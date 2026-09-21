@@ -1,0 +1,1833 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wonder.invalid/schema/http-v1.json",
+  "title": "Wonder HTTP v1 envelope",
+  "type": "object",
+  "required": ["apiVersion"],
+  "properties": {
+    "apiVersion": { "const": "v1" },
+    "approvalSummary": { "$ref": "#/$defs/approvalSummary" },
+    "executionReadiness": { "$ref": "#/$defs/executionReadiness" },
+    "hostStatus": { "$ref": "#/$defs/hostStatus" },
+    "pushConfiguration": { "$ref": "#/$defs/pushConfiguration" },
+    "pushRegistration": { "$ref": "#/$defs/pushRegistration" },
+    "pushPresence": { "$ref": "#/$defs/pushPresence" },
+    "pushRoute": { "$ref": "#/$defs/pushRoute" },
+    "accountUsage": { "$ref": "#/$defs/accountUsage" },
+    "asrTranscription": { "$ref": "#/$defs/asrTranscription" },
+    "asrError": { "$ref": "#/$defs/asrError" },
+    "conversationSummary": { "$ref": "#/$defs/conversationSummary" },
+    "conversationList": { "$ref": "#/$defs/conversationList" },
+    "subagentSummary": { "$ref": "#/$defs/subagentSummary" },
+    "subagentList": { "$ref": "#/$defs/subagentList" },
+    "workspaceRoot": { "$ref": "#/$defs/workspaceRoot" },
+    "workspaceRoots": { "$ref": "#/$defs/workspaceRoots" },
+    "workspaceDirectory": { "$ref": "#/$defs/workspaceDirectory" },
+    "workspaceGitStatus": { "$ref": "#/$defs/workspaceGitStatus" },
+    "workspaceDiff": { "$ref": "#/$defs/workspaceDiff" },
+    "computerSession": { "$ref": "#/$defs/computerSession" },
+    "computerControlLease": { "$ref": "#/$defs/computerControlLease" },
+    "computerControlActionResponse": { "$ref": "#/$defs/computerControlActionResponse" },
+    "computerAdmissionResponse": { "$ref": "#/$defs/computerAdmissionResponse" },
+    "computerSignalingResponse": { "$ref": "#/$defs/computerSignalingResponse" },
+    "computerSignalingMutationResponse": { "$ref": "#/$defs/computerSignalingMutationResponse" },
+    "teachingCapability": { "$ref": "#/$defs/teachingCapability" },
+    "teachingSession": { "$ref": "#/$defs/teachingSession" },
+    "botSkill": { "$ref": "#/$defs/botSkill" },
+    "botSkillList": { "$ref": "#/$defs/botSkillList" },
+    "saveBotSkillVersionResponse": { "$ref": "#/$defs/saveBotSkillVersionResponse" },
+    "botSkillFixtureTestReceipt": { "$ref": "#/$defs/botSkillFixtureTestReceipt" },
+    "conversationFile": { "$ref": "#/$defs/conversationFile" },
+    "conversationFiles": { "type": "array", "items": { "$ref": "#/$defs/conversationFile" } },
+    "createConversationFileRequest": { "$ref": "#/$defs/createConversationFileRequest" },
+    "botSummary": { "$ref": "#/$defs/botSummary" },
+    "botList": { "$ref": "#/$defs/botList" },
+    "searchResult": { "$ref": "#/$defs/searchResult" },
+    "searchResponse": { "type": "object", "required": ["results", "nextCursor"], "properties": { "results": { "type": "array", "items": { "$ref": "#/$defs/searchResult" } }, "nextCursor": { "type": ["string", "null"] } }, "additionalProperties": false },
+    "deviceSummary": { "$ref": "#/$defs/deviceSummary" },
+    "deviceList": { "type": "array", "items": { "$ref": "#/$defs/deviceSummary" } },
+    "renameDeviceRequest": { "$ref": "#/$defs/renameDeviceRequest" },
+    "conversationSettings": { "$ref": "#/$defs/conversationSettings" },
+    "conversationSettingsPatch": { "$ref": "#/$defs/conversationSettingsPatch" },
+    "createBotRequest": { "$ref": "#/$defs/createBotRequest" },
+    "conversationalCreateBotRequest": { "$ref": "#/$defs/conversationalCreateBotRequest" },
+    "updateBotRequest": { "$ref": "#/$defs/updateBotRequest" },
+    "queuedExecutionSettings": { "$ref": "#/$defs/queuedExecutionSettings" },
+    "queuedMessage": { "$ref": "#/$defs/queuedMessage" },
+    "queueEditRequest": { "$ref": "#/$defs/queueEditRequest" },
+    "queueReorderRequest": { "$ref": "#/$defs/queueReorderRequest" },
+    "queueList": { "$ref": "#/$defs/queueList" },
+    "channelSummary": { "$ref": "#/$defs/channelSummary" },
+    "channelList": { "type": "array", "items": { "$ref": "#/$defs/channelSummary" } },
+    "createChannelRequest": { "$ref": "#/$defs/createChannelRequest" },
+    "updateChannelRequest": { "$ref": "#/$defs/updateChannelRequest" },
+    "channelMemberRequest": { "$ref": "#/$defs/channelMemberRequest" },
+    "sendChannelMessageRequest": { "$ref": "#/$defs/sendChannelMessageRequest" },
+    "conversationSnapshot": { "$ref": "#/$defs/conversationSnapshot" },
+    "historyRefresh": { "$ref": "#/$defs/historyRefresh" },
+    "messageReceipt": { "$ref": "#/$defs/messageReceipt" },
+    "steerTurnRequest": { "$ref": "#/$defs/steerTurnRequest" },
+    "steerTurnResponse": { "$ref": "#/$defs/steerTurnResponse" },
+    "sendMessageRequest": { "$ref": "#/$defs/sendMessageRequest" },
+    "createConversationRequest": { "$ref": "#/$defs/createConversationRequest" },
+    "updateConversationRequest": { "$ref": "#/$defs/updateConversationRequest" }
+  },
+  "paths": {
+    "/api/v1/push/presence": { "post": { "request": { "$ref": "#/$defs/pushPresence" }, "response": { "type": "object", "required": ["updated"], "properties": {"updated": {"const": true}}, "additionalProperties": false } } },
+    "/api/v1/push/config": { "get": { "response": { "$ref": "#/$defs/pushConfiguration" } } },
+    "/api/v1/push/registration": { "post": { "request": { "$ref": "#/$defs/pushRegistration" }, "response": { "type": "object", "required": ["registered"], "properties": { "registered": { "const": true } }, "additionalProperties": false } } },
+    "/api/v1/push/revoke": { "post": { "request": { "$ref": "#/$defs/pushSignedAction" }, "response": { "type": "object", "required": ["revoked"], "properties": { "revoked": { "const": true } }, "additionalProperties": false } } },
+    "/api/v1/push/routes/{route}": { "get": { "response": { "$ref": "#/$defs/pushRoute" } } },
+
+    "/api/v1/computer/sessions": {
+      "post": { "request": { "$ref": "#/$defs/startComputerSessionRequest" }, "response": { "$ref": "#/$defs/computerSession" }, "successStatus": 201 }
+    },
+    "/api/v1/account/usage": {
+      "get": { "response": { "$ref": "#/$defs/accountUsage" }, "failureStatus": 503 }
+    },
+    "/api/v1/computer/sessions/{id}": {
+      "get": { "query": { "$ref": "#/$defs/computerSessionGenerationQuery" }, "response": { "$ref": "#/$defs/computerSession" } },
+      "delete": { "query": { "$ref": "#/$defs/computerSessionGenerationQuery" }, "response": { "successStatus": 204 } }
+    },
+    "/api/v1/computer/sessions/{id}/admission": {
+      "post": { "request": { "$ref": "#/$defs/computerAdmissionRequest" }, "response": { "$ref": "#/$defs/computerAdmissionResponse" }, "failureStatus": 503 }
+    },
+    "/api/v1/computer/sessions/{id}/signaling": {
+      "post": { "request": { "$ref": "#/$defs/computerSignalingPollRequest" }, "response": { "$ref": "#/$defs/computerSignalingResponse" }, "failureStatus": 409 }
+    },
+    "/api/v1/computer/sessions/{id}/signaling/answer": {
+      "post": { "request": { "$ref": "#/$defs/computerSignalingAnswerRequest" }, "response": { "$ref": "#/$defs/computerSignalingMutationResponse" }, "failureStatus": 409 }
+    },
+    "/api/v1/computer/sessions/{id}/signaling/candidate": {
+      "post": { "request": { "$ref": "#/$defs/computerSignalingCandidateRequest" }, "response": { "$ref": "#/$defs/computerSignalingMutationResponse" }, "failureStatus": 409 }
+    },
+    "/api/v1/computer/sessions/{id}/signaling/close": {
+      "post": { "request": { "$ref": "#/$defs/computerSignalingCloseRequest" }, "response": { "$ref": "#/$defs/computerSignalingMutationResponse" }, "failureStatus": 409 }
+    },
+    "/api/v1/computer/sessions/{id}/control/acquire": {
+      "post": { "request": { "$ref": "#/$defs/acquireComputerControlRequest" }, "response": { "$ref": "#/$defs/computerControlActionResponse" }, "failureStatus": 503 }
+    },
+    "/api/v1/computer/sessions/{id}/control/heartbeat": {
+      "post": { "request": { "$ref": "#/$defs/computerControlBindingRequest" }, "response": { "$ref": "#/$defs/computerControlActionResponse" }, "failureStatus": 503 }
+    },
+    "/api/v1/computer/sessions/{id}/control/input": {
+      "post": { "request": { "$ref": "#/$defs/computerInputBatchRequest" }, "response": { "$ref": "#/$defs/computerControlActionResponse" }, "failureStatus": 503 }
+    },
+    "/api/v1/computer/sessions/{id}/control/release": {
+      "post": { "request": { "$ref": "#/$defs/computerControlBindingRequest" }, "response": { "$ref": "#/$defs/computerControlActionResponse" } }
+    },
+    "/api/v1/computer/sessions/{id}/control/resume": {
+      "post": { "request": { "$ref": "#/$defs/computerControlBindingRequest" }, "response": { "$ref": "#/$defs/computerControlActionResponse" }, "failureStatus": 409 }
+    },
+    "/api/v1/teaching/capability": {
+      "get": { "response": { "$ref": "#/$defs/teachingCapability" } }
+    },
+    "/api/v1/bots/{botId}/teaching/sessions": {
+      "post": { "request": { "$ref": "#/$defs/startTeachingSessionRequest" }, "response": { "$ref": "#/$defs/teachingSession" }, "successStatus": 201 }
+    },
+    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}": {
+      "get": { "response": { "$ref": "#/$defs/teachingSession" } }
+    },
+    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}/stop": {
+      "post": { "request": { "$ref": "#/$defs/teachingRevisionRequest" }, "response": { "$ref": "#/$defs/teachingSession" } }
+    },
+    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}/cancel": {
+      "post": { "request": { "$ref": "#/$defs/optionalTeachingRevisionRequest" }, "response": { "$ref": "#/$defs/teachingSession" } }
+    },
+    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}/review": {
+      "post": { "request": { "$ref": "#/$defs/reviewTeachingSessionRequest" }, "response": { "$ref": "#/$defs/teachingSession" } }
+    },
+    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}/save-version": {
+      "post": { "request": { "$ref": "#/$defs/saveBotSkillVersionRequest" }, "response": { "$ref": "#/$defs/saveBotSkillVersionResponse" } }
+    },
+    "/api/v1/bots/{botId}/skills": {
+      "get": { "response": { "$ref": "#/$defs/botSkillList" } }
+    },
+    "/api/v1/bots/{botId}/skills/{skillId}/versions/{version}/fixture-tests": {
+      "post": { "request": { "$ref": "#/$defs/runBotSkillFixtureTestRequest" }, "response": { "$ref": "#/$defs/botSkillFixtureTestReceipt" }, "successStatus": 201 }
+    },
+    "/api/v1/bots/{botId}/skills/{skillId}/fixture-tests/{requestId}": {
+      "get": { "response": { "$ref": "#/$defs/botSkillFixtureTestReceipt" } }
+    },
+    "/api/v1/bots/{botId}/skills/{skillId}": {
+      "get": { "response": { "$ref": "#/$defs/botSkill" } },
+      "delete": { "successStatus": 204 }
+    },
+    "/api/v1/bots/{botId}/skills/{skillId}/activate": {
+      "post": { "request": { "$ref": "#/$defs/activateBotSkillVersionRequest" }, "response": { "$ref": "#/$defs/botSkill" } }
+    },
+    "/api/v1/sync/checkpoint": {
+      "get": { "response": { "$ref": "#/$defs/readCheckpoint" } }
+    },
+    "/api/v1/conversations/{conversationId}/history": {
+      "get": { "query": { "$ref": "#/$defs/historyQuery" }, "response": { "$ref": "#/$defs/conversationSnapshot" } }
+    },
+    "/api/v1/conversations/{conversationId}/subagents": {
+      "get": { "response": { "$ref": "#/$defs/subagentList" } }
+    },
+    "/api/v1/conversations/{conversationId}/workspace/roots": {
+      "get": { "response": { "$ref": "#/$defs/workspaceRoots" } }
+    },
+    "/api/v1/conversations/{conversationId}/workspace/directory": {
+      "get": { "query": { "$ref": "#/$defs/workspaceQuery" }, "response": { "$ref": "#/$defs/workspaceDirectory" } }
+    },
+    "/api/v1/conversations/{conversationId}/workspace/file": {
+      "get": { "query": { "$ref": "#/$defs/workspaceQuery" }, "response": { "contentType": "application/octet-stream", "maxBytes": 8388608 } }
+    },
+    "/api/v1/conversations/{conversationId}/workspace/git/status": {
+      "get": { "query": { "$ref": "#/$defs/workspaceQuery" }, "response": { "$ref": "#/$defs/workspaceGitStatus" } }
+    },
+    "/api/v1/conversations/{conversationId}/workspace/git/diff": {
+      "get": { "query": { "$ref": "#/$defs/workspaceDiffQuery" }, "response": { "$ref": "#/$defs/workspaceDiff" } }
+    },
+    "/api/v1/conversations/{conversationId}/history/refresh": {
+      "get": { "response": { "$ref": "#/$defs/historyRefresh" } },
+      "post": { "response": { "$ref": "#/$defs/historyRefresh" }, "successStatus": 202 }
+    },
+    "/api/v1/conversations/{conversationId}/settings": {
+      "get": { "response": { "$ref": "#/$defs/conversationSettings" } },
+      "patch": {
+        "request": { "$ref": "#/$defs/conversationSettingsPatch" },
+        "response": { "$ref": "#/$defs/conversationSettings" }
+      }
+    },
+    "/api/v1/bot-options": {
+      "get": { "response": { "$ref": "#/$defs/botOptions" } }
+    },
+    "/api/v1/conversations/{conversationId}/composer-options": {
+      "get": { "query": { "type": "object", "additionalProperties": false, "properties": { "queuedMessageId": { "type": "string", "description": "Use the frozen settings of this conversation's pending message. Unknown, delivered, or unrelated IDs return 404." } } }, "response": { "$ref": "#/$defs/composerOptions" } }
+    },
+    "/api/v1/bots": {
+      "get": { "response": { "$ref": "#/$defs/botList" } },
+      "post": { "request": { "$ref": "#/$defs/createBotRequest" }, "response": { "$ref": "#/$defs/botSummary" } }
+    },
+    "/api/v1/bots/new": {
+      "post": { "request": { "$ref": "#/$defs/conversationalCreateBotRequest" }, "response": { "$ref": "#/$defs/botSummary" } }
+    },
+    "/api/v1/bots/{botId}": {
+      "get": { "response": { "$ref": "#/$defs/botSummary" } },
+      "patch": { "request": { "$ref": "#/$defs/updateBotRequest" }, "response": { "$ref": "#/$defs/botSummary" } }
+    },
+    "/api/v1/conversations/{conversationId}/queue": {
+      "get": { "response": { "$ref": "#/$defs/queueList" } },
+      "post": { "request": { "$ref": "#/$defs/queueReorderRequest" }, "successStatus": 204 }
+    },
+    "/api/v1/conversations/{conversationId}/queue/{messageId}": {
+      "post": { "request": { "$ref": "#/$defs/queueEditRequest" }, "successStatus": 204 }
+    },
+    "/api/v1/devices/{deviceId}": {
+      "patch": { "request": { "$ref": "#/$defs/renameDeviceRequest" }, "response": { "$ref": "#/$defs/deviceSummary" } }
+    },
+    "/api/v1/devices/{deviceId}/revoke": {
+      "post": { "request": { "$ref": "#/$defs/signedActionFields" } }
+    }
+  },
+  "$defs": {
+    "pushConfiguration": {"type": "object", "required": ["endpoint", "topic", "environment"], "properties": {"endpoint": {"type": ["string", "null"]}, "topic": {"type": "string"}, "environment": {"enum": ["production", "sandbox"]}, "previewVersion": {"const": 1}}, "additionalProperties": false},
+    "pushSignedAction": {"type": "object", "required": ["actionNonce", "issuedAtMs", "signature"], "properties": {"actionNonce": {"type": "string", "minLength": 1}, "issuedAtMs": {"type": "integer", "minimum": 0}, "signature": {"type": "string", "minLength": 1}}, "additionalProperties": false},
+    "pushPresence": {"type": "object", "required": ["state", "actionNonce", "issuedAtMs", "signature"], "properties": {"state": {"enum": ["foreground", "background"]}, "actionNonce": {"type": "string", "minLength": 1}, "issuedAtMs": {"type": "integer", "minimum": 0}, "signature": {"type": "string", "minLength": 1}}, "additionalProperties": false},
+    "pushRoute": {"type": "object", "required": ["conversationId"], "properties": {"conversationId": {"type": "string", "minLength": 1}}, "additionalProperties": false},
+    "pushRegistration": {"type": "object", "required": ["id", "senderSecret", "actionNonce", "issuedAtMs", "signature"], "properties": {"id": {"type": "string", "format": "uuid"}, "senderSecret": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}, "actionNonce": {"type": "string", "minLength": 1}, "issuedAtMs": {"type": "integer", "minimum": 0}, "signature": {"type": "string", "minLength": 1}, "previewKey": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"}}, "additionalProperties": false},
+    "computerToolArguments": {
+      "description": "Exact supported Mac action, normalized from runtime arguments. Unsupported fields and actions are not exposed as approvable computer actions.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ],
+          "properties": {
+            "action": {
+              "enum": [
+                "status",
+                "screenshot"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "x",
+            "y"
+          ],
+          "properties": {
+            "action": {
+              "const": "click"
+            },
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "text"
+          ],
+          "properties": {
+            "action": {
+              "const": "type"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 32768
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "keyCode"
+          ],
+          "properties": {
+            "action": {
+              "const": "key"
+            },
+            "keyCode": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "modifiers": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2031616,
+              "multipleOf": 65536
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "bundleId"
+          ],
+          "properties": {
+            "action": {
+              "const": "focusApp"
+            },
+            "bundleId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        }
+      ]
+    },
+    "approvalSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approvalId",
+        "method",
+        "params",
+        "actionNonce",
+        "resolutionIdempotencyKey"
+      ],
+      "properties": {
+        "approvalId": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "actionNonce": {
+          "type": "string"
+        },
+        "resolutionIdempotencyKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "arguments": {
+              "$ref": "#/$defs/computerToolArguments"
+            },
+            "availableDecisions": { "type": "array", "items": { "type": ["string", "object"] } },
+            "permissions": { "type": "object" },
+            "additionalPermissions": { "type": "object" },
+            "networkApprovalContext": { "type": "object", "properties": { "host": { "type": "string" }, "protocol": { "type": "string" } } },
+            "grantRoot": { "type": "string" },
+            "requestedSchema": { "type": "object", "description": "The complete service form schema, never a projection that drops constraints. Limited to 64 KiB by the host." },
+            "mode": { "type": "string" },
+            "message": { "type": "string" },
+            "url": { "type": "string" }
+          }
+        }
+      }
+    },
+    "readCheckpoint": {
+      "description": "Authenticated host journal head. Read before fetching independent projections, atomically invalidate all cached scopes with this cursor, then replay strictly after it.",
+      "type": "object",
+      "required": ["hostEpoch", "lastSequence", "hostInstallationId"],
+      "properties": {
+        "hostEpoch": { "type": "string", "minLength": 1 },
+        "lastSequence": { "type": "integer", "minimum": 0 },
+        "hostInstallationId": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "executionReadiness": {
+      "type": "object",
+      "required": ["ready", "detail"],
+      "properties": {
+        "ready": { "type": "boolean" },
+        "detail": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "hostStatus": {
+      "type": "object",
+      "required": ["apiVersion", "hostEpoch", "hostInstallationId", "state", "codexTransport", "startedAt", "publicOrigin", "execution"],
+      "properties": {
+        "hostName": { "type": "string", "minLength": 1 },
+        "apiVersion": { "const": "v1" },
+        "hostEpoch": { "type": "string" },
+        "hostInstallationId": { "type": "string" },
+        "state": { "enum": ["ready", "degraded"] },
+        "codexTransport": { "const": "stdio-jsonl" },
+        "startedAt": { "type": "string" },
+        "publicOrigin": { "type": ["string", "null"] },
+        "execution": { "$ref": "#/$defs/executionReadiness" }
+      },
+      "additionalProperties": false
+    },
+    "accountUsageWindow": {
+      "type": "object",
+      "required": ["id", "label", "usedPercent", "remainingPercent"],
+      "properties": {
+        "id": { "type": "string", "enum": ["primary", "secondary", "window-1", "window-2", "window-3", "window-4", "window-5", "window-6", "window-7", "window-8"] },
+        "label": { "type": "string", "maxLength": 32 },
+        "usedPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "remainingPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "windowDurationMins": { "type": "integer", "minimum": 1 },
+        "resetsAt": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "accountUsage": {
+      "type": "object",
+      "required": ["checkedAtMs", "windows"],
+      "properties": {
+        "checkedAtMs": { "type": "integer", "minimum": 0 },
+        "windows": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/accountUsageWindow" } }
+      },
+      "additionalProperties": false
+    },
+    "computerSessionState": {
+      "type": "string",
+      "enum": ["preparing", "awaitingSource", "live", "paused", "stale", "ended", "failed", "unavailable"]
+    },
+    "computerCapability": {
+      "type": "object",
+      "required": ["available", "action", "reason"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "action": { "enum": ["update-host", "retry", "none"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 512 }
+      },
+      "additionalProperties": false
+    },
+    "computerControlCapability": {
+      "type": "object",
+      "required": ["available", "action", "reason", "heartbeatIntervalSeconds", "leaseExpirySeconds"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "action": { "enum": ["update-host", "retry", "none"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "heartbeatIntervalSeconds": { "type": "integer", "const": 3 },
+        "leaseExpirySeconds": { "type": "integer", "const": 10 }
+      },
+      "additionalProperties": false
+    },
+    "computerSource": {
+      "type": "object",
+      "required": ["id", "name", "kind", "width", "height", "scale", "crop"],
+      "properties": {
+        "id": { "type": ["string", "null"], "maxLength": 160 },
+        "name": { "type": ["string", "null"], "maxLength": 160 },
+        "kind": { "type": ["string", "null"], "maxLength": 160 },
+        "width": { "type": ["integer", "null"], "minimum": 1, "maximum": 16384 },
+        "height": { "type": ["integer", "null"], "minimum": 1, "maximum": 16384 },
+        "scale": { "type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 8 },
+        "crop": {
+          "type": ["object", "null"],
+          "required": ["x", "y", "width", "height"],
+          "properties": {
+            "x": { "type": "number", "minimum": 0, "maximum": 16384 },
+            "y": { "type": "number", "minimum": 0, "maximum": 16384 },
+            "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 16384 },
+            "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 16384 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "startComputerSessionRequest": {
+      "type": "object",
+      "required": ["clientRequestId", "conversationId", "hostInstallationId"],
+      "properties": {
+        "clientRequestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "hostInstallationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "generation": { "type": "integer", "const": 1 },
+        "source": { "$ref": "#/$defs/computerSource" }
+      },
+      "additionalProperties": false
+    },
+    "computerSessionGenerationQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "generation": { "type": "integer", "minimum": 1 } }
+    },
+    "computerSession": {
+      "type": "object",
+      "required": ["id", "clientRequestId", "ownerDeviceId", "hostInstallationId", "conversationId", "generation", "state", "source", "geometryRevision", "failureReason", "createdAt", "updatedAt", "lastStateAt", "endedAt", "capability"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "clientRequestId": { "type": "string", "minLength": 1 },
+        "ownerDeviceId": { "type": "string", "minLength": 1 },
+        "hostInstallationId": { "type": "string", "minLength": 1 },
+        "conversationId": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "state": { "$ref": "#/$defs/computerSessionState" },
+        "source": { "$ref": "#/$defs/computerSource" },
+        "geometryRevision": { "type": "integer", "minimum": 0 },
+        "failureReason": { "type": ["string", "null"], "maxLength": 512 },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 },
+        "lastStateAt": { "type": "string", "minLength": 1 },
+        "endedAt": { "type": ["string", "null"] },
+        "capability": { "$ref": "#/$defs/computerCapability" },
+        "control": { "$ref": "#/$defs/computerControlCapability" }
+      },
+      "additionalProperties": false
+    },
+    "computerAdmissionRequest": {
+      "type": "object",
+      "required": ["generation", "role"],
+      "properties": {
+        "generation": { "type": "integer", "minimum": 1 },
+        "role": { "enum": ["viewer", "publisher"] }
+      },
+      "additionalProperties": false
+    },
+    "computerAdmissionResponse": {
+      "type": "object",
+      "required": ["session", "role", "granted", "admission", "capability"],
+      "properties": {
+        "session": { "$ref": "#/$defs/computerSession" },
+        "role": { "enum": ["viewer", "publisher"] },
+        "granted": { "type": "boolean" },
+        "admission": { "type": ["object", "null"] },
+        "capability": { "$ref": "#/$defs/computerCapability" }
+      },
+      "additionalProperties": false
+    },
+    "computerSignalingBinding": {
+      "type": "object",
+      "required": ["generation", "conversationId", "hostInstallationId"],
+      "properties": {
+        "generation": { "type": "integer", "minimum": 1 },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "hostInstallationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "peerRevision": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "computerSignalingPollRequest": {
+      "unevaluatedProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/computerSignalingBinding" },
+        { "type": "object", "properties": { "cursor": { "type": "integer", "minimum": 0 } } }
+      ]
+    },
+    "computerSignalingAnswerRequest": {
+      "unevaluatedProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/computerSignalingBinding" },
+        { "type": "object", "required": ["peerRevision", "type", "sdp"], "properties": { "type": { "const": "answer" }, "sdp": { "type": "string", "minLength": 1, "maxLength": 65536 } } }
+      ]
+    },
+    "computerSignalingCandidateRequest": {
+      "unevaluatedProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/computerSignalingBinding" },
+        { "type": "object", "required": ["peerRevision", "sequence", "candidate", "sdpMLineIndex"], "properties": {
+          "sequence": { "type": "integer", "minimum": 1, "maximum": 128 },
+          "candidate": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^candidate:" },
+          "sdpMid": { "type": ["string", "null"], "maxLength": 128 },
+          "sdpMLineIndex": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+          "usernameFragment": { "type": ["string", "null"], "maxLength": 256 }
+        } }
+      ]
+    },
+    "computerSignalingCloseRequest": {
+      "unevaluatedProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/computerSignalingBinding" },
+        { "type": "object", "required": ["peerRevision"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 128 } } }
+      ]
+    },
+    "computerSignalingDescription": {
+      "type": "object",
+      "required": ["type", "sdp"],
+      "properties": { "type": { "const": "offer" }, "sdp": { "type": "string", "minLength": 1, "maxLength": 65536 } },
+      "additionalProperties": false
+    },
+    "computerSignalingCandidate": {
+      "type": "object",
+      "required": ["sequence", "candidate", "sdpMLineIndex"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "candidate": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "sdpMid": { "type": ["string", "null"], "maxLength": 128 },
+        "sdpMLineIndex": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "usernameFragment": { "type": ["string", "null"], "maxLength": 256 }
+      },
+      "additionalProperties": false
+    },
+    "computerIceServer": {
+      "type": "object",
+      "required": ["urls", "username", "credential"],
+      "properties": {
+        "urls": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+        "username": { "type": ["string", "null"], "maxLength": 256 },
+        "credential": { "type": ["string", "null"], "maxLength": 2048 }
+      },
+      "additionalProperties": false
+    },
+    "computerSignalingResponse": {
+      "type": "object",
+      "required": ["sessionId", "generation", "peerRevision", "state", "captureState", "peerState", "offer", "candidates", "cursor", "nextCursor", "failureReason", "iceServers"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "peerRevision": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+        "state": { "enum": ["preparing", "offerReady", "connecting", "live", "failed", "closed", "awaitingSource", "capturing"] },
+        "captureState": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "peerState": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "offer": { "anyOf": [{ "$ref": "#/$defs/computerSignalingDescription" }, { "type": "null" }] },
+        "candidates": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/computerSignalingCandidate" } },
+        "cursor": { "type": "integer", "minimum": 0 },
+        "nextCursor": { "type": "integer", "minimum": 0 },
+        "failureReason": { "type": ["string", "null"], "maxLength": 128 },
+        "iceServers": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/computerIceServer" } }
+      },
+      "additionalProperties": false
+    },
+    "computerSignalingMutationResponse": {
+      "type": "object",
+      "required": ["accepted"],
+      "properties": { "accepted": { "type": "boolean" }, "duplicate": { "type": "boolean" }, "closed": { "type": "boolean" }, "sessionId": { "type": "string" }, "generation": { "type": "integer", "minimum": 1 } },
+      "additionalProperties": false
+    },
+    "acquireComputerControlRequest": {
+      "type": "object",
+      "required": ["clientRequestId", "generation", "geometryRevision", "sourceId"],
+      "properties": {
+        "clientRequestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "geometryRevision": { "type": "integer", "minimum": 0 },
+        "sourceId": { "type": ["string", "null"], "maxLength": 160 }
+      },
+      "additionalProperties": false
+    },
+    "computerControlBindingRequest": {
+      "type": "object",
+      "required": ["leaseId", "generation", "geometryRevision", "sourceId"],
+      "properties": {
+        "leaseId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "geometryRevision": { "type": "integer", "minimum": 0 },
+        "sourceId": { "type": ["string", "null"], "maxLength": 160 }
+      },
+      "additionalProperties": false
+    },
+    "computerInputAction": {
+      "oneOf": [
+        {
+          "type": "object", "required": ["type", "x", "y", "phase"],
+          "properties": {
+            "type": { "const": "pointer" }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 },
+            "phase": { "enum": ["move", "down", "up"] }, "button": { "enum": ["left", "right", "middle", null] }
+          }, "additionalProperties": false
+        },
+        {
+          "type": "object", "required": ["type", "deltaX", "deltaY"],
+          "properties": { "type": { "const": "scroll" }, "deltaX": { "type": "number", "minimum": -4096, "maximum": 4096 }, "deltaY": { "type": "number", "minimum": -4096, "maximum": 4096 } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object", "required": ["type", "key", "phase", "modifiers"],
+          "properties": { "type": { "const": "key" }, "key": { "type": "string", "minLength": 1, "maxLength": 32 }, "phase": { "enum": ["down", "up", "press"] }, "modifiers": { "type": "integer", "minimum": 0, "maximum": 31 } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object", "required": ["type", "text"],
+          "properties": { "type": { "const": "text" }, "text": { "type": "string", "minLength": 1, "maxLength": 4096, "description": "Unicode text; newline and tab are allowed, other control characters are rejected." } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object", "required": ["type", "operation"],
+          "properties": { "type": { "const": "clipboard" }, "operation": { "const": "copyToPhone" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object", "required": ["type", "operation", "text"],
+          "properties": { "type": { "const": "clipboard" }, "operation": { "const": "pasteFromPhone" }, "text": { "type": "string", "maxLength": 8192, "description": "Inserts Unicode text without changing the Mac clipboard; newline and tab are allowed, other control characters are rejected." } },
+          "additionalProperties": false
+        },
+        { "type": "object", "required": ["type"], "properties": { "type": { "const": "releaseAll" } }, "additionalProperties": false }
+      ]
+    },
+    "computerInputBatchRequest": {
+      "type": "object",
+      "required": ["leaseId", "generation", "geometryRevision", "sourceId", "sequence", "actions"],
+      "properties": {
+        "leaseId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "geometryRevision": { "type": "integer", "minimum": 0 },
+        "sourceId": { "type": ["string", "null"], "maxLength": 160 },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "actions": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/computerInputAction" } }
+      },
+      "if": {
+        "properties": {
+          "actions": {
+            "contains": {
+              "type": "object",
+              "properties": { "type": { "const": "clipboard" }, "operation": { "const": "pasteFromPhone" } },
+              "required": ["type", "operation"]
+            }
+          }
+        }
+      },
+      "then": { "properties": { "actions": { "maxItems": 1 } } },
+      "additionalProperties": false
+    },
+    "computerControlLease": {
+      "type": "object",
+      "required": ["id", "sessionId", "ownerDeviceId", "hostInstallationId", "conversationId", "generation", "sourceId", "geometryRevision", "status", "lastSequence", "acquiredAt", "updatedAt", "expiresAt", "releasedAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 }, "sessionId": { "type": "string", "minLength": 1 }, "ownerDeviceId": { "type": "string", "minLength": 1 }, "hostInstallationId": { "type": "string", "minLength": 1 }, "conversationId": { "type": "string", "minLength": 1 }, "generation": { "type": "integer", "minimum": 1 }, "sourceId": { "type": ["string", "null"], "maxLength": 160 }, "geometryRevision": { "type": "integer", "minimum": 0 }, "status": { "enum": ["active", "released", "expired"] }, "lastSequence": { "type": "integer", "minimum": 0 }, "acquiredAt": { "type": "string" }, "updatedAt": { "type": "string" }, "expiresAt": { "type": "string" }, "releasedAt": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "computerControlActionResponse": {
+      "type": "object",
+      "required": ["granted", "acknowledged", "status", "reason", "lease", "control"],
+      "properties": {
+        "granted": { "type": "boolean" }, "acknowledged": { "type": "boolean" }, "status": { "enum": ["active", "busy", "unavailable", "stale", "expired", "released", "rejected", "unsupported"] }, "reason": { "type": "string", "minLength": 1 }, "lease": { "anyOf": [{ "$ref": "#/$defs/computerControlLease" }, { "type": "null" }] }, "control": { "$ref": "#/$defs/computerControlCapability" }, "clipboardText": { "type": "string", "maxLength": 8192 }
+      },
+      "additionalProperties": false
+    },
+    "teachingCapability": {
+      "type": "object",
+      "required": ["available", "action", "reason", "provider", "maxDurationSeconds", "maxEvents", "maxEvidenceBytes"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "action": { "enum": ["update-host", "retry", "none"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "maxDurationSeconds": { "type": "integer", "minimum": 1, "maximum": 600 },
+        "maxEvents": { "type": "integer", "minimum": 1, "maximum": 20000 },
+        "maxEvidenceBytes": { "type": "integer", "minimum": 1, "maximum": 52428800 }
+      },
+      "additionalProperties": false
+    },
+    "teachingSessionState": {
+      "enum": ["draft", "awaitingCaptureConsent", "starting", "recording", "reviewing", "skillDraft", "approvedVersion", "testing", "replayVerified", "testFailed", "cancelled", "interrupted", "expired", "unavailable"]
+    },
+    "startTeachingSessionRequest": {
+      "type": "object",
+      "required": ["clientRequestId", "conversationId", "computerSessionId", "controlLeaseId", "captureScope", "outcome"],
+      "properties": {
+        "clientRequestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "computerSessionId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "controlLeaseId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "captureScope": { "const": "authenticated-remote-control" },
+        "outcome": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      },
+      "additionalProperties": false
+    },
+    "teachingRevisionRequest": {
+      "type": "object",
+      "required": ["expectedRevision"],
+      "properties": { "expectedRevision": { "type": "integer", "minimum": 1 } },
+      "additionalProperties": false
+    },
+    "optionalTeachingRevisionRequest": {
+      "type": "object",
+      "properties": { "expectedRevision": { "type": ["integer", "null"], "minimum": 1 } },
+      "additionalProperties": false
+    },
+    "reviewTeachingSessionRequest": {
+      "type": "object",
+      "required": ["expectedRevision", "name", "description", "goal", "inputSchema", "prerequisites", "steps", "resultChecks"],
+      "properties": {
+        "expectedRevision": { "type": "integer", "minimum": 1 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "goal": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "inputSchema": { "type": "object" },
+        "prerequisites": { "type": "string", "minLength": 1, "maxLength": 24576 },
+        "steps": { "type": "string", "minLength": 1, "maxLength": 24576 },
+        "resultChecks": { "type": "string", "minLength": 1, "maxLength": 24576 }
+      },
+      "additionalProperties": false
+    },
+    "saveBotSkillVersionRequest": {
+      "type": "object",
+      "required": ["clientRequestId", "expectedRevision"],
+      "properties": {
+        "clientRequestId": { "type": "string", "format": "uuid" },
+        "expectedRevision": { "type": "integer", "minimum": 1 },
+        "slug": { "type": ["string", "null"], "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 64 }
+      },
+      "additionalProperties": false
+    },
+    "activateBotSkillVersionRequest": {
+      "type": "object",
+      "required": ["version"],
+      "properties": { "version": { "type": "integer", "minimum": 1 } },
+      "additionalProperties": false
+    },
+    "teachingEvent": {
+      "type": "object",
+      "required": ["sequence", "actionIndex", "kind", "payload", "createdAt"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "actionIndex": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "kind": { "enum": ["pointer", "scroll", "key", "text", "clipboard"] },
+        "payload": { "type": "object", "maxProperties": 12 },
+        "createdAt": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "teachingSession": {
+      "type": "object",
+      "required": ["id", "clientRequestId", "ownerDeviceId", "hostInstallationId", "botId", "conversationId", "computerSessionId", "controlLeaseId", "state", "captureScope", "captureProvider", "outcome", "name", "description", "goal", "inputSchema", "prerequisites", "steps", "resultChecks", "failureReason", "revision", "eventCount", "evidenceBytes", "contentHash", "createdAt", "updatedAt", "startedAt", "endedAt", "expiresAt", "events", "capability"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "clientRequestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "ownerDeviceId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "hostInstallationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "botId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "computerSessionId": { "type": ["string", "null"], "maxLength": 160 },
+        "controlLeaseId": { "type": ["string", "null"], "maxLength": 160 },
+        "state": { "$ref": "#/$defs/teachingSessionState" },
+        "captureScope": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "captureProvider": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "outcome": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "name": { "type": ["string", "null"], "maxLength": 120 },
+        "description": { "type": ["string", "null"], "maxLength": 2000 },
+        "goal": { "type": ["string", "null"], "maxLength": 2000 },
+        "inputSchema": { "type": ["object", "null"] },
+        "prerequisites": { "type": ["string", "null"], "maxLength": 24576 },
+        "steps": { "type": ["string", "null"], "maxLength": 24576 },
+        "resultChecks": { "type": ["string", "null"], "maxLength": 24576 },
+        "failureReason": { "type": ["string", "null"], "maxLength": 512 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "eventCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
+        "evidenceBytes": { "type": "integer", "minimum": 0, "maximum": 52428800 },
+        "contentHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 },
+        "startedAt": { "type": ["string", "null"] },
+        "endedAt": { "type": ["string", "null"] },
+        "expiresAt": { "type": ["string", "null"] },
+        "events": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/teachingEvent" } },
+        "capability": { "$ref": "#/$defs/teachingCapability" }
+      },
+      "additionalProperties": false
+    },
+    "botSkillVersion": {
+      "type": "object",
+      "required": ["id", "version", "sourceSessionId", "contentHash", "inputSchema", "verificationState", "createdAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "sourceSessionId": { "type": "string", "minLength": 1 },
+        "contentHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "inputSchema": { "type": "object" },
+        "verificationState": { "enum": ["unverified", "structurallyVerified", "fixtureVerified", "replayVerified", "testFailed"] },
+        "createdAt": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "botSkill": {
+      "type": "object",
+      "required": ["id", "botId", "slug", "name", "description", "state", "activeVersion", "discoverability", "versions"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "botId": { "type": "string", "minLength": 1 },
+        "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 64 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "state": { "enum": ["draft", "active", "archived"] },
+        "activeVersion": { "type": ["integer", "null"], "minimum": 1 },
+        "discoverability": { "const": "bot-private" },
+        "versions": { "type": ["array", "null"], "items": { "$ref": "#/$defs/botSkillVersion" } }
+      },
+      "additionalProperties": false
+    },
+    "botSkillList": {
+      "type": "object",
+      "required": ["capability", "skills"],
+      "properties": {
+        "capability": { "$ref": "#/$defs/teachingCapability" },
+        "skills": { "type": "array", "items": { "$ref": "#/$defs/botSkill" } }
+      },
+      "additionalProperties": false
+    },
+    "saveBotSkillVersionResponse": {
+      "type": "object",
+      "required": ["skill", "version", "teachingSession"],
+      "properties": {
+        "skill": { "$ref": "#/$defs/botSkill" },
+        "version": { "$ref": "#/$defs/botSkillVersion" },
+        "teachingSession": { "$ref": "#/$defs/teachingSession" }
+      },
+      "additionalProperties": false
+    },
+    "runBotSkillFixtureTestRequest": {
+      "type": "object",
+      "required": ["clientRequestId", "contentHash", "inputSchema", "inputs"],
+      "properties": {
+        "clientRequestId": { "type": "string", "format": "uuid" },
+        "contentHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "inputSchema": { "type": "object", "maxProperties": 16 },
+        "inputs": { "type": "object", "maxProperties": 16, "maxLength": 8192 },
+        "workingDirectory": { "type": ["string", "null"], "maxLength": 512 }
+      },
+      "additionalProperties": false
+    },
+    "botSkillFixtureTestReceipt": {
+      "type": "object",
+      "required": ["id", "clientRequestId", "ownerDeviceId", "botId", "skillId", "version", "contentHash", "inputSchemaHash", "inputSchema", "inputs", "workingDirectory", "provider", "executionKind", "status", "verificationState", "artifactPath", "artifactHash", "artifactBytes", "evidence", "failureReason", "createdAt", "completedAt"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "clientRequestId": { "type": "string", "format": "uuid" },
+        "ownerDeviceId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "botId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "skillId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "version": { "type": "integer", "minimum": 1 },
+        "contentHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "inputSchemaHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "inputSchema": { "type": "object", "maxProperties": 16 },
+        "inputs": { "type": "object", "maxProperties": 16 },
+        "workingDirectory": { "type": "string", "maxLength": 512 },
+        "provider": { "const": "deterministic-local" },
+        "executionKind": { "const": "deterministicFixture" },
+        "status": { "enum": ["succeeded", "failed"] },
+        "verificationState": { "enum": ["fixtureVerified", "testFailed"] },
+        "artifactPath": { "type": ["string", "null"], "maxLength": 1024 },
+        "artifactHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "artifactBytes": { "type": "integer", "minimum": 0, "maximum": 65536 },
+        "evidence": { "type": "object", "maxProperties": 16 },
+        "failureReason": { "type": ["string", "null"], "maxLength": 512 },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "completedAt": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "transcriptionState": {
+      "type": "string",
+      "enum": ["queued", "processing", "completed", "failed", "cancelled"]
+    },
+    "asrErrorCategory": {
+      "type": "string",
+      "enum": [
+        "microphone_permission", "unsupported_recording_format", "no_audio", "too_short",
+        "upload", "decoder", "model_unavailable", "timeout", "transcription", "busy", "rate_limited", "interrupted", "cancelled", "unsupported_language"
+      ]
+    },
+    "wordTimestamp": {
+      "type": "object",
+      "required": ["word", "startMs", "endMs"],
+      "properties": {
+        "word": { "type": "string" },
+        "startMs": { "type": "integer", "minimum": 0 },
+        "endMs": { "type": "integer", "minimum": 0 },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "asrTranscription": {
+      "type": "object",
+      "required": ["id", "state", "sourceDeviceId", "durationMs", "modelId", "language", "processingSource", "transcriptText", "wordTimestamps", "confidence", "retryExpiresAtMs", "errorCategory"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "state": { "$ref": "#/$defs/transcriptionState" },
+        "sourceDeviceId": { "type": "string", "minLength": 1 },
+        "durationMs": { "type": "integer", "minimum": 0, "maximum": 300000 },
+        "modelId": { "type": "string" },
+        "language": { "const": "auto" },
+        "processingSource": { "const": "paired_mac" },
+        "transcriptText": { "type": ["string", "null"] },
+        "wordTimestamps": { "type": ["array", "null"], "items": { "$ref": "#/$defs/wordTimestamp" } },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "retryExpiresAtMs": { "type": ["integer", "null"], "minimum": 0 },
+        "errorCategory": { "anyOf": [{ "$ref": "#/$defs/asrErrorCategory" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "asrError": {
+      "type": "object",
+      "required": ["error", "errorCategory"],
+      "properties": {
+        "error": { "type": "string" },
+        "errorCategory": { "$ref": "#/$defs/asrErrorCategory" }
+      },
+      "additionalProperties": false
+    },
+    "deliveryState": {
+      "type": "string",
+      "enum": [
+        "draft_on_device", "submitting", "accepted_by_wonder", "dispatching_to_codex",
+        "accepted_by_codex", "streaming", "completed", "interrupted", "failed",
+        "uncertain", "safe_to_retry"
+      ]
+    },
+    "conversationSummary": {
+      "type": "object",
+      "required": ["conversationId", "botId", "title", "lastMessagePreview", "lastMessageAt", "messageCount", "deliveryState", "hasUnread", "isArchived", "isPinned"],
+      "properties": {
+        "conversationId": { "type": "string", "minLength": 1 },
+        "botId": { "type": ["string", "null"] },
+        "title": { "type": "string" },
+        "lastMessagePreview": { "type": ["string", "null"] },
+        "lastMessageAt": { "type": ["string", "null"] },
+        "messageCount": { "type": "integer", "minimum": 0 },
+        "deliveryState": { "anyOf": [{ "$ref": "#/$defs/deliveryState" }, { "type": "null" }] },
+        "hasUnread": { "type": "boolean" },
+        "isArchived": { "type": "boolean" },
+        "isPinned": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "conversationList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/conversationSummary" }
+    },
+    "subagentSummary": {
+      "type": "object",
+      "required": ["conversationId", "threadId", "parentConversationId", "parentThreadId", "title", "agentNickname", "agentRole", "agentPath", "status", "canAcceptDirectInput", "isArchived"],
+      "properties": {
+        "conversationId": { "type": "string", "minLength": 1 },
+        "threadId": { "type": "string", "minLength": 1 },
+        "parentConversationId": { "type": "string", "minLength": 1 },
+        "parentThreadId": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "agentNickname": { "type": ["string", "null"] },
+        "agentRole": { "type": ["string", "null"] },
+        "agentPath": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "canAcceptDirectInput": { "const": false, "description": "Wonder agent transcripts are read-only regardless of runtime capability." },
+        "isArchived": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "subagentList": {
+      "type": "object",
+      "required": ["available", "detail", "subagents"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "detail": { "type": ["string", "null"] },
+        "subagents": { "type": "array", "items": { "$ref": "#/$defs/subagentSummary" }, "maxItems": 100 }
+      },
+      "additionalProperties": false
+    },
+    "workspaceRoot": {
+      "type": "object",
+      "required": ["id", "label", "path", "isDirectory", "kind", "readOnly"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "isDirectory": { "type": "boolean" },
+        "kind": { "enum": ["botWorkspace", "workingDirectory", "groupWorkspace", "childWorkingDirectory", "appliedGrant"] },
+        "readOnly": { "const": true },
+        "byteSize": { "type": ["integer", "null"], "minimum": 0 },
+        "mimeType": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "workspaceRoots": {
+      "type": "object",
+      "required": ["available", "detail", "roots", "attachments"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "detail": { "type": ["string", "null"] },
+        "roots": { "type": "array", "maxItems": 34, "items": { "$ref": "#/$defs/workspaceRoot" } },
+        "attachments": { "type": "array", "items": { "$ref": "#/$defs/conversationFile" } }
+      },
+      "additionalProperties": false
+    },
+    "workspaceEntry": {
+      "type": "object",
+      "required": ["name", "path", "isDirectory"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "isDirectory": { "type": "boolean" },
+        "byteSize": { "type": ["integer", "null"], "minimum": 0 },
+        "mimeType": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "workspaceDirectory": {
+      "type": "object",
+      "required": ["rootId", "path", "parentPath", "entries", "nextOffset"],
+      "properties": {
+        "rootId": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "parentPath": { "type": ["string", "null"] },
+        "entries": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/workspaceEntry" } },
+        "nextOffset": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "workspaceGitChange": {
+      "type": "object",
+      "required": ["path", "originalPath", "state", "indexStatus", "worktreeStatus"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "originalPath": { "type": ["string", "null"] },
+        "state": { "enum": ["staged", "unstaged", "untracked", "renamed", "deleted", "conflicted", "modified"] },
+        "indexStatus": { "type": "string", "minLength": 1, "maxLength": 1 },
+        "worktreeStatus": { "type": "string", "minLength": 1, "maxLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "workspaceGitStatus": {
+      "type": "object",
+      "required": ["available", "detail", "repositoryPath", "changes"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "detail": { "type": ["string", "null"] },
+        "repositoryPath": { "type": ["string", "null"] },
+        "changes": { "type": "array", "maxItems": 20000, "items": { "$ref": "#/$defs/workspaceGitChange" } }
+      },
+      "additionalProperties": false
+    },
+    "workspaceDiff": {
+      "type": "object",
+      "required": ["path", "staged", "diff"],
+      "properties": {
+        "path": { "type": "string" },
+        "staged": { "type": "boolean" },
+        "diff": { "type": "string", "maxLength": 1048576 }
+      },
+      "additionalProperties": false
+    },
+    "workspaceQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "showHidden": { "type": "boolean" },
+        "offset": { "type": "integer", "minimum": 0, "maximum": 20000 }
+      }
+    },
+    "workspaceDiffQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "staged": { "type": "boolean" }
+      }
+    },
+    "botSummary": {
+      "type": "object",
+      "required": ["id", "name", "role", "systemPrompt", "workspacePath", "permissionProfile", "model", "reasoningEffort", "serviceTier", "isArchived"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "role": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "systemPrompt": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "workspacePath": { "type": "string", "minLength": 1 },
+        "permissionProfile": { "type": "string", "minLength": 1 },
+        "permissionMode": { "type": ["string", "null"], "enum": ["read-only", "workspace", "full-access", null] },
+        "approvalMode": { "type": ["string", "null"], "enum": ["ask-for-approval", "approve-for-me", "full-access", null] },
+        "workingDirectory": { "type": ["string", "null"] },
+        "avatarColor": { "type": ["string", "null"] },
+        "avatarShape": { "type": ["string", "null"], "minLength": 1, "description": "Known catalog ID, or an unknown future stored ID preserved for forward compatibility." },
+        "avatarPalette": { "type": ["string", "null"], "minLength": 1, "description": "Known catalog ID, or an unknown future stored ID preserved for forward compatibility." },
+        "conversationId": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "reasoningEffort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] },
+        "isArchived": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "botList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/botSummary" }
+    },
+    "approvalMode": {
+      "type": "string",
+      "enum": ["ask-for-approval", "approve-for-me", "full-access"]
+    },
+    "approvalModeOption": {
+      "type": "object",
+      "required": ["id", "allowed"],
+      "properties": {
+        "id": { "$ref": "#/$defs/approvalMode" },
+        "allowed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "avatarShapeId": {
+      "type": "string",
+      "enum": ["sun", "orbit", "nova", "comet", "prism", "atom", "luna"]
+    },
+    "avatarPaletteId": {
+      "type": "string",
+      "enum": ["amber", "coral", "rose", "violet", "indigo", "ocean", "sky", "teal", "mint", "olive", "cocoa", "slate"]
+    },
+    "composerOptions": {
+      "description": "Runtime-backed model and permission choices. approvalModes is absent on older hosts; clients must show an actionable update state and never submit a new approval field to those hosts.",
+      "type": "object",
+      "required": ["models", "allowedApprovalPolicies"],
+      "properties": {
+        "groupCollaboration": { "type": "boolean" },
+        "models": { "type": "array", "items": { "type": "object" } },
+        "permissionProfiles": { "type": "array", "items": { "type": "object" } },
+        "permissionModes": { "type": "array", "items": { "$ref": "#/$defs/permissionModeOption" } },
+        "approvalModes": { "type": "array", "items": { "$ref": "#/$defs/approvalModeOption" } },
+        "timezone": { "type": "string", "minLength": 1 },
+        "allowedApprovalPolicies": { "type": "array", "items": { "type": "string" } },
+        "allowedApprovalReviewers": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "botOptions": {
+      "description": "Host-wide composer options. New hosts include the group collaboration capability and approvalModes; older hosts may omit approvalModes and must be surfaced as an actionable update state by clients.",
+      "allOf": [
+        { "$ref": "#/$defs/composerOptions" },
+        { "type": "object", "required": ["groupCollaboration"] }
+      ]
+    },
+    "permissionModeOption": {
+      "type": "object",
+      "required": ["id", "allowed"],
+      "properties": {
+        "id": { "enum": ["read-only", "workspace", "full-access"] },
+        "allowed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "createBotRequest": {
+      "type": "object",
+      "required": ["name", "role", "systemPrompt"],
+      "properties": {
+        "permissionMode": { "anyOf": [{ "$ref": "#/$defs/permissionMode" }, { "type": "null" }] },
+        "approvalMode": { "anyOf": [{ "$ref": "#/$defs/approvalMode" }, { "type": "null" }] },
+        "readRoots": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "writeRoots": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "clientRequestId": { "type": ["string", "null"], "format": "uuid" },
+        "avatarColor": { "type": ["string", "null"] },
+        "avatarShape": { "anyOf": [{ "$ref": "#/$defs/avatarShapeId" }, { "type": "null" }] },
+        "avatarPalette": { "anyOf": [{ "$ref": "#/$defs/avatarPaletteId" }, { "type": "null" }] },
+        "workingDirectory": { "type": ["string", "null"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "role": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "systemPrompt": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "model": { "type": ["string", "null"] },
+        "reasoningEffort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "conversationalCreateBotRequest": {
+      "type": "object",
+      "required": ["clientRequestId"],
+      "properties": {
+        "clientRequestId": { "type": "string", "format": "uuid" },
+        "model": { "type": ["string", "null"] },
+        "reasoningEffort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] },
+        "approvalMode": { "anyOf": [{ "$ref": "#/$defs/approvalMode" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "updateBotRequest": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "permissionMode": { "anyOf": [{ "$ref": "#/$defs/permissionMode" }, { "type": "null" }] },
+        "approvalMode": { "anyOf": [{ "$ref": "#/$defs/approvalMode" }, { "type": "null" }] },
+        "avatarColor": { "type": ["string", "null"] },
+        "avatarShape": { "anyOf": [{ "$ref": "#/$defs/avatarShapeId" }, { "type": "null" }] },
+        "avatarPalette": { "anyOf": [{ "$ref": "#/$defs/avatarPaletteId" }, { "type": "null" }] },
+        "workingDirectory": { "type": ["string", "null"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "role": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "systemPrompt": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "model": { "type": ["string", "null"] },
+        "reasoningEffort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "permissionMode": {
+      "type": "string",
+      "enum": ["read-only", "workspace", "full-access"]
+    },
+    "queuedExecutionSettings": {
+      "type": "object",
+      "properties": {
+        "model": { "type": ["string", "null"] },
+        "reasoningEffort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] },
+        "permissionMode": { "anyOf": [{ "$ref": "#/$defs/permissionMode" }, { "type": "null" }] },
+        "approvalMode": { "anyOf": [{ "$ref": "#/$defs/approvalMode" }, { "type": "null" }] },
+        "workingDirectory": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "queuedMessage": {
+      "type": "object",
+      "required": ["id", "clientMessageId", "body", "revision", "attachmentIds"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "clientMessageId": { "type": "string", "minLength": 1 },
+        "body": { "type": "string" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "attachmentIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true, "maxItems": 32 },
+        "executionSettings": { "$ref": "#/$defs/queuedExecutionSettings" }
+      },
+      "additionalProperties": false
+    },
+    "queueList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/queuedMessage" }
+    },
+    "queueEditRequest": {
+      "type": "object",
+      "required": ["expectedRevision"],
+      "properties": {
+        "expectedRevision": { "type": "integer", "minimum": 1 },
+        "settings": { "$ref": "#/$defs/queuedExecutionSettings" },
+        "body": { "type": ["string", "null"], "maxLength": 65536 },
+        "cancel": { "type": "boolean" },
+        "expectedTurnId": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "queueReorderRequest": {
+      "type": "object",
+      "required": ["items"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 1000, "items": { "type": "array", "prefixItems": [{ "type": "string", "minLength": 1 }, { "type": "integer", "minimum": 1 }], "items": false, "minItems": 2, "maxItems": 2 } }
+      },
+      "additionalProperties": false
+    },
+    "searchResult": {
+      "type": "object",
+      "required": ["kind", "id", "title", "snippet", "conversationId", "botId", "updatedAt", "deepLink"],
+      "properties": {
+        "kind": { "enum": ["bot", "channel", "conversation", "message", "assistant_message", "file"] },
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "snippet": { "type": ["string", "null"] },
+        "conversationId": { "type": ["string", "null"] },
+        "botId": { "type": ["string", "null"] },
+        "updatedAt": { "type": "string", "minLength": 1 },
+        "deepLink": { "type": "string", "pattern": "^#/(?:chats(?:/[^/?]+){0,2}(?:\\?focus=[^&]+(?:&kind=(?:message|assistant_message|file))?)?|bots/[^/?]+|group-chats/[^/?]+)$" }
+      },
+      "additionalProperties": false
+    },
+    "deviceSummary": {
+      "type": "object",
+      "required": ["id", "label", "role", "lastSeenAt", "revokedAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "role": { "const": "owner" },
+        "lastSeenAt": { "type": ["string", "null"] },
+        "revokedAt": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "renameDeviceRequest": {
+      "type": "object",
+      "required": ["label", "actionNonce", "issuedAtMs", "signature"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "actionNonce": { "type": "string", "format": "uuid" },
+        "issuedAtMs": { "type": "integer", "minimum": 0 },
+        "signature": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "signedActionFields": {
+      "type": "object",
+      "required": ["actionNonce", "issuedAtMs", "signature"],
+      "properties": {
+        "actionNonce": { "type": "string", "format": "uuid" },
+        "issuedAtMs": { "type": "integer", "minimum": 0 },
+        "signature": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "conversationSettingsValues": {
+      "type": "object",
+      "required": ["model", "effort", "serviceTier", "permissionProfile", "approvalPolicy", "approvalsReviewer"],
+      "properties": {
+        "model": { "type": ["string", "null"] },
+        "effort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] },
+        "permissionProfile": { "type": "string", "minLength": 1 },
+        "approvalMode": { "anyOf": [{ "$ref": "#/$defs/approvalMode" }, { "type": "null" }] },
+        "approvalPolicy": { "type": "string", "minLength": 1 },
+        "approvalsReviewer": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "conversationSettingsOverrides": {
+      "type": "object",
+      "required": ["model", "effort", "serviceTier", "permissionProfile"],
+      "properties": {
+        "model": { "type": ["string", "null"] },
+        "effort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] },
+        "permissionProfile": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "conversationSettings": {
+      "type": "object",
+      "required": ["effective", "overrides", "botDefaults"],
+      "properties": {
+        "effective": { "$ref": "#/$defs/conversationSettingsValues" },
+        "overrides": { "$ref": "#/$defs/conversationSettingsOverrides" },
+        "botDefaults": { "$ref": "#/$defs/conversationSettingsValues" }
+      },
+      "additionalProperties": false
+    },
+    "conversationSettingsPatch": {
+      "type": "object",
+      "required": ["actionNonce", "issuedAtMs", "signature"],
+      "properties": {
+        "model": { "type": ["string", "null"] },
+        "effort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] },
+        "permissionProfile": { "type": ["string", "null"] },
+        "actionNonce": { "type": "string", "format": "uuid" },
+        "issuedAtMs": { "type": "integer", "minimum": 0 },
+        "signature": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "channelMember": {
+      "type": "object",
+      "required": ["botId", "botName", "role", "position"],
+      "properties": {
+        "botId": { "type": "string", "minLength": 1 },
+        "botName": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["coordinator", "worker"] },
+        "position": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "channelSummary": {
+      "type": "object",
+      "required": ["id", "conversationId", "name", "description", "coordinatorBotId", "isArchived", "createdAt", "updatedAt", "members", "messages"],
+      "properties": {
+        "attachmentsSupported": { "type": "boolean" },
+        "id": { "type": "string", "minLength": 1 },
+        "conversationId": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": ["string", "null"], "maxLength": 500 },
+        "coordinatorBotId": { "type": "string", "minLength": 1 },
+        "hasUnread": { "type": "boolean" },
+        "hostEpoch": { "type": ["string", "null"] },
+        "lastSequence": { "type": ["integer", "null"], "minimum": 0 },
+        "isArchived": { "type": "boolean" },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 },
+        "members": { "type": "array", "items": { "$ref": "#/$defs/channelMember" } },
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/channelMessage" } }
+      },
+      "additionalProperties": false
+    },
+    "channelMessage": {
+      "type": "object",
+      "required": ["messageId", "clientMessageId", "body", "state", "createdAt", "bodySha256", "codexThreadId", "codexTurnId", "authorKind", "authorBotId", "authorBotName", "phase", "presentationKind", "outcome", "retryable"],
+      "properties": {
+        "attachmentIds": { "type": "array", "items": { "type": "string" }, "maxItems": 32, "uniqueItems": true },
+        "messageId": { "type": "string", "minLength": 1 },
+        "clientMessageId": { "type": "string", "minLength": 1 },
+        "body": { "type": "string" },
+        "state": { "anyOf": [{ "$ref": "#/$defs/deliveryState" }, { "type": "null" }] },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "bodySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "codexThreadId": { "type": ["string", "null"] },
+        "codexTurnId": { "type": ["string", "null"] },
+        "authorKind": { "enum": ["user", "coordinator", "member", "automation"] },
+        "authorBotId": { "type": ["string", "null"] },
+        "authorBotName": { "type": ["string", "null"] },
+        "phase": { "enum": ["user", "routing", "worker", "synthesis", "direct"] },
+        "presentationKind": { "enum": ["message", "status"] },
+        "outcome": { "enum": ["completed", "failed", "timed_out", "interrupted", null] },
+        "retryable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "createChannelRequest": {
+      "type": "object",
+      "required": ["name", "coordinatorBotId"],
+      "properties": {
+        "clientRequestId": { "type": "string", "format": "uuid" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "maxLength": 500 },
+        "coordinatorBotId": { "type": "string", "minLength": 1 },
+        "memberBotIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true, "maxItems": 16 }
+      },
+      "additionalProperties": false
+    },
+    "updateChannelRequest": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": ["string", "null"], "maxLength": 500 },
+        "isArchived": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "channelMemberRequest": {
+      "type": "object",
+      "required": ["botId"],
+      "properties": {
+        "botId": { "type": "string", "minLength": 1 },
+        "role": { "const": "worker" }
+      },
+      "additionalProperties": false
+    },
+    "sendChannelMessageRequest": {
+      "type": "object",
+      "required": ["deviceId", "clientMessageId", "body"],
+      "properties": {
+        "deviceId": { "type": "string", "minLength": 1 },
+        "clientMessageId": { "type": "string", "format": "uuid" },
+        "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "attachmentIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true, "maxItems": 32 }
+      },
+      "additionalProperties": false
+    },
+    "conversationFile": {
+      "type": "object",
+      "required": ["id", "kind", "name", "mimeType", "byteSize", "sha256", "relativePath", "state", "additions", "deletions", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["attachment", "file_change", "artifact"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "mimeType": { "type": ["string", "null"] },
+        "byteSize": { "type": ["integer", "null"], "minimum": 0 },
+        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "relativePath": { "type": ["string", "null"] },
+        "state": { "type": "string", "minLength": 1 },
+        "additions": { "type": ["integer", "null"] },
+        "deletions": { "type": ["integer", "null"] },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "createConversationFileRequest": {
+      "type": "object",
+      "required": ["name", "contentBase64"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "mimeType": { "type": "string", "maxLength": 255 },
+        "contentBase64": { "type": "string", "minLength": 1, "maxLength": 11184812 }
+      },
+      "additionalProperties": false
+    },
+    "conversationMessage": {
+      "type": "object",
+      "required": ["messageId", "clientMessageId", "body", "state", "createdAt", "bodySha256", "codexThreadId", "codexTurnId", "attachmentIds"],
+      "properties": {
+        "messageId": { "type": "string", "minLength": 1 },
+        "clientMessageId": { "type": "string", "minLength": 1 },
+        "body": { "type": "string" },
+        "state": { "$ref": "#/$defs/deliveryState" },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "originalBodySha256": { "type": ["string", "null"] },
+        "bodySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "codexThreadId": { "type": ["string", "null"] },
+        "codexTurnId": { "type": ["string", "null"] },
+        "attachmentIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true, "maxItems": 32 }
+      },
+      "additionalProperties": false
+    },
+    "conversationEvent": {
+      "type": "object",
+      "required": ["eventId", "hostEpoch", "sequence", "occurredAt", "event"],
+      "properties": {
+        "eventId": { "type": "string", "minLength": 1 },
+        "hostEpoch": { "type": "string", "minLength": 1 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "occurredAt": { "type": "string", "minLength": 1 },
+        "requestId": { "type": ["string", "null"] },
+        "deviceId": { "type": ["string", "null"] },
+        "conversationId": { "type": ["string", "null"] },
+        "messageId": { "type": ["string", "null"] },
+        "threadId": { "type": ["string", "null"] },
+        "turnId": { "type": ["string", "null"] },
+        "itemId": { "type": ["string", "null"] },
+        "approvalId": { "type": ["string", "null"] },
+        "event": { "type": "object", "required": ["type"], "properties": { "type": { "type": "string" }, "data": {} }, "additionalProperties": false }
+      },
+      "additionalProperties": false
+    },
+    "historyQuery": {
+      "type": "object",
+      "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 100 }, "before": { "type": "string", "maxLength": 2048 } },
+      "additionalProperties": false
+    },
+    "historyRefresh": {
+      "type": "object",
+      "required": ["state", "detail"],
+      "properties": { "state": { "enum": ["idle", "refreshing", "completed", "failed"] }, "detail": { "type": ["string", "null"] } },
+      "additionalProperties": false
+    },
+    "conversationSnapshot": {
+      "description": "A local page of at most 100 canonical entries. Use thread.nextCursor as the next before parameter; each page has its own committed lastSequence.",
+      "type": "object",
+      "required": ["conversationId", "hostEpoch", "lastSequence", "codexThreadId", "messages", "assistantMessages", "thread", "events"],
+      "properties": {
+        "initialization": {
+          "description": "Present only while a new Bot has no user work. Wait for questionId to be available in the questions response before enabling chat. Null or absent preserves normal conversation behavior.",
+          "type": ["object", "null"],
+          "required": ["questionId"],
+          "properties": { "questionId": { "type": ["string", "null"] } },
+          "additionalProperties": false
+        },
+        "hostEpoch": { "type": "string", "minLength": 1 },
+        "lastSequence": { "type": "integer", "minimum": 0 },
+        "conversationId": { "type": "string", "minLength": 1 },
+        "codexThreadId": { "type": ["string", "null"] },
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/conversationMessage" } },
+        "assistantMessages": { "type": "array", "items": { "$ref": "#/$defs/conversationAssistantMessage" } },
+        "thread": { "$ref": "#/$defs/conversationThread" },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/conversationEvent" } }
+      },
+      "additionalProperties": false
+    },
+    "conversationThread": {
+      "type": "object",
+      "required": [
+        "threadId",
+        "turns",
+        "nextCursor",
+        "hydrated"
+      ],
+      "properties": {
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/conversationTurn"
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hydrated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "conversationTurn": {
+      "type": "object",
+      "required": [
+        "id",
+        "status",
+        "createdAt",
+        "updatedAt",
+        "items"
+      ],
+      "properties": {
+        "startedAt": { "type": ["string", "null"] },
+        "completedAt": { "type": ["string", "null"] },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/conversationThreadItem"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "conversationThreadItem": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "state",
+        "text",
+        "payload",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payload": {},
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "conversationAssistantMessage": {
+      "type": "object",
+      "required": ["messageId", "codexThreadId", "codexTurnId", "itemId", "text", "state", "createdAt", "updatedAt"],
+      "properties": {
+        "messageId": { "type": "string", "minLength": 1 },
+        "codexThreadId": { "type": "string", "minLength": 1 },
+        "codexTurnId": { "type": "string", "minLength": 1 },
+        "itemId": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" },
+        "state": { "type": "string", "enum": ["streaming", "completed"] },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "messageReceipt": {
+      "type": "object",
+      "required": ["clientMessageId", "wonderMessageId", "bodySha256", "conversationId", "deliveryState", "codexThreadId", "codexTurnId"],
+      "properties": {
+        "clientMessageId": { "type": "string", "minLength": 1 },
+        "wonderMessageId": { "type": "string", "minLength": 1 },
+        "bodySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "conversationId": { "type": "string", "minLength": 1 },
+        "deliveryState": { "$ref": "#/$defs/deliveryState" },
+        "codexThreadId": { "type": ["string", "null"] },
+        "codexTurnId": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "steerTurnResponse": {
+      "$ref": "#/$defs/messageReceipt"
+    },
+    "steerTurnRequest": {
+      "type": "object",
+      "required": ["deviceId", "clientMessageId", "body", "expectedTurnId"],
+      "properties": {
+        "deviceId": { "type": "string", "minLength": 1 },
+        "clientMessageId": { "type": "string", "minLength": 1 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "expectedTurnId": { "type": "string", "minLength": 1 },
+        "attachmentIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true, "maxItems": 32 }
+      },
+      "additionalProperties": false
+    },
+    "sendMessageRequest": {
+      "type": "object",
+      "required": ["deviceId", "clientMessageId", "body"],
+      "properties": {
+        "deviceId": { "type": "string", "minLength": 1 },
+        "clientMessageId": { "type": "string", "minLength": 1 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "attachmentIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true, "maxItems": 32 }
+      },
+      "additionalProperties": false
+    },
+    "createConversationRequest": {
+      "type": "object",
+      "required": ["botId"],
+      "properties": {
+        "botId": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 }
+      },
+      "additionalProperties": false
+    },
+    "updateConversationRequest": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "isArchived": { "type": "boolean" },
+        "isPinned": { "type": "boolean" },
+        "markRead": { "type": "boolean" },
+        "hostEpoch": { "type": "string", "minLength": 1 },
+        "readThroughSequence": { "type": "integer", "minimum": 0 }
+      },
+      "if": { "properties": { "markRead": { "const": true } }, "required": ["markRead"] },
+      "then": { "required": ["hostEpoch", "readThroughSequence"] },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

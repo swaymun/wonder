@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Luna agents">
+  <title>Luna agents</title>
+  <g data-part="agent-1" transform="translate(0 0) scale(0.62)">
+    <g data-part="body" transform="translate(14.08 14.08) scale(.89)">
+      <path data-part="crescent" d="M154 25c7-1 9 3 3 8a86 86 0 0 0 72 137c7-2 9 2 4 8A108 108 0 1 1 154 25Z" fill="var(--avatar-body, #B4A0F3)" />
+      <path data-part="body-shadow" d="M48 167c44 42 109 40 179 13a108 108 0 0 1-179-13Z" fill="var(--avatar-shadow, #7765C8)" />
+      <g data-part="craters">
+        <circle cx="73" cy="103" r="12" fill="var(--avatar-shadow, #7765C8)" />
+        <circle cx="76" cy="101" r="8.5" fill="var(--avatar-accent, #E4DCFF)" opacity=".5" />
+        <circle cx="151" cy="184" r="6.5" fill="var(--avatar-shadow, #7765C8)" opacity=".65" />
+      </g>
+    </g>
+    <g data-part="face" transform="translate(3.96 -2.09) rotate(-12 92 147)" fill="none" stroke="var(--avatar-ink, #312653)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M72 142q5.5 8 11 0M104 142q5.5 8 11 0M86 159q8 8 16 0" />
+    </g>
+  </g>
+  <g data-part="agent-2" transform="translate(97.28 0) scale(0.62)">
+    <g data-part="body" transform="translate(14.08 14.08) scale(.89)">
+      <path data-part="crescent" d="M154 25c7-1 9 3 3 8a86 86 0 0 0 72 137c7-2 9 2 4 8A108 108 0 1 1 154 25Z" fill="var(--avatar-body, #B4A0F3)" />
+      <path data-part="body-shadow" d="M48 167c44 42 109 40 179 13a108 108 0 0 1-179-13Z" fill="var(--avatar-shadow, #7765C8)" />
+      <g data-part="craters">
+        <circle cx="73" cy="103" r="12" fill="var(--avatar-shadow, #7765C8)" />
+        <circle cx="76" cy="101" r="8.5" fill="var(--avatar-accent, #E4DCFF)" opacity=".5" />
+        <circle cx="151" cy="184" r="6.5" fill="var(--avatar-shadow, #7765C8)" opacity=".65" />
+      </g>
+    </g>
+    <g data-part="face" transform="translate(3.96 -2.09) rotate(-12 92 147)" fill="none" stroke="var(--avatar-ink, #312653)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M72 142q5.5 8 11 0M104 142q5.5 8 11 0M86 159q8 8 16 0" />
+    </g>
+  </g>
+  <g data-part="agent-3" transform="translate(48.64 97.28) scale(0.62)">
+    <g data-part="body" transform="translate(14.08 14.08) scale(.89)">
+      <path data-part="crescent" d="M154 25c7-1 9 3 3 8a86 86 0 0 0 72 137c7-2 9 2 4 8A108 108 0 1 1 154 25Z" fill="var(--avatar-body, #B4A0F3)" />
+      <path data-part="body-shadow" d="M48 167c44 42 109 40 179 13a108 108 0 0 1-179-13Z" fill="var(--avatar-shadow, #7765C8)" />
+      <g data-part="craters">
+        <circle cx="73" cy="103" r="12" fill="var(--avatar-shadow, #7765C8)" />
+        <circle cx="76" cy="101" r="8.5" fill="var(--avatar-accent, #E4DCFF)" opacity=".5" />
+        <circle cx="151" cy="184" r="6.5" fill="var(--avatar-shadow, #7765C8)" opacity=".65" />
+      </g>
+    </g>
+    <g data-part="face" transform="translate(3.96 -2.09) rotate(-12 92 147)" fill="none" stroke="var(--avatar-ink, #312653)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M72 142q5.5 8 11 0M104 142q5.5 8 11 0M86 159q8 8 16 0" />
+    </g>
+  </g>
+</svg>

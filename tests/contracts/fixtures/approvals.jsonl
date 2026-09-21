@@ -1,0 +1,3 @@
+{"method":"item/commandExecution/requestApproval","params":{"requestId":"approval-command","itemId":"item-command","command":["echo","approved"],"availableDecisions":["accept","decline"]}}
+{"method":"item/fileChange/requestApproval","params":{"requestId":"approval-file","itemId":"item-file","changes":[{"path":"/tmp/wonder-recorded/out.txt","kind":"add"}],"availableDecisions":["accept","decline"]}}
+{"method":"serverRequest/resolved","params":{"requestId":"approval-command"}}

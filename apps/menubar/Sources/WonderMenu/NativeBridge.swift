@@ -1,0 +1,233 @@
+import AppKit
+import Combine
+import CoreImage.CIFilterBuiltins
+
+// This process owns only macOS integrations. All Wonder windows are rendered by GPUI.
+struct BridgeCommand: Decodable, Sendable {
+    let id: String
+    let action: String
+    var enabled: Bool?
+    var key: String?
+    var paths: [String]?
+    var setup: Bool?
+    var verification: String?
+    var step: Int?
+}
+
+@MainActor
+final class NativeBridge: NSObject, NSApplicationDelegate {
+    let model = MenuModel()
+    let service: ServiceControls
+    let updates = AppUpdates()
+    let setup: SetupProgress
+
+    init(defaults: UserDefaults = .standard, serviceDirectory: URL? = nil) {
+        service = ServiceControls(defaults: defaults, serviceDirectory: serviceDirectory)
+        setup = SetupProgress(defaults: defaults)
+        super.init()
+    }
+    let permissions = PermissionModel()
+    let pairing = PhonePairing()
+    let files = FileAccessModel()
+    let computerFolders = ComputerFolders()
+    private var importedFolders = false
+    private var lastState = Data()
+    private var timer: Timer?
+    private var commandBusy = false
+    private var acknowledged = ""
+    private var commandError: String?
+    private var qrURL: String?
+    private var qrBytes: [UInt8] = []
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // LaunchServices registration of a second executable in this bundle can
+        // remove GPUI's status item. Restore it once registration has settled.
+        DispatchQueue.main.async {
+            if let directory = self.service.serviceDirectory {
+                do { try Data().write(to: directory.appendingPathComponent("refresh-menu"), options: .atomic) }
+                catch { self.commandError = "The menu bar could not refresh. Reopen Wonder." }
+            }
+        }
+        if !setup.completed && setup.step == .finish { service.applyInitialLoginDefault() }
+        pairing.start()
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.publish() }
+        }
+        Task { @MainActor in
+            while !Task.isCancelled {
+                refresh()
+                await files.load()
+                if !importedFolders, let paths = try? await files.existingFolderPaths() {
+                    computerFolders.importExisting(paths)
+                    importedFolders = true
+                }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            while let line = readLine() {
+                guard let data = line.data(using: .utf8), data.count < 65536,
+                      let command = try? JSONDecoder().decode(BridgeCommand.self, from: data) else { continue }
+                Task { @MainActor in await self?.perform(command) }
+            }
+            Task { @MainActor in NSApp.terminate(nil) }
+        }
+    }
+
+    private func refresh() {
+        model.refresh(); service.refreshLogin(); service.refreshControlPreferences(); service.refreshRemote(); permissions.refresh()
+    }
+
+    func perform(_ command: BridgeCommand) async {
+        guard !commandBusy else { return }
+        commandBusy = true; commandError = nil
+        defer { commandBusy = false; acknowledged = command.id; publish() }
+        switch command.action {
+        case "tailscale-open":
+            if !NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Tailscale.app")) {
+                NSWorkspace.shared.open(URL(string: "https://tailscale.com/download/mac")!)
+            }
+        case "tailscale-configure": await service.configureTailscale()
+        case "download-update": NSWorkspace.shared.open(URL(string: "https://github.com/swaymun/wonder/releases")!)
+        case "refresh": refresh(); await pairing.refresh()
+        case "restart": service.restart()
+        case "repair": service.repair()
+        case "sign-in": service.repair(signIn: true)
+        case "login":
+            guard let enabled = command.enabled else { return }
+            service.setLaunchAtLogin(enabled)
+        case "login-settings": service.openLoginSettings()
+        case "allow-control-from-paired-devices":
+            guard let enabled = command.enabled else { return }
+            service.setAllowControlFromPairedDevices(enabled)
+        case "automatic-updates":
+            guard let enabled = command.enabled, updates.available else { return }
+            updates.setAutomaticChecks(enabled)
+        case "check-updates": updates.check()
+        case "connect-mac":
+            if let url = service.authURL, !NSWorkspace.shared.open(url) { commandError = "The sign-in page could not open." }
+        case "screen": permissions.request(.screenRecording, setup: command.setup == true)
+        case "input": permissions.request(.accessibility, setup: command.setup == true)
+        case "setup-step":
+            guard let raw = command.step, let next = SetupStep(rawValue: raw),
+                  next.canEnter(executionReady: model.executionReady) else { return }
+            setup.go(to: next)
+            if next == .finish { service.applyInitialLoginDefault() }
+        case "setup-finish":
+            guard setup.step == .finish, model.executionReady else { return }
+            PrivacySettings.dismiss()
+            setup.finish()
+        case "pair": await pairing.create()
+        case "approve", "reject":
+            guard pairing.refreshError == nil,
+                  let phone = pairing.pending.first(where: { $0.id == command.key }),
+                  phone.challenge.verification == command.verification else {
+                commandError = "The connection request changed. Refresh and match the code again."; return
+            }
+            await pairing.decide(phone, approve: command.action == "approve")
+        case "forget-device":
+            guard let phone = pairing.devices.first(where: { $0.id == command.key && $0.revokedAt != nil }) else { return }
+            await pairing.forget(phone)
+        case "revoke":
+            guard let phone = pairing.devices.first(where: { $0.id == command.key && $0.revokedAt == nil }) else { return }
+            await pairing.revoke(phone)
+        case "computer-folder-add":
+            computerFolders.message = nil
+            for path in command.paths ?? [] {
+                do { try computerFolders.remember(URL(fileURLWithPath: path, isDirectory: true)) }
+                catch { computerFolders.message = error.localizedDescription }
+            }
+        case "computer-folder-remove":
+            if let path = command.key { computerFolders.remove(path) }
+        case "computer-folder-settings": computerFolders.openPrivacy(fullDisk: false)
+        case "computer-full-disk": computerFolders.openPrivacy(fullDisk: true, setup: command.setup == true)
+        case "review-folder", "decline-folder":
+            guard let item = files.requests.first(where: { $0.id == command.key }) else { return }
+            if command.action == "review-folder" { NSApp.activate(ignoringOtherApps: true); files.review(item) }
+            else { await files.decide(item, accepted: false) }
+        default: commandError = "This settings action is unavailable. Reopen Wonder."
+        }
+    }
+
+    func snapshot() -> [String: Any] {
+        if qrURL != pairing.offer?.url {
+            qrURL = pairing.offer?.url; qrBytes = []
+            if let url = qrURL {
+                let filter = CIFilter.qrCodeGenerator(); filter.message = Data(url.utf8)
+                if let output = filter.outputImage,
+                   let cg = CIContext().createCGImage(output.transformed(by: CGAffineTransform(scaleX: 6, y: 6)), from: output.extent.applying(CGAffineTransform(scaleX: 6, y: 6))),
+                   let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) { qrBytes = Array(data) }
+            }
+        }
+        var value: [String: Any] = [
+            "acknowledged": acknowledged, "error": commandError ?? "", "busy": commandBusy,
+            "hostName": Host.current().localizedName ?? "Mac",
+            "serviceRunning": model.serviceRunning, "remoteReady": service.remoteState == .ready,
+            "remoteChecking": service.remoteState == .starting, "remoteOrigin": service.remoteOrigin ?? "",
+            "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development",
+            "status": model.status, "detail": model.statusDetail, "ready": model.executionReady,
+            "needsRepair": model.needsRepair, "remoteStatus": service.remoteState.presentation.title,
+            "remoteDetail": service.remoteDetail, "canConnect": service.authURL != nil,
+            "serviceBusy": service.busy, "serviceMessage": service.message ?? "",
+            "login": service.launchAtLogin, "loginMessage": service.loginMessage ?? "", "loginApproval": service.loginNeedsApproval,
+            "allowControlFromPairedDevices": service.allowControlFromPairedDevices,
+            "controlPreferencesMessage": service.controlPreferencesMessage ?? "",
+            "updatesAvailable": updates.available, "automaticUpdates": updates.automaticallyChecks,
+            "screen": permissions.screen.label, "input": permissions.input.label,
+            "permissionsBusy": permissions.busy, "permissionsMessage": permissions.message ?? "",
+            "setupCompleted": setup.completed, "setupStep": setup.step.rawValue,
+            "pairingBusy": pairing.busy, "pairingError": pairing.error ?? pairing.refreshError ?? "",
+            "pairingFresh": pairing.refreshError == nil, "pairingMessage": pairing.message ?? "",
+            "pending": pairing.pending.filter { $0.isValid(at: Date()) }.map { ["id": $0.id, "label": $0.label, "verification": $0.challenge.verification, "expiresAtMs": $0.challenge.expiresAtMs] as [String: Any] },
+            "devices": pairing.devices.map { ["id": $0.id, "label": $0.label, "revoked": $0.revokedAt != nil, "lastSeen": $0.lastSeenAt ?? "", "pairedAt": $0.createdAt ?? ""] as [String: Any] },
+            "permissionDrag": PrivacySettings.dragRequest,
+            "computerFolders": computerFolders.rows, "computerFoldersMessage": computerFolders.message ?? "",
+            "filesBusy": files.busy, "filesMessage": files.message ?? "",
+            "fileRequests": files.requests.map { ["id": $0.id, "path": $0.path, "access": $0.access, "project": $0.useAsWorkingDirectory, "botName": files.snapshot?.botName ?? "Bot"] as [String: Any] }
+        ]
+        if let offer = pairing.offer {
+            value["offer"] = ["id": offer.offerId, "url": offer.url, "origin": offer.origin, "code": offer.humanCode.uppercased(), "expired": pairing.expired, "expiresAtMs": offer.expiresAtMs, "qr": qrBytes] as [String: Any]
+        }
+        return value
+    }
+
+    private func publish() {
+        guard timer != nil else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: snapshot(), options: [.sortedKeys]), data != lastState else { return }
+        lastState = data
+        do { try FileHandle.standardOutput.write(contentsOf: data + Data([10])) }
+        catch { NSApp.terminate(nil) }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        service.cancelSetup(); pairing.stop()
+        guard updates.preparingInstall, let directory = service.serviceDirectory else { return .terminateNow }
+        do { try Data().write(to: directory.appendingPathComponent("stop"), options: .atomic) }
+        catch { return .terminateCancel }
+        Task { @MainActor in
+            for _ in 0..<120 {
+                if FileManager.default.fileExists(atPath: directory.appendingPathComponent("stopped").path) {
+                    try? Data().write(to: directory.appendingPathComponent("update-ready"), options: .atomic)
+                    sender.reply(toApplicationShouldTerminate: true)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            sender.reply(toApplicationShouldTerminate: false)
+        }
+        return .terminateLater
+    }
+}
+
+@main
+struct BridgeMain {
+    @MainActor static func main() {
+        guard CommandLine.arguments.contains("--bridge") else { return }
+        let app = NSApplication.shared
+        let delegate = NativeBridge()
+        app.setActivationPolicy(.accessory)
+        app.delegate = delegate
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}

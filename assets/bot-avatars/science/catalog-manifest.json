@@ -1,0 +1,29 @@
+{
+  "sourceVersion": "science-avatar-v1",
+  "sourceHash": "9324e397b3c5d27dd693bac25f5a776d451fb7ad941f7567f21446e79fc63c3a",
+  "shapes": [
+    "sun",
+    "orbit",
+    "nova",
+    "comet",
+    "prism",
+    "atom",
+    "luna"
+  ],
+  "palettes": [
+    "amber",
+    "coral",
+    "rose",
+    "violet",
+    "indigo",
+    "ocean",
+    "sky",
+    "teal",
+    "mint",
+    "olive",
+    "cocoa",
+    "slate"
+  ],
+  "defaultShape": "sun",
+  "defaultPalette": "amber"
+}

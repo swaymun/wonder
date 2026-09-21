@@ -1,0 +1,2 @@
+{"id":5,"result":{"data":[{"id":"gpt-5.6-luna","supportedReasoningEfforts":["low","medium"]}],"nextCursor":null}}
+{"method":"model/rerouted","params":{"from":"gpt-5.6-luna","to":"gpt-5.6-terra"}}

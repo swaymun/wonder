@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>Wonder</string>
+	<key>CFBundleExecutable</key>
+	<string>WonderMenu</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.saimun.wonder</string>
+	<key>CFBundleIconFile</key>
+	<string>Wonder.icns</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Wonder</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Wonder connects directly to devices you pair with this Mac for secure live screen viewing.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Wonder shares this Mac’s screen with a device you paired, only while Computer View is open.</string>
+</dict>
+</plist>

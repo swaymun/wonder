@@ -1,0 +1,175 @@
+require "json"
+require "shellwords"
+require "fileutils"
+require "openssl"
+require "securerandom"
+require "open3"
+
+opt_out_usage
+skip_docs
+
+WONDER_BUNDLE_IDENTIFIER = "com.swaymun.wonder"
+WONDER_PUSH_BUNDLE_IDENTIFIER = "#{WONDER_BUNDLE_IDENTIFIER}.NotificationService"
+WONDER_TEAM_ID = "8KKNVD7758"
+WONDER_MATCH_GIT_URL = "https://github.com/swaymun/wonder-signing.git"
+WONDER_MATCH_GIT_BRANCH = "main"
+WONDER_MATCH_KEYCHAIN_PATH = File.expand_path("~/Library/Keychains/wonder-signing.keychain-db")
+WONDER_MATCH_PROFILE_NAME = "match AppStore #{WONDER_BUNDLE_IDENTIFIER}"
+
+def wonder_root
+  root = File.expand_path("..", __dir__)
+  ["scripts/archive-ios-release.sh", "apps/ios/ExportOptions.plist", "apps/ios/Wonder.xcodeproj/project.pbxproj"].each do |relative|
+    UI.user_error!("Missing release input: #{relative}") unless File.file?(File.join(root, relative))
+  end
+  root
+end
+
+def wonder_upload_config
+  path = File.expand_path(ENV.fetch("WONDER_ASC_CONFIG", "~/.config/wonder/app-store-connect/upload.json"))
+  config = JSON.parse(File.read(path))
+  UI.user_error!("Upload configuration must target #{WONDER_BUNDLE_IDENTIFIER}") unless config.fetch("appBundleId") == WONDER_BUNDLE_IDENTIFIER
+  key = File.expand_path(config.fetch("privateKeyPath"))
+  UI.user_error!("Private key must be readable only by its owner (chmod 600)") unless (File.stat(key).mode & 0o077).zero?
+  parsed_key = OpenSSL::PKey.read(File.read(key))
+  UI.user_error!("Expected a private P-256 App Store Connect key") unless parsed_key.is_a?(OpenSSL::PKey::EC) && parsed_key.private? && parsed_key.group.curve_name == "prime256v1"
+  config.merge("privateKeyPath" => key)
+rescue KeyError, JSON::ParserError, SystemCallError, OpenSSL::PKey::PKeyError => error
+  UI.user_error!("Cannot load Wonder upload configuration: #{error.class}. Check #{path}.")
+end
+
+def wonder_secret(environment_key, keychain_service)
+  configured = ENV[environment_key].to_s
+  return configured unless configured.empty?
+
+  stdout, _stderr, status = Open3.capture3(
+    "/usr/bin/security", "find-generic-password", "-s", keychain_service, "-w"
+  )
+  secret = stdout.strip
+  UI.user_error!("Missing #{environment_key}; set it or add login Keychain service #{keychain_service}") unless status.success? && !secret.empty?
+  secret
+end
+
+def wonder_match_credentials
+  UI.user_error!("Missing dedicated signing keychain: #{WONDER_MATCH_KEYCHAIN_PATH}") unless File.file?(WONDER_MATCH_KEYCHAIN_PATH)
+  {
+    match_password: wonder_secret("MATCH_PASSWORD", "wonder-fastlane-match"),
+    keychain_password: wonder_secret("MATCH_KEYCHAIN_PASSWORD", "wonder-fastlane-keychain")
+  }
+end
+
+def wonder_sync_signing(api_key, credentials)
+  ENV["MATCH_PASSWORD"] = credentials.fetch(:match_password)
+  unlock_keychain(
+    path: WONDER_MATCH_KEYCHAIN_PATH,
+    password: credentials.fetch(:keychain_password),
+    set_default: false,
+    add_to_search_list: :add
+  )
+  match(
+    type: "appstore",
+    readonly: true,
+    app_identifier: [WONDER_BUNDLE_IDENTIFIER, WONDER_PUSH_BUNDLE_IDENTIFIER],
+    team_id: WONDER_TEAM_ID,
+    git_url: WONDER_MATCH_GIT_URL,
+    git_branch: WONDER_MATCH_GIT_BRANCH,
+    keychain_name: WONDER_MATCH_KEYCHAIN_PATH,
+    keychain_password: credentials.fetch(:keychain_password),
+    api_key: api_key
+  )
+end
+
+def wonder_lock_signing_keychain
+  _stdout, stderr, status = Open3.capture3(
+    "/usr/bin/security", "lock-keychain", WONDER_MATCH_KEYCHAIN_PATH
+  )
+  UI.important("Could not lock the Wonder signing keychain: #{stderr.strip}") unless status.success?
+end
+
+def wonder_manual_signing_arguments
+  [
+    "CODE_SIGN_STYLE=Manual",
+    "DEVELOPMENT_TEAM=#{WONDER_TEAM_ID}",
+    "CODE_SIGN_IDENTITY=Apple Distribution",
+    "WONDER_MAIN_PROFILE=#{WONDER_MATCH_PROFILE_NAME}",
+    "WONDER_PUSH_PROFILE=match AppStore #{WONDER_PUSH_BUNDLE_IDENTIFIER}"
+  ]
+end
+
+def wonder_manual_export_options
+  {
+    method: "app-store-connect",
+    destination: "export",
+    manageAppVersionAndBuildNumber: false,
+    signingStyle: "manual",
+    teamID: WONDER_TEAM_ID,
+    signingCertificate: "Apple Distribution",
+    provisioningProfiles: { WONDER_BUNDLE_IDENTIFIER => WONDER_MATCH_PROFILE_NAME, WONDER_PUSH_BUNDLE_IDENTIFIER => "match AppStore #{WONDER_PUSH_BUNDLE_IDENTIFIER}" },
+    uploadSymbols: true
+  }
+end
+
+def wonder_api_key(config)
+  app_store_connect_api_key(key_id: config.fetch("keyId"), issuer_id: config.fetch("issuerId"),
+                           key_filepath: config.fetch("privateKeyPath"), in_house: false)
+end
+
+default_platform(:ios)
+platform :ios do
+  desc "Validate local upload configuration without contacting Apple or building"
+  lane :validate do
+    wonder_root
+    wonder_upload_config
+    wonder_match_credentials
+    UI.success("Wonder API-key, Match secret, and dedicated signing keychain are valid locally. No upload or Apple authentication attempted.")
+  end
+
+  desc "Archive, upload with the API key, and wait for TestFlight processing"
+  lane :beta do |options|
+    root = wonder_root
+    profile = options.fetch(:profile, "release").to_s
+    UI.user_error!("profile must be release or diagnostics") unless %w[release diagnostics].include?(profile)
+    scheme = profile == "diagnostics" ? "Diagnostics" : "Wonder"
+    config = wonder_upload_config
+    api_key = wonder_api_key(config)
+    signing_credentials = nil
+    begin
+      signing_credentials = wonder_match_credentials
+      wonder_sync_signing(api_key, signing_credentials)
+      latest = latest_testflight_build_number(api_key: api_key, app_identifier: config.fetch("appBundleId"), initial_build_number: 0)
+      build = options[:build] ? Integer(options[:build].to_s, 10) : latest + 1
+      UI.user_error!("Build must exceed the latest TestFlight build (#{latest})") unless build > latest
+      output = File.join(root, ".local", "testflight-#{build}-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}-#{SecureRandom.hex(3)}")
+      FileUtils.mkdir_p(output)
+      UI.message("Release evidence: #{output}")
+      sh(Shellwords.join(["env", "WONDER_IOS_PROFILE=#{profile}", File.join(root, "scripts/archive-ios-release.sh"), build.to_s, output] + wonder_manual_signing_arguments))
+      archive = File.join(output, "Wonder.xcarchive")
+      ipa = build_app(project: File.join(root, "apps/ios/Wonder.xcodeproj"), scheme: scheme,
+                      # Gym still validates the legacy name; Xcode accepts this alias.
+                      export_method: "app-store",
+                      skip_build_archive: true, archive_path: archive,
+                      export_options: wonder_manual_export_options,
+                      output_directory: output, output_name: "Wonder.ipa",
+                      buildlog_path: output)
+      result = JSON.parse(File.read(File.join(output, "build.json")))
+      # Pilot's post-processing path can update metadata even with skip_submission.
+      # Upload only, then use its read-only watcher so a Developer key is sufficient.
+      upload_to_testflight(api_key: api_key, app_identifier: config.fetch("appBundleId"), ipa: ipa,
+                          skip_submission: true, skip_waiting_for_build_processing: true,
+                          distribute_external: false)
+      File.write(File.join(output, "upload-result.json"), JSON.pretty_generate(result.merge("uploaded" => true, "testFlightProcessed" => false)) + "\n")
+      app = Spaceship::ConnectAPI::App.find(config.fetch("appBundleId"))
+      UI.user_error!("Uploaded, but cannot locate the app to watch processing") unless app
+      processed = FastlaneCore::BuildWatcher.wait_for_build_processing_to_be_complete(
+        app_id: app.id, platform: "ios", app_version: result.fetch("version"), build_version: build.to_s,
+        poll_interval: 30, timeout_duration: 1800, return_spaceship_testflight_build: false)
+      UI.user_error!("Apple did not mark this build valid") unless processed.processing_state == "VALID"
+      result["uploaded"] = true
+      result["testFlightProcessed"] = true
+      result["testFlightReady"] = false # Tester availability is a separate gate.
+      File.write(File.join(output, "upload-result.json"), JSON.pretty_generate(result) + "\n")
+      UI.success("Wonder #{result.fetch('version')} (#{build}) uploaded and processed. Tester availability is not verified.")
+    ensure
+      wonder_lock_signing_keychain if signing_credentials
+    end
+  end
+end

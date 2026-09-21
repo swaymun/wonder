@@ -1,0 +1,26 @@
+{
+  "sourceVersion": "science-avatar-v1",
+  "sourceHash": "9324e397b3c5d27dd693bac25f5a776d451fb7ad941f7567f21446e79fc63c3a",
+  "oldClientCreate": {
+    "name": "Research",
+    "role": "Research helper",
+    "systemPrompt": "Research the requested topic.",
+    "avatarColor": "#167a7a"
+  },
+  "newClientCreate": {
+    "name": "Research",
+    "role": "Research helper",
+    "systemPrompt": "Research the requested topic.",
+    "avatarShape": "orbit",
+    "avatarPalette": "coral"
+  },
+  "readWithFutureValues": {
+    "id": "bot-future",
+    "name": "Future Bot",
+    "role": "Helper",
+    "systemPrompt": "Help.",
+    "avatarShape": "future-character",
+    "avatarPalette": "future-palette",
+    "avatarColor": "#123456"
+  }
+}

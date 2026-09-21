@@ -1,0 +1,10 @@
+{
+  "key" : "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "payload" : {
+    "eventId" : "00000000-0000-4000-8000-000000000003",
+    "preview" : "AAECAwQFBgcICQoLPCCicrGJpzm3Y8Xk0I1YGfG_9xQyzH8tTQKW8XQGbpAtMsyTy7gwolbzF4Tr7whcjyBA-jWkyKkAt9qGj3AaVn8eu2CVVyfnz0FMKbT7GBkXrL4",
+    "registrationId" : "00000000-0000-4000-8000-000000000001",
+    "routeId" : "00000000-0000-4000-8000-000000000002"
+  },
+  "plaintext" : "{\"title\":\"Road trip · Question\",\"body\":\"Which day works? 🗓️\"}"
+}

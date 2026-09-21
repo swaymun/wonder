@@ -1,0 +1,2 @@
+{"method":"future/notification","params":{"known":"kept","futureField":{"value":1}}}
+{"id":8,"result":{"turn":{"id":"turn-recorded"},"futureField":"unknown-fields-do-not-crash"}}

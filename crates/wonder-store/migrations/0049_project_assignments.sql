@@ -1,0 +1,26 @@
+CREATE TABLE project_assignments (
+ id TEXT PRIMARY KEY,
+ creation_hash TEXT NOT NULL,
+ owner_device_id TEXT NOT NULL REFERENCES devices(id),
+ group_id TEXT NOT NULL REFERENCES channels(id),
+ bot_id TEXT NOT NULL REFERENCES bots(id),
+ parent_message_id TEXT NOT NULL UNIQUE REFERENCES group_runs(parent_message_id),
+ child_client_id TEXT NOT NULL,
+ title TEXT NOT NULL,
+ instruction TEXT NOT NULL,
+ repository_path TEXT NOT NULL,
+ target_ref TEXT NOT NULL,
+ worktree_path TEXT NOT NULL,
+ branch TEXT NOT NULL,
+ base_revision TEXT NOT NULL,
+ dependency_ids TEXT NOT NULL DEFAULT '[]',
+ state TEXT NOT NULL CHECK(state IN ('queued','working','awaiting_input','submitted','reviewed','integrating','integrated','failed','cancelled','uncertain')),
+ result_revision TEXT,
+ summary TEXT,
+ validation TEXT,
+ integration_head TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ FOREIGN KEY(parent_message_id,child_client_id) REFERENCES group_nodes(parent_message_id,client_message_id)
+);
+CREATE INDEX project_assignments_group ON project_assignments(group_id,created_at);

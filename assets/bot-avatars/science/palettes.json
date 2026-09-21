@@ -1,0 +1,25 @@
+{
+  "colors": {
+    "amber": { "name": "Amber", "body": "#ffb51c", "shadow": "#ff8b20", "accent": "#fff0b3", "ink": "#3b2709" },
+    "coral": { "name": "Coral", "body": "#ff925c", "shadow": "#db633b", "accent": "#ffe4ad", "ink": "#392623" },
+    "rose": { "name": "Rose", "body": "#e893b5", "shadow": "#ba638d", "accent": "#f9dce9", "ink": "#54243a" },
+    "violet": { "name": "Violet", "body": "#b4a0f3", "shadow": "#7765c8", "accent": "#e4dcff", "ink": "#312653" },
+    "indigo": { "name": "Indigo", "body": "#8893ee", "shadow": "#5d65b8", "accent": "#d9dcff", "ink": "#262d56" },
+    "ocean": { "name": "Ocean", "body": "#5699e7", "shadow": "#3264ad", "accent": "#b4e8ef", "ink": "#182d49" },
+    "sky": { "name": "Sky", "body": "#77cedf", "shadow": "#4298b4", "accent": "#d1f5f7", "ink": "#17424a" },
+    "teal": { "name": "Teal", "body": "#57b8b3", "shadow": "#308e8c", "accent": "#b9e9e0", "ink": "#153d3c" },
+    "mint": { "name": "Mint", "body": "#62c8aa", "shadow": "#359d85", "accent": "#c8f1df", "ink": "#163d35" },
+    "olive": { "name": "Olive", "body": "#adbe66", "shadow": "#788c42", "accent": "#e4edbe", "ink": "#343d1b" },
+    "cocoa": { "name": "Cocoa", "body": "#c49a7d", "shadow": "#946d56", "accent": "#ecd6c0", "ink": "#40291f" },
+    "slate": { "name": "Slate", "body": "#a4b0c5", "shadow": "#77849d", "accent": "#dee4ee", "ink": "#293447" }
+  },
+  "defaults": {
+    "sun": "amber",
+    "orbit": "coral",
+    "nova": "amber",
+    "comet": "sky",
+    "prism": "violet",
+    "atom": "ocean",
+    "luna": "violet"
+  }
+}

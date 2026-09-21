@@ -1,0 +1,5 @@
+{"id":7,"result":{"thread":{"id":"thread-recorded","sessionId":"session-recorded"}}}
+{"method":"thread/started","params":{"thread":{"id":"thread-recorded"}}}
+{"method":"turn/started","params":{"turn":{"id":"turn-recorded"}}}
+{"method":"item/agentMessage/delta","params":{"item":{"id":"item-recorded"},"delta":"recorded response"}}
+{"method":"turn/completed","params":{"turn":{"id":"turn-recorded","status":"completed"}}}

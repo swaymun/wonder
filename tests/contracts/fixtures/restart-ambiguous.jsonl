@@ -1,0 +1,2 @@
+{"event":"app-server-eof","activeMessageState":"uncertain","automaticRetry":false}
+{"event":"restarted","reconciledBy":"ThreadItem.userMessage.clientId","retry":"explicit-only"}

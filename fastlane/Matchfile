@@ -1,0 +1,6 @@
+git_url("https://github.com/swaymun/wonder-signing.git")
+git_branch("main")
+storage_mode("git")
+type("appstore")
+app_identifier(["com.swaymun.wonder", "com.swaymun.wonder.NotificationService"])
+team_id("8KKNVD7758")

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Comet">
+  <title>Comet</title>
+  <!-- Original outer-tail contour. Tail and head share a 0.93 optical scale; face strokes remain at family weight. -->
+<g data-part="tail" transform="translate(8.96 8.96) scale(.93)">
+    <path data-part="tail-outer" d="M43 123c22-28 57-33 84-64s57-46 69-37-18 51-18 51 44-39 55-30-27 57-27 57 25-15 30-5c7 14-27 51-58 79-29 26-58 48-91 44-48-6-66-61-44-95Z" fill="var(--avatar-shadow, #4298B4)"/>
+    <path data-part="tail-inner" d="M48 123C79 91 127 93 167 55C163 74 143 98 144 104C147 112 174 91 180 95C190 101 149 132 151 139C157 145 173 132 179 136C189 143 144 195 116 206C64 228 15 170 48 123Z" fill="var(--avatar-body, #77CEDF)"/>
+  </g>
+  <g data-part="body" transform="translate(8.96 8.96) scale(.93)">
+    <ellipse cx="89" cy="157" rx="55" ry="59" transform="rotate(32 89 157)" fill="var(--avatar-accent, #D1F5F7)" stroke="var(--avatar-body, #77CEDF)" stroke-width="4.5"/>
+  </g>
+  <g data-part="face" transform="translate(2.73 -2.03) rotate(24 89 157)" fill="var(--avatar-ink, #17424A)">
+    <rect x="66.4" y="140.2" width="11.2" height="17.6" rx="5.6"/>
+    <rect x="100.4" y="140.2" width="11.2" height="17.6" rx="5.6"/>
+    <path d="M81 173q8 9 16 0" fill="none" stroke="var(--avatar-ink, #17424A)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

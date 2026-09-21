@@ -1,0 +1,13 @@
+[package]
+name = "wonder-relay-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI for the Wonder relay Noise channel"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+wonder-relay = { path = "../wonder-relay" }
+snow = "0.10.0"

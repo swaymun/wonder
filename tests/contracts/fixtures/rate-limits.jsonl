@@ -1,0 +1,2 @@
+{"id":6,"result":{"rateLimits":[{"limitName":"recorded","usedPercent":0,"windowDurationMins":60,"resetsAt":4102444800}]}}
+{"method":"account/rateLimits/updated","params":{"rateLimits":[]}}

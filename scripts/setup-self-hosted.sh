@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Read-only source-build preflight. Does not install software or change a tailnet.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+missing=0
+for command in cargo swift go xcodebuild; do
+  if command -v "$command" >/dev/null 2>&1; then
+    echo "$command: installed"
+  else
+    echo "$command: missing (see DEVELOPMENT.md)"; missing=1
+  fi
+done
+runtime="${WONDER_CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex}"
+if [[ -x "$runtime" ]]; then
+  version="$("$runtime" --version)"
+  if [[ "$version" == 'codex-cli 0.155.0-alpha.9' || "$version" == 'codex-cli 0.155.0-alpha.9.2' ]]; then
+    echo 'Codex runtime: supported version (launch also checks schema and provider authentication)'
+  else
+    echo "Codex runtime: incompatible version $version; expected codex-cli 0.155.0-alpha.9 or 0.155.0-alpha.9.2"; missing=1
+  fi
+else
+  echo 'Codex runtime: install the supported ChatGPT app (see INSTALL.md)'; missing=1
+fi
+if command -v go >/dev/null 2>&1; then
+  (cd cmd/wonder-tunnel && go run . --once)
+fi
+if (( missing )); then exit 1; fi
+echo 'Build prerequisites found. Follow DEVELOPMENT.md to select your signing identity and build.'

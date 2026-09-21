@@ -1,0 +1,37 @@
+{
+  "manifestVersion": 1,
+  "wonderAdapterVersion": "0.1.0",
+  "codex": {
+    "version": "codex-cli 0.155.0-alpha.9",
+    "transport": "stdio-jsonl",
+    "stableSchemaSha256": "5a4d50ed04afa9cd1b383d011f67ec055960a35ca7fdeab222ed65e70fca8f0b",
+    "experimentalSchemaSha256": "48368bf71d00498557245665dd4581f9b0d5381561a2c8ba1ef4eb26ea4a1632",
+    "compatibleVersions": [
+      "codex-cli 0.155.0-alpha.9",
+      "codex-cli 0.155.0-alpha.9.2"
+    ]
+  },
+  "requiredCapabilities": [
+    "initialize",
+    "account/read",
+    "model/list",
+    "account/rateLimits/read",
+    "configRequirements/read",
+    "permissionProfile/list",
+    "thread/start",
+    "thread/resume",
+    "thread/read",
+    "thread/turns/list",
+    "thread/items/list",
+    "turn/start",
+    "turn/steer",
+    "turn/interrupt",
+    "clientUserMessageId",
+    "named-permission-profile"
+  ],
+  "policy": {
+    "experimentalApi": true,
+    "allowLegacySandboxComposition": false,
+    "allowUnknownVersions": false
+  }
+}

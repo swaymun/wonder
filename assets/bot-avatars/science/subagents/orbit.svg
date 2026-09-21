@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Orbit agents">
+  <title>Orbit agents</title>
+  <g data-part="agent-1" transform="translate(0 0) scale(0.62)">
+    <g data-part="ring-back" fill="none" stroke-linecap="butt" stroke-linejoin="round">
+      <path d="M32.662 180.577A107 33 -27 0 1 223.338 83.423" stroke="var(--avatar-shadow, #DB633B)" stroke-width="14" />
+      <path d="M32.662 180.577A107 33 -27 0 1 223.338 83.423" stroke="var(--avatar-accent, #FFE4AD)" stroke-width="11" />
+    </g>
+    <g data-part="body">
+      <circle cx="128" cy="126" r="75" fill="var(--avatar-body, #FF925C)" />
+      <path data-part="body-shadow" d="M64.396 165.744C105 184 168 174 202.817 120.768A75 75 0 0 1 64.396 165.744Z" fill="var(--avatar-shadow, #DB633B)" />
+      <ellipse data-part="highlight" cx="101" cy="77" rx="12" ry="6" transform="rotate(-27 101 77)" fill="var(--avatar-accent, #FFE4AD)" opacity=".6" />
+    </g>
+    <g data-part="ring-front" fill="none" stroke-linecap="butt" stroke-linejoin="round">
+      <path d="M32.662 180.577A107 33 -27 0 0 223.338 83.423" stroke="var(--avatar-shadow, #DB633B)" stroke-width="14" />
+      <path d="M32.009 178.972A107 33 -27 1 0 222.423 81.951" stroke="var(--avatar-accent, #FFE4AD)" stroke-width="11" />
+    </g>
+    <g data-part="face" transform="rotate(-12 124 110)" fill="var(--avatar-ink, #392623)">
+      <rect x="98.4" y="97.2" width="11.2" height="17.6" rx="5.6" />
+      <rect x="138.4" y="97.2" width="11.2" height="17.6" rx="5.6" />
+      <path d="M116 128q8 9 16 0" fill="none" stroke="var(--avatar-ink, #392623)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" />
+    </g>
+  </g>
+  <g data-part="agent-2" transform="translate(97.28 0) scale(0.62)">
+    <g data-part="ring-back" fill="none" stroke-linecap="butt" stroke-linejoin="round">
+      <path d="M32.662 180.577A107 33 -27 0 1 223.338 83.423" stroke="var(--avatar-shadow, #DB633B)" stroke-width="14" />
+      <path d="M32.662 180.577A107 33 -27 0 1 223.338 83.423" stroke="var(--avatar-accent, #FFE4AD)" stroke-width="11" />
+    </g>
+    <g data-part="body">
+      <circle cx="128" cy="126" r="75" fill="var(--avatar-body, #FF925C)" />
+      <path data-part="body-shadow" d="M64.396 165.744C105 184 168 174 202.817 120.768A75 75 0 0 1 64.396 165.744Z" fill="var(--avatar-shadow, #DB633B)" />
+      <ellipse data-part="highlight" cx="101" cy="77" rx="12" ry="6" transform="rotate(-27 101 77)" fill="var(--avatar-accent, #FFE4AD)" opacity=".6" />
+    </g>
+    <g data-part="ring-front" fill="none" stroke-linecap="butt" stroke-linejoin="round">
+      <path d="M32.662 180.577A107 33 -27 0 0 223.338 83.423" stroke="var(--avatar-shadow, #DB633B)" stroke-width="14" />
+      <path d="M32.009 178.972A107 33 -27 1 0 222.423 81.951" stroke="var(--avatar-accent, #FFE4AD)" stroke-width="11" />
+    </g>
+    <g data-part="face" transform="rotate(-12 124 110)" fill="var(--avatar-ink, #392623)">
+      <rect x="98.4" y="97.2" width="11.2" height="17.6" rx="5.6" />
+      <rect x="138.4" y="97.2" width="11.2" height="17.6" rx="5.6" />
+      <path d="M116 128q8 9 16 0" fill="none" stroke="var(--avatar-ink, #392623)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" />
+    </g>
+  </g>
+  <g data-part="agent-3" transform="translate(48.64 97.28) scale(0.62)">
+    <g data-part="ring-back" fill="none" stroke-linecap="butt" stroke-linejoin="round">
+      <path d="M32.662 180.577A107 33 -27 0 1 223.338 83.423" stroke="var(--avatar-shadow, #DB633B)" stroke-width="14" />
+      <path d="M32.662 180.577A107 33 -27 0 1 223.338 83.423" stroke="var(--avatar-accent, #FFE4AD)" stroke-width="11" />
+    </g>
+    <g data-part="body">
+      <circle cx="128" cy="126" r="75" fill="var(--avatar-body, #FF925C)" />
+      <path data-part="body-shadow" d="M64.396 165.744C105 184 168 174 202.817 120.768A75 75 0 0 1 64.396 165.744Z" fill="var(--avatar-shadow, #DB633B)" />
+      <ellipse data-part="highlight" cx="101" cy="77" rx="12" ry="6" transform="rotate(-27 101 77)" fill="var(--avatar-accent, #FFE4AD)" opacity=".6" />
+    </g>
+    <g data-part="ring-front" fill="none" stroke-linecap="butt" stroke-linejoin="round">
+      <path d="M32.662 180.577A107 33 -27 0 0 223.338 83.423" stroke="var(--avatar-shadow, #DB633B)" stroke-width="14" />
+      <path d="M32.009 178.972A107 33 -27 1 0 222.423 81.951" stroke="var(--avatar-accent, #FFE4AD)" stroke-width="11" />
+    </g>
+    <g data-part="face" transform="rotate(-12 124 110)" fill="var(--avatar-ink, #392623)">
+      <rect x="98.4" y="97.2" width="11.2" height="17.6" rx="5.6" />
+      <rect x="138.4" y="97.2" width="11.2" height="17.6" rx="5.6" />
+      <path d="M116 128q8 9 16 0" fill="none" stroke="var(--avatar-ink, #392623)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" />
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Prism">
+  <title>Prism</title>
+<g data-part="body" stroke-linejoin="round">
+    <path data-part="silhouette" d="M128 26Q130 26 132 30L224 190Q228 197 220 200L132 228Q128 230 124 228L36 200Q28 197 32 190L124 30Q126 26 128 26Z" fill="var(--avatar-body, #B4A0F3)"/>
+    <path data-part="facet-left" d="M128 26Q126 26 124 30L32 190Q28 197 36 200L86 160Z" fill="var(--avatar-shadow, #7765C8)"/>
+    <path data-part="facet-right" d="M128 26Q130 26 132 30L224 190Q228 197 220 200L170 160Z" fill="var(--avatar-accent, #E4DCFF)"/>
+    <path data-part="facet-lower" d="M86 160H170L132 228Q128 230 124 228Z" fill="var(--avatar-shadow, #7765C8)"/>
+    <path data-part="highlight" d="M128 44 142 103 131 90Z" fill="var(--avatar-accent, #E4DCFF)" opacity=".45"/>
+  </g>
+  <g data-part="face" fill="var(--avatar-ink, #312653)">
+    <rect x="106.4" y="118.2" width="11.2" height="17.6" rx="5.6"/>
+    <rect x="138.4" y="118.2" width="11.2" height="17.6" rx="5.6"/>
+    <path d="M120 145q8 9 16 0" fill="none" stroke="var(--avatar-ink, #312653)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

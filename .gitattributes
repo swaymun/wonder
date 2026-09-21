@@ -1,0 +1,10 @@
+*.pdf binary
+*.png binary
+
+# Archived research is kept byte-for-byte as provenance, including legacy whitespace.
+research/archive/** -whitespace
+
+# Preserve upstream license text exactly; hashes in the notices identify these bytes.
+licenses/RUST-NOTICES.txt -whitespace
+licenses/*-LICENSE.txt -whitespace
+licenses/upstream/*.txt -whitespace

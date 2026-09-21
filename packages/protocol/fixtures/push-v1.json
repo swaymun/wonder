@@ -1,0 +1,26 @@
+{
+  "apiVersion": "v1",
+  "pushConfiguration": {
+    "endpoint": "https://push.example.test",
+    "topic": "com.example.wonder",
+    "environment": "production",
+    "previewVersion": 1
+  },
+  "pushRoute": {
+    "conversationId": "parent-conversation"
+  },
+  "pushRegistration": {
+    "id": "9f24d8ab-fde5-4a9e-9bcc-f7b398cd0d28",
+    "senderSecret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "actionNonce": "fixture-nonce",
+    "issuedAtMs": 1789840000000,
+    "signature": "fixture-signature",
+    "previewKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+  },
+  "pushPresence": {
+    "state": "foreground",
+    "actionNonce": "fixture-nonce",
+    "issuedAtMs": 1789840000000,
+    "signature": "fixture-signature"
+  }
+}

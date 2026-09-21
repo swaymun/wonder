@@ -1,0 +1,2 @@
+{"id":3,"result":{"data":[{"name":"wonder_bot_recorded","allowed":true,"filesystem":{":minimal":"read"}}]}}
+{"method":"item/permissions/requestApproval","params":{"requestId":"approval-1","scope":"turn","permissions":{"filesystem":{"/tmp/approved":"read"}}}}

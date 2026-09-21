@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Orbit" class="wonder-avatar" data-avatar="orbit" data-state="idle" data-motion="on" style="--avatar-blink-delay: -0.71s; --avatar-idle-delay: -0.83s">
+  <title>Orbit</title>
+  <style>/* Embedded in each animated SVG. All selectors and keyframes are scoped. */
+.wonder-avatar [data-part="character"] {
+  transform-origin:128px 128px;
+  animation:wonder-avatar-idle 5.8s ease-in-out infinite;
+  animation-delay:var(--avatar-idle-delay, 0s);
+}
+.wonder-avatar [data-part="gaze"] {
+  transform:translate(calc(var(--avatar-look-x, 0px) + var(--avatar-rest-x, 0px)), calc(var(--avatar-look-y, 0px) + var(--avatar-rest-y, 0px)));
+  transition:transform 140ms ease-out;
+}
+.wonder-avatar .avatar-eye {
+  transform-box:fill-box;
+  transform-origin:center;
+  animation:wonder-avatar-blink 6.4s linear infinite;
+  animation-delay:var(--avatar-blink-delay, 0s);
+}
+.wonder-avatar[data-state="thinking"] { --avatar-rest-x:4px; --avatar-rest-y:-4px; }
+.wonder-avatar[data-state="thinking"] [data-part="character"] { animation:wonder-avatar-think 4s ease-in-out infinite; }
+.wonder-avatar[data-state="working"] [data-part="character"] { animation:wonder-avatar-work 1.1s ease-in-out infinite; }
+.wonder-avatar[data-state="done"] [data-part="character"] { animation:wonder-avatar-done 800ms cubic-bezier(.22,.7,.25,1) 1; }
+.wonder-avatar[data-state="sleeping"] [data-part="character"] { animation:wonder-avatar-sleep 6s ease-in-out infinite; }
+.wonder-avatar[data-state="sleeping"] .avatar-eye { animation:none; transform:scaleY(.13); }
+.wonder-avatar[data-state="sleeping"] [data-part="gaze"] { transform:none; }
+.wonder-avatar[data-avatar="sun"] [data-part="rays"] {
+  transform-origin:128px 162px;
+  animation:wonder-avatar-rays 3.8s ease-in-out infinite;
+}
+.wonder-avatar[data-avatar="orbit"] [data-part="ring-motion"] {
+  transform-origin:128px 132px;
+  animation:wonder-avatar-ring 7s ease-in-out infinite;
+}
+.wonder-avatar[data-avatar="nova"] [data-part="body"] {
+  transform-origin:128px 128px;
+  animation:wonder-avatar-star 4s ease-in-out infinite;
+}
+.wonder-avatar[data-avatar="comet"] [data-part="tail"] {
+  transform-origin:89px 157px;
+  animation:wonder-avatar-tail 3.2s ease-in-out infinite;
+}
+.wonder-avatar[data-avatar="prism"] [data-part="glint"] { animation:wonder-avatar-glint 4.5s ease-in-out infinite; }
+.wonder-avatar[data-avatar="atom"] [data-part="orbits-back"],
+.wonder-avatar[data-avatar="atom"] [data-part="orbits-front"],
+.wonder-avatar[data-avatar="atom"] [data-part="electron-track"] {
+  transform-origin:128px 128px;
+  animation:wonder-avatar-atom 18s linear infinite;
+}
+.wonder-avatar[data-avatar="luna"] [data-part="character"] { animation:wonder-avatar-moon 7s ease-in-out infinite; }
+.wonder-avatar[data-avatar="luna"][data-state="thinking"] [data-part="character"] { animation-name:wonder-avatar-think; }
+.wonder-avatar[data-avatar="luna"][data-state="working"] [data-part="character"] { animation-name:wonder-avatar-work; animation-duration:1.3s; }
+.wonder-avatar[data-avatar="luna"][data-state="done"] [data-part="character"] { animation:wonder-avatar-done 800ms cubic-bezier(.22,.7,.25,1) 1; }
+.wonder-avatar[data-avatar="luna"][data-state="sleeping"] [data-part="character"] { animation-name:wonder-avatar-sleep; }
+.wonder-avatar [data-part="awake-eyes"] { display:none; }
+.wonder-avatar[data-avatar="luna"][data-state="thinking"] [data-part="awake-eyes"],
+.wonder-avatar[data-avatar="luna"][data-state="working"] [data-part="awake-eyes"],
+.wonder-avatar[data-avatar="luna"][data-state="done"] [data-part="awake-eyes"] { display:inline; }
+.wonder-avatar[data-avatar="luna"][data-state="thinking"] [data-part="closed-eyes"],
+.wonder-avatar[data-avatar="luna"][data-state="working"] [data-part="closed-eyes"],
+.wonder-avatar[data-avatar="luna"][data-state="done"] [data-part="closed-eyes"] { display:none; }
+.wonder-avatar[data-state="working"] [data-part="rays"],
+.wonder-avatar[data-state="working"] [data-part="ring-motion"],
+.wonder-avatar[data-state="working"] [data-part="tail"],
+.wonder-avatar[data-state="working"] [data-part="glint"],
+.wonder-avatar[data-avatar="nova"][data-state="working"] [data-part="body"] { animation-duration:1.4s; }
+.wonder-avatar[data-avatar="atom"][data-state="working"] [data-part="orbits-back"],
+.wonder-avatar[data-avatar="atom"][data-state="working"] [data-part="orbits-front"],
+.wonder-avatar[data-avatar="atom"][data-state="working"] [data-part="electron-track"] { animation-duration:7s; }
+.wonder-avatar[data-state="sleeping"] [data-part="rays"],
+.wonder-avatar[data-state="sleeping"] [data-part="ring-motion"],
+.wonder-avatar[data-state="sleeping"] [data-part="tail"],
+.wonder-avatar[data-state="sleeping"] [data-part="glint"],
+.wonder-avatar[data-state="sleeping"] [data-part="orbits-back"],
+.wonder-avatar[data-state="sleeping"] [data-part="orbits-front"],
+.wonder-avatar[data-state="sleeping"] [data-part="electron-track"],
+.wonder-avatar[data-avatar="nova"][data-state="sleeping"] [data-part="body"] { animation:none; }
+.wonder-avatar[data-paused="true"] * { animation-play-state:paused !important; transition:none !important; }
+.wonder-avatar[data-motion="off"] * { animation:none !important; transition:none !important; }
+.wonder-avatar[data-motion="off"] [data-part="gaze"] { transform:none; }
+@media (prefers-reduced-motion:reduce) {
+  .wonder-avatar * { animation:none !important; transition:none !important; }
+  .wonder-avatar [data-part="gaze"] { transform:none; }
+}
+@keyframes wonder-avatar-idle { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-2.5px); } }
+@keyframes wonder-avatar-blink { 0%,42%,47%,100% { transform:scaleY(1); } 44%,45% { transform:scaleY(.1); } }
+@keyframes wonder-avatar-think { 0%,100% { transform:rotate(-4deg); } 50% { transform:rotate(-1deg) translateY(-2px); } }
+@keyframes wonder-avatar-work { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-3px) rotate(1.2deg); } }
+@keyframes wonder-avatar-done { 0%,100% { transform:scale(1); } 35% { transform:translateY(-8px) rotate(-5deg) scale(1.045); } 70% { transform:translateY(1px) rotate(2deg) scale(.99); } }
+@keyframes wonder-avatar-sleep { 0%,100% { transform:rotate(-3deg) scale(1); } 50% { transform:rotate(-3deg) scale(.985); } }
+@keyframes wonder-avatar-rays { 0%,100% { transform:scale(1); } 50% { transform:scale(1.055); } }
+@keyframes wonder-avatar-ring { 0%,100% { transform:rotate(-3deg); } 50% { transform:rotate(4deg); } }
+@keyframes wonder-avatar-star { 0%,100% { transform:scale(1); } 50% { transform:scale(1.025); } }
+@keyframes wonder-avatar-tail { 0%,100% { transform:scale(1) rotate(0); } 50% { transform:scale(.97,1.015) rotate(-1.5deg); } }
+@keyframes wonder-avatar-glint { 0%,100% { opacity:.25; } 50% { opacity:.8; } }
+@keyframes wonder-avatar-atom { to { transform:rotate(360deg); } }
+@keyframes wonder-avatar-moon { 0%,100% { transform:rotate(-2deg); } 50% { transform:rotate(2deg) translateY(-2px); } }
+</style>
+  <g data-part="character">
+    <g data-part="ring-motion">
+      <g data-part="ring-back" fill="none" stroke-linecap="butt" stroke-linejoin="round">
+        <path d="M32.662 180.577A107 33 -27 0 1 223.338 83.423" stroke="var(--avatar-shadow, #DB633B)" stroke-width="14" />
+        <path d="M32.662 180.577A107 33 -27 0 1 223.338 83.423" stroke="var(--avatar-accent, #FFE4AD)" stroke-width="11" />
+      </g>
+    </g>
+    <g data-part="body">
+      <circle cx="128" cy="126" r="75" fill="var(--avatar-body, #FF925C)" />
+      <path data-part="body-shadow" d="M64.396 165.744C105 184 168 174 202.817 120.768A75 75 0 0 1 64.396 165.744Z" fill="var(--avatar-shadow, #DB633B)" />
+      <ellipse data-part="highlight" cx="101" cy="77" rx="12" ry="6" transform="rotate(-27 101 77)" fill="var(--avatar-accent, #FFE4AD)" opacity=".6" />
+    </g>
+    <g data-part="ring-motion">
+      <g data-part="ring-front" fill="none" stroke-linecap="butt" stroke-linejoin="round">
+        <path d="M32.662 180.577A107 33 -27 0 0 223.338 83.423" stroke="var(--avatar-shadow, #DB633B)" stroke-width="14" />
+        <path d="M32.009 178.972A107 33 -27 1 0 222.423 81.951" stroke="var(--avatar-accent, #FFE4AD)" stroke-width="11" />
+      </g>
+    </g>
+    <g data-part="gaze">
+      <g data-part="face" transform="rotate(-12 124 110)" fill="var(--avatar-ink, #392623)">
+        <rect x="98.4" y="97.2" width="11.2" height="17.6" rx="5.6" class="avatar-eye" />
+        <rect x="138.4" y="97.2" width="11.2" height="17.6" rx="5.6" class="avatar-eye" />
+        <path d="M116 128q8 9 16 0" fill="none" stroke="var(--avatar-ink, #392623)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" />
+      </g>
+    </g>
+  </g>
+</svg>

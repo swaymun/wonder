@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Nova agents">
+  <title>Nova agents</title>
+  <g data-part="agent-1" transform="translate(0 0) scale(0.62)">
+    <g data-part="body">
+      <path data-part="silhouette" d="M128 22C134 22 136 76 158 98C180 120 234 122 234 128C234 134 180 136 158 158C136 180 134 234 128 234C122 234 120 180 98 158C76 136 22 134 22 128C22 122 76 120 98 98C120 76 122 22 128 22Z" fill="var(--avatar-body, #FFB51C)" />
+      <path data-part="lower-facets" d="M22 128H234C234 134 180 136 158 158C136 180 134 234 128 234C122 234 120 180 98 158C76 136 22 134 22 128Z" fill="var(--avatar-shadow, #FF8B20)" />
+      <path data-part="rays" d="M128 34 141 115 222 128 141 141 128 222 115 141 34 128 115 115Z" fill="var(--avatar-accent, #FFF0B3)" />
+      <circle data-part="face-plane" cx="128" cy="128" r="39.5" fill="var(--avatar-accent, #FFF0B3)" />
+    </g>
+    <g data-part="face" fill="var(--avatar-ink, #3B2709)">
+      <rect x="106.4" y="110.4" width="11.2" height="17.6" rx="5.6" />
+      <rect x="138.4" y="110.4" width="11.2" height="17.6" rx="5.6" />
+      <path d="M120 138q8 9 16 0" fill="none" stroke="var(--avatar-ink, #3B2709)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" />
+    </g>
+  </g>
+  <g data-part="agent-2" transform="translate(97.28 0) scale(0.62)">
+    <g data-part="body">
+      <path data-part="silhouette" d="M128 22C134 22 136 76 158 98C180 120 234 122 234 128C234 134 180 136 158 158C136 180 134 234 128 234C122 234 120 180 98 158C76 136 22 134 22 128C22 122 76 120 98 98C120 76 122 22 128 22Z" fill="var(--avatar-body, #FFB51C)" />
+      <path data-part="lower-facets" d="M22 128H234C234 134 180 136 158 158C136 180 134 234 128 234C122 234 120 180 98 158C76 136 22 134 22 128Z" fill="var(--avatar-shadow, #FF8B20)" />
+      <path data-part="rays" d="M128 34 141 115 222 128 141 141 128 222 115 141 34 128 115 115Z" fill="var(--avatar-accent, #FFF0B3)" />
+      <circle data-part="face-plane" cx="128" cy="128" r="39.5" fill="var(--avatar-accent, #FFF0B3)" />
+    </g>
+    <g data-part="face" fill="var(--avatar-ink, #3B2709)">
+      <rect x="106.4" y="110.4" width="11.2" height="17.6" rx="5.6" />
+      <rect x="138.4" y="110.4" width="11.2" height="17.6" rx="5.6" />
+      <path d="M120 138q8 9 16 0" fill="none" stroke="var(--avatar-ink, #3B2709)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" />
+    </g>
+  </g>
+  <g data-part="agent-3" transform="translate(48.64 97.28) scale(0.62)">
+    <g data-part="body">
+      <path data-part="silhouette" d="M128 22C134 22 136 76 158 98C180 120 234 122 234 128C234 134 180 136 158 158C136 180 134 234 128 234C122 234 120 180 98 158C76 136 22 134 22 128C22 122 76 120 98 98C120 76 122 22 128 22Z" fill="var(--avatar-body, #FFB51C)" />
+      <path data-part="lower-facets" d="M22 128H234C234 134 180 136 158 158C136 180 134 234 128 234C122 234 120 180 98 158C76 136 22 134 22 128Z" fill="var(--avatar-shadow, #FF8B20)" />
+      <path data-part="rays" d="M128 34 141 115 222 128 141 141 128 222 115 141 34 128 115 115Z" fill="var(--avatar-accent, #FFF0B3)" />
+      <circle data-part="face-plane" cx="128" cy="128" r="39.5" fill="var(--avatar-accent, #FFF0B3)" />
+    </g>
+    <g data-part="face" fill="var(--avatar-ink, #3B2709)">
+      <rect x="106.4" y="110.4" width="11.2" height="17.6" rx="5.6" />
+      <rect x="138.4" y="110.4" width="11.2" height="17.6" rx="5.6" />
+      <path d="M120 138q8 9 16 0" fill="none" stroke="var(--avatar-ink, #3B2709)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" />
+    </g>
+  </g>
+</svg>

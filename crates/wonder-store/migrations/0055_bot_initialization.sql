@@ -1,0 +1,4 @@
+CREATE TABLE bot_initializations (
+    bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE
+);

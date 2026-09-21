@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+RESOURCES="$APP_ROOT/Resources"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export WONDER_LOOPBACK_CAPABILITY="${WONDER_LOOPBACK_CAPABILITY:-$(uuidgen)}"
+export WONDER_PUBLIC_ORIGIN="${WONDER_PUBLIC_ORIGIN:-http://127.0.0.1:3777}"
+export WONDER_LOGO_PATH="${WONDER_LOGO_PATH:-$RESOURCES/WonderSunLogo.png}"
+# Local links are imported into the Bot workspace only after the owner clicks
+# them. Keep the default narrow enough to exclude dotfiles and app secrets.
+export WONDER_LINKED_FILE_ROOTS="${WONDER_LINKED_FILE_ROOTS:-$HOME/CodexProjects}"
+# Computer Use is available in the local app once the owner grants macOS
+# Accessibility and Screen Recording. Set this to 0 to hide the tool without
+# rebuilding the bundle.
+export WONDER_COMPUTER_USE_ENABLED="${WONDER_COMPUTER_USE_ENABLED:-1}"
+
+# Children have separate process groups so forced shutdown cannot leave workers.
+set -m
+umask 077
+export WONDER_RESOURCES="$RESOURCES"
+if [[ -z "${WONDER_DATA_DIR:-}" ]]; then
+  WONDER_DATA_DIR="$("$RESOURCES/wonderd" --prepare-data-dir)"
+fi
+export WONDER_DATA_DIR
+mkdir -p "$WONDER_DATA_DIR/Service" "$HOME/Library/Logs/Wonder"
+# A kernel lock is released on process exit, including crashes and reboot.
+LOCK="$WONDER_DATA_DIR/Service/launcher.pid"
+exec 9>"$LOCK"
+if ! /usr/bin/lockf -s -t 0 9; then
+  touch "$WONDER_DATA_DIR/Service/open-settings"
+  exit 0
+fi
+export WONDER_SERVICE_DIR="$WONDER_DATA_DIR/Service"
+rm -f "$WONDER_SERVICE_DIR/stop" "$WONDER_SERVICE_DIR/stopped" "$WONDER_SERVICE_DIR/update-ready"
+export WONDER_PUBLIC_ORIGIN_FILE="$WONDER_SERVICE_DIR/tunnel.jsonl"
+export WONDER_CODEX_BIN="${WONDER_CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex}"
+TUNNEL_PID=""; DAEMON_PID=""; MENU_PID=""
+stop_child() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  local n=0
+  while kill -0 "$pid" 2>/dev/null && (( n < 50 )); do sleep 0.1; n=$((n + 1)); done
+  # Kill the process group too, including a runtime left by a crashed daemon.
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+cleanup() {
+  trap - EXIT INT TERM
+  stop_child "$TUNNEL_PID"
+  stop_child "$DAEMON_PID"
+  stop_child "$MENU_PID"
+  printf '%s\n' '{"state":"stopped"}' > "$WONDER_PUBLIC_ORIGIN_FILE"
+  rm -f "$WONDER_SERVICE_DIR/restart"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ -z "${WONDER_ASR_DECODER_BIN:-}" ]]; then
+  for candidate in /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg /usr/bin/ffmpeg; do
+    if [[ -x "$candidate" ]]; then
+      export WONDER_ASR_DECODER_BIN="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${WONDER_ASR_BIN:-}" && -x "$RESOURCES/nemo-speech-worker.py" ]]; then
+  export WONDER_ASR_BIN="$RESOURCES/nemo-speech-worker.py"
+  export WONDER_ASR_MODEL="${WONDER_ASR_MODEL:-$WONDER_DATA_DIR/NeMoSpeech/models/parakeet-tdt-0.6b-v3.q8_0.gguf}"
+  export WONDER_NEMO_SPEECH_BIN="${WONDER_NEMO_SPEECH_BIN:-$WONDER_DATA_DIR/NeMoSpeech/bin/nemo-speech}"
+fi
+
+if [[ -z "${WONDER_COMPUTER_USE_BIN:-}" && -x "$RESOURCES/WonderComputerUse.app/Contents/MacOS/WonderComputerUse" ]]; then
+  export WONDER_COMPUTER_USE_BIN="$RESOURCES/WonderComputerUse.app/Contents/MacOS/WonderComputerUse"
+elif [[ -z "${WONDER_COMPUTER_USE_BIN:-}" && -x "$RESOURCES/WonderComputerUse" ]]; then
+  # Compatibility for a pre-bundle installation until the next signed update.
+  export WONDER_COMPUTER_USE_BIN="$RESOURCES/WonderComputerUse"
+fi
+
+
+"$APP_ROOT/MacOS/WonderHost" 9>&- &
+MENU_PID=$!
+DAEMON_DELAY=1; TUNNEL_DELAY=1
+DAEMON_NEXT=0; TUNNEL_NEXT=0
+DAEMON_STARTED=0; TUNNEL_STARTED=0
+while kill -0 "$MENU_PID" 2>/dev/null; do
+  if [[ -f "$WONDER_SERVICE_DIR/stop" ]]; then
+    stop_child "$TUNNEL_PID"; TUNNEL_PID=""
+    stop_child "$DAEMON_PID"; DAEMON_PID=""
+    printf '%s\n' '{"state":"stopped"}' > "$WONDER_PUBLIC_ORIGIN_FILE"
+    # Release before acknowledging termination so Sparkle can relaunch safely.
+    exec 9>&-
+    touch "$WONDER_SERVICE_DIR/stopped"
+    trap - EXIT INT TERM
+    wait "$MENU_PID" || true
+    exit 0
+  fi
+  NOW=$SECONDS
+  if [[ -f "$WONDER_SERVICE_DIR/restart" ]]; then
+    rm -f "$WONDER_SERVICE_DIR/restart"
+    stop_child "$TUNNEL_PID"; TUNNEL_PID=""
+    stop_child "$DAEMON_PID"; DAEMON_PID=""
+    DAEMON_NEXT=0; TUNNEL_NEXT=0; DAEMON_DELAY=1; TUNNEL_DELAY=1
+  fi
+  if [[ -n "$DAEMON_PID" ]] && ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+    stop_child "$DAEMON_PID"; DAEMON_PID=""
+    (( NOW - DAEMON_STARTED < 60 )) || DAEMON_DELAY=1
+    DAEMON_NEXT=$((NOW + DAEMON_DELAY))
+    (( DAEMON_DELAY >= 30 )) || DAEMON_DELAY=$((DAEMON_DELAY * 2))
+  fi
+  if [[ -n "$TUNNEL_PID" ]] && ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    stop_child "$TUNNEL_PID"; TUNNEL_PID=""
+    printf '%s\n' '{"state":"unavailable"}' > "$WONDER_PUBLIC_ORIGIN_FILE"
+    (( NOW - TUNNEL_STARTED < 60 )) || TUNNEL_DELAY=1
+    TUNNEL_NEXT=$((NOW + TUNNEL_DELAY))
+    (( TUNNEL_DELAY >= 30 )) || TUNNEL_DELAY=$((TUNNEL_DELAY * 2))
+  fi
+  if [[ -z "$DAEMON_PID" ]] && (( NOW >= DAEMON_NEXT )); then
+    "$RESOURCES/wonderd" 9>&- >> "$HOME/Library/Logs/Wonder/service.log" 2>&1 &
+    DAEMON_PID=$!; DAEMON_STARTED=$NOW
+  fi
+  if [[ -z "$TUNNEL_PID" ]] && (( NOW >= TUNNEL_NEXT )); then
+    printf '%s\n' '{"state":"starting"}' > "$WONDER_PUBLIC_ORIGIN_FILE"
+    "$RESOURCES/wonder-tunnel" \
+      9>&- >> "$WONDER_PUBLIC_ORIGIN_FILE" 2>> "$HOME/Library/Logs/Wonder/tunnel.log" &
+    TUNNEL_PID=$!; TUNNEL_STARTED=$NOW
+  fi
+  sleep 0.25
+done

@@ -1,0 +1,13 @@
+[package]
+name = "wonder-smoke"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wonder-smoke"
+path = "src/main.rs"
+
+[dependencies]
+wonder-app-server = { path = "../wonder-app-server" }
+serde_json.workspace = true

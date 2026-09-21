@@ -1,0 +1,2 @@
+{"id":4,"result":{"account":{"type":"chatgpt","email":"recorded@example.invalid"}}}
+{"method":"account/updated","params":{"account":{"type":"chatgpt"}}}

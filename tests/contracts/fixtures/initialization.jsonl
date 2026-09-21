@@ -1,0 +1,3 @@
+{"method":"initialize","id":1,"params":{"clientInfo":{"name":"wonder","title":"Wonder","version":"0.1.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false,"optOutNotificationMethods":[]}}}
+{"id":1,"result":{"userAgent":"wonder-fake-codex","platformFamily":"macos","platformOs":"macos","capabilities":{"experimentalApi":true}}}
+{"method":"initialized","params":{}}

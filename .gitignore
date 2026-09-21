@@ -1,0 +1,27 @@
+/target/
+*.log
+.DS_Store
+/.local/
+/.research/
+/node_modules/
+apps/menubar/.build/
+dist/
+cmd/wonder-tunnel/wonder-tunnel
+native/computer-use/.build/
+scripts/__pycache__/
+research/grokbot-app-analysis/extracted/
+research/grokbot-app-analysis/formatted-bundles/
+
+apps/native/.build/
+apps/ios/DerivedData/
+apps/ios/**/xcuserdata/
+
+# Local documentation and design review artifacts
+/docs/
+/.impeccable/
+
+# Local fastlane configuration and generated reports
+/.bundle/
+/fastlane/report.xml
+/fastlane/README.md
+/fastlane/Preview.html
