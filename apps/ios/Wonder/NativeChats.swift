@@ -2432,7 +2432,7 @@ struct AttentionRow: View {
                 ForEach(Array((request.params.questions ?? []).enumerated()).filter { $0.offset == questionIndex }, id: \.element.id) { _, question in
                     Text(question.question).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
                     ForEach(question.options ?? [], id: \.label) { option in
-                        QuestionChoice(title: option.label, detail: option.description, selected: answers[question.id] == option.label) {
+                        ConversationChoice(title: option.label, detail: option.description, selected: answers[question.id] == option.label) {
                             answers[question.id] = option.label; save()
                         }
                     }
@@ -2485,15 +2485,10 @@ struct AttentionRow: View {
                 if let reason = unavailableReason {
                     Text(reason).foregroundStyle(.secondary)
                 }
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 8) {
                     ForEach(choices) { choice in
-                        Button {
+                        ConversationChoice(title: choice.title, detail: choice.detail) {
                             Task { await model.resolve(request, choice: choice, answers: answers) }
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(choice.title)
-                                if let detail = choice.detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
-                            }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         }
                         .disabled(model.previewMode || !validChoices.contains(choice.id))
                         .accessibilityIdentifier("approval-\(choice.id)-\(request.id)")
@@ -3638,7 +3633,7 @@ struct AsyncQuestionRow: View {
                     ForEach(Array(question.questions.enumerated()).filter { $0.offset == questionIndex }, id: \.offset) { index, prompt in
                         Text(prompt.title).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
                         ForEach(prompt.options ?? [], id: \.self) { option in
-                            QuestionChoice(title: option, selected: answers[String(index)] == option) { answers[String(index)] = option; save() }
+                            ConversationChoice(title: option, selected: answers[String(index)] == option) { answers[String(index)] = option; save() }
                         }
                         TextField("Type an answer", text: Binding(get: { answers[String(index)] ?? "" }, set: { answers[String(index)] = $0; save() }), axis: .vertical).textFieldStyle(.roundedBorder).accessibilityLabel(prompt.title)
                     }
@@ -3659,7 +3654,7 @@ struct AsyncQuestionRow: View {
                                 Text(prompt.title).font(.subheadline.weight(.semibold))
                                 let selected = question.response?.answers.indices.contains(index) == true ? question.response?.answers[index] : answers[String(index)]
                                 ForEach(prompt.options ?? [], id: \.self) { option in
-                                    QuestionChoice(title: option, selected: selected == option) {}.disabled(true)
+                                    ConversationChoice(title: option, selected: selected == option) {}.disabled(true)
                                 }
                                 if let selected, !(prompt.options ?? []).contains(selected) { Text(selected).font(.subheadline) }
                             }.padding(.vertical, 8)
@@ -3738,25 +3733,29 @@ struct QuestionDock: View {
     }
 }
 
-struct QuestionChoice: View {
+struct ConversationChoice: View {
     let title: String
     var detail: String? = nil
-    let selected: Bool
+    var selected: Bool? = nil
     let choose: () -> Void
     var body: some View {
         Button(action: choose) {
             HStack(spacing: 10) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                if let selected {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                        .accessibilityHidden(true)
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.subheadline).foregroundStyle(.primary)
                     if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
                 }.fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
-            }.padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .background(selected ? Color.accentColor.opacity(0.10) : Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+            }.padding(.horizontal, 10).padding(.vertical, 8)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .background(selected == true ? Color.accentColor.opacity(0.10) : Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                 .contentShape(Rectangle())
-        }.buttonStyle(.plain).accessibilityAddTraits(selected ? [.isSelected] : [])
+        }.buttonStyle(.plain).accessibilityAddTraits(selected == true ? [.isSelected] : [])
     }
 }
 

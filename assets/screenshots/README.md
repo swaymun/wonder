@@ -8,6 +8,7 @@ and notification acceptance are separate checks.
 | Asset | Source |
 | --- | --- |
 | `conversation.png` | Native conversation renderer with a synthetic Saturday plan, composer and grouped moon helper symbol. |
+| `approval.png` | A synthetic request to save the Saturday plan, with question-style boxed native approval controls. Capture does not approve a real file operation. |
 | `agents.png` | The same conversation with its native helper roster open. Status labels remain separate from the decorative grouped symbols. |
 
 `pairing.png` and `mac-permissions.png` were captured September 20. They show the

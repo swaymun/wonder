@@ -831,19 +831,6 @@ fn open_file_at(directory: &fs::File, name: &std::ffi::OsStr) -> Result<fs::File
 }
 
 #[cfg(unix)]
-#[cfg(test)]
-fn open_file_path_nofollow(path: &Path) -> Result<fs::File, BrowseError> {
-    let parent = path
-        .parent()
-        .ok_or((StatusCode::BAD_REQUEST, "This workspace path is invalid."))?;
-    let name = path
-        .file_name()
-        .ok_or((StatusCode::BAD_REQUEST, "This workspace path is invalid."))?;
-    let directory = open_directory_nofollow(parent)?;
-    open_file_at(&directory, name)
-}
-
-#[cfg(unix)]
 fn open_workspace_file(root: &WorkspaceRoot, relative: &Path) -> Result<fs::File, BrowseError> {
     if !root.is_directory && !relative.as_os_str().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Choose a regular file."));
@@ -1069,15 +1056,6 @@ fn read_bounded_file(mut file: fs::File) -> Result<Vec<u8>, BrowseError> {
         ));
     }
     Ok(bytes)
-}
-
-#[cfg(test)]
-fn open_bounded_file(path: &Path) -> Result<Vec<u8>, BrowseError> {
-    #[cfg(unix)]
-    let file = open_file_path_nofollow(path)?;
-    #[cfg(not(unix))]
-    let file = fs::File::open(path).map_err(disk_error)?;
-    read_bounded_file(file)
 }
 
 fn open_workspace_bounded_file(
@@ -2005,9 +1983,14 @@ mod tests {
             is_directory: false,
             kind: "appliedGrant",
         };
-        let resolved =
-            resolve_workspace_path(&root, Path::new(""), &[], Some(&root.path), false).unwrap();
-        assert_eq!(open_bounded_file(&resolved).unwrap(), b"read-only");
+        assert_eq!(
+            open_workspace_bounded_file(&root, Path::new(""), &[], Some(&root.path)).unwrap(),
+            b"read-only"
+        );
+        assert!(
+            open_workspace_bounded_file(&root, Path::new("child.txt"), &[], Some(&root.path))
+                .is_err()
+        );
         assert!(
             list_workspace_directory(&root, Path::new(""), &[], Some(&root.path), false, 0)
                 .is_err()

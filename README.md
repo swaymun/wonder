@@ -21,10 +21,10 @@ available from this repository. [Release qualification](RELEASING.md).
 
 ## Keep your work with you
 
-| Conversations that last | Follow the helpers |
+| Follow the helpers | Requests you can act on |
 | --- | --- |
-| <img src="assets/screenshots/conversation.png" width="280" alt="A Wonder conversation with a relaxed Saturday plan and a message composer"> | <img src="assets/screenshots/agents.png" width="280" alt="A helper roster with grouped moon symbols matching the parent Bot"> |
-| Return to named Bots and Group Chats. Read replies, review activity, and share files. | See each helper’s status above the composer, then open its work without leaving the parent conversation. |
+| <img src="assets/screenshots/agents.png" width="280" alt="A helper roster with grouped moon symbols matching the parent Bot"> | <img src="assets/screenshots/approval.png" width="280" alt="A request to save a Saturday plan with Allow once, Allow for this session and Decline controls"> |
+| See each helper’s status above the composer, then open its work without leaving the parent conversation. | Review the requested action and choose how much permission to grant. |
 
 Answer questions and review approval requests from your phone. Permission choices
 remain explicit, with server-confirmed settings applied before work starts.

@@ -227,6 +227,7 @@ enum DiagnosticSubagentFixture {
     // This entire file is excluded from Release; no personal history is loaded.
     static var marketingFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-marketing") }
     static var botName: String { marketingFixture ? "Weekend plans" : "Fixture Bot" }
+    static var marketingApprovalFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-marketing-approval") }
     static var approvalSettingsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-optimistic-approval") }
     static var approvalDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.approval-settings")! }
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
@@ -462,6 +463,13 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             finish(status: 200, body: json(summaries))
         case "/api/v1/group-chats": finish(status: 200, body: Data("[]".utf8))
         case "/api/v1/bots": finish(status: 200, body: json([bot()]))
+        case "/api/v1/approvals" where DiagnosticSubagentFixture.marketingApprovalFixture:
+            finish(status: 200, body: json([["approvalId": "marketing-file-approval",
+                "conversationId": DiagnosticSubagentFixture.parentID,
+                "method": "item/fileChange/requestApproval", "actionNonce": "synthetic-marketing",
+                "params": ["threadId": DiagnosticSubagentFixture.parentThreadID,
+                    "turnId": "fixture-parent-turn", "grantRoot": "/Users/example/Documents/Weekend",
+                    "reason": "Save your Saturday plan."]]]))
         case "/api/v1/approvals": finish(status: 200, body: Data("[]".utf8))
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/queue",
              "/api/v1/conversations/\(DiagnosticSubagentFixture.childID)/queue",
@@ -528,7 +536,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             "id": "fixture-parent-turn", "status": "completed", "createdAt": "1000", "updatedAt": "3000",
             "items": [["id": "fixture-subagent-activity", "type": "subAgentActivity", "state": "completed", "createdAt": "2000", "payload": [
                 "agentThreadId": DiagnosticSubagentFixture.childThreadID, "agentNickname": "Scout", "agentRole": "research", "kind": "completed", "status": "completed"
-            ]], ["id": "fixture-created-task", "type": "dynamicToolCall", "state": "completed", "createdAt": "2500", "payload": ["threadId": DiagnosticSubagentFixture.ordinaryTaskThreadID]], ["id": "fixture-parent-reply", "type": "agentMessage", "state": "completed", "createdAt": "3000", "text": DiagnosticSubagentFixture.marketingFixture ? "A little structure, plenty of room.\n\n**Morning**\nBreakfast at home, then a walk by the water.\n\n**Afternoon**\nA bookshop and a long lunch. If it rains, Scout suggests swapping the walk for a museum.\n\n**Evening**\nKeep it free. Nothing else to fit in." : "The Scout is ready."]
+            ]], ["id": "fixture-created-task", "type": "dynamicToolCall", "state": "completed", "createdAt": "2500", "payload": ["threadId": DiagnosticSubagentFixture.ordinaryTaskThreadID]], ["id": "fixture-parent-reply", "type": "agentMessage", "state": "completed", "createdAt": "3000", "text": DiagnosticSubagentFixture.marketingApprovalFixture ? "Your Saturday plan is ready. I can save a copy so you can find it later." : DiagnosticSubagentFixture.marketingFixture ? "A little structure, plenty of room.\n\n**Morning**\nBreakfast at home, then a walk by the water.\n\n**Afternoon**\nA bookshop and a long lunch. If it rains, Scout suggests swapping the walk for a museum.\n\n**Evening**\nKeep it free. Nothing else to fit in." : "The Scout is ready."]
         ]]]
     ]] }
     private func childSnapshot() -> [String: Any] {

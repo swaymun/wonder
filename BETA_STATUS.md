@@ -12,9 +12,9 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Release 1.0 (48) is processed and available to internal testers. External review and public enrollment are pending. |
+| iPhone and iPad | Release 1.0 (48) is processed for internal testing. A newer candidate with boxed approval choices is being prepared. External review and public enrollment are pending. |
 | Mac companion | The final signed download is undergoing installation and compatibility checks. |
-| Source | The reviewed MIT source release is being prepared. Third-party components retain their own licenses. |
+| Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). Third-party components retain their own licenses. |
 
 ## Beta limitations
 

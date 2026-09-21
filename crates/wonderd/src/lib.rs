@@ -8409,7 +8409,7 @@ async fn start_bot_thread(
                 "{}{}",
                 pm_tools::version(computer, pm),
                 if onboarding {
-                    "+wonder-bot-profile-v3"
+                    "+wonder-bot-profile-v4"
                 } else {
                     ""
                 }
@@ -8459,7 +8459,7 @@ async fn conversation_needs_tool_migration(
                 "{}{}",
                 pm_tools::version(computer, pm),
                 if onboarding {
-                    "+wonder-bot-profile-v3"
+                    "+wonder-bot-profile-v4"
                 } else {
                     ""
                 }

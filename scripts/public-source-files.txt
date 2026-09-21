@@ -203,6 +203,7 @@ assets/bot-avatars/science/test_generate_ios.py
 assets/bot-avatars/science/validate-assets.py
 assets/screenshots/README.md
 assets/screenshots/agents.png
+assets/screenshots/approval.png
 assets/screenshots/conversation.png
 assets/screenshots/mac-permissions.png
 assets/screenshots/pairing.png

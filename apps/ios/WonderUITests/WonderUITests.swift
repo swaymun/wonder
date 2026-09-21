@@ -17,6 +17,13 @@ import UIKit
         XCTAssertTrue(app.buttons["subagent-roster:fixture-child-conversation"].waitForExistence(timeout: 5))
         retainMenuScreenshot(app, name: "Native sample helper roster")
         app.terminate()
+        app.launchArguments.append("-diagnostics-marketing-approval")
+        app.launch()
+        XCTAssertTrue(chat.waitForExistence(timeout: 10)); chat.tap()
+        XCTAssertTrue(app.staticTexts["Save your Saturday plan."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Allow once"].isEnabled)
+        retainMenuScreenshot(app, name: "Native sample approval request")
+        app.terminate()
     }
 
     func testChatInitialLayoutWithoutSavedPosition() throws {
