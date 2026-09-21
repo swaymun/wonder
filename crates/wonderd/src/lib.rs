@@ -12337,14 +12337,9 @@ mod tests {
             .await
             .unwrap();
         std::fs::write(dir.path().join("child-fixture"), "").unwrap();
-        let _ingestion = crate::ingestion::spawn(state.clone()).await;
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while state.ingestion.runtime_routes().is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("runtime registration");
+        // Discovery needs a runtime route, not concurrent recovery and retention tasks.
+        let health = state.app_server.lock().await.health();
+        state.ingestion.register(&state.app_server, health, None);
 
         let response = crate::subagents::list(
             axum::extract::State(state.clone()),
@@ -12356,7 +12351,8 @@ mod tests {
             .await
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["subagents"].as_array().unwrap().len(), 1);
+        assert_eq!(value["available"], true, "{value}");
+        assert_eq!(value["subagents"].as_array().unwrap().len(), 1, "{value}");
         let child = value["subagents"][0]["conversationId"]
             .as_str()
             .unwrap()
