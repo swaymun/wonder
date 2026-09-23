@@ -38,6 +38,7 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
     private var commandError: String?
     private var qrURL: String?
     private var qrBytes: [UInt8] = []
+    private var updateTerminationPending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // LaunchServices registration of a second executable in this bundle can
@@ -49,6 +50,7 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             }
         }
         if !setup.completed && setup.step == .finish { service.applyInitialLoginDefault() }
+        if setup.completed { updates.start() }
         pairing.start()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -104,6 +106,9 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
         case "automatic-updates":
             guard let enabled = command.enabled, updates.available else { return }
             updates.setAutomaticChecks(enabled)
+        case "automatic-update-downloads":
+            guard let enabled = command.enabled, updates.available else { return }
+            updates.setAutomaticDownloads(enabled)
         case "check-updates": updates.check()
         case "connect-mac":
             if let url = service.authURL, !NSWorkspace.shared.open(url) { commandError = "The sign-in page could not open." }
@@ -114,10 +119,13 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
                   next.canEnter(executionReady: model.executionReady) else { return }
             setup.go(to: next)
             if next == .finish { service.applyInitialLoginDefault() }
+        case "setup-review":
+            setup.review()
         case "setup-finish":
             guard setup.step == .finish, model.executionReady else { return }
             PrivacySettings.dismiss()
             setup.finish()
+            updates.start()
         case "pair": await pairing.create()
         case "approve", "reject":
             guard pairing.refreshError == nil,
@@ -151,6 +159,7 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
     }
 
     func snapshot() -> [String: Any] {
+        updates.refresh()
         if qrURL != pairing.offer?.url {
             qrURL = pairing.offer?.url; qrBytes = []
             if let url = qrURL {
@@ -174,6 +183,8 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             "allowControlFromPairedDevices": service.allowControlFromPairedDevices,
             "controlPreferencesMessage": service.controlPreferencesMessage ?? "",
             "updatesAvailable": updates.available, "automaticUpdates": updates.automaticallyChecks,
+            "automaticUpdateDownloads": updates.automaticallyDownloads,
+            "canCheckUpdates": updates.canCheck, "updatesMessage": updates.message ?? "",
             "screen": permissions.screen.label, "input": permissions.input.label,
             "permissionsBusy": permissions.busy, "permissionsMessage": permissions.message ?? "",
             "setupCompleted": setup.completed, "setupStep": setup.step.rawValue,
@@ -201,20 +212,63 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        service.cancelSetup(); pairing.stop()
-        guard updates.preparingInstall, let directory = service.serviceDirectory else { return .terminateNow }
-        do { try Data().write(to: directory.appendingPathComponent("stop"), options: .atomic) }
-        catch { return .terminateCancel }
+        guard updates.preparingInstall else {
+            service.cancelSetup(); pairing.stop()
+            return .terminateNow
+        }
+        guard let directory = service.serviceDirectory else {
+            updates.installationFailed("Open the installed Wonder app to finish its update.")
+            return .terminateCancel
+        }
+        guard !updateTerminationPending else { return .terminateLater }
+        updateTerminationPending = true
         Task { @MainActor in
+            guard await updates.prepareTermination() else {
+                updateTerminationPending = false
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            service.cancelSetup(); pairing.stop()
+            // Prepare the host's exit marker before stopping its services. The
+            // host acts on it only after the supervisor acknowledges shutdown.
+            let ready = directory.appendingPathComponent("update-ready")
+            do { try Data().write(to: ready, options: .atomic) }
+            catch {
+                updates.installationFailed("Wonder could not prepare its update. Try again.")
+                updateTerminationPending = false
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            do { try Data().write(to: directory.appendingPathComponent("stop"), options: .atomic) }
+            catch {
+                try? FileManager.default.removeItem(at: ready)
+                updates.installationFailed("Wonder could not stop for its update. Try again.")
+                updateTerminationPending = false
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            // Once stop is written, the supervisor can no longer resume the
+            // old services. Complete termination even if an acknowledgement is
+            // delayed; cancelling here would strand an open, unusable app.
             for _ in 0..<120 {
                 if FileManager.default.fileExists(atPath: directory.appendingPathComponent("stopped").path) {
-                    try? Data().write(to: directory.appendingPathComponent("update-ready"), options: .atomic)
-                    sender.reply(toApplicationShouldTerminate: true)
-                    return
+                    // Sparkle runs in this bridge child. Wait for the responsible
+                    // native launcher as well, so reopening cannot hit its old lock.
+                    if let raw = ProcessInfo.processInfo.environment["WONDER_APP_LAUNCHER_PID"],
+                       let launcher = Int32(raw), launcher > 1, launcher != getpid() {
+                        for _ in 0..<150 {
+                            if kill(launcher, 0) == -1 && errno == ESRCH {
+                                sender.reply(toApplicationShouldTerminate: true)
+                                return
+                            }
+                            try? await Task.sleep(for: .milliseconds(100))
+                        }
+                    }
+                    break
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
-            sender.reply(toApplicationShouldTerminate: false)
+            sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
     }

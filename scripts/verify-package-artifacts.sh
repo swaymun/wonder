@@ -60,12 +60,27 @@ for path in \
 done
 
 codesign --verify --strict "$CONTENTS_PATH/Frameworks/WebRTC.framework"
+codesign --verify --deep --strict "$CONTENTS_PATH/Frameworks/Sparkle.framework"
 codesign --verify --strict "$CONTENTS_PATH/Resources/WonderComputerUse.app"
 codesign --verify --strict "$COMPUTER_USE_BIN"
 [[ "$(shasum -a 256 "$CONTENTS_PATH/Resources/WebRTC-LICENSE.md" | awk '{print $1}')" == "843529896bae499c92af3ecade86855128f930334ba97530695ccecef56e966d" ]] || { echo "WebRTC license evidence mismatch" >&2; exit 1; }
 
 /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$CONTENTS_PATH/Info.plist" >/dev/null
 /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$CONTENTS_PATH/Info.plist" >/dev/null
+python3 - "$CONTENTS_PATH/Info.plist" <<'VERIFY_UPDATER'
+import base64, plistlib, sys
+from urllib.parse import urlsplit
+with open(sys.argv[1], 'rb') as stream:
+    info = plistlib.load(stream)
+feed = urlsplit(info.get('SUFeedURL', ''))
+assert feed.scheme == 'https' and feed.hostname and not feed.username and not feed.password
+assert not feed.query and not feed.fragment
+assert len(base64.b64decode(info.get('SUPublicEDKey', ''), validate=True)) == 32
+assert info.get('SUVerifyUpdateBeforeExtraction') is True
+assert info.get('SURequireSignedFeed') is True
+assert info.get('SUSendProfileInfo') is False
+assert 'SUEnableAutomaticChecks' not in info, 'Preserve the user consent and opt-out flow'
+VERIFY_UPDATER
 
 helper_value() {
   /usr/libexec/PlistBuddy -c "Print :$1" "$COMPUTER_USE_PLIST" 2>/dev/null || true

@@ -101,7 +101,7 @@ pub(crate) async fn find_accepted_turn(
         if child.ownership.thread_id != thread_id {
             return Err("The receipt does not belong to this subagent".into());
         }
-        crate::resume_child(&child).await?;
+        crate::resume_child(state, &child).await?;
         child.rpc
     } else {
         let Some(bot) = crate::bot_for_conversation(state, &message.conversation_id)
@@ -129,7 +129,9 @@ pub(crate) async fn find_accepted_turn(
         let response = runtime.request("thread/resume", json!({
         "threadId":thread_id,"excludeTurns":true,"cwd":bot.execution_directory(),
         "permissions":resolved.permission_profile,"runtimeWorkspaceRoots":roots,
-        "approvalPolicy":resolved.approval_policy,"approvalsReviewer":resolved.approvals_reviewer,"developerInstructions":wonder_harness::instructions(&bot.system_prompt)
+        "approvalPolicy":resolved.approval_policy,"approvalsReviewer":resolved.approvals_reviewer,
+        "developerInstructions":wonder_harness::instructions(&format!("{}\n\n{}", crate::teaching::BETA_POLICY, bot.system_prompt)),
+        "config":crate::teaching::runtime_config(state, &runtime, bot.execution_directory()).await?
     })).await.map_err(|e| e.to_string())?;
         if response.error.is_some() {
             return Ok(None);

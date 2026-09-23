@@ -188,6 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect(),
         linked_file_roots,
         dispatch_lock: Arc::new(tokio::sync::Mutex::new(())),
+        update_admission: Arc::new(Default::default()),
         channel_worker_slots: Arc::new(tokio::sync::Semaphore::new(CHANNEL_WORKER_CONCURRENCY)),
         approval_lock: Arc::new(tokio::sync::Mutex::new(())),
         bots_root: data_dir.join("bots").to_string_lossy().into_owned(),

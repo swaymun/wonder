@@ -372,6 +372,7 @@ crates/wonderd/src/subagents.rs
 crates/wonderd/src/sync.rs
 crates/wonderd/src/teaching.rs
 crates/wonderd/src/tool_media.rs
+crates/wonderd/src/update_admission.rs
 fastlane/Fastfile
 fastlane/Matchfile
 fastlane/USAGE.md
@@ -488,6 +489,7 @@ scripts/check-ios-profiles.py
 scripts/clean-build-artifacts.py
 scripts/collect-dependency-notices.py
 scripts/export-public-source.py
+scripts/generate-sparkle-appcast.py
 scripts/install-dev-app.sh
 scripts/install-parakeet-model.sh
 scripts/install-signed-app.py
@@ -505,6 +507,7 @@ scripts/test-code-mode-runtime.py
 scripts/test-codex-permission-modes.mjs
 scripts/test-degraded-service.py
 scripts/test-export-public-source.py
+scripts/test-generate-sparkle-appcast.py
 scripts/test-nemo-speech-worker.py
 scripts/test-package-release-gates.py
 scripts/test-replay-codex-thread.py

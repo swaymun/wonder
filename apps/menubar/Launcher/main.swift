@@ -41,6 +41,9 @@ let script = resources.appendingPathComponent("WonderService.sh").path
 let child = Process()
 child.executableURL = URL(fileURLWithPath: "/bin/bash")
 child.arguments = [script] + Array(CommandLine.arguments.dropFirst())
+var environment = ProcessInfo.processInfo.environment
+environment["WONDER_APP_LAUNCHER_PID"] = String(getpid())
+child.environment = environment
 
 // Keep the signed native executable as the LaunchServices responsible process.
 // Process inherits the launch environment and the standard streams when these

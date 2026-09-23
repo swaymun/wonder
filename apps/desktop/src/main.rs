@@ -1546,7 +1546,9 @@ fn main() {
                         {
                             open_settings(cx);
                         }
-                        if directory.join("update-ready").exists() {
+                        if directory.join("update-ready").exists()
+                            && directory.join("stopped").exists()
+                        {
                             cx.quit();
                             return;
                         }

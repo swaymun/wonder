@@ -36,6 +36,22 @@ final class SetupTests: XCTestCase {
     }
 
     @MainActor
+    func testReviewSetupPreservesExistingPreferencesAndResumesWelcome() {
+        let defaults = isolatedDefaults()
+        defaults.set(true, forKey: "login.defaultApplied")
+        defaults.set("retained", forKey: "paired-device-test")
+        let progress = SetupProgress(defaults: defaults)
+        progress.go(to: .finish)
+        progress.finish()
+        progress.review()
+        let reopened = SetupProgress(defaults: defaults)
+        XCTAssertFalse(reopened.completed)
+        XCTAssertEqual(reopened.step, .welcome)
+        XCTAssertTrue(defaults.bool(forKey: "login.defaultApplied"))
+        XCTAssertEqual(defaults.string(forKey: "paired-device-test"), "retained")
+    }
+
+    @MainActor
     func testSkippedPermissionsDoNotGateRemainingSetup() {
         let defaults = isolatedDefaults()
         let permissions = PermissionModel(helper: nil, defaults: defaults)

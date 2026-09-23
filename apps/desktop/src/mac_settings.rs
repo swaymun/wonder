@@ -240,8 +240,10 @@ impl MacSettings {
                     let finished_setup = self.received
                         && self.state["setupCompleted"] == false
                         && state["setupCompleted"] == true;
+                    let reviewing_setup =
+                        self.state["setupCompleted"] == true && state["setupCompleted"] == false;
                     self.state = state;
-                    if first && !self.flag("setupCompleted") {
+                    if (first && !self.flag("setupCompleted")) || reviewing_setup {
                         let model = cx.entity();
                         cx.defer(move |cx| setup_window::open(model, cx));
                     } else if finished_setup {
@@ -486,11 +488,21 @@ impl MacSettings {
                     "automatic-updates",
                     cx,
                 ))
+                .child(
+                    self.toggle(
+                        "update-downloads",
+                        "Download and install updates when idle",
+                        "automaticUpdateDownloads",
+                        "automatic-update-downloads",
+                        cx,
+                    )
+                    .disabled(self.disabled() || !self.flag("automaticUpdates")),
+                )
                 .child(self.action(
                     "check-updates",
                     "Check for updates…",
                     json!({"action":"check-updates"}),
-                    false,
+                    !self.flag("canCheckUpdates"),
                     cx,
                 ))
         } else {
@@ -513,6 +525,16 @@ impl MacSettings {
             .child(status)
             .child(settings_section("Startup", startup, cx))
             .child(settings_section("Updates", updates, cx))
+            .when(!text(&self.state, "updatesMessage").is_empty(), |v| {
+                v.child(note(text(&self.state, "updatesMessage")))
+            })
+            .child(self.action(
+                "setup-review",
+                "Review setup…",
+                json!({"action":"setup-review"}),
+                false,
+                cx,
+            ))
     }
     fn about(&self, _cx: &Context<Self>) -> Div {
         stack()

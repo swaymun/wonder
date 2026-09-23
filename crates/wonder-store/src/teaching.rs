@@ -742,6 +742,13 @@ impl Store {
         Ok(rows.iter().map(skill).collect())
     }
 
+    /// Saved teaching files only; ordinary workspace and installed skills are unrelated.
+    pub async fn teaching_skill_paths(&self) -> Result<Vec<(String, String)>, sqlx::Error> {
+        sqlx::query_as("SELECT b.workspace_path,s.skill_path FROM bot_skills s JOIN bots b ON b.id=s.bot_id WHERE s.state!='archived' UNION SELECT b.workspace_path,v.skill_path FROM bot_skill_versions v JOIN bots b ON b.id=v.bot_id")
+            .fetch_all(&self.pool)
+            .await
+    }
+
     pub async fn bot_skill(
         &self,
         bot_id: &str,

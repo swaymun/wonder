@@ -94,6 +94,24 @@ while kill -0 "$MENU_PID" 2>/dev/null; do
     exec 9>&-
     touch "$WONDER_SERVICE_DIR/stopped"
     trap - EXIT INT TERM
+    # The native bridge runs Sparkle and waits for this launcher to exit. If
+    # the GPUI host cannot process update-ready, bound its shutdown without
+    # killing the bridge's process group or leaving Wonder half running.
+    menu_live() {
+      local status
+      status="$(ps -o state= -p "$MENU_PID" 2>/dev/null | tr -d '[:space:]')"
+      [[ -n "$status" && "$status" != Z ]]
+    }
+    for (( n=0; n<32; n++ )); do
+      menu_live || break
+      sleep 0.25
+    done
+    if menu_live; then kill -TERM "$MENU_PID" 2>/dev/null || true; fi
+    for (( n=0; n<12; n++ )); do
+      menu_live || break
+      sleep 0.25
+    done
+    if menu_live; then kill -KILL "$MENU_PID" 2>/dev/null || true; fi
     wait "$MENU_PID" || true
     exit 0
   fi

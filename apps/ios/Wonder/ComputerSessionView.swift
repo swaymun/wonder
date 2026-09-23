@@ -946,28 +946,17 @@ struct ComputerSessionView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var sessionModel: ComputerSessionModel
-    @StateObject private var teachingModel: TeachingSessionModel
-    @State private var teaching = false
 
     init(model: ConnectionModel, chat: ChatSummary) {
         self.model = model
         self.chat = chat
         let computer = ComputerSessionModel(model: model, chat: chat)
         _sessionModel = StateObject(wrappedValue: computer)
-        _teachingModel = StateObject(wrappedValue: TeachingSessionModel(
-            model: model, botID: chat.botId ?? "", botName: chat.title,
-            conversationID: chat.id, computer: computer
-        ))
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            if teachingModel.hasCaptureToResolve || teachingModel.interrupted
-                || (sessionModel.isClosed && teachingModel.hasReviewDraft) {
-                TeachingLiveControls(teaching: teachingModel, showDetails: { teaching = true })
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 4)
-            } else if let session = sessionModel.session {
+            if let session = sessionModel.session {
                 ComputerSessionHeader(model: model, session: session, receiverState: sessionModel.receiverState)
             } else {
                 HStack(spacing: 10) {
@@ -1040,9 +1029,6 @@ struct ComputerSessionView: View {
                     }
                     .disabled(!sessionModel.isControlActive)
                     .accessibilityIdentifier("computer-session-keys")
-                    if chat.botId != nil {
-                        Button("Teach a task", systemImage: "record.circle") { teaching = true }
-                    }
                 } label: {
                     Label("More", systemImage: "ellipsis")
                 }
@@ -1052,14 +1038,6 @@ struct ComputerSessionView: View {
         }
         .task { await sessionModel.start() }
         .onDisappear { Task { await closeComputer() } }
-        .task(id: teachingModel.teachingPollingKey) { await teachingModel.poll() }
-        .onChange(of: teachingModel.session?.state) { _, state in
-            if state == "recording" { teaching = false }
-            if (state == "reviewing" || state == "skillDraft") && !teachingModel.interrupted { teaching = true }
-        }
-        .onChange(of: sessionModel.controlLease?.id) { previous, current in
-            if previous != nil && previous != current { Task { await teachingModel.controlEnded() } }
-        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { Task { await handleLifetimeEnd() } }
         }
@@ -1075,11 +1053,6 @@ struct ComputerSessionView: View {
         .onChange(of: chat.id) { _, _ in
             Task { await closeComputer(); dismiss() }
         }
-        .sheet(isPresented: $teaching) {
-            NavigationStack {
-                TeachingSessionContent(teaching: teachingModel, showsDoneButton: true)
-            }
-        }
         // Keep the container addressable without allowing its identifier to
         // replace the nested viewport's live status element in XCTest.
         .accessibilityElement(children: .contain)
@@ -1087,60 +1060,12 @@ struct ComputerSessionView: View {
     }
 
     private func handleLifetimeEnd() async {
-        let preserveTeaching = teachingModel.hasCaptureToResolve || teachingModel.interrupted || teachingModel.hasReviewDraft
-        teaching = false
         await closeComputer()
-        if !preserveTeaching { dismiss() }
+        dismiss()
     }
 
     private func closeComputer() async {
-        teachingModel.markControlEnded()
         await sessionModel.close()
-        await teachingModel.controlEnded()
-    }
-}
-
-private struct TeachingLiveControls: View {
-    @ObservedObject var teaching: TeachingSessionModel
-    let showDetails: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(teaching.interrupted ? "Teaching interrupted" : teaching.isStarting ? "Starting teaching…" : teaching.isRecording ? "Recording · \(teaching.session?.eventCount ?? 0) actions" : teaching.hasReviewDraft ? "Teaching ready to review" : "Teaching needs attention")
-                    .font(.footnote.weight(.semibold))
-                    .accessibilityIdentifier("teaching-live-status")
-                Spacer(minLength: 4)
-                if teaching.isRecording {
-                    Button { Task { await teaching.stop() } } label: {
-                        Label("Stop", systemImage: "stop.fill").frame(minWidth: 44, minHeight: 44)
-                    }
-                        .disabled(teaching.busy)
-                        .accessibilityIdentifier("teaching-live-stop")
-                }
-                if teaching.hasCaptureToResolve {
-                    Button(role: .cancel) { Task { await teaching.cancel() } } label: {
-                        Text("Cancel").frame(minWidth: 44, minHeight: 44)
-                    }
-                        .disabled(teaching.busy && !teaching.isStarting)
-                        .accessibilityIdentifier("teaching-live-cancel")
-                }
-                if teaching.interrupted || !teaching.hasCaptureToResolve {
-                    Button(action: showDetails) {
-                        Text("Details").frame(minWidth: 44, minHeight: 44)
-                    }
-                        .accessibilityIdentifier("teaching-live-details")
-                }
-            }
-            .frame(minHeight: 44)
-            if let failure = teaching.failure {
-                Text(failure).font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .buttonStyle(.plain)
-        .tint(.accentColor)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("teaching-live-controls")
     }
 }
 

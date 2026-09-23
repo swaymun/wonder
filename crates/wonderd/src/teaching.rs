@@ -39,6 +39,141 @@ const MAX_FIXTURE_INPUT_BYTES: usize = 8 * 1024;
 const MAX_FIXTURE_ARTIFACT_BYTES: usize = 64 * 1024;
 const FIXTURE_PROVIDER: &str = "deterministic-local";
 const FIXTURE_EXECUTION_KIND: &str = "deterministicFixture";
+const BETA_UNAVAILABLE: &str = "Teach a task is unavailable in this beta.";
+pub(crate) const BETA_POLICY: &str = "Wonder's Teach a task capture and taught-skill replay are unavailable in this beta. Do not offer teaching, run saved Wonder-taught skills, or recreate their capture/replay flow with another tool. Ordinary Codex skills and helping with the user's task directly remain available.";
+
+// Deliberate product gate: neither environment variables nor host capabilities
+// can enable the unverified teaching workflow in a shipped beta.
+pub(crate) const fn enabled() -> bool {
+    false
+}
+
+fn unavailable() -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, BETA_UNAVAILABLE).into_response()
+}
+
+pub(crate) async fn capture_session(
+    state: &AppState,
+    owner: &str,
+    computer_session: &str,
+    lease: &str,
+) -> Result<Option<StoredTeachingSession>, sqlx::Error> {
+    if !enabled() {
+        state
+            .store
+            .interrupt_teaching_for_lease(
+                lease,
+                BETA_UNAVAILABLE,
+                &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            )
+            .await?;
+        return Ok(None);
+    }
+    state
+        .store
+        .active_teaching_session_for_binding(
+            owner,
+            &state.host_installation_id,
+            computer_session,
+            lease,
+        )
+        .await
+}
+
+pub(crate) async fn disabled_skill_paths(
+    state: &AppState,
+) -> Result<std::collections::BTreeSet<PathBuf>, String> {
+    let mut paths = std::collections::BTreeSet::new();
+    for (root, relative) in state
+        .store
+        .teaching_skill_paths()
+        .await
+        .map_err(|_| BETA_UNAVAILABLE)?
+    {
+        let relative = FsPath::new(&relative);
+        if !FsPath::new(&root).is_absolute()
+            || !relative.starts_with(".agents/skills")
+            || relative.file_name().is_none_or(|name| name != "SKILL.md")
+            || relative.components().count() < 4
+            || relative
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err("Saved teaching skill paths could not be checked.".into());
+        }
+        let path = FsPath::new(&root).join(relative);
+        if let Ok(canonical) = fs::canonicalize(&path) {
+            paths.insert(canonical);
+        }
+        paths.insert(path);
+    }
+    Ok(paths)
+}
+
+fn disabled_skill_config(
+    config: &Value,
+    paths: &std::collections::BTreeSet<PathBuf>,
+) -> Result<Value, String> {
+    let mut entries = match config.pointer("/skills/config") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(entries)) => entries.clone(),
+        _ => return Err("Existing skill settings could not be preserved.".into()),
+    };
+    for path in paths {
+        // Accept both selectors documented by Codex: SKILL.md and its folder.
+        for selector in [path.as_path(), path.parent().ok_or(BETA_UNAVAILABLE)?] {
+            for entry in &mut entries {
+                if entry["path"]
+                    .as_str()
+                    .is_some_and(|value| FsPath::new(value) == selector)
+                {
+                    entry["enabled"] = Value::Bool(false);
+                }
+            }
+            if !entries.iter().any(|entry| {
+                entry["path"]
+                    .as_str()
+                    .is_some_and(|value| FsPath::new(value) == selector)
+            }) {
+                entries.push(serde_json::json!({"path":selector,"enabled":false}));
+            }
+        }
+    }
+    Ok(serde_json::json!({"skills.config":entries}))
+}
+
+pub(crate) async fn runtime_config(
+    state: &AppState,
+    rpc: &wonder_app_server::RpcClient,
+    cwd: &str,
+) -> Result<Value, String> {
+    let paths = disabled_skill_paths(state).await?;
+    if paths.is_empty() {
+        return Ok(Value::Null);
+    }
+    if !FsPath::new(cwd).is_absolute() {
+        return Err("The skill settings workspace could not be checked.".into());
+    }
+    // Read effective settings instead of replacing the owner's ordinary skill
+    // preferences. These overrides are session-local; no config or skill is written.
+    let response = rpc
+        .request(
+            "config/read",
+            serde_json::json!({"cwd":cwd,"includeLayers":false}),
+        )
+        .await
+        .map_err(|_| "Skill settings could not be checked before starting work.")?;
+    if response.error.is_some() {
+        return Err("Skill settings could not be checked before starting work.".into());
+    }
+    let config = response
+        .result
+        .as_ref()
+        .and_then(|result| result.get("config"))
+        .filter(|config| config.is_object())
+        .ok_or("Skill settings could not be checked before starting work.")?;
+    disabled_skill_config(config, &paths)
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -221,14 +356,20 @@ pub(crate) struct FixtureRunReceipt {
 }
 
 fn capability_value(state: &AppState) -> TeachingCapability {
-    let available = crate::computer_sessions::provider_available(state);
+    let available = enabled() && crate::computer_sessions::provider_available(state);
     TeachingCapability {
         available,
-        action: if available { "none" } else { CAPTURE_ACTION },
+        action: if !enabled() || available {
+            "none"
+        } else {
+            CAPTURE_ACTION
+        },
         reason: if available {
             CAPTURE_AVAILABLE_REASON
-        } else {
+        } else if enabled() {
             TEACHING_UNAVAILABLE
+        } else {
+            BETA_UNAVAILABLE
         },
         provider: if available { CAPTURE_PROVIDER } else { "none" },
         max_duration_seconds: 600,
@@ -736,6 +877,9 @@ pub(crate) async fn start(
     Path(bot_id): Path<String>,
     Json(request): Json<StartRequest>,
 ) -> Response {
+    if !enabled() {
+        return unavailable();
+    }
     let owner = match owner_device(authenticated, local) {
         Ok(owner) => owner,
         Err(response) => return response,
@@ -1000,6 +1144,9 @@ pub(crate) async fn review(
     Path((bot_id, session_id)): Path<(String, String)>,
     Json(request): Json<ReviewRequest>,
 ) -> Response {
+    if !enabled() {
+        return unavailable();
+    }
     let owner = match owner_device(authenticated, local) {
         Ok(owner) => owner,
         Err(response) => return response,
@@ -1212,6 +1359,9 @@ pub(crate) async fn save_version(
     Path((bot_id, session_id)): Path<(String, String)>,
     Json(request): Json<SaveVersionRequest>,
 ) -> Response {
+    if !enabled() {
+        return unavailable();
+    }
     let owner = match owner_device(authenticated, local) {
         Ok(owner) => owner,
         Err(response) => return response,
@@ -1474,6 +1624,9 @@ pub(crate) async fn run_fixture(
     Path((bot_id, skill_id, version)): Path<(String, String, u64)>,
     Json(request): Json<FixtureRunRequest>,
 ) -> Response {
+    if !enabled() {
+        return unavailable();
+    }
     let owner = match owner_device(authenticated, local) {
         Ok(owner) => owner,
         Err(response) => return response,
@@ -1855,6 +2008,9 @@ pub(crate) async fn activate_skill_version(
     Path((bot_id, skill_id)): Path<(String, String)>,
     Json(request): Json<ActivateVersionRequest>,
 ) -> Response {
+    if !enabled() {
+        return unavailable();
+    }
     if let Err(response) = owner_device(authenticated, local) {
         return response;
     }
@@ -1979,6 +2135,324 @@ pub(crate) async fn archive_skill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permission_modes::tests::{assert_http_contract, call, fixture};
+    use serde_json::json;
+
+    async fn legacy_session(state: &AppState, id: &str, status: &str) -> StoredTeachingSession {
+        state
+            .store
+            .insert_teaching_session(&TeachingSessionCreate {
+                id: id.into(),
+                client_request_id: id.into(),
+                owner_device_id: "wonder-desktop".into(),
+                host_installation_id: state.host_installation_id.clone(),
+                bot_id: "bot".into(),
+                conversation_id: "bot:bot".into(),
+                computer_session_id: Some("computer".into()),
+                control_lease_id: Some("lease".into()),
+                state: status.into(),
+                capture_scope: CAPTURE_SCOPE.into(),
+                capture_provider: CAPTURE_PROVIDER.into(),
+                outcome: "Save a synthetic preview".into(),
+                failure_reason: None,
+                now: Utc::now().to_rfc3339(),
+                expires_at: Some((Utc::now() + ChronoDuration::minutes(10)).to_rfc3339()),
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn beta_disables_mutations_and_capture_but_keeps_legacy_recovery() {
+        let (_dir, mut state) = fixture().await;
+        state.computer_use_enabled = true;
+        state.computer_use_bin = Some("/unused-test-helper".into());
+        state
+            .store
+            .ensure_bot_workspace("bot", "Bot", "now")
+            .await
+            .unwrap();
+        let (status, capability) =
+            call(&state, "GET", "/api/v1/teaching/capability", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_http_contract("teachingCapability", &capability);
+        assert_eq!(capability["available"], false);
+        assert_eq!(capability["reason"], BETA_UNAVAILABLE);
+        let request_id = uuid::Uuid::new_v4().to_string();
+        for (path, payload) in [
+            (
+                "/api/v1/bots/bot/teaching/sessions",
+                json!({"clientRequestId":request_id,"conversationId":"bot:bot","computerSessionId":"computer","controlLeaseId":"lease","captureScope":CAPTURE_SCOPE,"outcome":"Save a preview"}),
+            ),
+            (
+                "/api/v1/bots/bot/teaching/sessions/legacy/review",
+                json!({"expectedRevision":1,"name":"Preview","description":"Preview","goal":"Preview","inputSchema":{},"prerequisites":"None","steps":"Save","resultChecks":"Exists"}),
+            ),
+            (
+                "/api/v1/bots/bot/teaching/sessions/legacy/save-version",
+                json!({"clientRequestId":request_id,"expectedRevision":1}),
+            ),
+            (
+                "/api/v1/bots/bot/skills/skill/activate",
+                json!({"version":1}),
+            ),
+            (
+                "/api/v1/bots/bot/skills/skill/versions/1/fixture-tests",
+                json!({"clientRequestId":request_id,"contentHash":"0".repeat(64),"inputSchema":{},"inputs":{}}),
+            ),
+        ] {
+            let (status, body) = call(&state, "POST", path, payload).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
+            assert!(body.to_string().contains(BETA_UNAVAILABLE));
+        }
+        assert!(state
+            .store
+            .teaching_session_by_request("wonder-desktop", &request_id)
+            .await
+            .unwrap()
+            .is_none());
+        let session = legacy_session(&state, "legacy", "recording").await;
+        let event = wonder_store::TeachingEventCreate {
+            control_sequence: 1,
+            action_index: 0,
+            event_json: "{\"kind\":\"click\"}".into(),
+            payload_bytes: 16,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        state
+            .store
+            .append_teaching_events(
+                &session.id,
+                "wonder-desktop",
+                &state.host_installation_id,
+                "computer",
+                "lease",
+                &[event],
+                &Utc::now().to_rfc3339(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            capture_session(&state, "wonder-desktop", "computer", "lease")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            capture_session(&state, "wonder-desktop", "computer", "lease")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (status, read) = call(
+            &state,
+            "GET",
+            "/api/v1/bots/bot/teaching/sessions/legacy",
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(read["state"], "interrupted");
+        assert_eq!(read["failureReason"], BETA_UNAVAILABLE);
+        assert_eq!(read["eventCount"], 1);
+        assert_eq!(read["events"].as_array().unwrap().len(), 1);
+        let (status, stopped) = call(
+            &state,
+            "POST",
+            "/api/v1/bots/bot/teaching/sessions/legacy/stop",
+            json!({"expectedRevision":read["revision"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stopped["eventCount"], 1);
+        let (status, cancelled) = call(
+            &state,
+            "POST",
+            "/api/v1/bots/bot/teaching/sessions/legacy/cancel",
+            json!({"expectedRevision":stopped["revision"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cancelled["state"], "cancelled");
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn beta_excludes_saved_teaching_skills_without_changing_ordinary_skills_or_files() {
+        let (dir, state) = fixture().await;
+        let conversation = state
+            .store
+            .ensure_bot_workspace("bot", "Bot", "now")
+            .await
+            .unwrap();
+        let session = legacy_session(&state, "saved", "reviewing").await;
+        let drafted = state
+            .store
+            .review_teaching_session(
+                &session.id,
+                "wonder-desktop",
+                &TeachingReview {
+                    expected_revision: session.revision,
+                    name: "Preview".into(),
+                    description: "Create a preview".into(),
+                    goal: "Save".into(),
+                    input_schema_json: "{}".into(),
+                    prerequisites: "None".into(),
+                    steps: "Save".into(),
+                    result_checks: "Exists".into(),
+                    content_hash: "hash".into(),
+                    now: Utc::now().to_rfc3339(),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .store
+            .reserve_bot_skill_version(
+                "bot",
+                &drafted,
+                "skill",
+                "preview",
+                ".agents/skills/preview/SKILL.md",
+                ".agents/skills/.wonder-versions/skill/1/SKILL.md",
+                "save",
+                "now",
+            )
+            .await
+            .unwrap();
+        let bot = state.store.bot("bot").await.unwrap().unwrap();
+        let taught = FsPath::new(&bot.workspace_path).join(".agents/skills/preview/SKILL.md");
+        let ordinary = FsPath::new(&bot.workspace_path).join(".agents/skills/ordinary/SKILL.md");
+        for path in [&taught, &ordinary] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "unchanged synthetic skill").unwrap();
+        }
+        let original = json!({"skills":{"config":[{"path":ordinary,"enabled":false},{"name":"explicitly-enabled","enabled":true},{"path":taught,"enabled":true}]}});
+        fs::write(
+            dir.path().join("skill-config.json"),
+            json!({"config":original}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("skill-list.json"),
+            json!({"data":[{"skills":[
+                {"name":"Preview","path":taught,"enabled":true},
+                {"name":"Ordinary","path":ordinary,"enabled":true}
+            ]}]})
+            .to_string(),
+        )
+        .unwrap();
+        let script = dir.path().join("runtime.py");
+        let source = fs::read_to_string(&script).unwrap().replace("    elif method == 'thread/start':", "    elif method == 'config/read': result = json.load(open(root + '/skill-config.json'))\n    elif method == 'skills/list': result = json.load(open(root + '/skill-list.json'))\n    elif method == 'thread/start':");
+        fs::write(&script, source).unwrap();
+        state
+            .app_server
+            .lock()
+            .await
+            .restart(state.launch_config.lock().await.clone())
+            .await
+            .unwrap();
+        for index in 0..2 {
+            let crate::MessageInsert::Inserted(message) = state
+                .store
+                .insert_message(
+                    "owner",
+                    &format!("skill-gate-{index}"),
+                    "Help with this task",
+                    "hash",
+                    &conversation,
+                    "now",
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("new message")
+            };
+            crate::dispatch_to_codex_inner(state.clone(), message.clone(), None, None).await;
+            assert_eq!(
+                state
+                    .store
+                    .message_by_id(&message.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "accepted_by_codex"
+            );
+            state
+                .store
+                .update_message_delivery(&message.id, "completed", None, None)
+                .await
+                .unwrap();
+        }
+        let (status, capabilities) =
+            call(&state, "GET", "/api/v1/runtime/capabilities", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(capabilities["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(capabilities["skills"][0]["name"], "Ordinary");
+        state.app_server.lock().await.shutdown().await.unwrap();
+        let requests: Vec<Value> = fs::read_to_string(dir.path().join("payloads"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let registrations: Vec<_> = requests
+            .iter()
+            .filter(|request| {
+                matches!(
+                    request["method"].as_str(),
+                    Some("thread/start" | "thread/resume")
+                )
+            })
+            .collect();
+        assert_eq!(registrations.len(), 2);
+        for request in registrations {
+            let config = &request["params"]["config"]["skills.config"];
+            assert_eq!(config[0], original["skills"]["config"][0]);
+            assert_eq!(config[1], original["skills"]["config"][1]);
+            assert_eq!(config[2]["enabled"], false);
+            assert!(config.as_array().unwrap().iter().any(|entry| entry["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(".wonder-versions/skill/1/SKILL.md"))
+                && entry["enabled"] == false));
+            assert!(request["params"]["developerInstructions"]
+                .as_str()
+                .unwrap()
+                .contains(BETA_POLICY));
+        }
+        assert_eq!(
+            fs::read_to_string(&taught).unwrap(),
+            "unchanged synthetic skill"
+        );
+        assert_eq!(
+            fs::read_to_string(&ordinary).unwrap(),
+            "unchanged synthetic skill"
+        );
+        assert_eq!(
+            state
+                .store
+                .bot_skill_versions("bot", "skill")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state
+                .store
+                .teaching_session(&session.id)
+                .await
+                .unwrap()
+                .unwrap(),
+            drafted
+        );
+        assert!(disabled_skill_config(
+            &json!({"skills":{"config":"malformed"}}),
+            &disabled_skill_paths(&state).await.unwrap()
+        )
+        .is_err());
+    }
 
     #[test]
     fn stale_control_lease_binding_is_rejected() {

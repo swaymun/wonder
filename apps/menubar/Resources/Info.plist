@@ -24,6 +24,18 @@
 	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<key>SUFeedURL</key>
+	<string>https://wonder-launch-preview.saimun-h-shahee.chatgpt.site/updates/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>1FthPKpyNACzwe42UV0sGT2ql9zhQE+i40wC/pi65Yw=</string>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUPromptUserOnFirstLaunch</key>
+	<true/>
+	<key>SUSendProfileInfo</key>
+	<false/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Wonder connects directly to devices you pair with this Mac for secure live screen viewing.</string>
 	<key>NSScreenCaptureUsageDescription</key>

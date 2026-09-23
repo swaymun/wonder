@@ -679,48 +679,45 @@ import UIKit
         }
     }
 
-    func testDiagnosticsComputerTeachingKeepsViewerAndKeyboardAvailableUntilReview() throws {
+    private func assertComputerMoreMenuExcludesTeaching(_ app: XCUIApplication) {
+        app.buttons["computer-session-more"].tap()
+        let fit = app.buttons["Fit"]
+        XCTAssertTrue(fit.waitForExistence(timeout: 5), "Inspect the open Computer menu before checking its actions.")
+        XCTAssertFalse(app.buttons["Teach a task"].exists, "Teaching is not available in the beta Computer view.")
+        fit.tap()
+        XCTAssertTrue(waitUntilGone(fit, timeout: 5), "Computer menu did not dismiss after Fit.")
+    }
+
+    func testDiagnosticsComputerMenuExcludesTeachingAndKeepsKeyboardAvailable() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
         app.launch()
         let takeControl = app.buttons["computer-session-take-control"]
         XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
+        assertComputerMoreMenuExcludesTeaching(app)
         takeControl.tap()
-        XCTAssertTrue(app.buttons["computer-session-keyboard"].waitForExistence(timeout: 5))
-        app.buttons["computer-session-more"].tap()
-        app.buttons["Teach a task"].tap()
-        let sheet = app.collectionViews["teaching-view"]
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["teaching-done"].isEnabled)
-        app.buttons["teaching-start"].tap()
-        XCTAssertTrue(waitUntilGone(sheet, timeout: 5))
-        let stop = app.buttons["teaching-live-stop"]
-        XCTAssertTrue(stop.waitForExistence(timeout: 5))
-        assertFullyVisible(stop, in: app)
-        app.buttons["computer-session-keyboard"].tap()
+        let active = app.descendants(matching: .any).matching(identifier: "computer-session-control-active").firstMatch
+        XCTAssertTrue(active.waitForExistence(timeout: 5))
+        assertComputerMoreMenuExcludesTeaching(app)
+        let keyboard = app.buttons["computer-session-keyboard"]
+        keyboard.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         assertComputerControlRow(app)
+        app.typeText("Computer control keyboard fixture\n")
+        XCTAssertTrue(active.exists)
         let preview = app.descendants(matching: .any).matching(identifier: "computer-session-preview").firstMatch
-        XCTAssertLessThanOrEqual(stop.frame.maxY, preview.frame.minY)
-        app.typeText("Shared recording keyboard")
-        app.buttons["computer-session-keyboard"].tap()
-        stop.tap()
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
-        let status = app.descendants(matching: .any).matching(identifier: "teaching-session-status").firstMatch
-        for _ in 0..<8 where !status.isHittable { sheet.swipeUp(velocity: .slow) }
-        XCTAssertEqual(status.value as? String, "Ready to review")
-        app.buttons["teaching-done"].tap()
-        XCTAssertTrue(waitUntilGone(sheet, timeout: 5))
-        XCTAssertTrue(app.buttons["computer-session-keyboard"].exists)
-        XCTAssertFalse(app.buttons["teaching-live-stop"].exists)
+        XCTAssertEqual(preview.value as? String, "Live")
+        retainMenuScreenshot(app, name: "Computer controls and keyboard without teaching")
         app.buttons["computer-session-done"].tap()
         XCTAssertTrue(takeControl.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.keyboards.firstMatch.exists)
+        XCTAssertFalse(active.exists)
+        XCTAssertTrue(waitUntilGone(app.keyboards.firstMatch, timeout: 5))
         app.buttons["computer-session-close"].tap()
+        XCTAssertTrue(app.staticTexts["Computer viewer closed"].waitForExistence(timeout: 5))
     }
 
-    func testDiagnosticsComputerTeachingBackgroundKeepsEditedReview() throws {
+    func testDiagnosticsComputerCloseWhileControllingDismissesKeyboard() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
@@ -728,50 +725,22 @@ import UIKit
         let takeControl = app.buttons["computer-session-take-control"]
         XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
         takeControl.tap()
-        XCTAssertTrue(app.buttons["computer-session-keyboard"].waitForExistence(timeout: 5))
-        app.buttons["computer-session-more"].tap()
-        app.buttons["Teach a task"].tap()
-        let sheet = app.collectionViews["teaching-view"]
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
-        app.buttons["teaching-start"].tap()
-        XCTAssertTrue(waitUntilGone(sheet, timeout: 5))
-        let stop = app.buttons["teaching-live-stop"]
-        XCTAssertTrue(stop.waitForExistence(timeout: 5))
-        stop.tap()
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
-        let name = app.textFields["teaching-draft-name"]
-        for _ in 0..<8 where !name.isHittable { sheet.swipeUp(velocity: .slow) }
-        XCTAssertTrue(name.isHittable)
-        name.tap()
-        name.typeText(" retained")
-        let editedName = try XCTUnwrap(name.value as? String)
-        XCTAssertTrue(editedName.contains("retained"))
-
-        XCUIDevice.shared.press(.home)
-        RunLoop.current.run(until: Date().addingTimeInterval(1))
-        app.activate()
-
+        let keyboard = app.buttons["computer-session-keyboard"]
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        keyboard.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        assertComputerControlRow(app)
+        app.typeText("Close active control fixture\n")
+        app.buttons["computer-session-close"].tap()
+        XCTAssertTrue(app.staticTexts["Computer viewer closed"].waitForExistence(timeout: 5))
         let computerView = app.descendants(matching: .any).matching(identifier: "computer-session-container").firstMatch
-        XCTAssertTrue(computerView.waitForExistence(timeout: 10))
-        let details = app.buttons["teaching-live-details"]
-        XCTAssertTrue(details.waitForExistence(timeout: 5))
-        XCTAssertEqual(app.staticTexts["teaching-live-status"].label, "Teaching ready to review")
-        XCTAssertFalse(stop.exists)
-        XCTAssertFalse(takeControl.exists)
-        XCTAssertFalse(app.buttons["computer-session-keyboard"].exists)
-        details.tap()
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["teaching-start"].isEnabled)
-        for _ in 0..<8 where !name.isHittable { sheet.swipeUp(velocity: .slow) }
-        XCTAssertEqual(name.value as? String, editedName)
-        app.buttons["teaching-done"].tap()
-        XCTAssertTrue(waitUntilGone(sheet, timeout: 5))
-        XCTAssertTrue(details.exists)
-        app.buttons["computer-session-close"].tap()
-        XCTAssertTrue(waitUntilGone(computerView, timeout: 5))
+        XCTAssertFalse(computerView.exists)
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "computer-session-control-active").firstMatch.exists)
+        XCTAssertTrue(waitUntilGone(app.keyboards.firstMatch, timeout: 5))
+        retainMenuScreenshot(app, name: "Close dismisses active computer controls and keyboard")
     }
 
-    func testDiagnosticsComputerTeachingBackgroundKeepsInterruptedDetails() throws {
+    func testDiagnosticsComputerBackgroundEndsControlAndDismissesViewer() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
@@ -779,42 +748,23 @@ import UIKit
         let takeControl = app.buttons["computer-session-take-control"]
         XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
         takeControl.tap()
-        XCTAssertTrue(app.buttons["computer-session-keyboard"].waitForExistence(timeout: 5))
-        app.buttons["computer-session-more"].tap()
-        app.buttons["Teach a task"].tap()
-        let sheet = app.collectionViews["teaching-view"]
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
-        app.buttons["teaching-start"].tap()
-        XCTAssertTrue(waitUntilGone(sheet, timeout: 5))
-        XCTAssertTrue(app.buttons["teaching-live-stop"].waitForExistence(timeout: 5))
-
+        let keyboard = app.buttons["computer-session-keyboard"]
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        keyboard.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        assertComputerControlRow(app)
         XCUIDevice.shared.press(.home)
         RunLoop.current.run(until: Date().addingTimeInterval(1))
         app.activate()
 
-        let computerView = app.descendants(matching: .any)
-            .matching(identifier: "computer-session-container").firstMatch
-        XCTAssertTrue(computerView.waitForExistence(timeout: 10))
-        let preview = app.descendants(matching: .any)
-            .matching(identifier: "computer-session-preview").firstMatch
-        let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Closed"), object: preview)
-        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 5), .completed)
-        XCTAssertEqual(app.staticTexts["teaching-live-status"].label, "Teaching interrupted")
-        XCTAssertFalse(app.buttons["computer-session-keyboard"].exists)
+        XCTAssertTrue(app.staticTexts["Computer viewer closed"].waitForExistence(timeout: 10))
+        let computerView = app.descendants(matching: .any).matching(identifier: "computer-session-container").firstMatch
+        XCTAssertFalse(computerView.exists)
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "computer-session-control-active").firstMatch.exists)
+        XCTAssertFalse(keyboard.exists)
         XCTAssertFalse(takeControl.exists)
-        XCTAssertFalse(app.buttons["teaching-live-stop"].exists)
-        XCTAssertFalse(app.keyboards.firstMatch.exists)
-        let details = app.buttons["teaching-live-details"]
-        XCTAssertTrue(details.waitForExistence(timeout: 5))
-        details.tap()
-        XCTAssertTrue(sheet.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["teaching-start"].isEnabled)
-        app.buttons["teaching-done"].tap()
-        XCTAssertTrue(waitUntilGone(sheet, timeout: 5))
-        XCTAssertEqual(app.staticTexts["teaching-live-status"].label, "Teaching interrupted")
-        retainMenuScreenshot(app, name: "Interrupted teaching remains visible after foregrounding")
-        app.buttons["computer-session-close"].tap()
-        XCTAssertTrue(waitUntilGone(computerView, timeout: 5))
+        XCTAssertTrue(waitUntilGone(app.keyboards.firstMatch, timeout: 5))
+        retainMenuScreenshot(app, name: "Background ends computer controls and dismisses viewer")
     }
 
     func testPhysicalComputerViewStartsAuthenticatedMacStreamAndCloses() throws {
@@ -1011,7 +961,7 @@ import UIKit
         XCTAssertFalse(computerView.waitForExistence(timeout: 10))
     }
 
-    func testPhysicalComputerTrackpadKeyboardAndTeachingThreeMinuteSession() throws {
+    func testPhysicalComputerTrackpadAndKeyboardThreeMinuteSession() throws {
         continueAfterFailure = false
         guard let qaRowID = ProcessInfo.processInfo.environment["WONDER_PAIRING_QA_CONVERSATION_ID"],
               qaRowID.hasPrefix("chat-row:"), qaRowID.count > "chat-row:".count else {
@@ -1153,20 +1103,7 @@ import UIKit
         trackpad.tap()
         XCTAssertTrue(waitUntilGone(trackpad, timeout: 5))
         selectComputerMoreAction(app, identifier: "computer-session-recenter")
-        app.buttons["computer-session-more"].tap()
-        app.buttons["Teach a task"].tap()
-        let sheet = app.collectionViews["teaching-view"]
-        XCTAssertTrue(sheet.waitForExistence(timeout: 10))
-        let outcome = app.textFields["teaching-outcome"]
-        XCTAssertTrue(outcome.waitForExistence(timeout: 5))
-        outcome.tap()
-        outcome.typeText("Exercise the isolated local control fixture")
-        let startTeaching = app.buttons["teaching-start"]
-        for _ in 0..<6 where !startTeaching.isHittable { sheet.swipeUp(velocity: .slow) }
-        startTeaching.tap()
-        XCTAssertTrue(waitUntilGone(sheet, timeout: 15))
-        let stopTeaching = app.buttons["teaching-live-stop"]
-        XCTAssertTrue(stopTeaching.waitForExistence(timeout: 10))
+        assertComputerMoreMenuExcludesTeaching(app)
         let observationStart = Date()
         let preflightSeconds = observationStart.timeIntervalSince(preflightStarted)
         var commandDurations: [Double] = []
@@ -1210,7 +1147,7 @@ import UIKit
                 XCTAssertTrue(waitUntilGone(app.keyboards.firstMatch, timeout: 5))
             }
             if iteration == 0 || iteration == 15 || iteration == 29 {
-                retainMenuScreenshot(app, name: "Physical shared teaching cycle \(iteration)")
+                retainMenuScreenshot(app, name: "Physical computer control cycle \(iteration)")
             }
             completedCycles += 1
             // Continue relevant pointer input for three minutes. The three
@@ -1220,15 +1157,9 @@ import UIKit
         XCTAssertGreaterThanOrEqual(completedCycles, 30,
                                     "The bounded observation ended before 30 relevant input cycles completed.")
         XCTAssertGreaterThanOrEqual(elapsed, 180)
-        let liveStatus = app.staticTexts["teaching-live-status"]
-        let captured = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                let label = liveStatus.label
-                let count = label.split(whereSeparator: { $0.isWhitespace }).compactMap { Int($0) }.first ?? 0
-                return label.hasPrefix("Recording") && count >= 30
-            }, object: liveStatus)
-        XCTAssertEqual(XCTWaiter.wait(for: [captured], timeout: 10), .completed,
-                       "The host did not confirm at least 30 accepted actions in the same teaching session.")
+        XCTAssertTrue(active.exists)
+        XCTAssertEqual(preview.value as? String, "Live")
+        retainControlPhase("Pointer and keyboard cycles complete; independently verify accepted Mac input receipts")
         let ordered = commandDurations.sorted()
         let evidence = XCTAttachment(string: "Preflight seconds (excluded from observation): \(preflightSeconds)\nActive observation seconds: \(elapsed)\nRepetitions: \(completedCycles)\nXCTest command duration only; not touch/render latency.\nSamples: \(ordered.count), p50: \(ordered[ordered.count / 2]), p95: \(ordered[Int(Double(ordered.count - 1) * 0.95)]), max: \(ordered.last ?? 0)\nHost fixture receipts must independently verify pointer, drag, click, text, emoji and deletion outcomes.")
         evidence.name = "Physical computer input observation"
@@ -1283,16 +1214,7 @@ import UIKit
         XCTAssertFalse(app.staticTexts["Phone clipboard text is too large or contains unsupported characters."].exists)
         keyboard.tap()
         XCTAssertTrue(waitUntilGone(app.keyboards.firstMatch, timeout: 5))
-        stopTeaching.tap()
-        XCTAssertTrue(sheet.waitForExistence(timeout: 15))
-        let status = app.descendants(matching: .any).matching(identifier: "teaching-session-status").firstMatch
-        for _ in 0..<8 where !status.isHittable { sheet.swipeUp(velocity: .slow) }
-        XCTAssertEqual(status.value as? String, "Ready to review")
-        XCTAssertTrue(app.staticTexts["Exercise the isolated local control fixture"].exists)
-        retainMenuScreenshot(app, name: "Physical teaching stopped with captured review")
-        app.buttons["teaching-done"].tap()
-        XCTAssertTrue(waitUntilGone(sheet, timeout: 5))
-        XCTAssertFalse(stopTeaching.exists)
+        retainMenuScreenshot(app, name: "Physical computer control after input and clipboard checks")
         app.buttons["computer-session-done"].tap()
         XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
         XCTAssertFalse(active.exists)
@@ -1920,18 +1842,19 @@ import UIKit
         app.buttons["Conversation details"].tap()
         XCTAssertTrue(app.buttons["View computer"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["Teach a task"].exists,
-                       "Teaching should be initiated only from inside Computer View.")
+                       "Teaching is not available in the beta conversation menu.")
         app.buttons["View computer"].tap()
         let computerMenu = app.buttons["computer-session-more"]
         XCTAssertTrue(computerMenu.waitForExistence(timeout: 5))
         computerMenu.tap()
-        let teachingMenuItem = app.buttons["Teach a task"]
-        XCTAssertTrue(teachingMenuItem.waitForExistence(timeout: 5))
+        let fit = app.buttons["Fit"]
+        XCTAssertTrue(fit.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Teach a task"].exists, "Teaching is not available in the beta Computer menu.")
         let computerPreview = app.descendants(matching: .any)
             .matching(identifier: "computer-session-preview").firstMatch
         XCTAssertTrue(computerPreview.waitForExistence(timeout: 5))
         computerPreview.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        XCTAssertTrue(waitUntilGone(teachingMenuItem, timeout: 5), "Computer menu did not dismiss")
+        XCTAssertTrue(waitUntilGone(fit, timeout: 5), "Computer menu did not dismiss")
         let computerClose = app.buttons["computer-session-close"]
         XCTAssertTrue(computerClose.waitForExistence(timeout: 5))
         computerClose.tap()

@@ -43,6 +43,7 @@ mod questions;
 mod queue;
 mod subagents;
 mod teaching;
+pub mod update_admission;
 
 use std::{
     collections::HashMap,
@@ -110,6 +111,7 @@ pub struct AppState {
     /// readable and do not need to be listed here.
     pub linked_file_roots: Vec<PathBuf>,
     pub dispatch_lock: Arc<tokio::sync::Mutex<()>>,
+    pub update_admission: Arc<update_admission::UpdateAdmission>,
     pub channel_worker_slots: Arc<tokio::sync::Semaphore>,
     pub approval_lock: Arc<tokio::sync::Mutex<()>>,
     pub bots_root: String,
@@ -750,6 +752,11 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/api/v1/host/status", get(host_status))
+        .route(
+            "/api/v1/host/update/prepare",
+            post(update_admission::prepare),
+        )
+        .route("/api/v1/host/update/cancel", post(update_admission::cancel))
         .route("/api/v1/push/config", get(push::config))
         .route("/api/v1/push/registration", post(push::register))
         .route("/api/v1/push/revoke", post(push::revoke))
@@ -1121,6 +1128,10 @@ pub fn router(state: AppState) -> Router {
         .route("/pair", get(pairing_web::page))
         .route("/pair/style.css", get(pairing_web::style))
         .route("/sw.js", get(pairing_web::retire_worker))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            update_admission::guard_new_work,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_loopback_capability,
@@ -3298,6 +3309,13 @@ async fn runtime_capabilities(
 ) -> Response {
     let app_server = state.app_server.lock().await.rpc();
     let mut warnings = Vec::new();
+    let disabled_skills = match teaching::disabled_skill_paths(&state).await {
+        Ok(paths) => Some(paths),
+        Err(_) => {
+            warnings.push("Available Skills could not be checked.".to_owned());
+            None
+        }
+    };
 
     let apps = match app_server
         .request("app/list", serde_json::json!({ "limit": 100 }))
@@ -3346,6 +3364,14 @@ async fn runtime_capabilities(
                             .and_then(serde_json::Value::as_array)
                             .into_iter()
                             .flatten()
+                    })
+                    .filter(|skill| {
+                        disabled_skills.as_ref().is_some_and(|paths| {
+                            skill
+                                .get("path")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|path| !paths.contains(FsPath::new(path)))
+                        })
                     })
                     .filter_map(runtime_skill_summary)
                     .filter(|skill| skill.enabled)
@@ -8352,6 +8378,7 @@ async fn start_bot_thread(
         "model": resolved.model,
         "serviceTier": resolved.service_tier,
         "developerInstructions": bot_onboarding::instructions(bot, onboarding),
+        "config": teaching::runtime_config(state, &app_server.rpc(), bot.execution_directory()).await?,
     });
     let computer = state.computer_use_enabled
         && state.computer_use_bin.is_some()
@@ -9334,6 +9361,9 @@ pub fn spawn_automation_scheduler(state: AppState) -> tokio::task::JoinHandle<()
             if !state.ingestion.readiness(&state.store).await.ready {
                 continue;
             }
+            let Some(_admission) = state.update_admission.claim_guard().await else {
+                continue;
+            };
             let now = Utc::now();
             let now_string = now.to_rfc3339_opts(SecondsFormat::Millis, true);
             if state
@@ -9742,6 +9772,7 @@ async fn dispatch_to_codex_inner(
                 "model": resolved.model,
                 "serviceTier": resolved.service_tier,
                 "developerInstructions": bot_onboarding::instructions(&bot, onboarding),
+                "config": teaching::runtime_config(&state, &app_server.rpc(), bot.execution_directory()).await?,
             });
             let response = app_server
                 .request("thread/resume", resume_params)
@@ -9963,7 +9994,10 @@ async fn child_turn_status(
         .map(str::to_owned))
 }
 
-async fn resume_child(child: &subagents::ChildRuntime) -> Result<serde_json::Value, String> {
+async fn resume_child(
+    state: &AppState,
+    child: &subagents::ChildRuntime,
+) -> Result<serde_json::Value, String> {
     if child.ownership.is_archived {
         let response = child
             .rpc
@@ -9981,12 +10015,19 @@ async fn resume_child(child: &subagents::ChildRuntime) -> Result<serde_json::Val
             );
         }
     }
+    let mut params = inherited_child_resume_params(&child.ownership.thread_id);
+    let config = teaching::runtime_config(
+        state,
+        &child.rpc,
+        child.thread["cwd"].as_str().unwrap_or_default(),
+    )
+    .await?;
+    if !config.is_null() {
+        params["config"] = config;
+    }
     let response = child
         .rpc
-        .request(
-            "thread/resume",
-            inherited_child_resume_params(&child.ownership.thread_id),
-        )
+        .request("thread/resume", params)
         .await
         .map_err(|error| error.to_string())?;
     if response.error.is_some() {
@@ -10026,7 +10067,7 @@ async fn dispatch_subagent_message(
     if bot.is_archived {
         return Err("Restore this Bot before starting new work.".into());
     }
-    let resumed = resume_child(&child).await?;
+    let resumed = resume_child(state, &child).await?;
     match resumed
         .pointer("/thread/status/type")
         .and_then(serde_json::Value::as_str)
@@ -10184,6 +10225,7 @@ async fn restart_and_reconcile(
                 "approvalsReviewer": resolved.approvals_reviewer,
                 "model": resolved.model,
                 "developerInstructions": bot_onboarding::instructions(&bot, bot_onboarding::enabled(state, &message.conversation_id, &bot).await.ok()?),
+                "config": teaching::runtime_config(state, &app_server, bot.execution_directory()).await.ok()?,
             }),
         )
         .await
@@ -13949,6 +13991,7 @@ for line in sys.stdin:
             denied_roots: vec![],
             linked_file_roots: vec![directory.path().join("previewable")],
             dispatch_lock: Arc::new(tokio::sync::Mutex::new(())),
+            update_admission: Arc::new(Default::default()),
             channel_worker_slots: Arc::new(tokio::sync::Semaphore::new(CHANNEL_WORKER_CONCURRENCY)),
             approval_lock: Arc::new(tokio::sync::Mutex::new(())),
             bots_root: directory.path().display().to_string(),

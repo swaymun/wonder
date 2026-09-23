@@ -71,10 +71,13 @@ including with a source-built Mac host. If you sign your own iOS app, you need
 ## During the beta
 
 Keep the Mac awake, online, and running Wonder for new work and remote access.
-Mac updates use signed manual downloads. Automatic updates are unavailable.
+The Mac companion offers signed automatic updates, with checks and downloads
+controlled in Settings. Installation waits for work and computer sharing to finish.
+Automatic-upgrade qualification is still in progress; signed manual downloads
+remain an alternative. iPhone and iPad updates use TestFlight.
 Runtime compatibility is deliberately checked; an unsupported runtime will not
-run agent work. Teaching replay and the remaining device/recovery checks are
-tracked in the release status and are not claimed as qualified here.
+run agent work. Teaching a task and replaying taught tasks are unavailable in
+this beta. Remaining device and recovery checks are tracked in the release status.
 
 [Build from source](DEVELOPMENT.md) · [Security reporting](SECURITY.md) ·
 [Release process](RELEASING.md) · [MIT license](LICENSE) ·

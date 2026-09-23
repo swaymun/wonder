@@ -109,11 +109,16 @@ pub(super) async fn enabled(
 pub(super) fn instructions(bot: &StoredBot, enabled: bool) -> String {
     if enabled {
         wonder_harness::instructions(&format!(
-            "{POLICY}\n\n{PROFILE_POLICY}\n\n{HELPER_POLICY}\n\n{WORKSPACE_POLICY}\n\n{}",
+            "{}\n\n{POLICY}\n\n{PROFILE_POLICY}\n\n{HELPER_POLICY}\n\n{WORKSPACE_POLICY}\n\n{}",
+            teaching::BETA_POLICY,
             profile_context(bot)
         ))
     } else {
-        wonder_harness::instructions(&format!("{HELPER_POLICY}\n\n{}", bot.system_prompt))
+        wonder_harness::instructions(&format!(
+            "{}\n\n{HELPER_POLICY}\n\n{}",
+            teaching::BETA_POLICY,
+            bot.system_prompt
+        ))
     }
 }
 pub(super) fn context(bot: &StoredBot, enabled: bool) -> Value {

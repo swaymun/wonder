@@ -49,6 +49,7 @@ with tempfile.TemporaryDirectory(prefix='wonder-lifecycle-') as tmp:
         path.write_text('''#!/bin/bash
 name="$(basename "$0")"
 echo $$ >> "$WONDER_DATA_DIR/$name.pids"
+echo "$WONDER_APP_LAUNCHER_PID" >> "$WONDER_DATA_DIR/$name.launcher-pids"
 trap 'exit 0' TERM INT
 if [[ "$name" == wonderd ]]; then
   sleep 1000 &
@@ -67,6 +68,8 @@ while true; do sleep 0.1; done
         try:
             wait_for(lambda: all(pids(n) for n in ['WonderHost','wonderd','wonder-tunnel','worker']))
             service_shell = assert_native_launcher_chain(process.pid, launcher, resources/'WonderService.sh', ('--lifecycle-argument',))
+            for name in ['WonderHost', 'wonderd', 'wonder-tunnel']:
+                assert (data/(name+'.launcher-pids')).read_text().split()[0] == str(process.pid)
             duplicate = subprocess.run([str(launcher)], env=env, capture_output=True, timeout=5)
             assert duplicate.returncode == 0 and len(pids('WonderHost')) == 1
             assert (data/'Service/open-settings').exists(), 'second launch must reopen Settings'
@@ -81,11 +84,14 @@ while true; do sleep 0.1; done
             (data/'Service/restart').touch()
             wait_for(lambda: len(pids('wonderd')) == 3 and len(pids('wonder-tunnel')) == 3)
             # Native/Sparkle quit handshake stops services before menu exits.
+            (data/'Service/update-ready').touch()
+            assert alive(pids('WonderHost')[-1])
             (data/'Service/stop').touch()
             wait_for(lambda: (data/'Service/stopped').exists())
             assert not alive(pids('wonderd')[-1]) and not alive(pids('wonder-tunnel')[-1])
-            os.kill(pids('WonderHost')[-1], signal.SIGTERM)
-            assert process.wait(timeout=15) == 0
+            # A hung host does not respond to update-ready; the supervisor
+            # must bound its exit without killing Sparkle's sibling bridge.
+            assert process.wait(timeout=20) == 0
             wait_for(lambda: not alive(service_shell))
             wait_for(lambda: all(not alive(pid) for name in ['wonderd','wonder-tunnel','worker','WonderHost'] for pid in pids(name)))
             assert (data/'sentinel').read_text() == 'saved chat'

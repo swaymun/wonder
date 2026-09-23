@@ -20,14 +20,15 @@ The [landing page, setup guide and privacy information](https://wonder-launch-pr
 
 ## Qualification still in progress
 
-The iPhone 11 passed the focused approval-box tests and the permission/helper interaction session. Simulator regression checks and source CI also pass. These do not establish clean installation, production notification delivery, independent-network control, VoiceOver, physical performance, scheduler recovery or changed-input teaching replay. Those release gates remain open.
+The iPhone 11 passed the focused approval-box tests and the permission/helper interaction session. Simulator regression checks and source CI also pass. These do not establish clean installation, production notification delivery, independent-network control, VoiceOver, physical performance or scheduler recovery. Those release gates remain open. Teaching a task and replaying taught tasks have been removed from the beta scope until verified.
 
 ## Beta limitations
 
 - Initial setup requires both devices, Tailscale and access to the supported model provider.
 - Model requests are sent to your provider. Wonder does not include a model subscription or credits.
 - Remote access depends on the Mac being reachable. Tailscale may relay encrypted traffic when a direct connection is unavailable.
-- Updates to the Mac companion use signed downloads; automatic updates are unavailable in this beta.
+- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. A genuine signed-version upgrade is still being qualified; candidate 1.0.49 does not include this change. Manual signed downloads remain an alternative.
+- Teaching a task and replaying taught tasks are unavailable in this beta.
 - Notifications require permission and network access. Disabling notifications does not stop work on the Mac.
 - Supported OS versions and verification evidence are different: simulator checks do not establish physical-device behavior on every supported model.
 

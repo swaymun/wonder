@@ -586,7 +586,7 @@ async fn recover(state: &AppState, recover_all: bool) -> Result<(), String> {
             if child.ownership.thread_id != thread_id {
                 return Err("The receipt does not belong to this subagent".into());
             }
-            let resumed = crate::resume_child(&child).await?;
+            let resumed = crate::resume_child(state, &child).await?;
             (child.rpc, resumed)
         } else {
             let bot = crate::bot_for_conversation(state, &message.conversation_id)
@@ -620,7 +620,8 @@ async fn recover(state: &AppState, recover_all: bool) -> Result<(), String> {
                     "runtimeWorkspaceRoots": crate::permission_modes::runtime_roots(state, &bot).await?,
                     "approvalPolicy": resolved.approval_policy,
                     "approvalsReviewer": resolved.approvals_reviewer,
-                    "developerInstructions": wonder_harness::instructions(&bot.system_prompt),
+                    "developerInstructions": wonder_harness::instructions(&format!("{}\n\n{}", crate::teaching::BETA_POLICY, bot.system_prompt)),
+                    "config":crate::teaching::runtime_config(state, &runtime, bot.execution_directory()).await?,
                 }),
             )
             .await
@@ -901,6 +902,7 @@ for line in sys.stdin:
             denied_roots: vec![],
             linked_file_roots: vec![],
             dispatch_lock: Arc::new(tokio::sync::Mutex::new(())),
+            update_admission: Arc::new(Default::default()),
             channel_worker_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             approval_lock: Arc::new(tokio::sync::Mutex::new(())),
             bots_root: dir.path().to_string_lossy().into(),

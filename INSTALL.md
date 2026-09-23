@@ -54,6 +54,10 @@ Once the download is available:
 3. Open Wonder from Applications, then eject the disk image.
 4. Follow setup and choose **Connect Tailscale**.
 
+To repeat setup on an existing installation, open **Wonder → Settings → Status →
+Review setup…**. This keeps your conversations, paired devices, folders and
+launch-at-login preference.
+
 The official installer is signed and notarized. If macOS reports a damaged or
 unverifiable download, download it again from the official release and report the
 problem. Do not disable Gatekeeper or strip security attributes.
@@ -121,10 +125,17 @@ screenshots. See [security reporting](SECURITY.md).
 
 ## Updates and existing installations
 
-Download the newer signed DMG, quit Wonder, and replace the app in Applications.
-Reopen it and verify conversations and the phone connection. Automatic updates
-are unavailable during this beta. Updating the app preserves its separate data
-folder; never delete that folder to perform an update.
+After setup, Wonder offers automatic update checks. In **Settings → Status →
+Updates**, choose whether to check automatically and download updates. You can
+also choose **Check for Updates…** at any time. These preferences survive relaunch.
+Updates are signed and verified before installation. Wonder waits for active work
+and computer sharing to finish, then restarts to install the update.
+
+You can still update manually: download the newer signed DMG, quit Wonder, replace
+the app in Applications, and reopen it. Both update paths preserve the separate
+data folder; never delete that folder to update. Check that your conversations
+and phone connection return. On iPhone and iPad, updates are managed by TestFlight.
+See [beta status](BETA_STATUS.md) for which update paths have been qualified.
 
 If migrating from an older Cloudflare/Funnel connection, join Tailscale and pair
 again from the **same Mac**. Wonder verifies the Mac’s installation identity before

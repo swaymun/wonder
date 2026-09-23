@@ -33,6 +33,7 @@ cp apps/menubar/Resources/Info.plist "$APP_PATH/Contents/Info.plist"
 if [[ -n "${WONDER_BUILD_VERSION:-}" ]]; then
   [[ "$WONDER_BUILD_VERSION" =~ ^[0-9]+([.][0-9]+)*$ ]] || { echo 'Build version must be numeric and monotonic' >&2; exit 1; }
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $WONDER_BUILD_VERSION" "$APP_PATH/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $WONDER_BUILD_VERSION" "$APP_PATH/Contents/Info.plist"
 fi
 mkdir -p "$ICONSET_PATH"
 for size in 16 32 128 256 512; do
@@ -47,7 +48,7 @@ WEBRTC_FRAMEWORK="native/computer-use/.build/artifacts/webrtc/WebRTC/WebRTC.xcfr
 test -f "$WEBRTC_FRAMEWORK/WebRTC" || { echo 'Missing resolved macOS WebRTC framework' >&2; exit 1; }
 ditto "$WEBRTC_FRAMEWORK" "$APP_PATH/Contents/Frameworks/WebRTC.framework"
 cp native/computer-use/.build/checkouts/WebRTC/LICENSE.md "$APP_PATH/Contents/Resources/WebRTC-LICENSE.md"
-# The self-hosted beta uses signed manual downloads; automatic updates stay disabled.
+# Sparkle uses the bundled HTTPS feed and public EdDSA key; private keys never ship.
 cp apps/desktop/target/release/wonder-host "$APP_PATH/Contents/MacOS/WonderHost"
 cp "$MENUBAR_BUILD_PATH/WonderMenu" "$APP_PATH/Contents/MacOS/WonderMacBridge"
 xcrun swiftc -O -target "$(uname -m)-apple-macosx14.0" apps/menubar/Launcher/main.swift -o "$APP_PATH/Contents/MacOS/WonderMenu"

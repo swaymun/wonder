@@ -2148,15 +2148,9 @@ pub(crate) async fn input_control(
                 .into_response();
         }
     };
-    let teaching = state
-        .store
-        .active_teaching_session_for_binding(
-            &device.device_id,
-            &state.host_installation_id,
-            &session.id,
-            &request.lease_id,
-        )
-        .await;
+    let teaching =
+        crate::teaching::capture_session(&state, &device.device_id, &session.id, &request.lease_id)
+            .await;
     let teaching_outcome = match teaching {
         Ok(Some(teaching_session)) => {
             let events =

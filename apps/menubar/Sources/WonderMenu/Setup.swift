@@ -41,4 +41,11 @@ final class SetupProgress: ObservableObject {
         completed = true
         defaults.set(true, forKey: "setup.completed")
     }
+
+    func review() {
+        // Revisit setup without resetting devices, folders or login preferences.
+        go(to: .welcome)
+        completed = false
+        defaults.set(false, forKey: "setup.completed")
+    }
 }

@@ -142,6 +142,8 @@ struct ConversationDetails: View {
     }
 }
 
+#if WONDER_DIAGNOSTICS
+// Development fixtures remain available while teaching is excluded from the beta.
 struct TeachingPollingKey: Hashable {
     let sessionID: String?
     let state: String?
@@ -966,7 +968,6 @@ private struct BotSkillDetailView: View {
     }
 }
 
-#if WONDER_DIAGNOSTICS
 struct TeachingDiagnosticFixtureView: View {
     @StateObject private var model = ConnectionModel(saved: nil, persistConnection: { _ in })
 
