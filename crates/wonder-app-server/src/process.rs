@@ -627,13 +627,13 @@ async fn verify_runtime_inner(
         return Err(RuntimeError::Incompatible("codex --version failed".into()));
     }
     let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
-    if !crate::COMPATIBLE_CODEX_VERSIONS.contains(&version.as_str()) {
+    let Some(expected_hashes) = crate::expected_schema_hashes(&version) else {
         return Err(RuntimeError::Incompatible(format!(
             "expected {}, found {version}",
             crate::COMPATIBLE_CODEX_VERSIONS.join(" or ")
         )));
-    }
-    verify_generated_schemas(&canonical_bin).await?;
+    };
+    verify_generated_schemas(&canonical_bin, expected_hashes).await?;
 
     Ok(canonical_bin)
 }
@@ -722,7 +722,10 @@ fn valid_code_mode_probe_result(result: &Value) -> bool {
             == serde_json::json!([{"type":"input_text", "text":"42"}])
 }
 
-async fn verify_generated_schemas(codex_bin: &std::path::Path) -> Result<(), RuntimeError> {
+async fn verify_generated_schemas(
+    codex_bin: &std::path::Path,
+    expected_hashes: (&str, &str),
+) -> Result<(), RuntimeError> {
     let temporary = tempfile::tempdir().map_err(RuntimeError::Io)?;
     let stable_dir = temporary.path().join("stable");
     let experimental_dir = temporary.path().join("experimental");
@@ -762,9 +765,7 @@ async fn verify_generated_schemas(codex_bin: &std::path::Path) -> Result<(), Run
         tokio::fs::read(experimental_dir.join("codex_app_server_protocol.v2.schemas.json")).await?;
     let stable_hash = hex::encode(Sha256::digest(stable));
     let experimental_hash = hex::encode(Sha256::digest(experimental));
-    if stable_hash != crate::STABLE_SCHEMA_SHA256
-        || experimental_hash != crate::EXPERIMENTAL_SCHEMA_SHA256
-    {
+    if stable_hash != expected_hashes.0 || experimental_hash != expected_hashes.1 {
         return Err(RuntimeError::Incompatible(format!(
             "schema hash mismatch (stable {stable_hash}, experimental {experimental_hash})"
         )));

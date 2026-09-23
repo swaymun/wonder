@@ -15,7 +15,7 @@ repository access can use the [source-build instructions](DEVELOPMENT.md).
 | --- | --- |
 | Mac | Apple Silicon; macOS 14 or later is the deployment target. |
 | iPhone or iPad | iOS/iPadOS 17 or later is the deployment target. |
-| ChatGPT Desktop | The Mac runtime must be `codex-cli 0.155.0-alpha.9` or `0.155.0-alpha.9.2`, with the matching schema and code-mode helper. Wonder checks this automatically. |
+| ChatGPT Desktop | The Mac runtime must be a version listed in `compatibility-manifest.json` (`0.155.0-alpha.9`, `0.155.0-alpha.9.2`, or `0.155.0-alpha.16.3`), with its matching schema and code-mode helper. Wonder checks this automatically. |
 | Model access | Sign in to your model provider using the supported runtime. Its access limits and billing still apply. |
 | Tailscale | Install on both devices, join the same tailnet, and allow access between them. MagicDNS and tailnet HTTPS must be enabled. |
 

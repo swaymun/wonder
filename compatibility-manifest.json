@@ -8,8 +8,13 @@
     "experimentalSchemaSha256": "48368bf71d00498557245665dd4581f9b0d5381561a2c8ba1ef4eb26ea4a1632",
     "compatibleVersions": [
       "codex-cli 0.155.0-alpha.9",
-      "codex-cli 0.155.0-alpha.9.2"
-    ]
+      "codex-cli 0.155.0-alpha.9.2",
+      "codex-cli 0.155.0-alpha.16.3"
+    ],
+    "alpha16SchemaSha256": {
+      "stable": "6ca35a4c82645df5cba7b2bba1845d3167c12294317daf1923da1a2e8fa04738",
+      "experimental": "c7291ce922a7e7f5fe5e36902544bbc18b793d6f5a998ef36aeff0b195b0e91d"
+    }
   },
   "requiredCapabilities": [
     "initialize",
