@@ -4,10 +4,11 @@ Wonder runs on your Mac and connects to its native iPhone or iPad app over
 Tailscale. There is no Wonder account. Allow about one setup session with both
 devices nearby; the Mac must confirm the phone’s first connection.
 
-**Public downloads are not available yet.** The signed Mac installer and external
-TestFlight link will be added to the [README](README.md) after release qualification.
-These steps describe the installation path being qualified. Developers with
-repository access can use the [source-build instructions](DEVELOPMENT.md).
+The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.51-beta.1/Wonder-1.0.51.dmg)
+is available. Its SHA-256 checksum is
+`2e4c906f40fbe00fceace49988d6e6831d17f2208517c26fe7c45cfb82b87468`.
+External TestFlight enrollment is awaiting Apple review and device qualification.
+Developers can also use the [source-build instructions](DEVELOPMENT.md).
 
 ## Requirements
 
@@ -47,9 +48,7 @@ Serve configuration. The default is port 8443, forwarding to the Mac’s local s
 
 ## 3. Install Wonder on the Mac
 
-Once the download is available:
-
-1. Download the DMG from the release linked in the README.
+1. Download the signed DMG from the release linked in the README.
 2. Open it and drag **Wonder** into **Applications**.
 3. Open Wonder from Applications, then eject the disk image.
 4. Follow setup and choose **Connect Tailscale**.

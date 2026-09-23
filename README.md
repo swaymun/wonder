@@ -6,7 +6,7 @@
 <p align="center"><strong>Your Mac’s agents, on your iPhone and iPad.</strong></p>
 <p align="center">Keep a conversation going, review a request, or check your Mac from your phone.</p>
 
-<p align="center"><strong>Mac download — preparing beta</strong> · <strong>TestFlight — external access pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
+<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.51-beta.1/Wonder-1.0.51.dmg">Download the signed Mac beta</a> · <strong>TestFlight — awaiting external review</strong> · <a href="INSTALL.md">Setup guide</a></p>
 
 <p align="center"><img src="assets/screenshots/conversation.png" width="280" alt="Wonder’s native conversation and grouped moon helper icon, shown with sample content"></p>
 
@@ -15,9 +15,9 @@ work to a Bot, bring Bots together in a Group Chat, and return to the same
 conversations, files, and decisions later. Your Mac hosts Wonder; your devices
 connect through your own Tailscale network.
 
-**Public beta is being prepared.** The installer and public TestFlight invitation
-will appear here after first-install and device qualification. Source builds are
-available from this repository. [Release qualification](RELEASING.md).
+**The signed Mac beta is available.** External TestFlight enrollment opens after
+Apple’s review and device qualification. Source builds are available from this
+repository. [Release qualification](RELEASING.md).
 
 ## Keep your work with you
 
