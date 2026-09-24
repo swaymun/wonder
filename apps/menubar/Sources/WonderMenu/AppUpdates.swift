@@ -99,7 +99,7 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate {
     func postponeInstallation(_ installHandler: @escaping () -> Void) {
         preparingInstall = true
         pendingInstallation = installHandler
-        message = "Update ready. It will install after current work and messages needing attention are resolved."
+        message = "Update ready. It will install after current work and computer sharing finish."
         guard preparationTask == nil else { return }
         preparationTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -121,7 +121,7 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate {
             }
             admissionGranted = ready
             if !admissionGranted {
-                message = "Update ready. It will install after current work and messages needing attention are resolved."
+                message = "Update ready. It will install after current work and computer sharing finish."
             }
             return admissionGranted
         } catch {

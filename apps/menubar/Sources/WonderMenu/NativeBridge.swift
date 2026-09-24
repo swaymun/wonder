@@ -131,7 +131,10 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
         case "automatic-update-downloads":
             guard let enabled = command.enabled, updates.available else { return }
             updates.setAutomaticDownloads(enabled)
-        case "check-updates": updates.check()
+        case "check-updates":
+            // A foreground Sparkle check may keep its caller in a modal run loop.
+            // Acknowledge the bridge command before opening that UI.
+            Task { @MainActor [updates] in updates.check() }
         case "connect-mac":
             if let url = service.authURL, !NSWorkspace.shared.open(url) { commandError = "The sign-in page could not open." }
         case "screen": permissions.request(.screenRecording, setup: command.setup == true)

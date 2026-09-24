@@ -3169,7 +3169,9 @@ impl Store {
         &self,
         host_installation_id: &str,
     ) -> Result<bool, sqlx::Error> {
-        let blocking: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE state IN ('accepted_by_wonder','dispatching_to_codex','accepted_by_codex','streaming','uncertain')) OR EXISTS(SELECT 1 FROM group_runs WHERE state NOT IN ('completed','failed','cancelled')) OR EXISTS(SELECT 1 FROM automation_runs WHERE status='running') OR EXISTS(SELECT 1 FROM project_assignments WHERE state IN ('queued','working','uncertain','awaiting_input','integrating')) OR EXISTS(SELECT 1 FROM computer_sessions WHERE host_installation_id=? AND state IN ('preparing','awaitingSource','live','paused','stale')) OR EXISTS(SELECT 1 FROM computer_control_leases WHERE host_installation_id=? AND status='active')")
+        // An uncertain message needs user review, but is no longer executing.
+        // Blocking on it indefinitely would strand signed updates after a crash.
+        let blocking: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE state IN ('accepted_by_wonder','dispatching_to_codex','accepted_by_codex','streaming')) OR EXISTS(SELECT 1 FROM group_runs WHERE state NOT IN ('completed','failed','cancelled')) OR EXISTS(SELECT 1 FROM automation_runs WHERE status='running') OR EXISTS(SELECT 1 FROM project_assignments WHERE state IN ('queued','working','uncertain','awaiting_input','integrating')) OR EXISTS(SELECT 1 FROM computer_sessions WHERE host_installation_id=? AND state IN ('preparing','awaitingSource','live','paused','stale')) OR EXISTS(SELECT 1 FROM computer_control_leases WHERE host_installation_id=? AND status='active')")
             .bind(host_installation_id)
             .bind(host_installation_id)
             .fetch_one(&self.pool)
@@ -3883,7 +3885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_readiness_rejects_queued_uncertain_and_active_work() {
+    async fn update_readiness_rejects_active_work_but_allows_uncertain_messages() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         assert!(!store.has_update_blocking_work("host").await.unwrap());
         store
@@ -3902,7 +3904,7 @@ mod tests {
             .update_message_delivery(&message.id, "uncertain", None, None)
             .await
             .unwrap();
-        assert!(store.has_update_blocking_work("host").await.unwrap());
+        assert!(!store.has_update_blocking_work("host").await.unwrap());
         store
             .update_message_delivery(&message.id, "completed", None, None)
             .await
