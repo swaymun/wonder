@@ -4,9 +4,9 @@ Wonder runs on your Mac and connects to its native iPhone or iPad app over
 Tailscale. There is no Wonder account. Allow about one setup session with both
 devices nearby; the Mac must confirm the phone’s first connection.
 
-The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.61-beta.1/Wonder-1.0.61.dmg)
+The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.62-beta.1/Wonder-1.0.62.dmg)
 is available. Its SHA-256 checksum is
-`44aef1e3702d87b8e850ce416df613011aaccacb85dffa55be3135c9fdfacd60`.
+`d021928bcdbef4c0f111804bbf7ca8a94212ed38b028859437e6a943c264e788`.
 External TestFlight enrollment is awaiting Apple review and device qualification.
 Developers can also use the [source-build instructions](DEVELOPMENT.md).
 
@@ -139,6 +139,9 @@ You can still update manually: download the newer signed DMG, quit Wonder, repla
 the app in Applications, and reopen it. Both update paths preserve the separate
 data folder; never delete that folder to update. Check that your conversations
 and phone connection return. On iPhone and iPad, updates are managed by TestFlight.
+Install 1.0.62 manually if you have an earlier Mac beta; its update check can
+stall while reading the signed feed. Automatic upgrades from 1.0.62 onward still
+need an end-to-end qualification before relying on them.
 See [beta status](BETA_STATUS.md) for which update paths have been qualified.
 
 If migrating from an older Cloudflare/Funnel connection, join Tailscale and pair
