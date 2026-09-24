@@ -2,7 +2,7 @@ import XCTest
 @testable import WonderComputerUseCore
 
 final class CaptureCoreTests: XCTestCase {
-    func testSelectionPlanOffersThePickerBeforeTheMainDisplay() {
+    func testSelectionPlanPrefersTheMainDisplayWhenMultipleDisplaysAreAvailable() {
         let plan = CaptureSourceSelectionPlanner.plan(
             requestedSourceID: nil,
             displayIDs: [1, 2],
@@ -11,7 +11,7 @@ final class CaptureCoreTests: XCTestCase {
             pickerAvailable: true
         )
 
-        XCTAssertEqual(plan, .presentSharingPicker)
+        XCTAssertEqual(plan, .select(sourceID: "display:2"))
     }
 
     func testSelectionPlanDoesNotChooseAnUnrelatedWindowWhenTheMainDisplayIsMissing() {
