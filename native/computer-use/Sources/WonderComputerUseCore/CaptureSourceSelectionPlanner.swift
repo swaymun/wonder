@@ -2,7 +2,7 @@ import Foundation
 
 public enum CaptureSourceSelectionPlan: Equatable, Sendable {
     case select(sourceID: String)
-    case presentDisplayPicker
+    case presentSharingPicker
     case unavailable(reason: String)
 }
 
@@ -21,13 +21,13 @@ public enum CaptureSourceSelectionPlanner {
             return .select(sourceID: requestedSourceID)
         }
 
+        if pickerAvailable {
+            return .presentSharingPicker
+        }
+
         let mainSourceID = "display:\(mainDisplayID)"
         if displayIDs.contains(mainDisplayID), sourceIDs.contains(mainSourceID) {
             return .select(sourceID: mainSourceID)
-        }
-
-        if pickerAvailable {
-            return .presentDisplayPicker
         }
         return .unavailable(reason: "system_picker_unavailable")
     }

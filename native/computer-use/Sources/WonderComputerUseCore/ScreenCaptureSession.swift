@@ -493,7 +493,7 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
             }
             selectSource(source, filter: filter, for: request)
 
-        case .presentDisplayPicker:
+        case .presentSharingPicker:
             guard presentSystemPicker(for: request) else { return }
             guard let pending = currentSelectionStatus(for: request) else { return }
             emit("capture.pickerPresented", status: pending, message: "Choose a window or display on your Mac")

@@ -2,7 +2,7 @@ import XCTest
 @testable import WonderComputerUseCore
 
 final class CaptureCoreTests: XCTestCase {
-    func testSelectionPlanPrefersTheMainDisplay() {
+    func testSelectionPlanOffersThePickerBeforeTheMainDisplay() {
         let plan = CaptureSourceSelectionPlanner.plan(
             requestedSourceID: nil,
             displayIDs: [1, 2],
@@ -11,7 +11,7 @@ final class CaptureCoreTests: XCTestCase {
             pickerAvailable: true
         )
 
-        XCTAssertEqual(plan, .select(sourceID: "display:2"))
+        XCTAssertEqual(plan, .presentSharingPicker)
     }
 
     func testSelectionPlanDoesNotChooseAnUnrelatedWindowWhenTheMainDisplayIsMissing() {
@@ -23,7 +23,31 @@ final class CaptureCoreTests: XCTestCase {
             pickerAvailable: true
         )
 
-        XCTAssertEqual(plan, .presentDisplayPicker)
+        XCTAssertEqual(plan, .presentSharingPicker)
+    }
+
+    func testSelectionPlanUsesTheMainDisplayWhenThePickerIsUnavailable() {
+        let plan = CaptureSourceSelectionPlanner.plan(
+            requestedSourceID: nil,
+            displayIDs: [1, 2],
+            sourceIDs: ["display:1", "display:2", "window:9"],
+            mainDisplayID: 2,
+            pickerAvailable: false
+        )
+
+        XCTAssertEqual(plan, .select(sourceID: "display:2"))
+    }
+
+    func testSelectionPlanHonorsAnExplicitWindow() {
+        let plan = CaptureSourceSelectionPlanner.plan(
+            requestedSourceID: "window:9",
+            displayIDs: [1],
+            sourceIDs: ["display:1", "window:9"],
+            mainDisplayID: 1,
+            pickerAvailable: true
+        )
+
+        XCTAssertEqual(plan, .select(sourceID: "window:9"))
     }
 
     func testSelectionPlanRejectsAnExplicitSourceThatWasNotEnumerated() {
