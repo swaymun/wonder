@@ -4,9 +4,9 @@ Wonder runs on your Mac and connects to its native iPhone or iPad app over
 Tailscale. There is no Wonder account. Allow about one setup session with both
 devices nearby; the Mac must confirm the phone’s first connection.
 
-The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.62-beta.1/Wonder-1.0.62.dmg)
+The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.63-beta.1/Wonder-1.0.63.dmg)
 is available. Its SHA-256 checksum is
-`d021928bcdbef4c0f111804bbf7ca8a94212ed38b028859437e6a943c264e788`.
+`d640c2a1393f24102589349e82f2c711e08ebe76cc000ddb186761c0d554525c`.
 External TestFlight enrollment is awaiting Apple review and device qualification.
 Developers can also use the [source-build instructions](DEVELOPMENT.md).
 

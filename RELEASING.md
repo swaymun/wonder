@@ -97,9 +97,9 @@ its feed with the existing Sparkle tools:
 
 ```sh
 python3 scripts/generate-sparkle-appcast.py \
-  --dmg .local/release/Wonder-1.0.62.dmg \
-  --asset-url https://github.com/swaymun/wonder/releases/download/mac-v1.0.62-beta.1/Wonder-1.0.62.dmg \
-  --version 1.0.62 --output .local/release/appcast.xml
+  --dmg .local/release/Wonder-1.0.63.dmg \
+  --asset-url https://github.com/swaymun/wonder/releases/download/mac-v1.0.63-beta.1/Wonder-1.0.63.dmg \
+  --version 1.0.63 --output .local/release/appcast.xml
 ```
 
 Use the actual candidate version and source tag. GitHub's `latest/download` path
