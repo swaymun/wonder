@@ -571,7 +571,6 @@ impl MacSettings {
                 self.flag("serviceBusy"),
                 cx,
             ))
-            .child(note(text(&self.state, "serviceMessage")))
     }
     fn devices(&self, cx: &Context<Self>) -> Div {
         let mut view = stack().gap_4().child(first_section(
