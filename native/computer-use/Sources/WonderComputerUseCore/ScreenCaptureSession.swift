@@ -496,7 +496,7 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
         case .presentDisplayPicker:
             guard presentSystemPicker(for: request) else { return }
             guard let pending = currentSelectionStatus(for: request) else { return }
-            emit("capture.pickerPresented", status: pending, message: "Choose a display on your Mac")
+            emit("capture.pickerPresented", status: pending, message: "Choose a window or display on your Mac")
 
         case let .unavailable(reason):
             guard let failed = markSourceSelectionFailed(for: request, reason: reason) else { return }
@@ -651,8 +651,11 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
             picker.add(self)
             pickerObserverRegistered = true
         }
+        var configuration = picker.defaultConfiguration
+        configuration.allowedPickerModes = [.singleWindow, .singleDisplay]
+        picker.defaultConfiguration = configuration
         picker.isActive = true
-        picker.present(using: .display)
+        picker.present(using: .window)
         return true
     }
 
