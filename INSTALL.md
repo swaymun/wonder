@@ -139,9 +139,8 @@ You can still update manually: download the newer signed DMG, quit Wonder, repla
 the app in Applications, and reopen it. Both update paths preserve the separate
 data folder; never delete that folder to update. Check that your conversations
 and phone connection return. On iPhone and iPad, updates are managed by TestFlight.
-Install 1.0.62 manually if you have an earlier Mac beta; its update check can
-stall while reading the signed feed. Automatic upgrades from 1.0.62 onward still
-need an end-to-end qualification before relying on them.
+Automatic installation remains under qualification. If an update does not
+complete, install the latest signed DMG from the Mac release page.
 See [beta status](BETA_STATUS.md) for which update paths have been qualified.
 
 If migrating from an older Cloudflare/Funnel connection, join Tailscale and pair

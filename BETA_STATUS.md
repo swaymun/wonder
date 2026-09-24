@@ -28,7 +28,7 @@ The iPhone 11 passed the focused approval-box tests and the permission/helper in
 - Initial setup requires both devices, Tailscale and access to the supported model provider.
 - Model requests are sent to your provider. Wonder does not include a model subscription or credits.
 - Remote access depends on the Mac being reachable. Tailscale may relay encrypted traffic when a direct connection is unavailable.
-- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. Versions before 1.0.62 can stall while parsing the update feed, so install the [signed 1.0.62 DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.62-beta.1) manually once. The parser stall is fixed in 1.0.62; an end-to-end automatic installation from that version still needs qualification.
+- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. A complete automatic installation is still unverified; use the [signed Mac DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.62-beta.1) if an update does not complete.
 - Teaching a task and replaying taught tasks are unavailable in this beta.
 - Notifications require permission and network access. Disabling notifications does not stop work on the Mac.
 - Supported OS versions and verification evidence are different: simulator checks do not establish physical-device behavior on every supported model.
