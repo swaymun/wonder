@@ -12,13 +12,21 @@ public enum CaptureSourceSelectionPlanner {
         displayIDs: Set<UInt32>,
         sourceIDs: Set<String>,
         mainDisplayID: UInt32,
-        pickerAvailable: Bool
+        pickerAvailable: Bool,
+        preferredDisplayID: UInt32? = nil
     ) -> CaptureSourceSelectionPlan {
         if let requestedSourceID {
             guard sourceIDs.contains(requestedSourceID) else {
                 return .unavailable(reason: "source_not_found")
             }
             return .select(sourceID: requestedSourceID)
+        }
+
+        if let preferredDisplayID {
+            let preferredSourceID = "display:\(preferredDisplayID)"
+            if displayIDs.contains(preferredDisplayID), sourceIDs.contains(preferredSourceID) {
+                return .select(sourceID: preferredSourceID)
+            }
         }
 
         let mainSourceID = "display:\(mainDisplayID)"

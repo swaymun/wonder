@@ -929,13 +929,56 @@ impl MacSettings {
             &["controlPreferencesMessage"],
             cx,
         );
-        first_section("Mac access", rows, cx)
+        let section = first_section("Mac access", rows, cx)
             .child(paired_control)
             .children(
                 (!text(&self.state, "permissionsMessage").is_empty())
                     .then(|| note(text(&self.state, "permissionsMessage"))),
-            )
+            );
+        section
+            .when(!setup, |view| view.child(self.shared_display_choice(cx)))
             .child(self.computer_folders(cx))
+    }
+    fn shared_display_choice(&self, cx: &Context<Self>) -> Div {
+        let displays = array(&self.state, "sharedDisplays");
+        let saved = text(&self.state, "preferredDisplayID");
+        let saved_connected = displays.iter().any(|display| text(display, "id") == saved);
+        let mut choices = stack().gap_1().child(
+            self.action(
+                "share-main-display",
+                "Use main display automatically",
+                json!({"action":"shared-display","key":""}),
+                false,
+                cx,
+            )
+            .selected(saved.is_empty() || !saved_connected)
+            .accessibility_label("Use main display automatically"),
+        );
+        for display in displays {
+            let identifier = text(display, "id");
+            let name = text(display, "name");
+            let label = if display["main"] == true {
+                format!("{name} (currently main)")
+            } else {
+                name.to_owned()
+            };
+            choices = choices.child(
+                self.action(
+                    format!("share-display-{identifier}"),
+                    label.clone(),
+                    json!({"action":"shared-display","key":identifier}),
+                    false,
+                    cx,
+                )
+                .selected(saved == identifier)
+                .accessibility_label(format!("Share {label}")),
+            );
+        }
+        first_section("Screen to share", choices, cx)
+            .child(note("Choose a screen for live viewing from your phone. If you skip this, Wonder uses the Mac's main display. You can change it later in Access."))
+            .when(!saved.is_empty() && !saved_connected, |view| {
+                view.child(note("The saved screen is disconnected, so Wonder will use the main display until it returns."))
+            })
     }
     fn permissions(&self, cx: &Context<Self>) -> Div {
         self.mac_permissions(false, cx)
@@ -947,6 +990,7 @@ impl MacSettings {
             4 => "Connect with Tailscale",
             5 => "On-device dictation",
             1 => "Choose what Wonder can do",
+            6 => "Choose a screen to share",
             2 => "Connect your phone",
             _ => "Wonder stays with you",
         };
@@ -958,8 +1002,8 @@ impl MacSettings {
                     .font_weight(FontWeight::SEMIBOLD),
             )
             .child(note(format!(
-                "Step {} of 6",
-                [0, 4, 1, 5, 2, 3]
+                "Step {} of 7",
+                [0, 4, 1, 6, 5, 2, 3]
                     .iter()
                     .position(|value| *value == step)
                     .unwrap_or(0)
@@ -975,6 +1019,7 @@ impl MacSettings {
             4=>view.child(self.connection(cx)),
             5=>view.child(self.voice_content(cx)),
             1=>view.child(self.mac_permissions(true, cx)),
+            6=>view.child(self.shared_display_choice(cx)),
             2=>view.when(!self.flag("remoteReady"), |v| v.child(note("Connect Tailscale on both devices before pairing. You can finish setup and pair later.")).child(self.connection(cx)))
                 .child(self.devices(cx)),
             _=>view.child(note("Wonder stays in your menu bar while your Bots work."))
@@ -987,7 +1032,7 @@ impl MacSettings {
     }
     fn setup_controls(&self, cx: &Context<Self>) -> Div {
         let step = self.state["setupStep"].as_u64().unwrap_or(0);
-        let steps = [0, 4, 1, 5, 2, 3];
+        let steps = [0, 4, 1, 6, 5, 2, 3];
         let position = steps.iter().position(|value| *value == step).unwrap_or(0);
         let mut controls = div().w_full().flex().justify_end().gap_2().pt_4();
         if position > 0 {
@@ -1007,6 +1052,8 @@ impl MacSettings {
                         "Set up later"
                     } else if step == 5 {
                         self.voice.setup_continue_label()
+                    } else if step == 6 && text(&self.state, "preferredDisplayID").is_empty() {
+                        "Use main display"
                     } else if step == 1
                         && (text(&self.state, "screen") != "Enabled"
                             || text(&self.state, "input") != "Enabled")

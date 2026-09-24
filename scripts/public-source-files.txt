@@ -424,10 +424,12 @@ native/computer-use/Sources/WonderComputerUseCore/ControlModels.swift
 native/computer-use/Sources/WonderComputerUseCore/ControlPreferences.swift
 native/computer-use/Sources/WonderComputerUseCore/LatestFrameQueue.swift
 native/computer-use/Sources/WonderComputerUseCore/ScreenCaptureSession.swift
+native/computer-use/Sources/WonderComputerUseCore/SharedDisplayPreference.swift
 native/computer-use/THIRD_PARTY_WEBRTC.md
 native/computer-use/Tests/WonderComputerUseCoreTests/CaptureCoreTests.swift
 native/computer-use/Tests/WonderComputerUseCoreTests/ControlCoreTests.swift
 native/computer-use/Tests/WonderComputerUseCoreTests/ControlPreferencesTests.swift
+native/computer-use/Tests/WonderComputerUseCoreTests/SharedDisplayPreferenceTests.swift
 native/computer-use/Tests/WonderComputerUseWebRTCTests/M153TrickleICEProofTests.swift
 packages/protocol/README.md
 packages/protocol/fixtures/bot-avatar-contract-v1.json

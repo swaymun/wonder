@@ -3,7 +3,7 @@ import Combine
 
 enum SetupStep: Int, CaseIterable {
     // Preserve persisted step values from the original four-step setup.
-    case welcome = 0, connection = 4, permissions = 1, dictation = 5, phone = 2, finish = 3
+    case welcome = 0, connection = 4, permissions = 1, display = 6, dictation = 5, phone = 2, finish = 3
     func canEnter(executionReady: Bool) -> Bool {
         self == .welcome || executionReady
     }
@@ -12,6 +12,7 @@ enum SetupStep: Int, CaseIterable {
         case .welcome: "Set up Wonder on this Mac"
         case .connection: "Connect with Tailscale"
         case .permissions: "Choose what Wonder can do"
+        case .display: "Choose a screen to share"
         case .dictation: "On-device dictation"
         case .phone: "Connect your phone"
         case .finish: "Wonder stays with you"

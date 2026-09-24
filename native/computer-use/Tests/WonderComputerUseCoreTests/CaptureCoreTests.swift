@@ -14,6 +14,28 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(plan, .select(sourceID: "display:2"))
     }
 
+    func testSavedDisplayWinsAndDisconnectedChoiceFallsBackToMain() {
+        let available = CaptureSourceSelectionPlanner.plan(
+            requestedSourceID: nil,
+            displayIDs: [1, 2],
+            sourceIDs: ["display:1", "display:2"],
+            mainDisplayID: 2,
+            pickerAvailable: true,
+            preferredDisplayID: 1
+        )
+        XCTAssertEqual(available, .select(sourceID: "display:1"))
+
+        let disconnected = CaptureSourceSelectionPlanner.plan(
+            requestedSourceID: nil,
+            displayIDs: [1, 2],
+            sourceIDs: ["display:1", "display:2"],
+            mainDisplayID: 2,
+            pickerAvailable: true,
+            preferredDisplayID: 3
+        )
+        XCTAssertEqual(disconnected, .select(sourceID: "display:2"))
+    }
+
     func testSelectionPlanDoesNotChooseAnUnrelatedWindowWhenTheMainDisplayIsMissing() {
         let plan = CaptureSourceSelectionPlanner.plan(
             requestedSourceID: nil,

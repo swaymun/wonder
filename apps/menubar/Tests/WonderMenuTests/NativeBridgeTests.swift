@@ -20,6 +20,27 @@ final class NativeBridgeTests: XCTestCase {
         await bridge.perform(BridgeCommand(id: "unsigned", action: "setup-step", step: 1))
         XCTAssertEqual(bridge.setup.step, .permissions)
     }
+    @MainActor func testScreenChoiceDefaultsToMainRejectsStaleDisplayAndPersistsSelection() async {
+        let suite = "WonderBridgeDisplayTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = NativeBridge(defaults: defaults)
+        XCTAssertEqual(first.snapshot()["preferredDisplayID"] as? String, "")
+
+        await first.perform(BridgeCommand(id: "stale", action: "shared-display", key: "999:999:999"))
+        XCTAssertEqual(first.snapshot()["preferredDisplayID"] as? String, "")
+        XCTAssertFalse((first.snapshot()["error"] as? String ?? "").isEmpty)
+
+        if let display = (first.snapshot()["sharedDisplays"] as? [[String: Any]])?.first,
+           let identifier = display["id"] as? String {
+            await first.perform(BridgeCommand(id: "select", action: "shared-display", key: identifier))
+            XCTAssertEqual(first.snapshot()["preferredDisplayID"] as? String, identifier)
+            XCTAssertEqual(NativeBridge(defaults: defaults).snapshot()["preferredDisplayID"] as? String, identifier)
+        }
+
+        await first.perform(BridgeCommand(id: "main", action: "shared-display", key: ""))
+        XCTAssertEqual(first.snapshot()["preferredDisplayID"] as? String, "")
+    }
     @MainActor func testChangedPairingCodeCannotApproveARequest() async {
         let bridge = bridge()
         bridge.pairing.pending = [PhoneEnrollment(deviceId: "device", label: "Phone", challenge: EnrollmentChallenge(

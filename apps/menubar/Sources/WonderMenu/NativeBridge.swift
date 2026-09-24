@@ -1,6 +1,17 @@
 import AppKit
 import Combine
 import CoreImage.CIFilterBuiltins
+import WonderComputerUseCore
+
+private struct SharedDisplayChoice {
+    let identifier: String
+    let name: String
+    let isMain: Bool
+
+    var snapshot: [String: Any] {
+        ["id": identifier, "name": name, "main": isMain]
+    }
+}
 
 // This process owns only macOS integrations. All Wonder windows are rendered by GPUI.
 struct BridgeCommand: Decodable, Sendable {
@@ -20,10 +31,12 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
     let service: ServiceControls
     let updates = AppUpdates()
     let setup: SetupProgress
+    private let sharedDisplay: SharedDisplayPreference
 
     init(defaults: UserDefaults = .standard, serviceDirectory: URL? = nil) {
         service = ServiceControls(defaults: defaults, serviceDirectory: serviceDirectory)
         setup = SetupProgress(defaults: defaults)
+        sharedDisplay = SharedDisplayPreference(defaults: defaults)
         super.init()
     }
     let permissions = PermissionModel()
@@ -103,6 +116,15 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
         case "allow-control-from-paired-devices":
             guard let enabled = command.enabled else { return }
             service.setAllowControlFromPairedDevices(enabled)
+        case "shared-display":
+            guard let identifier = command.key else { return }
+            guard identifier.isEmpty || sharedDisplayChoices().contains(where: { $0.identifier == identifier }) else {
+                commandError = "That display is no longer connected. Choose another screen."
+                return
+            }
+            if !sharedDisplay.setPreferredIdentifier(identifier.isEmpty ? nil : identifier) {
+                commandError = "The screen choice could not be saved. Try again."
+            }
         case "automatic-updates":
             guard let enabled = command.enabled, updates.available else { return }
             updates.setAutomaticChecks(enabled)
@@ -182,6 +204,8 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             "login": service.launchAtLogin, "loginMessage": service.loginMessage ?? "", "loginApproval": service.loginNeedsApproval,
             "allowControlFromPairedDevices": service.allowControlFromPairedDevices,
             "controlPreferencesMessage": service.controlPreferencesMessage ?? "",
+            "sharedDisplays": sharedDisplayChoices().map(\.snapshot),
+            "preferredDisplayID": sharedDisplay.preferredIdentifier ?? "",
             "updatesAvailable": updates.available, "automaticUpdates": updates.automaticallyChecks,
             "automaticUpdateDownloads": updates.automaticallyDownloads,
             "canCheckUpdates": updates.canCheck, "updatesMessage": updates.message ?? "",
@@ -201,6 +225,22 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             value["offer"] = ["id": offer.offerId, "url": offer.url, "origin": offer.origin, "code": offer.humanCode.uppercased(), "expired": pairing.expired, "expiresAtMs": offer.expiresAtMs, "qr": qrBytes] as [String: Any]
         }
         return value
+    }
+
+    private func sharedDisplayChoices() -> [SharedDisplayChoice] {
+        let mainID = CGMainDisplayID()
+        let choices = NSScreen.screens.compactMap { screen -> SharedDisplayChoice? in
+            guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
+                  let identifier = SharedDisplayPreference.identifier(for: displayID) else { return nil }
+            return SharedDisplayChoice(
+                identifier: identifier,
+                name: String(screen.localizedName.prefix(80)),
+                isMain: displayID == mainID
+            )
+        }
+        let counts = Dictionary(grouping: choices, by: \.identifier)
+        return choices.filter { counts[$0.identifier]?.count == 1 }
+            .sorted { $0.isMain == $1.isMain ? $0.name < $1.name : $0.isMain }
     }
 
     private func publish() {

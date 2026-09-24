@@ -68,6 +68,11 @@ Screen viewing needs **Screen Recording**. Computer control also needs
 workspace folders through Wonder’s normal folder controls. Follow any macOS prompt
 to reopen Wonder after changing a permission.
 
+Setup asks which screen to share when your Mac has multiple displays. Skip the
+choice to use the main display. You can change it later in **Settings → Access →
+Screen to share**; if a chosen display is disconnected, Wonder uses the main one
+until it returns. Your choice stays saved when Wonder updates.
+
 ![Wonder’s Mac Access settings, cropped above the private folder list](assets/screenshots/mac-permissions.png)
 
 On-device dictation is optional and downloads its model separately. At the end of

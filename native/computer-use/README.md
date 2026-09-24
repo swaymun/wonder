@@ -34,9 +34,10 @@ bounded latest-frame sink. Superseded frames are dropped so a slow encoder canno
 accumulate latency. Pixel payloads are never persisted, logged, or placed in chat
 events; only bounded metadata is emitted.
 
-`capture.pick` selects the main display when it is available. An explicit source
-request uses that display or window; if the main display is unavailable on macOS
-14 and newer, the system sharing picker lets the person choose. A request from a
+`capture.pick` selects the saved setup display when connected, or the Mac's main
+display when none is selected. An explicit source request uses that display or
+window; if neither selected nor main display is available on macOS 14 and newer,
+the system sharing picker lets the person choose. A request from a
 phone reports **Choose what to share on your Mac** until that OS-owned action is
 complete. Selection never bypasses TCC. The daemon mediates authenticated,
 in-memory offer/answer and bounded trickle-ICE signaling. Direct LAN ICE is used

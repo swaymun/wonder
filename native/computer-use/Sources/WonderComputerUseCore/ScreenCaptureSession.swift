@@ -227,7 +227,7 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
             accepted: true,
             action: "pick",
             status: pending,
-            message: sourceID == nil ? "Selecting your main Mac display" : "Loading the selected Mac source"
+            message: sourceID == nil ? "Selecting your Mac display" : "Loading the selected Mac source"
         )
     }
 
@@ -481,7 +481,10 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
             displayIDs: Set(content.displays.map { UInt32($0.displayID) }),
             sourceIDs: Set(sources.map(\.id)),
             mainDisplayID: UInt32(mainDisplayID),
-            pickerAvailable: pickerIsAvailable()
+            pickerAvailable: pickerIsAvailable(),
+            preferredDisplayID: SharedDisplayPreference().preferredDisplayID(
+                in: content.displays.map(\.displayID)
+            )
         )
 
         switch plan {
