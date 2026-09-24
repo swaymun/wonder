@@ -127,7 +127,7 @@ If reporting a problem, include the Wonder and OS versions and a description usi
 synthetic data. Do not attach database files, tokens, pairing links, or private
 screenshots. See [security reporting](SECURITY.md).
 
-## Updates and existing installations
+## Updates
 
 After setup, Wonder offers automatic update checks. In **Settings → Status →
 Updates**, choose whether to check automatically and download updates. You can
@@ -143,14 +143,8 @@ Automatic installation remains under qualification. If an update does not
 complete, install the latest signed DMG from the Mac release page.
 See [beta status](BETA_STATUS.md) for which update paths have been qualified.
 
-If migrating from an older Cloudflare/Funnel connection, join Tailscale and pair
-again from the **same Mac**. Wonder verifies the Mac’s installation identity before
-preserving the connection’s history and drafts. Check chats, attachments, and
-reconnection before retiring an old service. Migration does not delete cloud resources.
-
-The default Mac data home is `~/.wonder`. Legacy Application Support migration
-retains a compatibility symlink and stops if two conflicting data homes exist.
-Do not repair pairing by editing SQLite or deleting Keychain entries.
+The Mac data folder is `~/.wonder`. Do not repair pairing by editing SQLite or
+deleting Keychain entries.
 
 ## Building your own apps
 
@@ -169,8 +163,7 @@ private keys in service secrets, never in an app or Git.
 Turn off launch at login in Wonder, revoke paired devices you no longer want to
 authorize, then quit Wonder and move the app from Applications to Trash. App removal
 does not delete your conversations or credentials. Keep the data folder if you
-might reinstall. Do not delete an Application Support path without checking whether
-it is a legacy symlink to the same data.
+might reinstall. Deleting `~/.wonder` also deletes local conversations and credentials.
 
 Removing Wonder does not uninstall Tailscale or reset its configuration. Remove
 only Wonder’s Serve entry if no longer needed; preserve your other services. Remove
