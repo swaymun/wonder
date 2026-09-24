@@ -26,6 +26,7 @@ serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tempfile.workspace = true
 uuid.workspace = true
 wonder-harness = { path = "../wonder-harness" }
 wonder-api = { path = "../wonder-api" }
@@ -41,6 +42,5 @@ jsonschema = { version = "0.53.0", default-features = false }
 [dev-dependencies]
 p256.workspace = true
 tower.workspace = true
-tempfile.workspace = true
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 tokio-tungstenite = "0.29.0"

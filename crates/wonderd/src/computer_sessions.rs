@@ -1,6 +1,19 @@
 use super::*;
 use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncRead, AsyncWrite};
+
+type HelperInput = Box<dyn AsyncWrite + Unpin + Send>;
+type HelperOutput = Box<dyn AsyncRead + Unpin + Send>;
+
+struct LaunchedHelper {
+    child: tokio::process::Child,
+    stdin: HelperInput,
+    stdout: HelperOutput,
+    // The FIFO paths must remain available until LaunchServices exits.
+    _ipc_directory: Option<tempfile::TempDir>,
+}
 
 const UNAVAILABLE_REASON: &str = "Live computer viewing is unavailable on this Mac. Update Wonder when a configured media provider is available.";
 const UNAVAILABLE_ACTION: &str = "update-host";
@@ -2980,6 +2993,116 @@ impl Default for ComputerSessionSupervisor {
     }
 }
 
+fn bundled_computer_app(binary: &FsPath) -> Option<&FsPath> {
+    let app = binary.parent()?.parent()?.parent()?;
+    (binary.file_name()? == "WonderComputerUse"
+        && app.file_name()? == "WonderComputerUse.app"
+        && app.is_dir())
+    .then_some(app)
+}
+
+#[cfg(unix)]
+fn make_private_fifo(path: &FsPath) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn make_private_fifo(_path: &FsPath) -> std::io::Result<()> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
+async fn launch_helper(
+    binary: PathBuf,
+    handshake: &str,
+) -> Result<LaunchedHelper, SupervisorStartError> {
+    if let Some(app) = bundled_computer_app(&binary) {
+        // A helper spawned by the daemon can inherit the daemon's TCC identity.
+        // LaunchServices starts the signed app with its own durable permission
+        // grants. Private FIFOs retain the existing bounded line protocol.
+        let directory = tempfile::Builder::new()
+            .prefix("wonder-computer-")
+            .tempdir()
+            .map_err(|_| SupervisorStartError::Spawn)?;
+        let input = directory.path().join("input");
+        let output = directory.path().join("output");
+        make_private_fifo(&input).map_err(|_| SupervisorStartError::Spawn)?;
+        make_private_fifo(&output).map_err(|_| SupervisorStartError::Spawn)?;
+        let mut command = Command::new("/usr/bin/open");
+        command
+            .args(["-g", "-W", "-n", "-a"])
+            .arg(app)
+            .arg("-i")
+            .arg(&input)
+            .arg("-o")
+            .arg(&output)
+            .arg("--env")
+            .arg(format!("WONDER_COMPUTER_USE_HANDSHAKE={handshake}"))
+            .arg("--args")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command.spawn().map_err(|_| SupervisorStartError::Spawn)?;
+        let open_fifo = |path: &FsPath| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+        };
+        let stdin = match open_fifo(&input) {
+            Ok(file) => file,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(SupervisorStartError::Spawn);
+            }
+        };
+        let stdout = match open_fifo(&output) {
+            Ok(file) => file,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(SupervisorStartError::Spawn);
+            }
+        };
+        return Ok(LaunchedHelper {
+            child,
+            stdin: Box::new(tokio::fs::File::from_std(stdin)),
+            stdout: Box::new(tokio::fs::File::from_std(stdout)),
+            _ipc_directory: Some(directory),
+        });
+    }
+
+    let mut command = Command::new(binary);
+    command
+        .env("WONDER_COMPUTER_USE_HANDSHAKE", handshake)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|_| SupervisorStartError::Spawn)?;
+    let Some(stdin) = child.stdin.take() else {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err(SupervisorStartError::Spawn);
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err(SupervisorStartError::Spawn);
+    };
+    Ok(LaunchedHelper {
+        child,
+        stdin: Box::new(stdin),
+        stdout: Box::new(stdout),
+        _ipc_directory: None,
+    })
+}
+
 impl ComputerSessionSupervisor {
     fn control_capable(&self) -> bool {
         self.control_capable.load(Ordering::Acquire)
@@ -3037,24 +3160,7 @@ impl ComputerSessionSupervisor {
             .ok_or(SupervisorStartError::Unavailable)?;
         self.set_control_capable(false);
         let handshake = uuid::Uuid::new_v4().to_string();
-        let mut command = Command::new(binary);
-        command
-            .env("WONDER_COMPUTER_USE_HANDSHAKE", &handshake)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|_| SupervisorStartError::Spawn)?;
-        let Some(stdin) = child.stdin.take() else {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(SupervisorStartError::Spawn);
-        };
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(SupervisorStartError::Spawn);
-        };
+        let helper = launch_helper(binary, &handshake).await?;
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(64);
         let (viewer_activity_tx, viewer_activity_rx) = tokio::sync::mpsc::channel(1);
@@ -3068,9 +3174,7 @@ impl ComputerSessionSupervisor {
             state,
             session,
             handshake,
-            child,
-            stdin,
-            stdout,
+            helper,
             stop_rx,
             revocations,
             command_rx,
@@ -3323,7 +3427,7 @@ fn command_line(id: u64, method: &str, params: serde_json::Value) -> Vec<u8> {
 }
 
 async fn write_helper_request(
-    stdin: &mut tokio::process::ChildStdin,
+    stdin: &mut HelperInput,
     id: u64,
     method: &str,
     params: serde_json::Value,
@@ -3387,9 +3491,7 @@ async fn supervise_helper(
     state: AppState,
     session: StoredComputerSession,
     handshake: String,
-    mut child: tokio::process::Child,
-    mut stdin: tokio::process::ChildStdin,
-    stdout: tokio::process::ChildStdout,
+    helper: LaunchedHelper,
     mut stop_rx: tokio::sync::oneshot::Receiver<StopCommand>,
     mut revocations: tokio::sync::broadcast::Receiver<String>,
     mut command_rx: tokio::sync::mpsc::Receiver<HelperCommand>,
@@ -3397,6 +3499,12 @@ async fn supervise_helper(
     viewer_activity_lease_duration: Duration,
     signaling: Arc<tokio::sync::Mutex<SignalingState>>,
 ) {
+    let LaunchedHelper {
+        mut child,
+        mut stdin,
+        stdout,
+        _ipc_directory,
+    } = helper;
     let common = serde_json::json!({
         "sessionID": session.id,
         "generation": session.generation,
@@ -3462,6 +3570,7 @@ async fn supervise_helper(
 
     loop {
         tokio::select! {
+            _ = child.wait() => break,
             line_result = read_bounded_line(&mut reader, &mut line) => {
                 match line_result {
                     Ok(None) => break,
@@ -4344,11 +4453,7 @@ async fn publish_session_event(state: &AppState, session: &StoredComputerSession
     .await;
 }
 
-async fn stop_child(
-    child: &mut tokio::process::Child,
-    stdin: &mut tokio::process::ChildStdin,
-    handshake: &str,
-) {
+async fn stop_child(child: &mut tokio::process::Child, stdin: &mut HelperInput, handshake: &str) {
     // Release held native input before asking the helper to exit. The helper
     // repeats this in its stop handler for crash/timeout races.
     let _ = write_helper_request(
