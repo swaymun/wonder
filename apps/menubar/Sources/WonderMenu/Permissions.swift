@@ -69,8 +69,8 @@ final class PermissionModel: ObservableObject {
     func request(_ pane: PrivacyPane, setup: Bool = false) {
         guard !busy else { return }
         message = pane == .screenRecording
-            ? "Allow Wonder in Privacy & Security → Screen Recording. If macOS asks you to quit and reopen Wonder, setup will resume. Access rechecks automatically."
-            : "Allow Wonder in Privacy & Security → Accessibility. Access rechecks automatically."
+            ? "Allow Wonder Computer Access in Privacy & Security → Screen Recording. If macOS asks you to quit and reopen Wonder, setup will resume."
+            : "Allow Wonder Computer Access in Privacy & Security → Accessibility. Access rechecks automatically."
         requestedPane = pane
         instructions = message
         probe(request: pane)
@@ -94,6 +94,34 @@ final class PermissionModel: ObservableObject {
     }
 
     nonisolated static func readPermissions(helper: String, requestFlag: String?) -> PermissionSnapshot? {
+        if let app = bundledHelperApp(for: helper) {
+            // LaunchServices gives the nested helper its own TCC identity for
+            // both checks and requests. A direct child of Wonder can inherit
+            // the outer app's grant while capture in the helper still fails.
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("wonder-permissions-\(UUID().uuidString)", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                        attributes: [.posixPermissions: 0o700])
+            } catch { return nil }
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let output = directory.appendingPathComponent("result.json")
+            let request = Process()
+            request.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            request.arguments = ["-W", "-n", "-a", app, "--args", "--permissions", "--permissions-output", output.path]
+                + (requestFlag.map { [$0] } ?? [])
+            request.standardOutput = FileHandle.nullDevice
+            request.standardError = FileHandle.nullDevice
+            do { try request.run() } catch { return nil }
+            let deadline = Date().addingTimeInterval(requestFlag == nil ? 3 : 30)
+            while request.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+            if request.isRunning {
+                request.terminate()
+                return nil
+            }
+            guard request.terminationStatus == 0 else { return nil }
+            guard let data = try? Data(contentsOf: output) else { return nil }
+            return try? JSONDecoder().decode(PermissionSnapshot.self, from: data)
+        }
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: helper)
@@ -114,5 +142,12 @@ final class PermissionModel: ObservableObject {
         guard process.terminationStatus == 0 else { return nil }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         return try? JSONDecoder().decode(PermissionSnapshot.self, from: data)
+    }
+
+    nonisolated private static func bundledHelperApp(for helper: String) -> String? {
+        let marker = "/WonderComputerUse.app/Contents/MacOS/WonderComputerUse"
+        guard helper.hasSuffix(marker) else { return nil }
+        let app = String(helper.dropLast("/Contents/MacOS/WonderComputerUse".count))
+        return FileManager.default.fileExists(atPath: app) ? app : nil
     }
 }

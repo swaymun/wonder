@@ -6,6 +6,8 @@
 	<string>WonderComputerUse</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.saimun.wonder.computer-use</string>
+	<key>CFBundleDisplayName</key>
+	<string>Wonder Computer Access</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundlePackageType</key>
