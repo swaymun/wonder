@@ -655,7 +655,7 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
         configuration.allowedPickerModes = [.singleWindow, .singleDisplay]
         picker.defaultConfiguration = configuration
         picker.isActive = true
-        picker.present(using: .window)
+        picker.present(using: .display)
         return true
     }
 
