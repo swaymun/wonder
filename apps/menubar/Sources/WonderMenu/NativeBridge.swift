@@ -81,10 +81,31 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             }
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            while let line = readLine() {
-                guard let data = line.data(using: .utf8), data.count < 65536,
-                      let command = try? JSONDecoder().decode(BridgeCommand.self, from: data) else { continue }
-                Task { @MainActor in await self?.perform(command) }
+            // readLine() holds stdin's C FILE lock while it waits. Foundation's
+            // XML parser also uses that lock when Sparkle reads an appcast.
+            // Read the pipe directly so an idle bridge cannot stall updates.
+            var pending = Data()
+            var discardingOversizeLine = false
+            while true {
+                let chunk = FileHandle.standardInput.availableData
+                if chunk.isEmpty { break }
+                for byte in chunk {
+                    if byte == 0x0A {
+                        if !discardingOversizeLine,
+                           let command = try? JSONDecoder().decode(BridgeCommand.self, from: pending) {
+                            Task { @MainActor in await self?.perform(command) }
+                        }
+                        pending.removeAll(keepingCapacity: true)
+                        discardingOversizeLine = false
+                    } else if !discardingOversizeLine {
+                        if pending.count < 65535 {
+                            pending.append(byte)
+                        } else {
+                            pending.removeAll(keepingCapacity: true)
+                            discardingOversizeLine = true
+                        }
+                    }
+                }
             }
             Task { @MainActor in NSApp.terminate(nil) }
         }
