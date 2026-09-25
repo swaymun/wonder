@@ -46,8 +46,48 @@ stop_child() {
   kill -KILL -- "-$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 }
+start_update_watcher() {
+  # Sparkle also installs downloaded updates on an ordinary app quit, without
+  # the explicit update-ready marker. Only watch that path when opted in.
+  if [[ "${1:-automatic}" != forced ]]; then
+    [[ "$(defaults read com.saimun.wonder SUAutomaticallyUpdate 2>/dev/null || true)" == 1 ]] || return 0
+  fi
+  local old_version
+  old_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_ROOT/Info.plist" 2>/dev/null || true)"
+  [[ -n "$old_version" ]] || return 0
+  /usr/bin/nohup /bin/bash -c '
+    app="$1"; old="$2"; log="$3"
+    printf "Watching for signed update after %s\n" "$old" > "$log"
+    for (( attempt=0; attempt<180; attempt++ )); do
+      sleep 1
+      new="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$app/Contents/Info.plist" 2>/dev/null || true)"
+      if [[ -n "$new" && "$new" != "$old" ]] &&
+         /usr/bin/codesign --verify --strict "$app" >/dev/null 2>&1 &&
+         /usr/sbin/spctl --assess --type execute "$app" >/dev/null 2>&1; then
+        # Let Sparkle finish its own termination before the first open.
+        sleep 4
+        for (( retry=0; retry<3; retry++ )); do
+          printf "Opening signed update %s (attempt %s)\n" "$new" "$((retry + 1))" >> "$log"
+          /usr/bin/open "$app"
+          for (( check=0; check<40; check++ )); do
+            if /usr/bin/curl -fsS --max-time 1 http://127.0.0.1:3777/readyz >/dev/null 2>&1; then
+              printf "Ready on %s\n" "$new" >> "$log"
+              exit 0
+            fi
+            sleep 2
+            if (( check >= 3 )) && ! /usr/bin/pgrep -f "^$app/Contents/MacOS/WonderMenu$" >/dev/null; then break; fi
+          done
+        done
+        printf "Update installed but relaunch needs attention\n" >> "$log"
+        exit 1
+      fi
+    done
+    printf "Update was not installed in three minutes\n" >> "$log"
+  ' wonder-update-relaunch "$(cd "$APP_ROOT/.." && pwd)" "$old_version" "$HOME/Library/Logs/Wonder/update-relaunch.log" </dev/null >/dev/null 2>&1 &
+}
 cleanup() {
   trap - EXIT INT TERM
+  start_update_watcher automatic
   stop_child "$TUNNEL_PID"
   stop_child "$DAEMON_PID"
   stop_child "$MENU_PID"
@@ -94,43 +134,7 @@ while kill -0 "$MENU_PID" 2>/dev/null; do
     exec 9>&-
     touch "$WONDER_SERVICE_DIR/stopped"
     trap - EXIT INT TERM
-    # Sparkle can silently replace the bundle after this app quits without
-    # reopening the service. Start the watcher before waiting for WonderHost:
-    # the updater may terminate this launcher as soon as the host exits.
-    if [[ -f "$WONDER_SERVICE_DIR/update-ready" ]]; then
-      old_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_ROOT/Info.plist" 2>/dev/null || true)"
-      if [[ -n "$old_version" ]]; then
-        /usr/bin/nohup /bin/bash -c '
-          app="$1"; old="$2"; log="$3"
-          printf "Watching for signed update after %s\n" "$old" > "$log"
-          for (( attempt=0; attempt<180; attempt++ )); do
-            sleep 1
-            new="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$app/Contents/Info.plist" 2>/dev/null || true)"
-            if [[ -n "$new" && "$new" != "$old" ]] &&
-               /usr/bin/codesign --verify --strict "$app" >/dev/null 2>&1 &&
-               /usr/sbin/spctl --assess --type execute "$app" >/dev/null 2>&1; then
-              # Let Sparkle finish its own termination before the first open.
-              sleep 4
-              for (( retry=0; retry<3; retry++ )); do
-                printf "Opening signed update %s (attempt %s)\n" "$new" "$((retry + 1))" >> "$log"
-                /usr/bin/open "$app"
-                for (( check=0; check<40; check++ )); do
-                  if /usr/bin/curl -fsS --max-time 1 http://127.0.0.1:3777/readyz >/dev/null 2>&1; then
-                    printf "Ready on %s\n" "$new" >> "$log"
-                    exit 0
-                  fi
-                  sleep 2
-                  if (( check >= 3 )) && ! /usr/bin/pgrep -f "^$app/Contents/MacOS/WonderMenu$" >/dev/null; then break; fi
-                done
-              done
-              printf "Update installed but relaunch needs attention\n" >> "$log"
-              exit 1
-            fi
-          done
-          printf "Update was not installed in three minutes\n" >> "$log"
-        ' wonder-update-relaunch "$(cd "$APP_ROOT/.." && pwd)" "$old_version" "$HOME/Library/Logs/Wonder/update-relaunch.log" </dev/null >/dev/null 2>&1 &
-      fi
-    fi
+    start_update_watcher forced
     # The native bridge runs Sparkle and waits for this launcher to exit. If
     # the GPUI host cannot process update-ready, bound its shutdown without
     # killing the bridge's process group or leaving Wonder half running.
