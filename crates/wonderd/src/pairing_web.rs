@@ -16,15 +16,6 @@ pub async fn style() -> impl IntoResponse {
         include_str!("pairing_web/style.css"),
     )
 }
-// An update at the old registration URL retires installed browser shells.
-// It never registers a replacement worker or handles requests.
-pub async fn retire_worker() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("pairing_web/retire-worker.js"),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -41,7 +32,7 @@ mod tests {
             ("/", StatusCode::TEMPORARY_REDIRECT),
             ("/pair", StatusCode::OK),
             ("/pair/style.css", StatusCode::OK),
-            ("/sw.js", StatusCode::OK),
+            ("/sw.js", StatusCode::NOT_FOUND),
             ("/manifest.webmanifest", StatusCode::NOT_FOUND),
             ("/precache-manifest.json", StatusCode::NOT_FOUND),
             ("/assets/index.js", StatusCode::NOT_FOUND),

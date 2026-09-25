@@ -1132,7 +1132,6 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(pairing_web::root))
         .route("/pair", get(pairing_web::page))
         .route("/pair/style.css", get(pairing_web::style))
-        .route("/sw.js", get(pairing_web::retire_worker))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             update_admission::guard_new_work,
@@ -3097,7 +3096,7 @@ fn route_auth(path: &str) -> RouteAuth {
 }
 
 fn is_pairing_web_path(path: &str) -> bool {
-    matches!(path, "/" | "/pair" | "/pair/style.css" | "/sw.js")
+    matches!(path, "/" | "/pair" | "/pair/style.css")
 }
 
 async fn require_loopback_capability(

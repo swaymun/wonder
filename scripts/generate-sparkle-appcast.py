@@ -4,9 +4,9 @@ r"""Create a verified, signed single-release appcast; never upload or publish it
 Requires an already Developer ID signed, stapled/notarized Wonder DMG and the
 existing wonder-public-beta Keychain account. No private key is exported.
 Example (the output must not exist):
-  python3 scripts/generate-sparkle-appcast.py --dmg dist/Wonder-1.0.51.dmg \
-    --version 1.0.51 --asset-url \
-    https://github.com/swaymun/wonder/releases/download/mac-v1.0.51-beta.1/Wonder-1.0.51.dmg \
+  python3 scripts/generate-sparkle-appcast.py --dmg dist/Wonder-1.0.80.dmg \
+    --version 1.0.80 --asset-url \
+    https://github.com/swaymun/wonder/releases/download/mac-v1.0.80-beta.1/Wonder-1.0.80.dmg \
     --output .local/appcast.xml
 
 The URL is a planned, versioned release asset; this tool does not certify its

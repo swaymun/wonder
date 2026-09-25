@@ -22,13 +22,9 @@ assert.match(shell.body, /<html/i, "the public response should be HTML");
 const unpairedRoot = curl("/", { origin: false });
 assert.equal(unpairedRoot.status, 307, "an unpaired browser must be redirected to pairing");
 
-for (const path of ["/manifest.webmanifest", "/precache-manifest.json", "/assets/index.js", "/index.html", "/bots"]) {
+for (const path of ["/sw.js", "/manifest.webmanifest", "/precache-manifest.json", "/assets/index.js", "/index.html", "/bots"]) {
   assert.equal(curl(path, { origin: false }).status, 404, `${path} must no longer serve a browser app`);
 }
-const retirement = curl("/sw.js", { origin: false });
-assert.equal(retirement.status, 200);
-assert.match(retirement.body, /registration\.unregister/);
-assert.doesNotMatch(retirement.body, /addEventListener\(["']fetch/);
 assert.doesNotMatch(shell.body, /<script|rel=["']manifest/i);
 
 const protectedBots = curl("/api/v1/bots");
@@ -54,4 +50,4 @@ const wrongOriginProtectedApi = (() => {
 })();
 assert.equal(wrongOriginProtectedApi.status, 403, "protected API requests must reject a wrong origin before session handling");
 
-console.log(`verified native pairing page, retired browser app, and unpaired API boundary at ${origin}`);
+console.log(`verified native pairing page, no browser app, and unpaired API boundary at ${origin}`);

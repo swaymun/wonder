@@ -2,7 +2,9 @@
 # Excludes private history, evidence, reference media, build output and credentials.
 .gitattributes
 .github/workflows/ci.yml
+.github/workflows/release-docs.yml
 .gitignore
+AGENTS.md
 BETA_STATUS.md
 Cargo.lock
 Cargo.toml
@@ -360,7 +362,6 @@ crates/wonderd/src/logging.rs
 crates/wonderd/src/main.rs
 crates/wonderd/src/pairing_web.rs
 crates/wonderd/src/pairing_web/index.html
-crates/wonderd/src/pairing_web/retire-worker.js
 crates/wonderd/src/pairing_web/style.css
 crates/wonderd/src/permission_modes.rs
 crates/wonderd/src/phone_approval_tests.rs
@@ -545,7 +546,6 @@ services/push/tsconfig.json
 services/push/vitest.config.ts
 services/push/worker-configuration.d.ts
 services/push/wrangler.jsonc
-tests/browser-retirement/worker.test.mjs
 tests/contracts/README.md
 tests/contracts/fixtures/account.jsonl
 tests/contracts/fixtures/approvals.jsonl

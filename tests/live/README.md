@@ -1,6 +1,6 @@
 # Opt-in native integration checks
 
-The no-model HTTP smoke checks the pairing-only public page, removal of browser assets and manifest, the retirement worker, and native API origin/session boundaries. It does not pair a device or consume model usage.
+The no-model HTTP smoke checks the pairing-only public page, absence of browser app assets, and native API origin/session boundaries. It does not pair a device or consume model usage.
 
 ```text
 WONDER_PUBLIC_ORIGIN=https://wonder.example.ts.net node tests/live/native-http-smoke.mjs
