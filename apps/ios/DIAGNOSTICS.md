@@ -192,6 +192,14 @@ refresh cases on iPhone/iPad; retain maximum Dynamic Type coverage.
 
 ## Optimistic approval settings and helper avatars
 
+`testDiagnosticsGoalPillAndSheetAtAccessibilitySize` exercises the Goal pill
+beside the agent pill on iPad with an open keyboard and large text. It checks
+the half sheet, pause/resume, objective and budget editing, removal confirmation,
+and preservation of the parent draft. `testDiagnosticsGoalPillAndSheet` covers
+normal iPhone text size. The synthetic Goal fixture uses the product conversation
+view and never starts model work; physical paired-host Goal continuation and
+enforcement remain separate checks.
+
 `testComposerApprovalChangesWithoutSavingIndicatorAndPersists` uses the actual
 composer and helper roster against `-diagnostics-subagent-fixture
 -diagnostics-optimistic-approval`. The synthetic PATCH waits 250 ms, writes only

@@ -13,7 +13,7 @@ done
 runtime="${WONDER_CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex}"
 if [[ -x "$runtime" ]]; then
   version="$("$runtime" --version)"
-  if [[ "$version" == 'codex-cli 0.155.0-alpha.9' || "$version" == 'codex-cli 0.155.0-alpha.9.2' || "$version" == 'codex-cli 0.155.0-alpha.16.3' ]]; then
+  if [[ "$version" == 'codex-cli 0.155.0-alpha.9' || "$version" == 'codex-cli 0.155.0-alpha.9.2' || "$version" == 'codex-cli 0.155.0-alpha.16.3' || "$version" == 'codex-cli 0.155.0-alpha.16.4' ]]; then
     echo 'Codex runtime: supported version (launch also checks schema and provider authentication)'
   else
     echo "Codex runtime: incompatible version $version; see compatibility-manifest.json"; missing=1

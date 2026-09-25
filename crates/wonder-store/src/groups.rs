@@ -59,6 +59,9 @@ impl Store {
         }
         let message = self.message_for_codex_thread_and_turn(thread, turn).await?;
         if message.is_none() {
+            if let Some(conversation) = self.goal_conversation_for_turn(thread, turn).await? {
+                return Ok(Some(conversation));
+            }
             return Ok(self
                 .subagent_ownership_for_thread(thread)
                 .await?

@@ -16,7 +16,7 @@ use std::{cmp::Ordering, collections::HashMap, time::Duration};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use wonder_api::{HostEventEnvelope, WonderEvent};
 
-pub const MIGRATION_NAMES: [&str; 72] = [
+pub const MIGRATION_NAMES: [&str; 73] = [
     "0001_initial.sql",
     "0002_message_body.sql",
     "0003_conversations.sql",
@@ -89,6 +89,7 @@ pub const MIGRATION_NAMES: [&str; 72] = [
     "0070_computer_tool_calls.sql",
     "0071_push.sql",
     "0072_push_previews_presence.sql",
+    "0073_goal_time_limits.sql",
 ];
 
 mod bot_management;
@@ -116,6 +117,8 @@ mod groups;
 pub use groups::GroupRun;
 mod queue;
 pub use queue::QueueItem;
+mod goals;
+pub use goals::GoalTimeLimit;
 mod history;
 mod search;
 pub use search::{SearchCursor, SearchPage};

@@ -559,6 +559,20 @@ struct ConnectionDetail: View {
                         }
                     ))
                     .accessibilityIdentifier("connection-notifications")
+                    if let state = push.setupState(host) {
+                        switch state {
+                        case .settingUp:
+                            Text("Setting up notifications…")
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("connection-notifications-status")
+                        case .needsRetry(let message):
+                            Text(message)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("connection-notifications-status")
+                            Button("Retry notification setup") { push.retry(host) }
+                                .accessibilityIdentifier("connection-notifications-retry")
+                        }
+                    }
                 }
                 .alert(push.settingsAlert?.title ?? "Couldn't change notifications", isPresented: Binding(
                     get: { push.settingsAlert?.host == host },

@@ -11,6 +11,7 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
         loop {
             while groups.try_join_next().is_some() {}
             let _ = crate::questions::expire_optional(&state).await;
+            crate::goals::enforce_time_limits(&state).await;
             if state.ingestion.readiness(&state.store).await.ready {
                 let _ = crate::groups::tick(&state, &mut groups).await;
                 if let Err(error) = tick(&state).await {

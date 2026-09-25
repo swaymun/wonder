@@ -27,6 +27,35 @@ struct CodexUsageCacheEntry: Sendable {
     let fetchedAt: Date
 }
 
+struct ConversationGoal: Decodable, Equatable, Sendable {
+    let objective: String
+    let status: String
+    let createdAt: Date?
+    let tokenBudget: Int?
+    let tokensUsed: Int
+    let timeBudgetSeconds: Int?
+    let timeUsedSeconds: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case objective, status, createdAt, tokenBudget, tokensUsed, timeBudgetSeconds, timeUsedSeconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        objective = try values.decode(String.self, forKey: .objective)
+        status = try values.decode(String.self, forKey: .status)
+        let stamp = try values.decodeIfPresent(Double.self, forKey: .createdAt)
+        createdAt = stamp.map { Date(timeIntervalSince1970: $0 > 1_000_000_000_000 ? $0 / 1000 : $0) }
+        tokenBudget = try values.decodeIfPresent(Int.self, forKey: .tokenBudget)
+        tokensUsed = try values.decodeIfPresent(Int.self, forKey: .tokensUsed) ?? 0
+        timeBudgetSeconds = try values.decodeIfPresent(Int.self, forKey: .timeBudgetSeconds)
+        timeUsedSeconds = try values.decodeIfPresent(Int.self, forKey: .timeUsedSeconds) ?? 0
+    }
+}
+
+private struct ConversationGoalResponse: Decodable, Sendable { let goal: ConversationGoal? }
+private struct EmptyGoalResponse: Decodable, Sendable {}
+
 /// Projects the server's mixed conversation response into the active Chats
 /// list. Bot IDs are intentionally supplied by the caller after it has
 /// applied the Bot archive state; the complete Bot ID set remains useful for
@@ -96,6 +125,7 @@ struct ManagedBotListMutationState {
                 cancelApprovalSettings()
                 connectedAppsCache = [:]
                 codexUsageCache = [:]
+                goals = [:]; goalErrors = [:]; goalMutationTokens = [:]
                 resetImagePreviews()
                 dictation.connectionChanged()
                 cameraContextID = UUID()
@@ -115,11 +145,14 @@ struct ManagedBotListMutationState {
     @Published var busy = false
     @Published var verification: String?
     @Published var error: String?
-    @Published var accessEnded = false { didSet { if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
+    @Published var accessEnded = false { didSet { if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
     @Published var chats: [ChatSummary] = []
     @Published var subagents: [String: [SubagentSummary]] = [:]
     @Published var subagentAvailability: [String: Bool] = [:]
     @Published var subagentErrors: [String: String] = [:]
+    @Published var goals: [String: ConversationGoal] = [:]
+    @Published var goalErrors: [String: String] = [:]
+    private var goalMutationTokens: [String: UUID] = [:]
     @Published var savingComposerSettings: Set<String> = []
     @Published var composerApprovalChanges: [ComposerApprovalTarget: ComposerApprovalChange] = [:]
     var composerApprovalTasks: [ComposerApprovalTarget: Task<Void, Never>] = [:]
@@ -829,6 +862,83 @@ struct ManagedBotListMutationState {
 
     func isSubagent(_ chat: ChatSummary) -> Bool {
         subagentSummary(for: chat.id) != nil
+    }
+
+    func loadGoal(_ chat: ChatSummary) async {
+        guard chat.botId != nil, !isSubagent(chat), !previewMode,
+              let saved = connection, !accessEnded else { return }
+        let key = partition
+        let mutation = goalMutationTokens[chat.id]
+        do {
+            let response: ConversationGoalResponse = try await api.request(
+                "/api/v1/conversations/\(Self.escape(chat.id))/goal",
+                origin: saved.origin, credential: saved.credential)
+            guard key == partition, mutation == goalMutationTokens[chat.id], !Task.isCancelled else { return }
+            if goals[chat.id] != response.goal { goals[chat.id] = response.goal }
+            if goalErrors[chat.id] == "Goal status could not be refreshed. Try again." { goalErrors[chat.id] = nil }
+        } catch PairingFailure.response(404) {
+            guard key == partition else { return }
+            if goals[chat.id] != nil { goals[chat.id] = nil }
+        } catch {
+            guard key == partition else { return }
+            if goals[chat.id] != nil { goalErrors[chat.id] = "Goal status could not be refreshed. Try again." }
+        }
+    }
+
+    @discardableResult private func mutateGoal(_ chat: ChatSummary, body: [String: Any]) async -> Bool {
+        guard chat.botId != nil, !isSubagent(chat), let saved = connection, !accessEnded else { return false }
+        let key = partition
+        let token = UUID()
+        goalMutationTokens[chat.id] = token
+        goalErrors[chat.id] = nil
+        do {
+            let data = try JSONSerialization.data(withJSONObject: body)
+            let response: ConversationGoalResponse = try await api.request(
+                "/api/v1/conversations/\(Self.escape(chat.id))/goal",
+                origin: saved.origin, body: data, credential: saved.credential, method: "PUT")
+            guard key == partition, goalMutationTokens[chat.id] == token else { return false }
+            goals[chat.id] = response.goal
+            return true
+        } catch {
+            guard key == partition, goalMutationTokens[chat.id] == token else { return false }
+            await loadGoal(chat)
+            if key == partition, goalMutationTokens[chat.id] == token {
+                goalErrors[chat.id] = "Goal could not be saved. Try again."
+            }
+            return false
+        }
+    }
+
+    func updateGoal(_ chat: ChatSummary, objective: String, tokenBudget: Int?, timeBudgetSeconds: Int?) async -> Bool {
+        await mutateGoal(chat, body: [
+            "objective": objective,
+            "tokenBudget": tokenBudget.map { $0 as Any } ?? NSNull(),
+            "timeBudgetSeconds": timeBudgetSeconds.map { $0 as Any } ?? NSNull()
+        ])
+    }
+
+    func pauseGoal(_ chat: ChatSummary) async { await mutateGoal(chat, body: ["status": "paused"]) }
+    func resumeGoal(_ chat: ChatSummary) async { await mutateGoal(chat, body: ["status": "active"]) }
+
+    func clearGoal(_ chat: ChatSummary) async {
+        guard chat.botId != nil, !isSubagent(chat), let saved = connection, !accessEnded else { return }
+        let key = partition
+        let token = UUID()
+        goalMutationTokens[chat.id] = token
+        goalErrors[chat.id] = nil
+        do {
+            let _: EmptyGoalResponse = try await api.request(
+                "/api/v1/conversations/\(Self.escape(chat.id))/goal",
+                origin: saved.origin, credential: saved.credential, method: "DELETE")
+            guard key == partition, goalMutationTokens[chat.id] == token else { return }
+            goals[chat.id] = nil
+        } catch {
+            guard key == partition, goalMutationTokens[chat.id] == token else { return }
+            await loadGoal(chat)
+            if key == partition, goalMutationTokens[chat.id] == token {
+                goalErrors[chat.id] = "Goal could not be removed. Try again."
+            }
+        }
     }
 
     func loadSubagents(_ parent: ChatSummary) async {

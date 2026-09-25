@@ -306,12 +306,14 @@ crates/wonder-store/migrations/0069_file_change_history_repair.sql
 crates/wonder-store/migrations/0070_computer_tool_calls.sql
 crates/wonder-store/migrations/0071_push.sql
 crates/wonder-store/migrations/0072_push_previews_presence.sql
+crates/wonder-store/migrations/0073_goal_time_limits.sql
 crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs
 crates/wonder-store/src/bot_management.rs
 crates/wonder-store/src/computer_sessions.rs
 crates/wonder-store/src/file_access.rs
+crates/wonder-store/src/goals.rs
 crates/wonder-store/src/group_collaboration.rs
 crates/wonder-store/src/groups.rs
 crates/wonder-store/src/history.rs
@@ -345,6 +347,7 @@ crates/wonderd/src/dispatch.rs
 crates/wonderd/src/enrollment_tests.rs
 crates/wonderd/src/file_access.rs
 crates/wonderd/src/filesystem.rs
+crates/wonderd/src/goals.rs
 crates/wonderd/src/group_attachments.rs
 crates/wonderd/src/group_collaboration.rs
 crates/wonderd/src/groups.rs

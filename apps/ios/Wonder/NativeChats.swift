@@ -628,6 +628,7 @@ struct ConversationView: View {
     let readOnly: Bool
     @State private var selectedSubagent: SubagentSummary?
     @State private var showingSubagents = false
+    @State private var showingGoal = false
     @State private var restoreSubagentRoster = false
     @State private var editingGroup = false
     @State private var importing = false
@@ -656,7 +657,7 @@ struct ConversationView: View {
         model.cameraContextID.uuidString + ":" + chat.id
     }
     private var conversationCovered: Bool {
-        showingDetails || showingApps || workspaceRequest != nil || editingGroup || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents
+        showingDetails || showingApps || workspaceRequest != nil || editingGroup || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents || showingGoal
     }
     private var avatarMotionState: ScienceAvatarMotionState {
         guard let turnID = model.activeTurn(chat.id),
@@ -1112,6 +1113,9 @@ struct ConversationView: View {
         .onChange(of: conversationCovered) { _, covered in
             if covered { model.dictation.captureControlsHidden(conversationID: chat.id) }
         }
+        .onChange(of: model.goals[chat.id] != nil) { _, exists in
+            if !exists { showingGoal = false }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange)) { _ in
             lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
         }
@@ -1135,6 +1139,13 @@ struct ConversationView: View {
         .task(id: chat.id) {
             await model.open(chat, root: rootChat, readOnly: readOnly)
             if model.previewMode, ProcessInfo.processInfo.arguments.contains("-preview-document") { workspaceRequest = WorkspaceBrowserRequest() }
+        }
+        .task(id: chat.id) {
+            guard !readOnly, chat.botId != nil else { return }
+            while !Task.isCancelled {
+                await model.loadGoal(chat)
+                try? await Task.sleep(for: .seconds(5))
+            }
         }
         .task(id: attachmentMetadataRequest) {
             let request = attachmentMetadataRequest
@@ -1168,18 +1179,35 @@ struct ConversationView: View {
                     else if model.uploading.contains(chat.id) { ProgressView("Uploading attachments…") }
                     else if model.preparingSends.contains(chat.id) { ProgressView("Preparing message…") }
                     VStack(spacing: 4) {
-                    if !(model.subagents[chat.id] ?? []).isEmpty {
-                    SubagentDock(agents: model.subagents[chat.id] ?? [], available: model.subagentAvailability[chat.id] != false,
-                        avatarShape: ScienceAvatarPresentation.shape(rawValue: headerBot?.avatarShape, identity: chat.botId ?? chat.id),
-                        avatarPalette: ScienceAvatarPresentation.palette(rawValue: headerBot?.avatarPalette, legacyColor: headerBot?.avatarColor),
-                        isPresented: $showingSubagents) { child in
-                        restoreSubagentRoster = true
-                        showingSubagents = false
-                        Task { @MainActor in
-                            await Task.yield()
-                            selectedSubagent = child
+                    if model.goals[chat.id] != nil || !(model.subagents[chat.id] ?? []).isEmpty {
+                        HStack(alignment: .bottom, spacing: 4) {
+                            Spacer(minLength: 0)
+                            if let goal = model.goals[chat.id], chat.botId != nil,
+                               model.groups[chat.id] == nil, !model.isSubagent(chat) {
+                                GoalDock(goal: goal, error: model.goalErrors[chat.id], isPresented: $showingGoal,
+                                    save: { objective, budget, timeBudget in
+                                        await model.updateGoal(chat, objective: objective,
+                                                               tokenBudget: budget, timeBudgetSeconds: timeBudget)
+                                    },
+                                    pause: { await model.pauseGoal(chat) },
+                                    resume: { await model.resumeGoal(chat) },
+                                    clear: { await model.clearGoal(chat) })
+                            }
+                            if !(model.subagents[chat.id] ?? []).isEmpty {
+                                SubagentDock(agents: model.subagents[chat.id] ?? [], available: model.subagentAvailability[chat.id] != false,
+                                    avatarShape: ScienceAvatarPresentation.shape(rawValue: headerBot?.avatarShape, identity: chat.botId ?? chat.id),
+                                    avatarPalette: ScienceAvatarPresentation.palette(rawValue: headerBot?.avatarPalette, legacyColor: headerBot?.avatarColor),
+                                    isPresented: $showingSubagents) { child in
+                                    restoreSubagentRoster = true
+                                    showingSubagents = false
+                                    Task { @MainActor in
+                                        await Task.yield()
+                                        selectedSubagent = child
+                                    }
+                                }
+                            }
                         }
-                    }
+                        .frame(maxWidth: .infinity)
                     }
                     DictationComposerSurface(controller: model.dictation, conversationID: chat.id) {
                     VStack(spacing: 0) {

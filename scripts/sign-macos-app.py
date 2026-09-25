@@ -14,8 +14,9 @@ def run(*args):
 def identity():
     matches = re.findall(r'\b([A-F0-9]{40}) "([^"]+)"', run('security', 'find-identity', '-v', '-p', 'codesigning'))
     requested = os.environ.get('WONDER_APP_SIGNING_IDENTITY')
+    default_prefix = 'Developer ID Application:' if os.environ.get('WONDER_NOTARIZE') == '1' else 'Apple Development:'
     candidates = [(sha, name) for sha, name in matches if
-                  (requested in (sha, name) if requested else name.startswith('Apple Development:'))]
+                  (requested in (sha, name) if requested else name.startswith(default_prefix))]
     if len(candidates) != 1:
         raise SystemExit('Select one valid certificate with WONDER_APP_SIGNING_IDENTITY. Ad-hoc signing is not supported.')
     sha, name = candidates[0]

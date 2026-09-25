@@ -806,6 +806,16 @@ for line in sys.stdin:
     result = {}
     if method == 'initialize': result = {'capabilities': {'experimentalApi': True}}
     elif method == 'permissionProfile/list': result = {'data': [{'name': 'test', 'allowed': True}, {'name': ':read-only', 'allowed': True}, {'name': ':workspace', 'allowed': True}, {'name': ':danger-full-access', 'allowed': True}]}
+    elif method == 'thread/goal/get':
+        result = {'goal':json.load(open(root + '/goal.json')) if os.path.exists(root + '/goal.json') else None}
+    elif method == 'thread/goal/set':
+        goal = json.load(open(root + '/goal.json')) if os.path.exists(root + '/goal.json') else {'threadId':'thread','createdAt':1700000000,'updatedAt':1700000000,'objective':'','status':'active','tokensUsed':0,'timeUsedSeconds':0,'tokenBudget':None}
+        goal.update({k:v for k,v in r['params'].items() if k in ('objective','status','tokenBudget')})
+        with open(root + '/goal.json','w') as saved: json.dump(goal,saved)
+        result = {'goal':goal}
+    elif method == 'thread/goal/clear':
+        if os.path.exists(root + '/goal.json'): os.remove(root + '/goal.json')
+        result = {}
     elif method == 'thread/start': result = {'thread':{'id':'thread'}}
     elif method == 'turn/start':
         with open(root + '/accepted-client', 'w') as saved: saved.write(r['params']['clientUserMessageId'])
@@ -1097,6 +1107,101 @@ for line in sys.stdin:
                 .unwrap()[0]
                 .text,
             "once"
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_continuation_stays_in_parent_after_goal_is_cleared() {
+        let (_dir, state) = fixture().await;
+        state
+            .store
+            .set_conversation_thread("bot", "thread", None, "now")
+            .await
+            .unwrap();
+        let created = crate::goals::set(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("bot".to_owned()),
+            axum::Json(
+                json!({"objective":"Finish the review","tokenBudget":1000,"timeBudgetSeconds":600}),
+            ),
+        )
+        .await;
+        assert_eq!(created.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            state
+                .store
+                .goal_time_limit("bot")
+                .await
+                .unwrap()
+                .unwrap()
+                .budget_seconds,
+            600
+        );
+        let start = json!({"method":"turn/started","params":{"threadId":"thread","turn":{"id":"continuation","status":"inProgress"}}});
+        assert!(crate::process_app_server_notification(&state, start, false).await);
+        assert_eq!(
+            state
+                .store
+                .goal_conversation_for_turn("thread", "continuation")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("bot")
+        );
+        let removed = crate::goals::clear(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("bot".to_owned()),
+        )
+        .await;
+        assert_eq!(removed.status(), axum::http::StatusCode::NO_CONTENT);
+        let delta = json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"continuation","itemId":"reply","sequence":1,"delta":{"text":"Finished"}}});
+        assert!(crate::process_app_server_notification(&state, delta, false).await);
+        let messages = state
+            .store
+            .assistant_messages_for_conversation("bot")
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "Finished");
+    }
+
+    #[tokio::test]
+    async fn goal_time_limit_pauses_after_active_time() {
+        let (dir, state) = fixture().await;
+        state
+            .store
+            .set_conversation_thread("bot", "thread", None, "now")
+            .await
+            .unwrap();
+        let created = crate::goals::set(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("bot".to_owned()),
+            axum::Json(json!({"objective":"Finish a long review","timeBudgetSeconds":60})),
+        )
+        .await;
+        assert_eq!(created.status(), axum::http::StatusCode::OK);
+        let goal_path = dir.path().join("goal.json");
+        let mut goal: Value = serde_json::from_slice(&fs::read(&goal_path).unwrap()).unwrap();
+        goal["timeUsedSeconds"] = json!(59);
+        fs::write(&goal_path, serde_json::to_vec(&goal).unwrap()).unwrap();
+        crate::goals::enforce_time_limits_now(&state).await;
+        let goal: Value = serde_json::from_slice(&fs::read(&goal_path).unwrap()).unwrap();
+        assert_eq!(goal["status"], "active");
+        let mut goal = goal;
+        goal["timeUsedSeconds"] = json!(60);
+        fs::write(&goal_path, serde_json::to_vec(&goal).unwrap()).unwrap();
+        crate::goals::enforce_time_limits_now(&state).await;
+        let goal: Value = serde_json::from_slice(&fs::read(&goal_path).unwrap()).unwrap();
+        assert_eq!(goal["status"], "paused");
+        assert_eq!(
+            state
+                .store
+                .goal_time_limit("bot")
+                .await
+                .unwrap()
+                .unwrap()
+                .budget_seconds,
+            60
         );
     }
 

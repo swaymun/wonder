@@ -48,6 +48,10 @@ struct PushSettingsAlert: Identifiable {
     let message: String
     var opensSettings = false
 }
+enum PushSetupState: Equatable {
+    case settingUp
+    case needsRetry(String)
+}
 
 struct PushRetry {
     private(set) var failures = 0
@@ -75,6 +79,7 @@ private enum PushFailure: LocalizedError {
     // The switch expresses durable user intent, independently of network setup.
     @Published private var requestedDevices: [String: String] = [:]
     @Published private(set) var settingsAlert: PushSettingsAlert?
+    @Published private(set) var setupStates: [String: PushSetupState] = [:]
     @Published private(set) var destination: PushDestination?
     @Published private(set) var routingError: String?
     private var records: [String: PushRegistration] = [:]
@@ -88,6 +93,7 @@ private enum PushFailure: LocalizedError {
     private var tasks: [String: Task<Void, Never>] = [:]
     private var taskIDs: [String: UUID] = [:]
     private var proofTasks: [String: Task<Void, Never>] = [:]
+    private var challengeTasks: [String: Task<Void, Never>] = [:]
     private var routingTask: Task<Void, Never>?
     private var foreground = false
     private var presenceTask: Task<Void, Never>?
@@ -176,7 +182,15 @@ private enum PushFailure: LocalizedError {
         }
         for saved in library.saved.connections {
             let host = saved.credential.hostInstallationId
-            if requestedDevices[host] == saved.credential.deviceId { schedule(host) }
+            if requestedDevices[host] == saved.credential.deviceId {
+                if isRegistered(host) { setupStates.removeValue(forKey: host) }
+                else if setupStates[host] == nil { setupStates[host] = .settingUp }
+                if let record = records[host], !record.nonce.isEmpty,
+                   let lastAttempt = record.lastAttempt, Date().timeIntervalSince(lastAttempt) >= 45 {
+                    challengeTimedOut(host, nonce: record.nonce)
+                }
+                schedule(host)
+            }
             else if records[host]?.enabled == true { disable(host) }
             else { scheduleDisable(host) }
         }
@@ -185,14 +199,47 @@ private enum PushFailure: LocalizedError {
     func receivedToken(_ data: Data) {
         let value = data.map { String(format: "%02x", $0) }.joined()
         if token != value { token = value; retries.removeAll() }
+        for host in requestedDevices.keys where isRegistered(host) { setupStates.removeValue(forKey: host) }
         refresh()
     }
-    func registrationFailed() { /* The next foreground retry asks APNs again. */ }
+    func registrationFailed() {
+        guard token == nil else { return }
+        for host in requestedDevices.keys where isEnabled(host) {
+            setupStates[host] = .needsRetry("iPhone couldn't register with Apple's notification service. Check your connection and retry.")
+        }
+    }
+    func setupState(_ host: String) -> PushSetupState? { isEnabled(host) ? setupStates[host] : nil }
+    func retry(_ host: String) {
+        guard isEnabled(host) else { return }
+        if isRegistered(host) { setupStates.removeValue(forKey: host); return }
+        challengeTasks.removeValue(forKey: host)?.cancel()
+        tasks.removeValue(forKey: host)?.cancel()
+        taskIDs.removeValue(forKey: host)
+        if records[host]?.enabled == true {
+            records[host]?.lastAttempt = nil
+            records[host]?.nonce = ""
+            do { try persist() }
+            catch {
+                setupStates[host] = .needsRetry("Unlock your iPhone, then retry notification setup.")
+                return
+            }
+        }
+        retries.removeValue(forKey: host)
+        setupStates[host] = .settingUp
+        if token == nil { registerForPush() }
+        schedule(host)
+    }
+    private func isRegistered(_ host: String) -> Bool {
+        guard let record = records[host] else { return false }
+        return record.enabled && record.macRegistered && record.id != nil && record.token == token
+    }
     func enable(_ model: ConnectionModel) {
         guard let saved = model.connection else { return }
         let host = saved.credential.hostInstallationId
         guard setRequested(saved.credential.deviceId, host: host) else { return }
         settingsAlert = nil
+        if isRegistered(host) { setupStates.removeValue(forKey: host) }
+        else { setupStates[host] = .settingUp }
         retries.removeValue(forKey: host)
         schedule(host)
     }
@@ -252,21 +299,37 @@ private enum PushFailure: LocalizedError {
             guard records[host]?.enabled == true else { return }
             return
         }
-        if let attempt = record.lastAttempt, Date().timeIntervalSince(attempt) < 60 { return }
+        // A pending proof may still arrive for ten minutes. Do not consume the
+        // service's three-per-hour challenge quota in a foreground retry loop.
+        if !record.nonce.isEmpty && record.pendingToken == token { return }
         record.pendingToken = token; record.nonce = try randomSecret(); record.enrollmentSecret = try randomSecret(); record.lastAttempt = Date(); record.macRegistered = false
         records[host] = record; try persist()
+        setupStates[host] = .settingUp
         let key = try P256.Signing.PrivateKey(rawRepresentation: record.key)
         let body = try JSONSerialization.data(withJSONObject: ["token": token, "publicKey": key.publicKey.x963Representation.base64URL, "nonce": record.nonce])
         struct Challenge: Decodable, Sendable { let id: String }
         let _: Challenge = try await api.request("/v1/challenges", origin: record.endpoint, body: body, decodingStatuses: [202])
         // The proof arrives via APNs, never in this HTTP response.
         try Task.checkCancellation()
+        let nonce = record.nonce
+        challengeTasks[host]?.cancel()
+        challengeTasks[host] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(45))
+            guard let self, !Task.isCancelled else { return }
+            self.challengeTimedOut(host, nonce: nonce)
+        }
+    }
+    func challengeTimedOut(_ host: String, nonce: String) {
+        guard proofTasks[host] == nil, records[host]?.nonce == nonce,
+              records[host]?.macRegistered != true, isEnabled(host) else { return }
+        setupStates[host] = .needsRetry("Apple didn't confirm notification setup. Check your connection and retry.")
     }
     func receiveChallenge(id: String, challenge: String, nonce: String) async {
         guard UUID(uuidString: id) != nil, challenge.count == 43,
               let (host, record) = records.first(where: { $0.value.enabled && $0.value.nonce == nonce }),
               let model = model(host, device: record.device) else { return }
         guard proofTasks[host] == nil else { return }
+        challengeTasks.removeValue(forKey: host)?.cancel()
         let task = Task { [weak self] in
             guard let self else { return }
             await acceptChallenge(id: id, challenge: challenge, nonce: nonce, host: host, record: record, model: model)
@@ -289,8 +352,10 @@ private enum PushFailure: LocalizedError {
             if record.previousIDs.count >= 16, let oldest = record.previousIDs.last { try PushPreviewKeys.remove(oldest) }
             if let old = record.id, old != id { updated.previousIDs = Array(([old] + record.previousIDs).prefix(16)) }
             updated.id = id; updated.token = record.pendingToken; updated.senderSecret = record.enrollmentSecret; updated.registeredAt = Date(); updated.macRegistered = false
+            updated.nonce = ""
             records[host] = updated; try persist()
             try await registerWithMac(updated, model: model)
+            challengeTasks.removeValue(forKey: host)?.cancel()
             retries.removeValue(forKey: host)
         } catch {
             if !Task.isCancelled {
@@ -317,11 +382,13 @@ private enum PushFailure: LocalizedError {
         let result: Registered = try await model.api.request("/api/v1/push/registration", origin: saved.origin, body: body, credential: saved.credential)
         guard result.registered, records[record.host]?.id == id, records[record.host]?.enabled == true else { throw CancellationError() }
         records[record.host]?.macRegistered = true; records[record.host]?.previewVersion = config.previewVersion; try persist()
+        setupStates.removeValue(forKey: record.host)
     }
     func disable(_ model: ConnectionModel) {
         guard let host = model.connection?.credential.hostInstallationId else { return }
         guard setRequested(nil, host: host) else { return }
         settingsAlert = nil
+        setupStates.removeValue(forKey: host)
         disable(host)
     }
     func dismissSettingsAlert() { settingsAlert = nil }
@@ -352,7 +419,8 @@ private enum PushFailure: LocalizedError {
         case is SigningIdentityFailure:
             message = "Unlock your iPhone and try again."
         default:
-            // Offline Macs, APNs delays and service/rate-limit errors recover quietly.
+            // Preserve intent for automatic retries, but make a stalled setup visible.
+            setupStates[host] = .needsRetry("Couldn't finish notification setup. Check your connection and retry.")
             return
         }
         guard setRequested(nil, host: host) else { return }
@@ -360,6 +428,8 @@ private enum PushFailure: LocalizedError {
         settingsAlert = PushSettingsAlert(host: host, title: "Couldn't turn on notifications", message: message, opensSettings: opensSettings)
     }
     private func disable(_ host: String) {
+        setupStates.removeValue(forKey: host)
+        challengeTasks.removeValue(forKey: host)?.cancel()
         retries.removeValue(forKey: host)
         if records[host] != nil {
             records[host]?.enabled = false

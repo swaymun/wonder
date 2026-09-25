@@ -28,6 +28,7 @@ mod connected_apps;
 pub mod dispatch;
 pub mod file_access;
 mod filesystem;
+mod goals;
 mod group_attachments;
 mod group_collaboration;
 mod groups;
@@ -914,6 +915,10 @@ pub fn router(state: AppState) -> Router {
             get(subagents::list),
         )
         .route(
+            "/api/v1/conversations/{conversation_id}/goal",
+            get(goals::get).put(goals::set).delete(goals::clear),
+        )
+        .route(
             "/api/v1/groups/{group_id}/assignment-projects",
             get(project_assignments::projects),
         )
@@ -1345,6 +1350,59 @@ async fn process_app_server_notification(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     });
+    if matches!(method, "thread/goal/updated" | "thread/goal/cleared") {
+        let Some(thread) = thread_id.as_deref() else {
+            return false;
+        };
+        if method == "thread/goal/cleared" {
+            if let Ok(Some(conversation)) = state.store.goal_conversation_for_thread(thread).await {
+                if state
+                    .store
+                    .clear_goal_time_limit(&conversation)
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            return state.store.clear_goal_thread(thread).await.is_ok();
+        }
+        let conversation = match state.store.conversation_for_thread(thread).await {
+            Ok(Some(conversation)) => conversation,
+            Ok(None) => return true,
+            Err(_) => return false,
+        };
+        if state
+            .store
+            .set_goal_thread(&conversation, thread)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        if let Some(turn) = turn_id.as_deref() {
+            return state
+                .store
+                .set_goal_turn(&conversation, thread, turn)
+                .await
+                .is_ok();
+        }
+        return true;
+    }
+    if method == "turn/started" {
+        if let (Some(thread), Some(turn)) = (thread_id.as_deref(), turn_id.as_deref()) {
+            if let Ok(Some(conversation)) = state.store.goal_conversation_for_thread(thread).await {
+                if state
+                    .store
+                    .set_goal_turn(&conversation, thread, turn)
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+    }
     let message = match (thread_id.as_deref(), turn_id.as_deref()) {
         (Some(thread_id), Some(turn_id)) => {
             state
@@ -1395,6 +1453,19 @@ async fn process_app_server_notification(
             Err(_) => return false,
         }
     };
+    let goal_conversation = if message.is_none() && ownership.is_none() {
+        match (thread_id.as_deref(), turn_id.as_deref()) {
+            (Some(thread), Some(turn)) => {
+                match state.store.goal_conversation_for_turn(thread, turn).await {
+                    Ok(conversation) => conversation,
+                    Err(_) => return false,
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     let conversation_id = message
         .as_ref()
         .map(|message| message.conversation_id.clone())
@@ -1402,7 +1473,8 @@ async fn process_app_server_notification(
             ownership
                 .as_ref()
                 .map(|ownership| ownership.conversation_id.clone())
-        });
+        })
+        .or(goal_conversation.clone());
     if method == "item/tool/call"
         && matches!(
             params.get("tool").and_then(serde_json::Value::as_str),
@@ -1438,7 +1510,11 @@ async fn process_app_server_notification(
         || method == "item/fileChange/patchUpdated";
     // A notification can race the dispatch response that stores the turn id.
     // Keep it durably until the turn is mapped to a Wonder conversation.
-    if is_message_bound_notification && message.is_none() && ownership.is_none() {
+    if is_message_bound_notification
+        && message.is_none()
+        && ownership.is_none()
+        && goal_conversation.is_none()
+    {
         let identity_key = app_server_notification_key(method, &notification, &params);
         return enqueue_pending_app_server_notification(
             state,

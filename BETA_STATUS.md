@@ -1,8 +1,9 @@
 # Wonder beta status
 
 The signed Mac beta is available. Public TestFlight enrollment is not open yet.
-Build 1.0 (50) is waiting for Apple’s external Beta App Review; the first group
-is limited to 100 people.
+Apple shows iOS build 1.0 (50) as Approved for external testing, but the Public
+Beta group has no testers and no public link. The planned first wave is limited
+to 100 people; release qualification is still in progress.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -13,7 +14,7 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Release 1.0 (50) is uploaded and processed. It is in the internal Owner Beta group and waiting for external Beta App Review in Public Beta. Installation of build 50 through TestFlight on the iPhone 11, notification delivery, and public enrollment remain unverified. |
+| iPhone and iPad | Release 1.0 (50) is uploaded, processed and externally approved. New Goal and notification fixes are under test and require a later Release build. Notification delivery, the updated build's physical installation, and public enrollment remain unverified. |
 | Mac companion | [Version 1.0.63](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.63-beta.1) is Developer ID signed, notarized, stapled and publicly downloadable. Its downloaded DMG matched the published checksum, and the live signed update feed matches the release. It is installed on the development Mac: `/readyz` returned 200, the previous Bots/messages/pairings remained, and Screen Recording and Accessibility remained allowed. A fresh-Mac install and an end-to-end automatic upgrade remain open. |
 | Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). Third-party components retain their own licenses. |
 
@@ -21,7 +22,7 @@ The [landing page, setup guide and privacy information](https://wonder-launch-pr
 
 ## Qualification still in progress
 
-The iPhone 11 passed the focused approval-box tests and the permission/helper interaction session. On the iPhone Air, remote viewing followed the selected Dell display and returned to the main built-in display when the preference was cleared; an earlier dedicated QA-window input test and Stop Control succeeded. The final selected-display session did not repeat remote input because the QA note was not visible in the preview. Simulator regression checks and source CI also pass. These do not establish clean installation, production notification delivery, independent-network control, VoiceOver, physical performance or scheduler recovery. Those release gates remain open. Teaching a task and replaying taught tasks have been removed from the beta scope until verified.
+The iPhone 11 passed the focused approval-box tests, the permission/helper interaction session, and the Goal sheet test. A ten-minute Diagnostics session completed 214 live interaction cycles, and a physical scrolling XCTest measured 0 ms/s hitch time over ten iterations. The expansion-readiness proxy reached 203 ms at p95, and physical footprint rose toward 81 MiB; these need a repeat against the updated host before performance is accepted. On the iPhone Air, remote viewing followed the selected Dell display and returned to the main built-in display when the preference was cleared; an earlier dedicated QA-window input test and Stop Control succeeded. The final selected-display session did not repeat remote input because the QA note was not visible in the preview. Simulator regression checks and source CI also pass. Clean installation, production notification delivery, independent-network control, VoiceOver, and scheduler recovery remain open. Teaching a task and replaying taught tasks have been removed from the beta scope until verified.
 
 ## Beta limitations
 
@@ -34,7 +35,8 @@ The iPhone 11 passed the focused approval-box tests and the permission/helper in
 - Supported OS versions and verification evidence are different: simulator checks do not establish physical-device behavior on every supported model.
 
 Release qualification is described in [RELEASING.md](RELEASING.md). The public
-TestFlight link will be enabled only after approval and installation checks pass.
+TestFlight link will be enabled only after the updated build and installation
+checks pass.
 
 Use synthetic examples when reporting issues. See [security reporting](SECURITY.md)
 before sharing any sensitive reproduction information.

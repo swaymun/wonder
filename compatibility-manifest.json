@@ -9,7 +9,8 @@
     "compatibleVersions": [
       "codex-cli 0.155.0-alpha.9",
       "codex-cli 0.155.0-alpha.9.2",
-      "codex-cli 0.155.0-alpha.16.3"
+      "codex-cli 0.155.0-alpha.16.3",
+      "codex-cli 0.155.0-alpha.16.4"
     ],
     "alpha16SchemaSha256": {
       "stable": "6ca35a4c82645df5cba7b2bba1845d3167c12294317daf1923da1a2e8fa04738",

@@ -211,7 +211,9 @@ final class ServiceControls: ObservableObject {
                 return "Tailscale setup was not confirmed. Open Tailscale and retry."
             } catch { return "The connection helper could not run. Reinstall Wonder and retry." }
         }.value
-        message = result ?? "Private connection configured. Checking the address…"
+        // The setup view already shows the live remote-address check. Keep this
+        // message for failures so the success state is not rendered twice.
+        message = result
         refreshRemote()
     }
 

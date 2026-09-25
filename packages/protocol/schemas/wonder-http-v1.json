@@ -49,6 +49,8 @@
     "renameDeviceRequest": { "$ref": "#/$defs/renameDeviceRequest" },
     "conversationSettings": { "$ref": "#/$defs/conversationSettings" },
     "conversationSettingsPatch": { "$ref": "#/$defs/conversationSettingsPatch" },
+    "conversationGoalResponse": { "$ref": "#/$defs/conversationGoalResponse" },
+    "conversationGoalUpdate": { "$ref": "#/$defs/conversationGoalUpdate" },
     "createBotRequest": { "$ref": "#/$defs/createBotRequest" },
     "conversationalCreateBotRequest": { "$ref": "#/$defs/conversationalCreateBotRequest" },
     "updateBotRequest": { "$ref": "#/$defs/updateBotRequest" },
@@ -164,6 +166,11 @@
     },
     "/api/v1/conversations/{conversationId}/subagents": {
       "get": { "response": { "$ref": "#/$defs/subagentList" } }
+    },
+    "/api/v1/conversations/{conversationId}/goal": {
+      "get": { "response": { "$ref": "#/$defs/conversationGoalResponse" } },
+      "put": { "request": { "$ref": "#/$defs/conversationGoalUpdate" }, "response": { "$ref": "#/$defs/conversationGoalResponse" } },
+      "delete": { "successStatus": 204 }
     },
     "/api/v1/conversations/{conversationId}/workspace/roots": {
       "get": { "response": { "$ref": "#/$defs/workspaceRoots" } }
@@ -1060,6 +1067,39 @@
         "available": { "type": "boolean" },
         "detail": { "type": ["string", "null"] },
         "subagents": { "type": "array", "items": { "$ref": "#/$defs/subagentSummary" }, "maxItems": 100 }
+      },
+      "additionalProperties": false
+    },
+    "conversationGoalResponse": {
+      "type": "object",
+      "required": ["goal"],
+      "properties": {
+        "goal": { "anyOf": [{ "$ref": "#/$defs/conversationGoal" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "conversationGoal": {
+      "type": "object",
+      "required": ["objective", "status", "createdAt", "tokensUsed", "timeUsedSeconds"],
+      "properties": {
+        "objective": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"] },
+        "createdAt": { "type": "integer" },
+        "tokenBudget": { "type": ["integer", "null"], "minimum": 1 },
+        "tokensUsed": { "type": "integer", "minimum": 0 },
+        "timeUsedSeconds": { "type": "integer", "minimum": 0 },
+        "timeBudgetSeconds": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "conversationGoalUpdate": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "objective": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "status": { "enum": ["active", "paused"] },
+        "tokenBudget": { "type": ["integer", "null"], "minimum": 1 },
+        "timeBudgetSeconds": { "type": ["integer", "null"], "minimum": 1 }
       },
       "additionalProperties": false
     },

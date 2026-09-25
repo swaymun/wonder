@@ -229,6 +229,7 @@ enum DiagnosticSubagentFixture {
     static var botName: String { marketingFixture ? "Weekend plans" : "Fixture Bot" }
     static var marketingApprovalFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-marketing-approval") }
     static var approvalSettingsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-optimistic-approval") }
+    static var goalFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-goal-fixture") }
     static var approvalDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.approval-settings")! }
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
     static var readStatusFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-read-status") }
@@ -313,6 +314,11 @@ enum DiagnosticSubagentFixture {
             state.delayNextChildSend = false
             state.childRevision = 2
             state.childStatus = "completed"
+            state.goalPresent = goalFixture
+            state.goalObjective = "Prepare a reliable beta launch with the Scout helper."
+            state.goalStatus = "active"
+            state.goalTokenBudget = 1_000
+            state.goalTimeBudgetSeconds = 600
         }
     }
     static func updateChild(status: String) {
@@ -344,6 +350,11 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var childStatus = "completed"
         var unread = true
         var readAttempts = 0
+        var goalPresent = DiagnosticSubagentFixture.goalFixture
+        var goalObjective = "Prepare a reliable beta launch with the Scout helper."
+        var goalStatus = "active"
+        var goalTokenBudget: Int? = 1_000
+        var goalTimeBudgetSeconds: Int? = 600
     }
     static let state = State()
 
@@ -387,6 +398,34 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
     override func stopLoading() {}
 
     private func respond(method: String, path: String, body: Data?) {
+        if path == "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/goal" {
+            let state = Self.state
+            switch method {
+            case "GET":
+                finish(status: 200, body: json(["goal": state.lock.withLock { goalValue() }]))
+            case "PUT":
+                guard let values = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any] else {
+                    finish(status: 400, body: Data("{}".utf8)); return
+                }
+                state.lock.withLock {
+                    if let objective = values["objective"] as? String { state.goalObjective = objective }
+                    if values.keys.contains("tokenBudget") { state.goalTokenBudget = values["tokenBudget"] as? Int }
+                    if values.keys.contains("timeBudgetSeconds") { state.goalTimeBudgetSeconds = values["timeBudgetSeconds"] as? Int }
+                    if let status = values["status"] as? String { state.goalStatus = status }
+                    state.goalPresent = true
+                }
+                finish(status: 200, body: json(["goal": state.lock.withLock { goalValue() }]))
+            case "DELETE":
+                state.lock.withLock { state.goalPresent = false }
+                finish(status: 204, body: Data())
+            default:
+                finish(status: 405, body: Data("{}".utf8))
+            }
+            return
+        }
+        if path == "/api/v1/conversations/\(DiagnosticSubagentFixture.childID)/goal" {
+            finish(status: 200, body: json(["goal": NSNull()])); return
+        }
         if DiagnosticSubagentFixture.approvalSettingsFixture, method == "PATCH", path == "/api/v1/bots/fixture-bot" {
             guard let values = try? JSONDecoder().decode([String: String].self, from: body ?? Data()),
                   values.count == 1, let raw = values["approvalMode"], BotApprovalMode(rawValue: raw) != nil else {
@@ -501,6 +540,19 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
 
     private func json(_ value: Any) -> Data {
         (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
+    }
+    private func goalValue() -> Any {
+        let state = Self.state
+        guard state.goalPresent else { return NSNull() }
+        return [
+            "objective": state.goalObjective,
+            "status": state.goalStatus,
+            "createdAt": Int(Date().timeIntervalSince1970) - 120,
+            "tokenBudget": state.goalTokenBudget.map { $0 as Any } ?? NSNull(),
+            "tokensUsed": 50,
+            "timeUsedSeconds": 20,
+            "timeBudgetSeconds": state.goalTimeBudgetSeconds.map { $0 as Any } ?? NSNull()
+        ] as [String: Any]
     }
     private func parentSummary() -> [String: Any] { [
         "conversationId": DiagnosticSubagentFixture.parentID, "botId": "fixture-bot", "title": DiagnosticSubagentFixture.botName,

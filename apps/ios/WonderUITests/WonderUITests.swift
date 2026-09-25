@@ -426,6 +426,85 @@ import UIKit
         try checkSubagentSheet(contentSize: "UICTContentSizeCategoryAccessibilityXXL")
     }
 
+    func testDiagnosticsGoalPillAndSheet() throws {
+        try checkGoalSheet(contentSize: "UICTContentSizeCategoryL")
+    }
+
+    func testDiagnosticsGoalPillAndSheetAtAccessibilitySize() throws {
+        try checkGoalSheet(contentSize: "UICTContentSizeCategoryAccessibilityXXL")
+    }
+
+    private func checkGoalSheet(contentSize: String) throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-goal-fixture",
+                               "-UIPreferredContentSizeCategoryName", contentSize]
+        app.launch()
+        let parent = app.buttons["chat-row:fixture-parent-conversation"]
+        XCTAssertTrue(parent.waitForExistence(timeout: 10)); parent.tap()
+        let draft = app.textViews["message-draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        draft.tap(); draft.typeText("parent draft")
+
+        let goalPill = app.buttons["goal-status-pill"]
+        let agentPill = app.buttons["subagent-status-pill"]
+        XCTAssertTrue(goalPill.waitForExistence(timeout: 10))
+        XCTAssertTrue(agentPill.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(goalPill.frame.height, 44)
+        XCTAssertLessThan(goalPill.frame.maxX, agentPill.frame.minX)
+        XCTAssertLessThanOrEqual(agentPill.frame.minX - goalPill.frame.maxX, 8)
+        XCTAssertLessThanOrEqual(agentPill.frame.maxX, draft.frame.maxX + 24)
+        XCTAssertGreaterThanOrEqual(draft.frame.minY - goalPill.frame.maxY, 0)
+        XCTAssertLessThan(draft.frame.minY - goalPill.frame.maxY, 22)
+        retainMenuScreenshot(app, name: "Goal and agent pills above composer")
+        goalPill.tap()
+        let objective = app.staticTexts["goal-objective"]
+        XCTAssertTrue(objective.waitForExistence(timeout: 5))
+        XCTAssertTrue((objective.label).contains("reliable beta launch"))
+        XCTAssertTrue(app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Token budget")).firstMatch.exists)
+        retainMenuScreenshot(app, name: "Goal details half sheet")
+
+        tapGoalControl("goal-pause", in: app)
+        XCTAssertTrue(app.buttons["goal-resume"].waitForExistence(timeout: 5))
+        tapGoalControl("goal-resume", in: app)
+        XCTAssertTrue(app.buttons["goal-pause"].waitForExistence(timeout: 5))
+        tapGoalControl("goal-edit", in: app)
+        let editor = app.textViews["goal-objective-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let timeLimit = app.textFields["goal-time-budget-editor"]
+        XCTAssertTrue(timeLimit.exists)
+        XCTAssertEqual(timeLimit.value as? String, "10")
+        editor.tap(); editor.typeText(" Ready.")
+        tapGoalControl("goal-save", in: app)
+        XCTAssertTrue(objective.waitForExistence(timeout: 5))
+        XCTAssertTrue(objective.label.contains("Ready."))
+
+        tapGoalControl("goal-remove", in: app)
+        let removeButtons = app.buttons.matching(NSPredicate(format: "label == %@", "Remove goal"))
+        let removeConfirmation = try XCTUnwrap(removeButtons.allElementsBoundByIndex.first { $0.isHittable })
+        removeConfirmation.tap()
+        expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: goalPill)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(agentPill.exists)
+        XCTAssertEqual(draft.value as? String, "parent draft")
+        app.terminate()
+    }
+
+    private func tapGoalControl(_ identifier: String, in app: XCUIApplication) {
+        let control = app.buttons[identifier]
+        XCTAssertTrue(control.waitForExistence(timeout: 5))
+        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: control)
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed)
+        let scroll = app.scrollViews["goal-details-scroll"]
+        for _ in 0..<3 where !control.isHittable {
+            if identifier == "goal-edit" { scroll.swipeDown() }
+            else { scroll.swipeUp() }
+        }
+        XCTAssertTrue(control.isHittable)
+        control.tap()
+    }
+
     private func checkSubagentSheet(contentSize: String) throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")

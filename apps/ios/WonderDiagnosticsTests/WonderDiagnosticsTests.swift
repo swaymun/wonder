@@ -60,6 +60,13 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: "/api/v1/push/config", includingEmpty: true).count, 1)
         XCTAssertTrue(push.isEnabled(host))
         XCTAssertNil(push.settingsAlert, "An offline Mac must not interrupt the user")
+        for _ in 0..<100 {
+            if case .some(.needsRetry) = push.setupState(host) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .some(.needsRetry) = push.setupState(host) else {
+            return XCTFail("An offline setup should offer retry in Settings")
+        }
         let restored = PushNotifications(read: { values[$0] }, write: { values[$1] = $0 }, registerForPush: {})
         restored.attach(library)
         XCTAssertTrue(restored.isEnabled(host), "Pending intent survives relaunch without a registration")
@@ -85,6 +92,82 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(push.settingsAlert?.opensSettings, true)
         let saved = try JSONDecoder().decode([String: String].self, from: XCTUnwrap(values["push-requested-devices-v1"]))
         XCTAssertNil(saved[host])
+    }
+
+    @MainActor func testPushAPNsFailureIsVisibleAndRetryableWithoutLosingPreference() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = recoveryModel(root: root), host = Self.cameraSavedConnection().credential.hostInstallationId
+        let library = ConnectionLibrary(diagnosticModel: model)
+        var values: [String: Data] = [:]
+        var registrations = 0
+        let push = PushNotifications(read: { values[$0] }, write: { values[$1] = $0 },
+                                     authorize: { true }, registerForPush: { registrations += 1 })
+        push.attach(library)
+        push.enable(model)
+        XCTAssertEqual(push.setupState(host), .settingUp)
+
+        push.registrationFailed()
+        guard case .some(.needsRetry(let message)) = push.setupState(host) else {
+            return XCTFail("APNs failure should offer a retry")
+        }
+        XCTAssertTrue(message.contains("Apple"))
+        XCTAssertTrue(push.isEnabled(host), "An APNs failure must preserve the requested setting")
+
+        let beforeRetry = registrations
+        push.retry(host)
+        XCTAssertEqual(push.setupState(host), .settingUp)
+        XCTAssertEqual(registrations, beforeRetry + 1)
+        push.disable(model)
+        XCTAssertNil(push.setupState(host))
+    }
+
+    @MainActor func testPushChallengeTimeoutIgnoresStaleProof() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = recoveryModel(root: root), saved = Self.cameraSavedConnection(), host = saved.credential.hostInstallationId
+        let library = ConnectionLibrary(diagnosticModel: model)
+        var record = PushRegistration(host: host, device: saved.credential.deviceId,
+                                      endpoint: "https://push.example.test", key: Data(repeating: 1, count: 32))
+        record.nonce = "current"
+        var values = ["push-registrations-v1": try JSONEncoder().encode([host: record])]
+        let push = PushNotifications(read: { values[$0] }, write: { values[$1] = $0 },
+                                     authorize: { true }, registerForPush: {})
+        push.attach(library)
+        push.enable(model)
+        push.challengeTimedOut(host, nonce: "stale")
+        XCTAssertEqual(push.setupState(host), .settingUp)
+        push.challengeTimedOut(host, nonce: "current")
+        guard case .some(.needsRetry(let message)) = push.setupState(host) else {
+            return XCTFail("An unanswered current challenge should offer retry")
+        }
+        XCTAssertTrue(message.contains("Apple"))
+        let pending = try JSONDecoder().decode([String: PushRegistration].self,
+                                               from: XCTUnwrap(values["push-registrations-v1"]))
+        XCTAssertEqual(pending[host]?.nonce, "current", "A late APNs proof must remain eligible after the warning")
+        push.disable(model)
+    }
+
+    @MainActor func testPushRestoredRegistrationClearsSetupWhenAPNsTokenArrives() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = recoveryModel(root: root), saved = Self.cameraSavedConnection(), host = saved.credential.hostInstallationId
+        let library = ConnectionLibrary(diagnosticModel: model)
+        var record = PushRegistration(host: host, device: saved.credential.deviceId,
+                                      endpoint: "https://push.example.test", key: Data(repeating: 1, count: 32))
+        record.id = UUID().uuidString
+        record.token = "0102"
+        record.macRegistered = true
+        record.previewVersion = 1
+        record.registeredAt = Date()
+        var values = ["push-registrations-v1": try JSONEncoder().encode([host: record])]
+        let push = PushNotifications(read: { values[$0] }, write: { values[$1] = $0 },
+                                     authorize: { true }, registerForPush: {})
+        push.attach(library)
+        push.enable(model)
+        XCTAssertEqual(push.setupState(host), .settingUp)
+        push.receivedToken(Data([0x01, 0x02]))
+        XCTAssertNil(push.setupState(host), "A confirmed registration must not look stuck after relaunch")
     }
 
     @MainActor func testPushOffCancelsDelayedPermissionWithoutReenabling() async throws {
