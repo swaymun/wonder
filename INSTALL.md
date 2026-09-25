@@ -4,7 +4,7 @@ Wonder runs on your Mac and connects to its native iPhone or iPad app over
 Tailscale. There is no Wonder account. Allow about one setup session with both
 devices nearby; the Mac must confirm the phone’s first connection.
 
-The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.67-beta.1/Wonder-1.0.67.dmg)
+The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.68-beta.1/Wonder-1.0.68.dmg)
 is available. Its SHA-256 checksum is
 `d640c2a1393f24102589349e82f2c711e08ebe76cc000ddb186761c0d554525c`.
 External TestFlight enrollment is awaiting Apple review and device qualification.
@@ -131,7 +131,7 @@ screenshots. See [security reporting](SECURITY.md).
 
 After setup, Wonder offers automatic update checks. In **Settings → Status →
 Updates**, choose whether to check automatically and download updates. You can
-also choose **Check for Updates…** at any time. These preferences survive relaunch.
+also choose **Check for Updates…** at any time; if a newer version is found, Settings links to its signed release. These preferences survive relaunch.
 Updates are signed and verified before installation. Wonder waits for active work
 and computer sharing to finish, then restarts to install the update.
 
