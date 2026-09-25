@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='wonder-lifecycle-') as tmp:
     launcher = macos/'WonderMenu'
     (resources/'WonderService.sh').write_bytes((ROOT/'apps/menubar/WonderMenu.launcher').read_bytes())
     import plistlib
-    (resources.parent/'Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable': 'WonderMenu', 'CFBundleIdentifier': 'com.saimun.wonder'}))
+    (resources.parent/'Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable': 'WonderMenu', 'CFBundleIdentifier': 'com.saimun.wonder', 'CFBundleVersion': '1.0.0'}))
     subprocess.run(['xcrun', 'swiftc', str(ROOT/'apps/menubar/Launcher/main.swift'), '-o', str(launcher)], check=True)
     for name in ['WonderHost', 'wonderd', 'wonder-tunnel']:
         path = (macos if name == 'WonderHost' else resources)/name
@@ -93,6 +93,14 @@ while true; do sleep 0.1; done
             # must bound its exit without killing Sparkle's sibling bridge.
             assert process.wait(timeout=20) == 0
             wait_for(lambda: not alive(service_shell))
+            watcher_log = root/'Library/Logs/Wonder/update-relaunch.log'
+            wait_for(lambda: watcher_log.exists() and 'Watching for signed update' in watcher_log.read_text())
+            watcher = wait_for(lambda: next((pid for pid, _, command in process_rows()
+                                            if 'wonder-update-relaunch' in command and str(root/'Wonder.app') in command), None))
+            # A detached update watcher must not hold the launcher lock: the
+            # replacement app has to acquire it before the watcher exits.
+            subprocess.run(['lockf', '-s', '-t', '0', str(data/'Service/launcher.pid'), '/usr/bin/true'], check=True)
+            os.kill(watcher, signal.SIGTERM)
             wait_for(lambda: all(not alive(pid) for name in ['wonderd','wonder-tunnel','worker','WonderHost'] for pid in pids(name)))
             assert (data/'sentinel').read_text() == 'saved chat'
             assert json.loads((data/'Service/tunnel.jsonl').read_text())['state'] == 'stopped'

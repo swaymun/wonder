@@ -87,7 +87,7 @@ start_update_watcher() {
       fi
     done
     printf "Update was not installed in three minutes\n" >> "$log"
-  ' wonder-update-relaunch "$(cd "$APP_ROOT/.." && pwd)" "$old_version" "$HOME/Library/Logs/Wonder/update-relaunch.log" </dev/null >/dev/null 2>&1 &
+  ' wonder-update-relaunch "$(cd "$APP_ROOT/.." && pwd)" "$old_version" "$HOME/Library/Logs/Wonder/update-relaunch.log" </dev/null >/dev/null 2>&1 9>&- &
 }
 cleanup() {
   trap - EXIT INT TERM
