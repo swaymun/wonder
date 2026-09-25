@@ -68,7 +68,11 @@ start_update_watcher() {
         sleep 4
         for (( retry=0; retry<3; retry++ )); do
           printf "Opening signed update %s (attempt %s)\n" "$new" "$((retry + 1))" >> "$log"
-          /usr/bin/open "$app"
+          # Launch Services can still cache the just-quit process as running.
+          # Force a new instance only when the launcher is actually gone.
+          if ! /usr/bin/pgrep -f "^$app/Contents/MacOS/WonderMenu$" >/dev/null; then
+            /usr/bin/open -n "$app"
+          fi
           for (( check=0; check<40; check++ )); do
             if /usr/bin/curl -fsS --max-time 1 http://127.0.0.1:3777/readyz >/dev/null 2>&1; then
               printf "Ready on %s\n" "$new" >> "$log"
