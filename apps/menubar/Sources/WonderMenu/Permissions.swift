@@ -112,7 +112,7 @@ final class PermissionModel: ObservableObject {
             request.standardOutput = FileHandle.nullDevice
             request.standardError = FileHandle.nullDevice
             do { try request.run() } catch { return nil }
-            let deadline = Date().addingTimeInterval(requestFlag == nil ? 3 : 30)
+            let deadline = Date().addingTimeInterval(requestFlag == nil ? 8 : 30)
             while request.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
             if request.isRunning {
                 request.terminate()

@@ -80,6 +80,14 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
                 try? await Task.sleep(for: .seconds(3))
             }
         }
+        // A slow file-access scan must not delay permission recovery after an
+        // app update or a grant change in System Settings.
+        Task { @MainActor in
+            while !Task.isCancelled {
+                permissions.refresh()
+                try? await Task.sleep(for: .seconds(10))
+            }
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // readLine() holds stdin's C FILE lock while it waits. Foundation's
             // XML parser also uses that lock when Sparkle reads an appcast.
@@ -112,7 +120,7 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
     }
 
     private func refresh() {
-        model.refresh(); service.refreshLogin(); service.refreshControlPreferences(); service.refreshRemote(); permissions.refresh()
+        model.refresh(); service.refreshLogin(); service.refreshControlPreferences(); service.refreshRemote()
     }
 
     func perform(_ command: BridgeCommand) async {
