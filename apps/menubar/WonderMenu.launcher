@@ -113,6 +113,28 @@ while kill -0 "$MENU_PID" 2>/dev/null; do
     done
     if menu_live; then kill -KILL "$MENU_PID" 2>/dev/null || true; fi
     wait "$MENU_PID" || true
+    # Sparkle may install a silently downloaded update only after this app has
+    # quit. In that path it replaces the bundle without reopening the service.
+    # A detached, bounded helper watches for the signed new bundle and opens it.
+    # The update-ready marker is written only after host admission succeeds.
+    if [[ -f "$WONDER_SERVICE_DIR/update-ready" ]]; then
+      old_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_ROOT/Info.plist" 2>/dev/null || true)"
+      if [[ -n "$old_version" ]]; then
+        /usr/bin/nohup /bin/bash -c '
+          app="$1"; old="$2"
+          for (( attempt=0; attempt<180; attempt++ )); do
+            sleep 1
+            new="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$app/Contents/Info.plist" 2>/dev/null || true)"
+            if [[ -n "$new" && "$new" != "$old" ]] &&
+               /usr/bin/codesign --verify --strict "$app" >/dev/null 2>&1 &&
+               /usr/sbin/spctl --assess --type execute "$app" >/dev/null 2>&1; then
+              /usr/bin/open "$app"
+              exit 0
+            fi
+          done
+        ' wonder-update-relaunch "$(cd "$APP_ROOT/.." && pwd)" "$old_version" </dev/null >/dev/null 2>&1 &
+      fi
+    fi
     exit 0
   fi
   NOW=$SECONDS
