@@ -5,7 +5,7 @@ import Sparkle
 /// Sparkle owns preferences and archive/signature verification. Wonder only
 /// coordinates admission and shutdown with the host that owns ongoing work.
 @MainActor
-final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate {
+final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate, @preconcurrency SPUStandardUserDriverDelegate {
     @Published private(set) var available = false
     @Published private(set) var automaticallyChecks = false
     @Published private(set) var automaticallyDownloads = false
@@ -17,6 +17,7 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate {
     private var pendingInstallation: (() -> Void)?
     private var preparationTask: Task<Void, Never>?
     private var attempt = UUID()
+    private var manualCheckPending = false
     private let prepare: (String) async throws -> Bool
     private let cancelPreparation: (String) async -> Void
 
@@ -40,7 +41,7 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate {
 
     func start() {
         guard updater == nil, Self.configured(Bundle.main.infoDictionary ?? [:]) else { return }
-        let driver = SPUStandardUserDriver(hostBundle: .main, delegate: nil)
+        let driver = SPUStandardUserDriver(hostBundle: .main, delegate: self)
         let candidate = SPUUpdater(hostBundle: .main, applicationBundle: .main, userDriver: driver, delegate: self)
         do {
             try candidate.start()
@@ -61,9 +62,43 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate {
 
     func check() {
         guard let updater, updater.canCheckForUpdates else { return }
-        message = nil
+        manualCheckPending = true
+        message = "Checking for updates…"
+        // The bridge is an LSUIElement app. Sparkle's window otherwise has no
+        // foreground app to attach to when Settings requests a manual check.
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         updater.checkForUpdates()
+        refresh()
+    }
+
+    var supportsGentleScheduledUpdateReminders: Bool { true }
+
+    func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool,
+                                                    forUpdate update: SUAppcastItem,
+                                                    state: SPUUserUpdateState) {
+        message = "Update \(update.displayVersionString) is ready to install in the update window."
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func standardUserDriverWillFinishUpdateSession() {
+        NSApp.setActivationPolicy(.accessory)
+        refresh()
+    }
+
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        if manualCheckPending { message = "Update \(item.displayVersionString) is available." }
+    }
+
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+        if manualCheckPending { message = "Wonder is up to date." }
+    }
+
+    func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck,
+                 error: Error?) {
+        manualCheckPending = false
+        NSApp.setActivationPolicy(.accessory)
         refresh()
     }
 
@@ -162,7 +197,10 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
         // Sparkle's ordinary no-new-version result is not an installation error.
         if (error as NSError).domain == SUSparkleErrorDomain,
-           (error as NSError).code == Int(SUError.noUpdateError.rawValue) { refresh(); return }
+           (error as NSError).code == Int(SUError.noUpdateError.rawValue) {
+            refresh()
+            return
+        }
         installationFailed("The update could not finish. Check for updates to try again.")
     }
 }
