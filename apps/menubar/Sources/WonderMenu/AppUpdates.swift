@@ -11,6 +11,7 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate, @preconc
     @Published private(set) var automaticallyDownloads = false
     @Published private(set) var canCheck = false
     @Published private(set) var message: String?
+    @Published private(set) var latestAvailableVersion: String?
     private(set) var preparingInstall = false
     private(set) var admissionGranted = false
     private var updater: SPUUpdater?
@@ -63,42 +64,50 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate, @preconc
     func check() {
         guard let updater, updater.canCheckForUpdates else { return }
         manualCheckPending = true
+        latestAvailableVersion = nil
         message = "Checking for updates…"
-        // The bridge is an LSUIElement app. Sparkle's window otherwise has no
-        // foreground app to attach to when Settings requests a manual check.
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        updater.checkForUpdates()
+        // This updater runs in a background bridge process. Its modal would
+        // appear behind the visible Settings window, so check without one.
+        updater.checkForUpdateInformation()
         refresh()
     }
 
     var supportsGentleScheduledUpdateReminders: Bool { true }
 
+    func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem,
+                                                               andInImmediateFocus immediateFocus: Bool) -> Bool {
+        // The updater lives in the background bridge, not the visible Settings app.
+        return false
+    }
+
     func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool,
                                                     forUpdate update: SUAppcastItem,
                                                     state: SPUUserUpdateState) {
-        message = "Update \(update.displayVersionString) is ready to install in the update window."
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        latestAvailableVersion = update.displayVersionString
+        message = "Update \(update.displayVersionString) is available. Download the signed release to install it."
     }
 
     func standardUserDriverWillFinishUpdateSession() {
-        NSApp.setActivationPolicy(.accessory)
         refresh()
     }
 
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
-        if manualCheckPending { message = "Update \(item.displayVersionString) is available." }
+        if manualCheckPending {
+            latestAvailableVersion = item.displayVersionString
+            message = "Update \(item.displayVersionString) is available. Download the signed release to install it."
+        }
     }
 
-    func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
-        if manualCheckPending { message = "Wonder is up to date." }
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater, error: Error) {
+        if manualCheckPending {
+            latestAvailableVersion = nil
+            message = "No newer compatible update is available."
+        }
     }
 
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck,
                  error: Error?) {
         manualCheckPending = false
-        NSApp.setActivationPolicy(.accessory)
         refresh()
     }
 
@@ -198,6 +207,7 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate, @preconc
         // Sparkle's ordinary no-new-version result is not an installation error.
         if (error as NSError).domain == SUSparkleErrorDomain,
            (error as NSError).code == Int(SUError.noUpdateError.rawValue) {
+            if manualCheckPending { message = "No newer compatible update is available." }
             refresh()
             return
         }

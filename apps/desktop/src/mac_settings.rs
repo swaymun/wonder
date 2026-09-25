@@ -505,6 +505,15 @@ impl MacSettings {
                     !self.flag("canCheckUpdates"),
                     cx,
                 ))
+                .when(!text(&self.state, "updateVersion").is_empty(), |v| {
+                    v.child(self.action(
+                        "download-update",
+                        "Open signed releases",
+                        json!({"action":"download-update"}),
+                        false,
+                        cx,
+                    ))
+                })
         } else {
             stack()
                 .gap_1()

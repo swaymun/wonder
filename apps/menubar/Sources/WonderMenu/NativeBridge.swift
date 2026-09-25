@@ -233,6 +233,7 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             "updatesAvailable": updates.available, "automaticUpdates": updates.automaticallyChecks,
             "automaticUpdateDownloads": updates.automaticallyDownloads,
             "canCheckUpdates": updates.canCheck, "updatesMessage": updates.message ?? "",
+            "updateVersion": updates.latestAvailableVersion ?? "",
             "screen": permissions.screen.label, "input": permissions.input.label,
             "permissionsBusy": permissions.busy, "permissionsMessage": permissions.message ?? "",
             "setupCompleted": setup.completed, "setupStep": setup.step.rawValue,
