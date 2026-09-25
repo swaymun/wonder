@@ -175,6 +175,44 @@ import UIKit
         app.terminate()
     }
 
+    func testActivityDisclosureKeepsVisibleReadingAnchorAtLargeText() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-older",
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXXXL"]
+        app.launch()
+        let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        let work = app.buttons["activity-group:layout-turn-6/layout-work-6"]
+        let scroll = app.scrollViews["conversation-scroll"]
+        let draft = app.textViews["message-draft"]
+        let header = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
+        XCTAssertTrue(work.waitForExistence(timeout: 10))
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        for _ in 0..<8 {
+            let top = max(scroll.frame.minY, header.frame.maxY)
+            let bottom = conversationLayoutBottom(app, draft: draft)
+            if work.isHittable && work.frame.minY >= top && work.frame.maxY <= bottom { break }
+            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
+            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: work.frame.minY < top ? 0.65 : 0.45))
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0)
+        }
+        let top = max(scroll.frame.minY, header.frame.maxY)
+        let bottom = conversationLayoutBottom(app, draft: draft)
+        XCTAssertTrue(work.isHittable)
+        XCTAssertGreaterThanOrEqual(work.frame.minY, top)
+        XCTAssertLessThanOrEqual(work.frame.maxY, bottom)
+        let before = work.frame
+        work.tap()
+        XCTAssertEqual(work.value as? String, "Expanded")
+        let after = work.frame
+        XCTAssertGreaterThanOrEqual(after.minY, top)
+        XCTAssertLessThanOrEqual(after.minY, bottom)
+        XCTAssertEqual(after.minY, before.minY, accuracy: 64,
+                       "Expanding a visible row should not jump the conversation to another position")
+    }
+
     private func conversationLayoutBottom(_ app: XCUIApplication, draft: XCUIElement) -> CGFloat {
         let pill = app.buttons["subagent-status-pill"]
         return pill.exists && pill.isHittable ? min(pill.frame.minY, draft.frame.minY) : draft.frame.minY

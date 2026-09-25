@@ -770,7 +770,9 @@ struct ConversationView: View {
         Diagnostics.shared.interaction("activity.expand", count: isExpanded ? 0 : 1)
         #endif
         activityDisclosure = ActivityDisclosurePolicy.toggled(activityDisclosure, entry: descriptor, isExpanded: isExpanded)
-        requestedScrollID = entry.id
+        // The tapped row is already visible. A forced animated scroll on every
+        // disclosure change repeatedly lays out long histories and moves the
+        // reader away from the row they opened.
     }
     private func toggleDetail(_ id: String) {
         #if WONDER_DIAGNOSTICS
