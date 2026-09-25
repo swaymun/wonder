@@ -6,7 +6,7 @@
 <p align="center"><strong>Your Mac’s agents, on your iPhone and iPad.</strong></p>
 <p align="center">Keep a conversation going, review a request, or check your Mac from your phone.</p>
 
-<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.63-beta.1/Wonder-1.0.63.dmg">Download the signed Mac beta</a> · <strong>TestFlight — awaiting external review</strong> · <a href="INSTALL.md">Setup guide</a></p>
+<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.67-beta.1/Wonder-1.0.67.dmg">Download the signed Mac beta</a> · <strong>TestFlight — public invite pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
 
 <p align="center"><img src="assets/screenshots/conversation.png" width="280" alt="Wonder’s native conversation and grouped moon helper icon, shown with sample content"></p>
 

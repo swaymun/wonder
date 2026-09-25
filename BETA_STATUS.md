@@ -1,9 +1,10 @@
 # Wonder beta status
 
 The signed Mac beta is available. Public TestFlight enrollment is not open yet.
-Apple shows iOS build 1.0 (50) as Approved for external testing, but the Public
-Beta group has no testers and no public link. The planned first wave is limited
-to 100 people; release qualification is still in progress.
+Apple shows iOS build 1.0 (50) as Approved for external testing. Build 1.0 (52)
+is processed but ready for beta submission, and the Public Beta group has no
+testers or public link. The planned first wave is limited to 100 people; release
+qualification is still in progress.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -14,8 +15,8 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Release 1.0 (50) is externally approved. Release 1.0 (51), containing Goal mode and notification setup changes, is uploaded and processed but its external approval, TestFlight installation, notification delivery, and public enrollment are unverified. |
-| Mac companion | [Version 1.0.63](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.63-beta.1) remains the public download. Candidate 1.0.65 is Developer ID signed, notarized, stapled, installed on the development Mac, and passes Gatekeeper and `/readyz` with the current ChatGPT runtime. Existing Bots/messages/pairings remain, and Screen Recording and Accessibility still report enabled. The candidate is not yet published; a fresh-Mac install and end-to-end automatic upgrade remain open. |
+| iPhone and iPad | Release 1.0 (50) is externally approved. Release 1.0 (52), containing Goal mode, notification setup feedback, and the reading-anchor fix, is uploaded and processed. Its external approval, TestFlight installation, notification delivery, and public enrollment are unverified. |
+| Mac companion | [Version 1.0.67](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.67-beta.1) is the public signed and notarized download. Its hosted checksum and signed update feed match the verified artifacts. It is installed on the development Mac and passes Gatekeeper and `/readyz` with ChatGPT's `0.155.0-alpha.16.4` runtime. The test Goal survived installation, and Screen Recording and Accessibility still report enabled. Sparkle found a newer signed release from an older installed build; completing the in-app install and a fresh-Mac setup remain unverified. |
 | Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). Third-party components retain their own licenses. |
 
 The [landing page, setup guide and privacy information](https://wonder-launch-preview.saimun-h-shahee.chatgpt.site) are public.
@@ -29,7 +30,7 @@ The iPhone 11 passed the focused approval-box tests, the permission/helper inter
 - Initial setup requires both devices, Tailscale and access to the supported model provider.
 - Model requests are sent to your provider. Wonder does not include a model subscription or credits.
 - Remote access depends on the Mac being reachable. Tailscale may relay encrypted traffic when a direct connection is unavailable.
-- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. A complete automatic installation is still unverified; use the [signed Mac DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.63-beta.1) if an update does not complete.
+- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. A complete automatic installation is still unverified; use the [signed Mac DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.67-beta.1) if an update does not complete.
 - Teaching a task and replaying taught tasks are unavailable in this beta.
 - Notifications require permission and network access. Disabling notifications does not stop work on the Mac.
 - Supported OS versions and verification evidence are different: simulator checks do not establish physical-device behavior on every supported model.
