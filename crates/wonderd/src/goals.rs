@@ -12,55 +12,64 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_LIMIT_CHECK_MS: AtomicI64 = AtomicI64::new(0);
 
-async fn direct_thread(state: &AppState, conversation: &str) -> Result<Option<String>, Response> {
+async fn direct_thread(
+    state: &AppState,
+    conversation: &str,
+) -> Result<Option<String>, Box<Response>> {
     if let Some(response) = subagents::reject_user_mutation(state, conversation).await {
-        return Err(response);
+        return Err(Box::new(response));
     }
     if state
         .store
         .group_id_for_conversation(conversation)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?
+        .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?
         .is_some()
     {
-        return Err((
-            StatusCode::CONFLICT,
-            "Goals are available in direct Bot conversations.",
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::CONFLICT,
+                "Goals are available in direct Bot conversations.",
+            )
+                .into_response(),
+        ));
     }
     if bot_for_conversation(state, conversation)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?
+        .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?
         .is_none()
     {
-        return Err(StatusCode::NOT_FOUND.into_response());
+        return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     }
     state
         .store
         .conversation_thread(conversation)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
+        .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))
 }
 
-async fn runtime_goal(state: &AppState, thread: &str) -> Result<Value, Response> {
+async fn runtime_goal(state: &AppState, thread: &str) -> Result<Value, Box<Response>> {
     let rpc = state.app_server.lock().await.rpc();
     let response = rpc
         .request("thread/goal/get", json!({"threadId":thread}))
         .await
         .map_err(|_| {
+            Box::new(
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Goal status is unavailable. Try again.",
+                )
+                    .into_response(),
+            )
+        })?;
+    if response.error.is_some() {
+        return Err(Box::new(
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Goal status is unavailable. Try again.",
             )
-                .into_response()
-        })?;
-    if response.error.is_some() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Goal status is unavailable. Try again.",
-        )
-            .into_response());
+                .into_response(),
+        ));
     }
     Ok(response.result.unwrap_or(json!({"goal":null})))
 }
@@ -70,18 +79,18 @@ async fn decorate(
     conversation: &str,
     thread: &str,
     mut result: Value,
-) -> Result<Value, Response> {
+) -> Result<Value, Box<Response>> {
     if result.get("goal").is_some_and(|goal| !goal.is_null()) {
         state
             .store
             .set_goal_thread(conversation, thread)
             .await
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
+            .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?;
         if let Some(limit) = state
             .store
             .goal_time_limit(conversation)
             .await
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?
+            .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?
         {
             if limit.thread_id == thread {
                 result["goal"]["timeBudgetSeconds"] = json!(limit.budget_seconds);
@@ -92,12 +101,12 @@ async fn decorate(
             .store
             .clear_goal_thread(thread)
             .await
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
+            .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?;
         state
             .store
             .clear_goal_time_limit(conversation)
             .await
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
+            .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?;
     }
     Ok(result)
 }
@@ -106,14 +115,14 @@ pub async fn get(State(state): State<AppState>, Path(conversation): Path<String>
     let thread = match direct_thread(&state, &conversation).await {
         Ok(Some(thread)) => thread,
         Ok(None) => return Json(json!({"goal":null})).into_response(),
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match runtime_goal(&state, &thread).await {
         Ok(result) => match decorate(&state, &conversation, &thread, result).await {
             Ok(result) => Json(result).into_response(),
-            Err(response) => response,
+            Err(response) => *response,
         },
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -131,7 +140,7 @@ pub async fn set(
             )
                 .into_response()
         }
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(input) = body.as_object() else {
         return StatusCode::BAD_REQUEST.into_response();
@@ -222,7 +231,7 @@ pub async fn set(
     .await
     {
         Ok(result) => Json(result).into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -230,7 +239,7 @@ pub async fn clear(State(state): State<AppState>, Path(conversation): Path<Strin
     let thread = match direct_thread(&state, &conversation).await {
         Ok(Some(thread)) => thread,
         Ok(None) => return StatusCode::NO_CONTENT.into_response(),
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let rpc = state.app_server.lock().await.rpc();
     match rpc
