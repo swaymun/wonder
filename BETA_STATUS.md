@@ -16,11 +16,11 @@ Keep the Mac awake and online while using it remotely.
 | Component | Status |
 | --- | --- |
 | iPhone and iPad | Release 1.0 (52), containing Goal mode, notification setup feedback, and the reading-anchor fix, is uploaded, processed, approved for external testing, and installed through internal TestFlight on the iPhone Air. Visible background notification delivery and public enrollment remain unverified. |
-| Mac companion | [Version 1.0.80](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.80-beta.1) is the public signed and notarized download. Its hosted DMG matches the verified local artifact. It is installed on the development Mac and passes Gatekeeper and `/readyz` with ChatGPT's `0.155.0-alpha.16.4` runtime. Screen Recording and Computer Control both show Allowed after installation. A signed 1.0.78→1.0.79 automatic upgrade completed and relaunched this Mac in about 31 seconds; 1.0.80 was installed manually. A fresh-Mac setup remains unverified. |
+| Mac companion | [Version 1.0.80](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.80-beta.1) remains the public signed and notarized download. A signed, notarized 1.0.81 candidate is installed on the development Mac and passes Gatekeeper, `/readyz`, and runtime verification with ChatGPT's `0.155.0-alpha.16.4` runtime. Screen Recording and Computer Control remain allowed after installation. A signed 1.0.78→1.0.79 automatic upgrade previously completed and relaunched this Mac in about 31 seconds. A fresh-Mac setup remains unverified. |
 | Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). Third-party components retain their own licenses. |
 
-The source now checks additive ChatGPT runtime schema changes locally. This
-change is awaiting the next signed Mac build; the current 1.0.80 download
+The source and locally installed 1.0.81 candidate check additive ChatGPT runtime
+schema changes. This candidate is not public yet; the current 1.0.80 download
 still supports the four versions listed in the installation guide.
 
 The [landing page, setup guide and privacy information](https://wonder-launch-preview.saimun-h-shahee.chatgpt.site) are public.
