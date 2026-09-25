@@ -6,7 +6,7 @@
 <p align="center"><strong>Your Mac’s agents, on your iPhone and iPad.</strong></p>
 <p align="center">Keep a conversation going, review a request, or check your Mac from your phone.</p>
 
-<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.68-beta.1/Wonder-1.0.68.dmg">Download the signed Mac beta</a> · <strong>TestFlight — public invite pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
+<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.80-beta.1/Wonder-1.0.80.dmg">Download the signed Mac beta</a> · <strong>TestFlight — public invite pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
 
 <p align="center"><img src="assets/screenshots/conversation.png" width="280" alt="Wonder’s native conversation and grouped moon helper icon, shown with sample content"></p>
 
@@ -73,8 +73,9 @@ including with a source-built Mac host. If you sign your own iOS app, you need
 Keep the Mac awake, online, and running Wonder for new work and remote access.
 The Mac companion offers signed automatic updates, with checks and downloads
 controlled in Settings. Installation waits for work and computer sharing to finish.
-Automatic-upgrade qualification is still in progress; signed manual downloads
-remain an alternative. iPhone and iPad updates use TestFlight.
+A signed automatic upgrade from 1.0.78 to 1.0.79 passed on one physical Mac;
+broader upgrade qualification remains in progress. Signed manual downloads remain
+an alternative. iPhone and iPad updates use TestFlight.
 Runtime compatibility is deliberately checked; an unsupported runtime will not
 run agent work. Teaching a task and replaying taught tasks are unavailable in
 this beta. Remaining device and recovery checks are tracked in the release status.
