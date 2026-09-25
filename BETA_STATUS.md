@@ -19,6 +19,10 @@ Keep the Mac awake and online while using it remotely.
 | Mac companion | [Version 1.0.80](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.80-beta.1) is the public signed and notarized download. Its hosted DMG matches the verified local artifact. It is installed on the development Mac and passes Gatekeeper and `/readyz` with ChatGPT's `0.155.0-alpha.16.4` runtime. Screen Recording and Computer Control both show Allowed after installation. A signed 1.0.78→1.0.79 automatic upgrade completed and relaunched this Mac in about 31 seconds; 1.0.80 was installed manually. A fresh-Mac setup remains unverified. |
 | Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). Third-party components retain their own licenses. |
 
+The source now checks additive ChatGPT runtime schema changes locally. This
+change is awaiting the next signed Mac build; the current 1.0.80 download
+still supports the four versions listed in the installation guide.
+
 The [landing page, setup guide and privacy information](https://wonder-launch-preview.saimun-h-shahee.chatgpt.site) are public.
 
 ## Qualification still in progress

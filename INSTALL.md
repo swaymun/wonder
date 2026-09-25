@@ -17,7 +17,7 @@ Developers can also use the [source-build instructions](DEVELOPMENT.md).
 | --- | --- |
 | Mac | Apple Silicon; macOS 14 or later is the deployment target. |
 | iPhone or iPad | iOS/iPadOS 17 or later is the deployment target. |
-| ChatGPT Desktop | The Mac runtime must be a version listed in `compatibility-manifest.json` (`0.155.0-alpha.9`, `0.155.0-alpha.9.2`, `0.155.0-alpha.16.3`, or `0.155.0-alpha.16.4`), with its matching schema and code-mode helper. Wonder checks this automatically. |
+| ChatGPT Desktop | The current Mac 1.0.80 download supports `0.155.0-alpha.9`, `0.155.0-alpha.9.2`, `0.155.0-alpha.16.3`, and `0.155.0-alpha.16.4` with matching schemas. The next Mac build will check changed schemas locally for additive protocol compatibility. Breaking protocol changes still require a Wonder update. |
 | Model access | Sign in to your model provider using the supported runtime. Its access limits and billing still apply. |
 | Tailscale | Install on both devices, join the same tailnet, and allow access between them. MagicDNS and tailnet HTTPS must be enabled. |
 
@@ -115,7 +115,7 @@ Opening a notification reconnects to the Mac to resolve the conversation.
 
 | What you see | What to do |
 | --- | --- |
-| Runtime unavailable or incompatible | Check that the supported ChatGPT Desktop is in Applications and signed in. Compare the version requirements above; keep Wonder’s compatibility checks enabled. |
+| Runtime unavailable or incompatible | Check that ChatGPT Desktop is in Applications and signed in. Restart Wonder after updating ChatGPT. If Wonder reports a breaking protocol change, update Wonder; keep its compatibility checks enabled. |
 | Tailscale needs login or is offline | Open Tailscale on both devices and connect to the same tailnet. Check the tailnet’s device-access rules. |
 | HTTPS or Serve setup fails | Follow Wonder’s specific error. Enable tailnet HTTPS/MagicDNS if requested. If another service uses Wonder’s port, resolve that conflict without resetting unrelated Serve configuration. |
 | Phone cannot find the Mac | Keep Wonder running and the Mac awake. Reconnect Tailscale, then retry the existing connection before pairing again. |

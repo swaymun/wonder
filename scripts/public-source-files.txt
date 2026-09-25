@@ -222,6 +222,7 @@ crates/wonder-api/src/pairing_protocol.rs
 crates/wonder-app-server/Cargo.toml
 crates/wonder-app-server/src/lib.rs
 crates/wonder-app-server/src/process.rs
+crates/wonder-app-server/src/schema_compat.rs
 crates/wonder-asr/Cargo.toml
 crates/wonder-asr/src/lib.rs
 crates/wonder-harness/Cargo.toml

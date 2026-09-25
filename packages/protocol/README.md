@@ -7,7 +7,7 @@ September 5, 2026. Native migration gates 01–02. This package defines the wire
 - HTTP: `schemas/wonder-http-v1.json`, with the endpoint's named `$defs` schema as the root. The file's outer envelope is a schema catalog, **not** a wrapper emitted by HTTP handlers.
 - WebSocket: `schemas/wonder-websocket-v1.json`. Optional correlation fields are nullable and use camelCase. Event data uses each Rust event variant's existing field names; do not apply a blanket casing conversion.
 - Signing: `crates/wonder-api/src/pairing.rs`; normative byte/signature vectors in `tests/contracts/native/signing-v1.json`.
-- Runtime: root `compatibility-manifest.json` independently pins the Codex adapter/version/schema hashes and required methods. Wonder API v1 does not imply compatibility with arbitrary runtime versions.
+- Runtime: root `compatibility-manifest.json` records exact known schema hashes and the local additive-compatibility policy. A newer Codex runtime must preserve the bundled stable and experimental contracts and pass the code-mode probe. Wonder API v1 does not imply compatibility with arbitrary runtime versions.
 - Revision 1 corrects previously omitted `conversationSnapshot.thread` and WebSocket correlation properties. It does not change the emitted response shape or the URI version.
 
 The snapshot route `GET /api/v1/conversations/{id}` returns `conversationSnapshot`; a successful send/steer returns `messageReceipt`. The checked-in fixtures come from the real Axum handler against an isolated SQLite store and a fake stdio App Server. They contain synthetic IDs and may contain temporary test paths. Never regenerate them from an owner's live daemon.

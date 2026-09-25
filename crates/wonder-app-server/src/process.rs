@@ -627,13 +627,12 @@ async fn verify_runtime_inner(
         return Err(RuntimeError::Incompatible("codex --version failed".into()));
     }
     let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
-    let Some(expected_hashes) = crate::expected_schema_hashes(&version) else {
+    if !version.starts_with("codex-cli ") {
         return Err(RuntimeError::Incompatible(format!(
-            "expected {}, found {version}",
-            crate::COMPATIBLE_CODEX_VERSIONS.join(" or ")
+            "unexpected runtime version: {version}"
         )));
-    };
-    verify_generated_schemas(&canonical_bin, expected_hashes).await?;
+    }
+    verify_generated_schemas(&canonical_bin, crate::expected_schema_hashes(&version)).await?;
 
     Ok(canonical_bin)
 }
@@ -724,7 +723,7 @@ fn valid_code_mode_probe_result(result: &Value) -> bool {
 
 async fn verify_generated_schemas(
     codex_bin: &std::path::Path,
-    expected_hashes: (&str, &str),
+    expected_hashes: Option<(&str, &str)>,
 ) -> Result<(), RuntimeError> {
     let temporary = tempfile::tempdir().map_err(RuntimeError::Io)?;
     let stable_dir = temporary.path().join("stable");
@@ -763,13 +762,18 @@ async fn verify_generated_schemas(
         tokio::fs::read(stable_dir.join("codex_app_server_protocol.v2.schemas.json")).await?;
     let experimental =
         tokio::fs::read(experimental_dir.join("codex_app_server_protocol.v2.schemas.json")).await?;
-    let stable_hash = hex::encode(Sha256::digest(stable));
-    let experimental_hash = hex::encode(Sha256::digest(experimental));
-    if stable_hash != expected_hashes.0 || experimental_hash != expected_hashes.1 {
-        return Err(RuntimeError::Incompatible(format!(
-            "schema hash mismatch (stable {stable_hash}, experimental {experimental_hash})"
-        )));
+    let stable_hash = hex::encode(Sha256::digest(&stable));
+    let experimental_hash = hex::encode(Sha256::digest(&experimental));
+    if let Some(hashes) = expected_hashes {
+        if stable_hash == hashes.0 && experimental_hash == hashes.1 {
+            return Ok(());
+        }
     }
+    crate::schema_compat::verify(&stable, &experimental).map_err(|reason| {
+        RuntimeError::Incompatible(format!(
+            "Codex changed a required protocol contract ({reason}; stable {stable_hash}, experimental {experimental_hash}); update Wonder"
+        ))
+    })?;
     Ok(())
 }
 
@@ -939,6 +943,52 @@ fn toml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn newer_runtime_uses_local_schema_contract_and_rejects_breakage() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../research/codex-app-server/0.155.0-alpha.16.3");
+        let stable = fixture.join("stable/codex_app_server_protocol.v2.schemas.json");
+        let experimental = dir.path().join("experimental.json");
+        std::fs::copy(
+            fixture.join("experimental/codex_app_server_protocol.v2.schemas.json"),
+            &experimental,
+        )
+        .unwrap();
+        let binary = dir.path().join("codex");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 9.9.9'; exit 0; fi\nlast=''; for arg in \"$@\"; do last=\"$arg\"; done\nif [ \"$3\" = --experimental ]; then cp '{}' \"$last/codex_app_server_protocol.v2.schemas.json\"; else cp '{}' \"$last/codex_app_server_protocol.v2.schemas.json\"; fi\n",
+                experimental.display(),
+                stable.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let helper = dir.path().join("codex-code-mode-host");
+        std::fs::write(
+            &helper,
+            include_str!("../../../tests/fixtures/code-mode-host.py"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(verify_runtime(&binary).await.is_ok());
+        let mut changed: Value =
+            serde_json::from_slice(&std::fs::read(&experimental).unwrap()).unwrap();
+        changed["definitions"]["TurnStartParams"]["properties"]["permissions"]["type"] =
+            serde_json::json!("object");
+        std::fs::write(&experimental, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(matches!(
+            verify_runtime(&binary).await,
+            Err(RuntimeError::Incompatible(_))
+        ));
+    }
 
     #[tokio::test]
     async fn missing_code_mode_helper_is_incompatible() {

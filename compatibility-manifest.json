@@ -38,6 +38,7 @@
   "policy": {
     "experimentalApi": true,
     "allowLegacySandboxComposition": false,
-    "allowUnknownVersions": false
+    "allowUnknownVersions": true,
+    "unknownVersionPolicy": "local-additive-schema-check-against-0.155.0-alpha.16.3"
   }
 }

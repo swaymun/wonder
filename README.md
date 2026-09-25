@@ -76,9 +76,11 @@ controlled in Settings. Installation waits for work and computer sharing to fini
 A signed automatic upgrade from 1.0.78 to 1.0.79 passed on one physical Mac;
 broader upgrade qualification remains in progress. Signed manual downloads remain
 an alternative. iPhone and iPad updates use TestFlight.
-Runtime compatibility is deliberately checked; an unsupported runtime will not
-run agent work. Teaching a task and replaying taught tasks are unavailable in
-this beta. Remaining device and recovery checks are tracked in the release status.
+Runtime compatibility is checked locally. The next Mac build will accept
+additive ChatGPT runtime changes without a Wonder update; breaking protocol
+changes still pause agent work until Wonder is updated. Teaching a task and
+replaying taught tasks are unavailable in this beta. Remaining device and
+recovery checks are tracked in the release status.
 
 [Build from source](DEVELOPMENT.md) · [Security reporting](SECURITY.md) ·
 [Release process](RELEASING.md) · [MIT license](LICENSE) ·

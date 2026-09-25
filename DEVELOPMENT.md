@@ -18,10 +18,12 @@ changing your tailnet. The installer builds a signed app at `/Applications/Wonde
 and preserves the separate data home, host identity, and device records. Do not
 replace a running app by copying individual executables into its bundle.
 
-The runtime versions and schema hashes are in `compatibility-manifest.json`.
+Known runtime versions and schema hashes are in `compatibility-manifest.json`.
 The default runtime is `/Applications/ChatGPT.app/Contents/Resources/codex`.
 `WONDER_CODEX_BIN` selects an explicit executable for controlled development, but
-it must pass the same version, schema, and helper checks. It is not a release workaround.
+it must pass the same local schema and helper checks. Newer compatible schemas
+can pass without a Wonder update; changed required contracts still fail closed.
+The preflight reports the installed version; startup performs the full check.
 
 ## iOS
 
