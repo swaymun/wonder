@@ -7,7 +7,8 @@ devices nearby; the Mac must confirm the phone’s first connection.
 The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.80-beta.1/Wonder-1.0.80.dmg)
 is available. Its SHA-256 checksum is
 `d19ab4e1ca7fba04d7c74d7db5fd6ebfbdba3a120ce8a7e86dcc87dc219d0a5c`.
-External TestFlight enrollment is awaiting Apple review and device qualification.
+The current iOS build is approved for external testing; public TestFlight
+enrollment remains closed until the remaining device checks pass.
 Developers can also use the [source-build instructions](DEVELOPMENT.md).
 
 ## Requirements

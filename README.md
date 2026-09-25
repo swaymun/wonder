@@ -15,8 +15,8 @@ work to a Bot, bring Bots together in a Group Chat, and return to the same
 conversations, files, and decisions later. Your Mac hosts Wonder; your devices
 connect through your own Tailscale network.
 
-**The signed Mac beta is available.** External TestFlight enrollment opens after
-Apple’s review and device qualification. Source builds are available from this
+**The signed Mac beta is available.** The iOS build is approved for external
+testing; enrollment opens after the remaining device checks. Source builds are available from this
 repository. [Release qualification](RELEASING.md).
 
 ## Keep your work with you

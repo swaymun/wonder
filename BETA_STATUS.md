@@ -1,10 +1,10 @@
 # Wonder beta status
 
 The signed Mac beta is available. Public TestFlight enrollment is not open yet.
-Apple shows iOS build 1.0 (50) as Approved for external testing. Build 1.0 (52)
-is processed but ready for beta submission, and the Public Beta group has no
-testers or public link. The planned first wave is limited to 100 people; release
-qualification is still in progress.
+Apple shows iOS build 1.0 (52) as Approved for external testing and assigned to
+the Public Beta group. The group has no testers or public link, and automatic
+tester notification is off. The planned first wave is limited to 100 people;
+release qualification is still in progress.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -15,7 +15,7 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Release 1.0 (50) is externally approved. Release 1.0 (52), containing Goal mode, notification setup feedback, and the reading-anchor fix, is uploaded, processed, and installed through internal TestFlight on the iPhone Air. Its external approval, visible background notification delivery, and public enrollment are unverified. |
+| iPhone and iPad | Release 1.0 (52), containing Goal mode, notification setup feedback, and the reading-anchor fix, is uploaded, processed, approved for external testing, and installed through internal TestFlight on the iPhone Air. Visible background notification delivery and public enrollment remain unverified. |
 | Mac companion | [Version 1.0.80](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.80-beta.1) is the public signed and notarized download. Its hosted DMG matches the verified local artifact. It is installed on the development Mac and passes Gatekeeper and `/readyz` with ChatGPT's `0.155.0-alpha.16.4` runtime. Screen Recording and Computer Control both show Allowed after installation. A signed 1.0.78→1.0.79 automatic upgrade completed and relaunched this Mac in about 31 seconds; 1.0.80 was installed manually. A fresh-Mac setup remains unverified. |
 | Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). Third-party components retain their own licenses. |
 
