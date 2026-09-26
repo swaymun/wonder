@@ -80,7 +80,14 @@ export async function inspectSdk(runtime, { cwd, includeUsage = false, connector
     if (includeUsage && connected && typeof usageMethod === "function") {
       try { windows = projectUsage(await usageMethod.call(query, { skipBehaviors: true })); } catch { /* Usage is optional; never fake a zero. */ }
     }
-    const servers = connectors && connected ? await query.mcpServerStatus() : [];
+    let servers = connectors && connected ? await query.mcpServerStatus() : [];
+    // MCP startup is asynchronous. Closing a control-only query immediately
+    // caches pending servers as unavailable even when they would connect.
+    for (let i = 0; i < 10 && servers.some(s => s.status === "pending"); i++) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      if (abortController.signal.aborted) break;
+      servers = await query.mcpServerStatus();
+    }
     return { version: runtime.version, connected, subscription: connected ? account.subscriptionType : null,
       models: models.map(m => ({ id: m.value, name: m.displayName, description: m.description,
         efforts: m.supportsEffort ? (m.supportedEffortLevels ?? []).filter(e => ["low", "medium", "high", "xhigh", "max"].includes(e)) : [] })),

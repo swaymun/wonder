@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile, mkdir, readdir, writeFile, realpath } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compatibleVersion, RuntimeUpdates } from "../runtime-updates.mjs";
-import { isSubscription, subscriptionEnvironment, projectUsage, baseOptions, loadSdk } from "../sdk-runtime.mjs";
+import { isSubscription, subscriptionEnvironment, projectUsage, baseOptions, loadSdk, inspectSdk } from "../sdk-runtime.mjs";
 
 // Contract: new SDK bytes never replace a running turn; a bad candidate and a
 // restart must preserve a usable runtime. Exercise the manager's persisted state.
@@ -65,6 +65,24 @@ test("experimental usage is optional and percentages are never fractions", () =>
   assert.equal(projectUsage({ rate_limits_available: true, rate_limits: { future: { utilization: 10 } } }), null);
   const result = projectUsage({ rate_limits_available: true, rate_limits: { five_hour: { utilization: 10 }, seven_day: { utilization: 20 } } });
   assert.deepEqual(result.map(w => [w.id, w.remainingPercent]), [["five_hour", 90], ["seven_day", 80]]);
+});
+
+test("control discovery waits for pending connections before closing the SDK", async () => {
+  let calls = 0, closed = false;
+  const runtime = { version: "0.3.283", sdk: { query: () => ({
+    initializationResult: async () => ({}),
+    accountInfo: async () => ({ apiProvider: "firstParty", subscriptionType: "Claude Pro" }),
+    supportedModels: async () => [{ value: "haiku" }],
+    mcpServerStatus: async () => {
+      assert.equal(closed, false);
+      return [{ name: "Mail", source: "claudeai", status: ++calls === 1 ? "pending" : "connected" }];
+    },
+    interrupt: async () => {}, close: () => { closed = true; },
+  }) } };
+  const result = await inspectSdk(runtime, { connectors: true });
+  assert.equal(result.servers[0].status, "connected");
+  assert.equal(calls, 2);
+  assert.equal(closed, true);
 });
 
 test("a staged update survives restart and old versions are bounded", async t => {
