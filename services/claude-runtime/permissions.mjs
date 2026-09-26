@@ -65,6 +65,9 @@ export class ToolPolicy {
     if (/^mcp__claude[-_]in[-_]chrome__/i.test(name)) return "deny";
     if (name.startsWith("mcp__")) return "ask";
     if (["AskUserQuestion", "ExitPlanMode"].includes(name)) return "ask";
+    // Loads tool definitions only. Invoking a discovered connector still asks
+    // through this policy; large catalogs need not fill every model prompt.
+    if (name === "ToolSearch") return "allow";
     if (name === "Agent") return input.isolation === "remote" ? "deny" : "allow";
     if (["TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "EnterPlanMode"].includes(name)) return "allow";
     // Recursive built-ins execute outside the Bash sandbox and can traverse a

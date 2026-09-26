@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile, mkdir, readdir } from "node:fs/promises";
+import { mkdtemp, rm, readFile, mkdir, readdir, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compatibleVersion, RuntimeUpdates } from "../runtime-updates.mjs";
-import { isSubscription, subscriptionEnvironment, projectUsage } from "../sdk-runtime.mjs";
+import { isSubscription, subscriptionEnvironment, projectUsage, baseOptions, loadSdk } from "../sdk-runtime.mjs";
 
 // Contract: new SDK bytes never replace a running turn; a bad candidate and a
 // restart must preserve a usable runtime. Exercise the manager's persisted state.
@@ -119,4 +119,58 @@ test("shutdown aborts discovery and drains the owner without activating an updat
   assert.equal(JSON.parse(await readFile(join(options.root, "state.json"))).active, "0.3.283");
   manager.latest = () => assert.fail("closed managers cannot restart discovery");
   await manager.refresh({ force: true });
+});
+
+// Contract: enabling account connectors must not execute MCP commands from the
+// user's CLI config or the Bot's workspace. Exercise the actual pinned SDK with
+// an isolated, unauthenticated HOME; no model prompt or network credential.
+test("account connector options exclude user, project and local MCP processes", async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "wonder-mcp-scope-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home"), cwd = join(root, "workspace"), config = join(home, ".claude");
+  await mkdir(config, { recursive: true }); await mkdir(cwd);
+  const server = join(root, "fixture.mjs"), marker = join(root, "started");
+  await writeFile(server, `import { appendFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+appendFileSync(process.argv[2], process.argv[3] + '\\n');
+for await (const line of createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.id == null) continue;
+  const result = request.method === 'initialize'
+    ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } }
+    : { tools: [] };
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
+}
+`);
+  const command = scope => ({ command: process.execPath, args: [server, marker, scope] });
+  await writeFile(join(config, ".claude.json"), JSON.stringify({
+    mcpServers: { fixture_user: command("user") },
+    projects: { [cwd]: { mcpServers: { fixture_local: command("local") } } },
+  }));
+  await writeFile(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: { fixture_project: command("project") } }));
+  const runtime = await loadSdk();
+  const inspect = async overrides => {
+    const base = baseOptions(runtime, { connectors: true });
+    const abortController = new AbortController(), done = Promise.withResolvers();
+    const timer = setTimeout(() => abortController.abort(), 15_000);
+    const query = runtime.sdk.query({ prompt: (async function* () { await done.promise; })(), options: {
+      ...base, ...overrides, cwd, abortController, tools: [], mcpServers: {}, persistSession: false,
+      env: { ...base.env, HOME: home, CLAUDE_CONFIG_DIR: config }, permissionMode: "dontAsk",
+    } });
+    try {
+      await query.initializationResult();
+      let servers = await query.mcpServerStatus();
+      for (let i = 0; i < 50 && servers.some(s => s.status === "pending"); i++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        servers = await query.mcpServerStatus();
+      }
+      return servers;
+    } finally { clearTimeout(timer); done.resolve(); query.close(); abortController.abort(); }
+  };
+  assert.deepEqual(await inspect({}), []);
+  await assert.rejects(readFile(marker), { code: "ENOENT" });
+  // Positive control proves all three fixture configs are readable by this SDK.
+  const enabled = await inspect({ settingSources: ["user", "project", "local"] });
+  assert.deepEqual(enabled.map(s => s.name).sort(), ["fixture_local", "fixture_project", "fixture_user"]);
+  assert.deepEqual((await readFile(marker, "utf8")).trim().split("\n").sort(), ["local", "project", "user"]);
 });

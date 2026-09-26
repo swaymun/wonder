@@ -6,7 +6,7 @@ import { baseOptions, inspectSdk, isSubscription } from "./sdk-runtime.mjs";
 import { ToolPolicy, closeCommandSandbox } from "./permissions.mjs";
 
 const BUILTINS = ["Read", "Write", "Edit", "NotebookEdit", "Bash", "WebFetch", "WebSearch",
-  "AskUserQuestion", "Agent", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop"];
+  "AskUserQuestion", "Agent", "ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop"];
 
 function page(data, params) {
   const fingerprint = createHash("sha256").update(JSON.stringify(data)).digest("hex").slice(0, 16);
@@ -245,7 +245,8 @@ export class ClaudeBridge {
           return response;
         }));
       const model = selectedModel(options.model);
-      const sdkOptions = { ...baseOptions(lease.runtime), cwd: options.cwd, model, abortController: run.abort,
+      const base = baseOptions(lease.runtime, { connectors: options.wonderConnectors === true && !options.wonderPlanning && !policy.internal });
+      const sdkOptions = { ...base, cwd: options.cwd, model, abortController: run.abort,
         systemPrompt: [options.developerInstructions ?? "You are a helpful Wonder Bot.", ...Object.values(options.additionalContext ?? {}).filter(v => v?.kind === "application" && typeof v.value === "string").map(v => v.value)].join("\n\n"),
         tools: policy.internal || options.wonderPlanning ? [] : BUILTINS,
         mcpServers: tools.length ? { wonder: sdk.createSdkMcpServer({ name: "wonder", version: "1.0.0", tools }) } : {},
@@ -254,8 +255,7 @@ export class ClaudeBridge {
           PostToolUse: [{ hooks: [async () => run.initialized ? { continue: false, stopReason: "The optional question was posted. Initialization is complete." } : {}] }] },
         permissionMode: "default", sandbox: policy.sandbox(), includePartialMessages: true,
         persistSession: true, verbatimPrompts: true, maxTurns: 64,
-        settings: { ...baseOptions(lease.runtime).settings, availableModels: [model], enforceAvailableModels: true,
-          disableClaudeAiConnectors: options.wonderConnectors !== true || options.wonderPlanning === true },
+        settings: { ...base.settings, availableModels: [model], enforceAvailableModels: true },
         ...(model === HAIKU_MODEL ? { thinking: { type: "disabled" } } : options.effort ? { effort: options.effort } : {}),
         ...(options.outputSchema ? { outputFormat: { type: "json_schema", schema: options.outputSchema } } : {}),
         ...(session.sdkStarted ? { resume: session.sdkSessionId } : { sessionId: session.sdkSessionId }) };

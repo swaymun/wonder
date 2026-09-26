@@ -100,6 +100,31 @@ test("question response only reaches its exact outstanding request", async t => 
   assert.equal(f.bridge.pending.size, 0);
 });
 
+test("account connector calls wait for the owning Bot approval", async t => {
+  const f = await fixture(t);
+  const { ToolPolicy } = await import("../permissions.mjs");
+  const session = f.sessions.get(f.thread.id);
+  const policy = new ToolPolicy({ ...session.options.wonderPolicy, cwd: session.options.cwd });
+  const run = { turn: { id: "connector-turn" }, abort: new AbortController() };
+  const before = f.frames.length;
+  assert.equal((await f.bridge.permission(session, run, policy, "ToolSearch", { query: "gmail labels" },
+    { toolUseID: "search-labels" })).behavior, "allow");
+  assert.equal(f.frames.length, before);
+  for (const decision of ["decline", "accept"]) {
+    let settled = false;
+    const result = f.bridge.permission(session, run, policy, "mcp__claude_ai_Gmail__list_labels", {},
+      { toolUseID: `labels-${decision}`, mcpServer: { name: "claude.ai Gmail", source: "claudeai" } });
+    result.then(() => { settled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    const request = f.frames.at(-1);
+    assert.equal(request.method, "item/commandExecution/requestApproval");
+    assert.equal(request.params.threadId, f.thread.id);
+    assert.equal(settled, false);
+    await f.bridge.receive({ id: request.id, result: { decision } });
+    assert.equal((await result).behavior, decision === "accept" ? "allow" : "deny");
+  }
+});
+
 // Contract: uploaded opaque image IDs and application-owned Bot context reach
 // the SDK together, while an active history read never replaces turn settings.
 test("opaque image attachments and Bot context survive the normalized input boundary", async t => {

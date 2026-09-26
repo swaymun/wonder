@@ -35,11 +35,14 @@ export function isSubscription(account) {
     && (account.tokenSource == null || account.tokenSource === "claude.ai");
 }
 
-export function baseOptions(runtime) {
+export function baseOptions(runtime, { connectors = false } = {}) {
   return { pathToClaudeCodeExecutable: runtime.executable, env: subscriptionEnvironment(),
     extraArgs: { "no-chrome": null },
-    model: HAIKU_MODEL, settingSources: [], plugins: [], strictMcpConfig: true,
-    settings: { autoMemoryEnabled: false, switchModelsOnFlag: false, autoContinueAtUsageLimit: false },
+    // Strict MCP also suppresses the account's claude.ai connectors. Empty
+    // settingSources still excludes user/project/local MCP servers and hooks.
+    model: HAIKU_MODEL, settingSources: [], plugins: [], strictMcpConfig: !connectors,
+    settings: { autoMemoryEnabled: false, switchModelsOnFlag: false, autoContinueAtUsageLimit: false,
+      disableClaudeAiConnectors: !connectors },
     promptSuggestions: false, agentProgressSummaries: false, stderr: () => {} };
 }
 
@@ -58,10 +61,11 @@ export async function inspectSdk(runtime, { cwd, includeUsage = false, connector
   const abortController = new AbortController();
   const done = Promise.withResolvers();
   const timer = setTimeout(() => abortController.abort(), 30_000);
+  const options = baseOptions(runtime, { connectors });
   const query = runtime.sdk.query({ prompt: (async function* () { await done.promise; })(),
-    options: { ...baseOptions(runtime), cwd, abortController, tools: [], mcpServers: {},
+    options: { ...options, cwd, abortController, tools: [], mcpServers: {},
       permissionMode: "dontAsk", permissionPrompts: "none", persistSession: false,
-      settings: { ...baseOptions(runtime).settings, disableAllHooks: true, disableClaudeAiConnectors: !connectors } } });
+      settings: { ...options.settings, disableAllHooks: true } } });
   try {
     for (const method of ["initializationResult", "accountInfo", "supportedModels", "mcpServerStatus", "interrupt", "close"])
       if (typeof query[method] !== "function") throw new Error(`Claude runtime is missing ${method}`);
