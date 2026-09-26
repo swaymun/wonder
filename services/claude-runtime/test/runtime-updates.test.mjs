@@ -75,13 +75,14 @@ test("control discovery waits for pending connections before closing the SDK", a
     supportedModels: async () => [{ value: "haiku" }],
     mcpServerStatus: async () => {
       assert.equal(closed, false);
-      return [{ name: "Mail", source: "claudeai", status: ++calls === 1 ? "pending" : "connected" }];
+      if (++calls === 1) return [];
+      return [{ name: "Mail", source: "claudeai", status: calls === 2 ? "pending" : "connected" }];
     },
     interrupt: async () => {}, close: () => { closed = true; },
   }) } };
   const result = await inspectSdk(runtime, { connectors: true });
   assert.equal(result.servers[0].status, "connected");
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.equal(closed, true);
 });
 

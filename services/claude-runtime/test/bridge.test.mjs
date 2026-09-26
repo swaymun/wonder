@@ -125,6 +125,22 @@ test("account connector calls wait for the owning Bot approval", async t => {
   }
 });
 
+test("concurrent account and model reads share discovery and retry after failure", async t => {
+  const f = await fixture(t), done = Promise.withResolvers();
+  let calls = 0;
+  f.bridge.inspect = async () => { calls++; await done.promise; throw new Error("offline"); };
+  const account = f.bridge.request("account/read", { refresh: true });
+  const models = f.bridge.request("model/list", {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
+  done.resolve();
+  const first = await Promise.allSettled([account, models]);
+  assert.ok(first.every(r => r.status === "rejected" && r.reason.message === "offline"));
+  f.bridge.inspect = async () => { calls++; return { connected: true, subscription: "Claude Pro", models: [], servers: [] }; };
+  assert.deepEqual(await f.bridge.request("model/list", {}), { data: [], nextCursor: null });
+  assert.equal(calls, 2);
+});
+
 // Contract: uploaded opaque image IDs and application-owned Bot context reach
 // the SDK together, while an active history read never replaces turn settings.
 test("opaque image attachments and Bot context survive the normalized input boundary", async t => {

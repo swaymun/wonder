@@ -81,9 +81,10 @@ export async function inspectSdk(runtime, { cwd, includeUsage = false, connector
       try { windows = projectUsage(await usageMethod.call(query, { skipBehaviors: true })); } catch { /* Usage is optional; never fake a zero. */ }
     }
     let servers = connectors && connected ? await query.mcpServerStatus() : [];
-    // MCP startup is asynchronous. Closing a control-only query immediately
-    // caches pending servers as unavailable even when they would connect.
-    for (let i = 0; i < 10 && servers.some(s => s.status === "pending"); i++) {
+    // MCP startup is asynchronous, including the account's server list fetch.
+    // Give empty/pending discovery up to five seconds before closing the query.
+    for (let i = 0; i < 10 && connectors && connected
+      && (servers.length === 0 || servers.some(s => s.status === "pending")); i++) {
       await new Promise(resolve => setTimeout(resolve, 500));
       if (abortController.signal.aborted) break;
       servers = await query.mcpServerStatus();

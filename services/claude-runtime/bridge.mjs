@@ -78,12 +78,17 @@ export class ClaudeBridge {
     this.active = new Map(); this.pending = new Map(); this.inspection = null; this.inspectionAt = 0;
   }
   async catalog(refresh = false) {
-    if (refresh || !this.inspection || Date.now() - this.inspectionAt > 60_000) {
+    // Account, model and app requests can arrive together during startup.
+    // Share discovery so an older empty response cannot replace a newer list.
+    if (this.inspecting) return this.inspecting;
+    if (!refresh && this.inspection && Date.now() - this.inspectionAt <= 60_000) return this.inspection;
+    this.inspecting = (async () => {
       const lease = await this.updates.acquire();
-      try { this.inspection = await this.inspect(lease.runtime, { includeUsage: true, connectors: true }); this.inspectionAt = Date.now(); }
+      try { this.inspection = await this.inspect(lease.runtime, { includeUsage: true, connectors: true }); this.inspectionAt = Date.now(); return this.inspection; }
       finally { await lease.release(); }
-    }
-    return this.inspection;
+    })();
+    try { return await this.inspecting; }
+    finally { this.inspecting = null; }
   }
   async receive(frame) {
     if (!frame || typeof frame !== "object") throw new Error("Invalid runtime frame");
