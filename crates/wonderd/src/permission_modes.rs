@@ -175,6 +175,15 @@ pub(super) fn approval_options_for_bot(
     catalog: &RuntimeCatalog,
     bot: &StoredBot,
 ) -> Vec<ApprovalModeOption> {
+    if bot.agent_family == AgentFamily::Claude {
+        return [ApprovalMode::AskForApproval, ApprovalMode::FullAccess]
+            .into_iter()
+            .map(|mode| ApprovalModeOption {
+                id: mode.id(),
+                allowed: true,
+            })
+            .collect();
+    }
     approval_option_values(catalog, Some(bot.execution_directory()), Some(bot))
 }
 
@@ -234,6 +243,13 @@ fn approval_option_values(
 }
 
 pub(super) fn approval_allowed(catalog: &RuntimeCatalog, bot: &StoredBot) -> bool {
+    if bot.agent_family == AgentFamily::Claude {
+        return bot.approval_mode.as_deref() != Some("approve-for-me")
+            && matches!(
+                bot.permission_mode.as_deref(),
+                Some("read-only" | "workspace" | "full-access")
+            );
+    }
     let resolved = resolve(bot);
     profile_allowed(
         catalog,
@@ -358,11 +374,25 @@ pub(super) fn options(catalog: &RuntimeCatalog) -> Vec<serde_json::Value> {
     .collect()
 }
 
+pub(super) async fn verify_selected(state: &AppState, bot: &StoredBot) -> Result<(), String> {
+    if bot.agent_family == AgentFamily::Claude {
+        crate::claude::policy(state, bot).await?;
+        return file_access::dispatch_check(state, bot, bot.effective_permission_profile()).await;
+    }
+    let client = crate::claude::client(state, bot.agent_family)?;
+    let mut runtime = client.lock().await;
+    verify(state, &mut runtime, bot).await
+}
+
 pub(super) async fn verify(
     state: &AppState,
     runtime: &mut AppServerClient,
     bot: &StoredBot,
 ) -> Result<(), String> {
+    if bot.agent_family == AgentFamily::Claude {
+        crate::claude::policy(state, bot).await?;
+        return file_access::dispatch_check(state, bot, bot.effective_permission_profile()).await;
+    }
     let resolved = resolve(bot);
     let profile = resolved.permission_profile.as_str();
     if !requirements_allow(
@@ -418,6 +448,13 @@ pub(super) fn validate_roots(
     .map(|_| ())
 }
 
+pub(crate) async fn is_group_workspace(state: &AppState, bot: &StoredBot) -> Result<bool, String> {
+    let root = tokio::fs::canonicalize(&state.bots_root)
+        .await
+        .map_err(|_| "Bot storage is unavailable.")?;
+    Ok(FsPath::new(&bot.workspace_path).starts_with(root.join(".group-files")))
+}
+
 pub(super) async fn runtime_roots(
     state: &AppState,
     bot: &StoredBot,
@@ -425,8 +462,7 @@ pub(super) async fn runtime_roots(
     let mut roots = vec![bot.workspace_path.clone()];
     // A collaborative turn writes only inside its shared group folder. The
     // Bot's private additional write grants do not leak into this assignment.
-    let group_workspace = FsPath::new(&bot.workspace_path)
-        .starts_with(FsPath::new(&state.bots_root).join(".group-files"));
+    let group_workspace = is_group_workspace(state, bot).await?;
     if bot.permission_mode.as_deref() == Some("workspace") {
         roots.push(bot.execution_directory().to_owned());
         if !group_workspace {
@@ -492,7 +528,7 @@ pub(super) async fn create_native(
             .map_err(|(s, m)| (s, m.to_owned()))?;
         bot.working_directory = Some(directory.into());
     }
-    verify(state, &mut *state.app_server.lock().await, &bot)
+    verify_selected(state, &bot)
         .await
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     bot.avatar_color = request.avatar_color.clone();
@@ -554,6 +590,8 @@ pub(crate) mod tests {
             .await
             .models
             .push(ModelOption {
+                agent_family: AgentFamily::Codex,
+                capabilities: ModelCapabilities::for_family(AgentFamily::Codex),
                 id: "fake".into(),
                 display_name: "Fake".into(),
                 description: None,
@@ -612,6 +650,7 @@ pub(crate) mod tests {
 
     fn bot_with_modes(permission_mode: Option<&str>, approval_mode: Option<&str>) -> StoredBot {
         StoredBot {
+            agent_family: wonder_store::AgentFamily::Codex,
             id: "bot".into(),
             name: "Bot".into(),
             role: "Assistant".into(),

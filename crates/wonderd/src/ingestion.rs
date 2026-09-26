@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use wonder_app_server::{NotificationSink, RuntimeHealth};
-use wonder_store::Store;
+use wonder_store::{AgentFamily, Store};
 
 #[derive(Clone, Default)]
 pub struct Ingestion {
@@ -16,17 +16,23 @@ pub struct Ingestion {
 
 #[derive(Default)]
 struct Status {
-    health: Option<RuntimeHealth>,
+    providers: HashMap<AgentFamily, ProviderStatus>,
     heartbeat: Option<Instant>,
     consumer: Option<tokio::task::AbortHandle>,
-    recovering: bool,
-    needs_validation: bool,
-    reconcile_requested: bool,
     error: Option<String>,
     runtimes: HashMap<String, RuntimeRegistration>,
 }
 
+#[derive(Default)]
+struct ProviderStatus {
+    health: Option<RuntimeHealth>,
+    recovering: bool,
+    needs_validation: bool,
+    reconcile_requested: bool,
+}
+
 struct RuntimeRegistration {
+    family: AgentFamily,
     health: RuntimeHealth,
     client: Weak<tokio::sync::Mutex<wonder_app_server::AppServerClient>>,
     message_id: Option<String>,
@@ -61,8 +67,10 @@ pub struct Readiness {
 impl Ingestion {
     pub(crate) fn request_reconciliation(&self) {
         let mut status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        status.reconcile_requested = true;
-        status.recovering = true;
+        for provider in status.providers.values_mut() {
+            provider.reconcile_requested = true;
+            provider.recovering = true;
+        }
     }
 
     pub fn register(
@@ -71,13 +79,24 @@ impl Ingestion {
         health: RuntimeHealth,
         message_id: Option<String>,
     ) {
+        self.register_provider(AgentFamily::Codex, client, health, message_id);
+    }
+
+    pub(crate) fn register_provider(
+        &self,
+        family: AgentFamily,
+        client: &Arc<tokio::sync::Mutex<wonder_app_server::AppServerClient>>,
+        health: RuntimeHealth,
+        message_id: Option<String>,
+    ) {
         let mut status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if message_id.is_none() {
-            status.health = Some(health.clone());
+            status.providers.entry(family).or_default().health = Some(health.clone());
         }
         status.runtimes.insert(
             health.id().to_owned(),
             RuntimeRegistration {
+                family,
                 health,
                 client: Arc::downgrade(client),
                 message_id,
@@ -153,30 +172,36 @@ impl Ingestion {
     }
 
     pub async fn readiness(&self, store: &Store) -> Readiness {
+        self.provider_readiness(store, None).await
+    }
+
+    pub(crate) async fn readiness_for(&self, store: &Store, family: AgentFamily) -> Readiness {
+        self.provider_readiness(store, Some(family)).await
+    }
+
+    async fn provider_readiness(&self, store: &Store, family: Option<AgentFamily>) -> Readiness {
         let detail = {
             let status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if status
-                .health
-                .as_ref()
-                .is_none_or(|health| !health.is_alive())
-            {
-                Some("Bots are restarting. Wonder will check existing work before you can send again. If this continues, reopen Wonder on your Mac.")
-            } else if status
-                .health
-                .as_ref()
-                .is_some_and(RuntimeHealth::storage_blocked)
-                || status.error.is_some()
+            let available = status.providers.iter().any(|(id, p)| {
+                family.is_none_or(|family| family == *id)
+                    && !p.recovering
+                    && p.health.as_ref().is_some_and(RuntimeHealth::is_alive)
+                    && !status.runtimes.values().any(|r| {
+                        r.family == *id
+                            && r.message_id.is_some()
+                            && (!r.health.is_alive() || r.health.storage_blocked())
+                    })
+            });
+            if status.error.is_some()
+                || status.runtimes.values().any(|r| r.health.storage_blocked())
             {
                 Some("Chat updates could not be saved. Wonder is retrying; check available disk space if this continues.")
-            } else if status.runtimes.values().any(|r| {
-                r.message_id.is_some() && (!r.health.is_alive() || r.health.storage_blocked())
-            }) {
-                Some("A Bot stopped responding. Wonder is checking its existing work.")
+            } else if !available {
+                Some("This agent is reconnecting. Check its sign-in and runtime in Wonder on your Mac if this continues.")
             } else if status
                 .consumer
                 .as_ref()
                 .is_none_or(tokio::task::AbortHandle::is_finished)
-                || status.recovering
                 || status
                     .heartbeat
                     .is_none_or(|time| time.elapsed() > Duration::from_secs(5))
@@ -239,11 +264,16 @@ pub struct NotificationService {
 }
 impl Drop for NotificationService {
     fn drop(&mut self) {
-        self.ingestion
+        for provider in self
+            .ingestion
             .inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .recovering = true;
+            .providers
+            .values_mut()
+        {
+            provider.recovering = true;
+        }
         for task in &self.tasks {
             task.abort();
         }
@@ -251,18 +281,25 @@ impl Drop for NotificationService {
 }
 
 pub async fn spawn(state: AppState) -> NotificationService {
-    let health = state.app_server.lock().await.health();
-    state
-        .ingestion
-        .register(&state.app_server, health.clone(), None);
-    {
-        let mut status = state
+    let mut families = vec![AgentFamily::Codex];
+    if state.claude.is_some() {
+        families.push(AgentFamily::Claude);
+    }
+    for family in &families {
+        let client = crate::claude::client(&state, *family).expect("configured provider");
+        let health = client.lock().await.health();
+        state
+            .ingestion
+            .register_provider(*family, &client, health, None);
+        state
             .ingestion
             .inner
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        status.health = Some(health);
-        status.recovering = true;
+            .unwrap_or_else(|e| e.into_inner())
+            .providers
+            .entry(*family)
+            .or_default()
+            .recovering = true;
     }
     let projection_state = state.clone();
     let projection = tokio::spawn(async move {
@@ -290,89 +327,98 @@ pub async fn spawn(state: AppState) -> NotificationService {
     });
     let ingestion = state.ingestion.clone();
     let maintenance_state = state.clone();
-    let recovery = tokio::spawn(async move {
-        let mut needs_recovery = true;
-        let mut recover_all = true;
-        let mut delay = Duration::from_secs(1);
-        loop {
-            if std::mem::take(
-                &mut state
-                    .ingestion
-                    .inner
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .reconcile_requested,
-            ) {
-                needs_recovery = true;
-                recover_all = true;
-            }
-            let healthy = {
-                let status = state
-                    .ingestion
-                    .inner
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                status.health.as_ref().is_some_and(RuntimeHealth::is_alive)
-            };
-            if !healthy {
-                needs_recovery = true;
-                recover_all = true;
-            }
-            if state
-                .ingestion
-                .inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .runtimes
-                .values()
-                .any(|r| r.message_id.is_some() && !r.health.is_alive())
-            {
-                needs_recovery = true;
-            }
-            if needs_recovery {
-                state
-                    .ingestion
-                    .inner
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .recovering = true;
-                match recover(&state, recover_all).await {
-                    Ok(()) => {
-                        needs_recovery = false;
-                        recover_all = false;
-                        state
-                            .ingestion
-                            .inner
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .runtimes
-                            .retain(|_, runtime| runtime.health.is_alive());
-                        delay = Duration::from_secs(1);
-                        state
-                            .ingestion
-                            .inner
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .recovering = false;
-                        let _ = state.logger.record(
-                            "info",
-                            "notification_runtime_recovered",
-                            json!({}),
-                        );
-                    }
-                    Err(error) => {
-                        let _ = state.logger.record(
-                            "error",
-                            "notification_runtime_recovery_failed",
-                            json!({"error": error}),
-                        );
-                        delay = (delay * 2).min(Duration::from_secs(30));
+    let mut recovery_tasks = Vec::new();
+    for family in families {
+        let state = state.clone();
+        recovery_tasks.push(tokio::spawn(async move {
+            let mut needs_recovery = true;
+            let mut recover_all = true;
+            let mut delay = Duration::from_secs(1);
+            let mut last_discovery = std::time::Instant::now();
+            loop {
+                // The sidecar can activate an SDK patch or observe a new login
+                // without restarting Wonder. Refresh its model contract on a
+                // bounded cadence, independently of Codex recovery.
+                if family == AgentFamily::Claude
+                    && !needs_recovery
+                    && last_discovery.elapsed() >= Duration::from_secs(300)
+                {
+                    last_discovery = std::time::Instant::now();
+                    if let Ok(client) = crate::claude::client(&state, family) {
+                        if crate::claude::discover(&state, &mut *client.lock().await)
+                            .await
+                            .is_err()
+                        {
+                            needs_recovery = true;
+                            state
+                                .ingestion
+                                .inner
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .providers
+                                .entry(family)
+                                .or_default()
+                                .needs_validation = true;
+                        }
                     }
                 }
+                {
+                    let mut status = state
+                        .ingestion
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let provider = status.providers.entry(family).or_default();
+                    if std::mem::take(&mut provider.reconcile_requested)
+                        || provider.health.as_ref().is_none_or(|h| !h.is_alive())
+                    {
+                        needs_recovery = true;
+                        recover_all = true;
+                    }
+                    if status.runtimes.values().any(|r| {
+                        r.family == family && r.message_id.is_some() && !r.health.is_alive()
+                    }) {
+                        needs_recovery = true;
+                    }
+                    if needs_recovery {
+                        status.providers.entry(family).or_default().recovering = true;
+                    }
+                }
+                if needs_recovery {
+                    match recover(&state, family, recover_all).await {
+                        Ok(()) => {
+                            needs_recovery = false;
+                            recover_all = false;
+                            delay = Duration::from_secs(1);
+                            let mut status = state
+                                .ingestion
+                                .inner
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            status
+                                .runtimes
+                                .retain(|_, r| r.family != family || r.health.is_alive());
+                            status.providers.entry(family).or_default().recovering = false;
+                            let _ = state.logger.record(
+                                "info",
+                                "notification_runtime_recovered",
+                                json!({"agentFamily":family}),
+                            );
+                        }
+                        Err(error) => {
+                            let _ = state.logger.record(
+                                "error",
+                                "notification_runtime_recovery_failed",
+                                json!({"agentFamily":family,"error":error}),
+                            );
+                            delay = (delay * 2).min(Duration::from_secs(30));
+                        }
+                    }
+                }
+                tokio::time::sleep(delay).await;
             }
-            tokio::time::sleep(delay).await;
-        }
-    });
+        }));
+    }
     let maintenance = tokio::spawn(async move {
         loop {
             if let Err(error) = maintenance_state.store.prune_replay().await {
@@ -385,9 +431,10 @@ pub async fn spawn(state: AppState) -> NotificationService {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
+    recovery_tasks.extend([projection, maintenance]);
     NotificationService {
         ingestion,
-        tasks: vec![projection, recovery, maintenance],
+        tasks: recovery_tasks,
     }
 }
 
@@ -480,45 +527,73 @@ async fn project_next(state: &AppState) -> Result<bool, String> {
     Ok(true)
 }
 
-async fn recover(state: &AppState, recover_all: bool) -> Result<(), String> {
-    // Let committed completion envelopes settle before inspecting runtime
-    // history or invalidating requests belonging to a dead connection.
+async fn recover(state: &AppState, family: AgentFamily, recover_all: bool) -> Result<(), String> {
+    // Committed completion envelopes settle before inspecting runtime history.
     while project_next(state).await? {}
-    let _guard = state.dispatch_lock.lock().await;
+    let client = crate::claude::client(state, family)?;
     {
-        let mut runtime = state.app_server.lock().await;
+        // Each provider owns its startup lock. A missing Codex installation
+        // must not hold Claude or durable notification projection behind it.
+        let mut runtime = client.lock().await;
         if !runtime.health().is_alive() {
             state
                 .ingestion
                 .inner
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
+                .providers
+                .entry(family)
+                .or_default()
                 .needs_validation = true;
-            runtime
-                .restart(state.launch_config.lock().await.clone())
-                .await
-                .map_err(|e| e.to_string())?;
+            match family {
+                AgentFamily::Codex => {
+                    runtime
+                        .restart(state.launch_config.lock().await.clone())
+                        .await
+                }
+                AgentFamily::Claude => {
+                    runtime
+                        .restart_bridge(
+                            state
+                                .claude
+                                .as_ref()
+                                .ok_or("Claude is not installed")?
+                                .config
+                                .clone(),
+                        )
+                        .await
+                }
+            }
+            .map_err(|e| e.to_string())?;
         }
         state
             .ingestion
-            .register(&state.app_server, runtime.health(), None);
+            .register_provider(family, &client, runtime.health(), None);
         let needs_validation = state
             .ingestion
             .inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .providers
+            .entry(family)
+            .or_default()
             .needs_validation;
         if needs_validation {
-            crate::rediscover_runtime(state, &mut runtime).await?;
+            match family {
+                AgentFamily::Codex => crate::rediscover_runtime(state, &mut runtime).await?,
+                AgentFamily::Claude => crate::claude::discover(state, &mut runtime).await?,
+            }
             state
                 .ingestion
                 .inner
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
+                .providers
+                .entry(family)
+                .or_default()
                 .needs_validation = false;
         }
     }
-    drop(_guard);
     // No request from a previous transport can be answered on the replacement.
     for approval in state
         .store
@@ -559,6 +634,9 @@ async fn recover(state: &AppState, recover_all: bool) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     for message in messages {
+        if crate::claude::conversation_family(state, &message.conversation_id).await? != family {
+            continue;
+        }
         if state.ingestion.live_worker(&message.id) {
             continue;
         }
@@ -608,24 +686,23 @@ async fn recover(state: &AppState, recover_all: bool) -> Result<(), String> {
             let bot = crate::group_collaboration::execution_bot(state, &message, bot).await?;
             crate::ensure_execution_permission_cache(state, &bot).await?;
             let resolved = crate::permission_modes::resolve(&bot);
-            let runtime = state.app_server.lock().await.rpc();
+            let runtime = crate::claude::for_thread(state, thread_id).await?;
+            let mut resume_params = json!({
+                "threadId": thread_id,
+                "excludeTurns": true,
+                "cwd": bot.execution_directory(),
+                "permissions": resolved.permission_profile,
+                "runtimeWorkspaceRoots": crate::permission_modes::runtime_roots(state, &bot).await?,
+                "approvalPolicy": resolved.approval_policy,
+                "approvalsReviewer": resolved.approvals_reviewer,
+                "developerInstructions": wonder_harness::instructions(&format!("{}\n\n{}", crate::teaching::BETA_POLICY, bot.system_prompt)),
+                "config":if bot.agent_family == AgentFamily::Codex { crate::teaching::runtime_config(state, &runtime, bot.execution_directory()).await? } else {json!({})},
+            });
+            crate::claude::configure_thread(state, &bot, &mut resume_params).await?;
             let response = runtime
-            .request(
-                "thread/resume",
-                json!({
-                    "threadId": thread_id,
-                    "excludeTurns": true,
-                    "cwd": bot.execution_directory(),
-                    "permissions": resolved.permission_profile,
-                    "runtimeWorkspaceRoots": crate::permission_modes::runtime_roots(state, &bot).await?,
-                    "approvalPolicy": resolved.approval_policy,
-                    "approvalsReviewer": resolved.approvals_reviewer,
-                    "developerInstructions": wonder_harness::instructions(&format!("{}\n\n{}", crate::teaching::BETA_POLICY, bot.system_prompt)),
-                    "config":crate::teaching::runtime_config(state, &runtime, bot.execution_directory()).await?,
-                }),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+                .request("thread/resume", resume_params)
+                .await
+                .map_err(|e| e.to_string())?;
             if response.error.is_some() {
                 return Err("Existing Bot work could not be reopened".into());
             }
@@ -893,6 +970,7 @@ for line in sys.stdin:
         .unwrap();
         store.start_event_epoch("epoch").await.expect("sync epoch");
         let state = AppState {
+            claude: None,
             ingestion: Ingestion::default(),
             store,
             logger: Arc::new(
@@ -931,6 +1009,171 @@ for line in sys.stdin:
             ),
         };
         (dir, state)
+    }
+
+    // Contract: one unavailable provider cannot block the other, and receipt,
+    // streamed output and recovery stay with the chosen provider's transport.
+    #[tokio::test]
+    async fn claude_dispatch_survives_missing_codex_and_keeps_its_session_binding() {
+        let (dir, mut state) = fixture().await;
+        let entrypoint = dir.path().join("claude.py");
+        fs::write(&entrypoint, r#"import json, sys
+for line in sys.stdin:
+    r=json.loads(line)
+    if 'id' not in r: continue
+    p=r.get('params',{}); m=r.get('method'); result={}
+    if m=='initialize': result={'wonderBridge':{'protocolVersion':1,'family':'claude'},'capabilities':{'experimentalApi':True}}
+    elif m=='account/read': result={'connected':True}
+    elif m=='model/list': result={'data':[{'id':'claude:haiku','displayName':'Haiku 4.5'}]}
+    elif m=='thread/start':
+        assert p['wonderPolicy']['mode']=='workspace'
+        assert p['model']=='claude:haiku'
+        assert 'config' not in p
+        result={'thread':{'id':'claude-owned','sessionId':'sdk-owned'}}
+    elif m=='turn/start':
+        assert p['threadId']=='claude-owned'
+        result={'turn':{'id':'claude-turn'}}
+    elif m=='thread/resume': result={'thread':{'id':'claude-owned','status':{'type':'idle'}}}
+    elif m=='thread/turns/list': result={'data':[{'id':'claude-turn','status':'completed'}]}
+    elif m=='thread/items/list': result={'data':[{'turnId':'claude-turn','item':{'id':'reply','type':'agentMessage','text':'Claude routed correctly'}}]}
+    print(json.dumps({'id':r['id'],'result':result}),flush=True)
+    if m=='turn/start':
+        item={'id':'reply','type':'agentMessage','text':'Claude routed correctly'}
+        print(json.dumps({'method':'item/completed','params':{'threadId':'claude-owned','turnId':'claude-turn','item':item}}),flush=True)
+        print(json.dumps({'method':'turn/completed','params':{'threadId':'claude-owned','turn':{'id':'claude-turn','status':'completed','items':[item]}}}),flush=True)
+"#).unwrap();
+        state.claude = Some(Arc::new(crate::claude::Runtime {
+            client: Arc::new(tokio::sync::Mutex::new(AppServerClient::unavailable(
+                "test".into(),
+                notification_sink(state.store.clone()),
+            ))),
+            config: wonder_app_server::BridgeLaunchConfig {
+                node_bin: "/usr/bin/python3".into(),
+                entrypoint,
+                state_dir: dir.path().join("claude-state"),
+                npm_cli: None,
+                wonder_version: "test".into(),
+            },
+        }));
+        state.app_server.lock().await.shutdown().await.unwrap();
+        state.launch_config.lock().await.codex_bin = dir.path().join("missing-codex");
+        let workspace = fs::canonicalize(&state.bot_home)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        state
+            .store
+            .upsert_bot(
+                "claude-bot",
+                "Claude",
+                "Help",
+                "Help",
+                &workspace,
+                "wonder_claude",
+                Some("claude:haiku"),
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+        let mut bot = state.store.bot("claude-bot").await.unwrap().unwrap();
+        bot.permission_mode = Some("workspace".into());
+        bot.approval_mode = Some("ask-for-approval".into());
+        state
+            .store
+            .update_managed_bot(&bot, [false; 3])
+            .await
+            .unwrap();
+        let _service = spawn(state.clone()).await;
+        ready(&state).await;
+        assert!(
+            state
+                .ingestion
+                .readiness_for(&state.store, AgentFamily::Claude)
+                .await
+                .ready
+        );
+        assert!(
+            !state
+                .ingestion
+                .readiness_for(&state.store, AgentFamily::Codex)
+                .await
+                .ready
+        );
+        let wonder_store::MessageInsert::Inserted(message) = state
+            .store
+            .insert_dispatch_message(
+                "owner",
+                "claude-client",
+                "hello",
+                "hash",
+                "claude-bot",
+                &[],
+                "now",
+                true,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        crate::dispatch_to_codex(state.clone(), message.clone()).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if state
+                    .store
+                    .message_by_id(&message.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state
+                    == "completed"
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "Claude receipt did not settle: {e}; {:?}",
+                fs::read_to_string(dir.path().join("logs/test.jsonl"))
+            )
+        });
+        let binding = state
+            .store
+            .runtime_binding("claude-bot")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.family, AgentFamily::Claude);
+        assert_eq!(binding.session_id.as_deref(), Some("sdk-owned"));
+        assert_eq!(
+            state
+                .store
+                .assistant_messages_for_conversation("claude-bot")
+                .await
+                .unwrap()[0]
+                .text,
+            "Claude routed correctly"
+        );
+        assert_eq!(
+            state.runtime_catalog.read().await.models[0]
+                .service_tiers
+                .len(),
+            0
+        );
+        state
+            .claude
+            .as_ref()
+            .unwrap()
+            .client
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .unwrap();
     }
 
     async fn ready(state: &AppState) {
@@ -1405,6 +1648,9 @@ for line in sys.stdin:
             .ingestion
             .inner
             .lock()
+            .unwrap()
+            .providers
+            .get(&AgentFamily::Codex)
             .unwrap()
             .health
             .as_ref()

@@ -10,7 +10,10 @@ for command in cargo swift go xcodebuild; do
     echo "$command: missing (see DEVELOPMENT.md)"; missing=1
   fi
 done
-runtime="${WONDER_CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex}"
+runtime="${WONDER_CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex}"
+if [[ -z "${WONDER_CODEX_BIN:-}" && ! -f "$runtime" ]]; then
+  runtime="/Applications/ChatGPT.app/Contents/Resources/codex"
+fi
 if [[ -x "$runtime" ]]; then
   version="$("$runtime" --version)"
   echo "Codex runtime: $version (Wonder checks its protocol compatibility at startup)"

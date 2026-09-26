@@ -19,11 +19,18 @@ and preserves the separate data home, host identity, and device records. Do not
 replace a running app by copying individual executables into its bundle.
 
 Known runtime versions and schema hashes are in `compatibility-manifest.json`.
-The default runtime is `/Applications/ChatGPT.app/Contents/Resources/codex`.
+Wonder discovers ChatGPT's current `Contents/Resources/codex-cli/bin/codex` launcher and falls back to its older `Contents/Resources/codex` location. `wonderd --locate-runtime` reports the selected path; `WONDER_CODEX_BIN` remains an explicit override. Discovery does not bypass runtime or protocol verification.
 `WONDER_CODEX_BIN` selects an explicit executable for controlled development, but
 it must pass the same local schema and helper checks. Newer compatible schemas
 can pass without a Wonder update; changed required contracts still fail closed.
 The preflight reports the installed version; startup performs the full check.
+
+Mac packaging downloads checksum-pinned official Node bytes and installs the
+Claude adapter’s locked production dependencies with lifecycle scripts disabled.
+It signs the bundled native executables along with Wonder. Claude authentication
+uses the official subscription login. The adapter strips API-billing environment
+overrides; use Haiku 4.5 for inexpensive live acceptance. Live SDK probes and
+private research are excluded from the public source inventory.
 
 ## iOS
 
@@ -45,6 +52,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 swift test --package-path apps/native
 swift test --package-path apps/menubar
+(cd services/claude-runtime && npm ci --ignore-scripts && npm test)
 (cd cmd/wonder-tunnel && go test ./...)
 (cd services/push && npm ci && npm run check && npm test)
 python3 scripts/verify-release-docs.py

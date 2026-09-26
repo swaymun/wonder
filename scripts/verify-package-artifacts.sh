@@ -21,6 +21,11 @@ required_files=(
   "$CONTENTS_PATH/Resources/Licenses/Go-LICENSE.txt"
   "$CONTENTS_PATH/Resources/Licenses/Sparkle-LICENSE.txt"
   "$CONTENTS_PATH/Resources/manage-runtime.sh"
+  "$CONTENTS_PATH/Resources/node/bin/node"
+  "$CONTENTS_PATH/Resources/node/LICENSE"
+  "$CONTENTS_PATH/Resources/node/lib/node_modules/npm/bin/npm-cli.js"
+  "$CONTENTS_PATH/Resources/claude-runtime/main.mjs"
+  "$CONTENTS_PATH/Resources/claude-runtime/node_modules/@anthropic-ai/claude-agent-sdk/LICENSE.md"
   "$CONTENTS_PATH/Resources/Wonder.icns"
   "$CONTENTS_PATH/Resources/WonderMenuIcon.pdf"
   "$CONTENTS_PATH/MacOS/WonderHost"
@@ -45,6 +50,15 @@ test ! -e "$CONTENTS_PATH/Resources/pwa" || { echo "obsolete PWA bundle is prese
 for path in "${required_files[@]}"; do
   test -e "$path" || { echo "missing package artifact: $path" >&2; exit 1; }
 done
+
+"$CONTENTS_PATH/Resources/node/bin/node" --input-type=module -e '
+  const {pathToFileURL}=await import("node:url");
+  const {resolve}=await import("node:path");
+  const {loadSdk}=await import(pathToFileURL(resolve(process.argv[1])).href);
+  const sdk=await loadSdk();
+  if(!sdk.executable.startsWith(resolve(process.argv[2])+"/")) throw new Error("Claude executable escaped the bundle");
+  console.log("Claude SDK "+sdk.version+" packaged");
+' "$CONTENTS_PATH/Resources/claude-runtime/sdk-runtime.mjs" "$CONTENTS_PATH/Resources/claude-runtime"
 
 test ! -d "$CONTENTS_PATH/Resources/WebRTC-M153-dSYM" || { echo "WebRTC dSYM must not be shipped" >&2; exit 1; }
 test ! -e "$CONTENTS_PATH/Resources/WebRTC-M153-dSYM.zip" || { echo "WebRTC dSYM archive must not be shipped" >&2; exit 1; }

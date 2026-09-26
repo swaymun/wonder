@@ -37,7 +37,10 @@ class PublicSourceTests(unittest.TestCase):
     def test_inventory_rejects_traversal_private_paths_and_duplicates(self):
         for name in ('../secret', '/tmp/key', '.', 'docs/private.md',
                      '.git/config', 'apps/.build/cache', 'services/push/.env',
-                     'apps/token.p8', 'apps/reference.ipa', 'apps\\outside'):
+                     'apps/token.p8', 'apps/reference.ipa', 'apps\\outside',
+                     'research/CLAUDE_AGENT_SDK_IMPLEMENTATION_PLAN.md',
+                     'research/CLAUDE_IMPLEMENTATION_STATUS.md',
+                     'scripts/claude-sdk-smoke/explore.mjs'):
             self.inventory([name])
             with self.assertRaises(ValueError, msg=name):
                 exporter.read_inventory(self.root)

@@ -22,6 +22,7 @@ mod sync;
 use sync::stream_events;
 
 mod account_usage;
+pub mod claude;
 pub mod computer_sessions;
 mod computer_tools;
 mod connected_apps;
@@ -82,10 +83,11 @@ use wonder_app_server::{
 };
 use wonder_asr::MAX_RECORDING_BYTES;
 use wonder_store::{
-    avatar, ComputerControlLeaseCreate, ComputerLeaseAcquireResult, ComputerSessionCreate,
-    ComputerSessionState, MessageInsert, NewChannelMessage, Store, StoredBot, StoredChannel,
-    StoredChannelMember, StoredComputerControlLease, StoredComputerSession, StoredConversationFile,
-    StoredConversationSummary, TeachingCaptureAppendResult, TeachingEventCreate,
+    avatar, AgentFamily, ComputerControlLeaseCreate, ComputerLeaseAcquireResult,
+    ComputerSessionCreate, ComputerSessionState, MessageInsert, NewChannelMessage, Store,
+    StoredBot, StoredChannel, StoredChannelMember, StoredComputerControlLease,
+    StoredComputerSession, StoredConversationFile, StoredConversationSummary,
+    TeachingCaptureAppendResult, TeachingEventCreate,
 };
 
 const COMPUTER_USE_DYNAMIC_TOOLS_VERSION: &str = "wonder-computer-use-v2";
@@ -106,6 +108,7 @@ pub struct AppState {
     pub host_installation_id: String,
     pub app_server: Arc<tokio::sync::Mutex<AppServerClient>>,
     pub launch_config: Arc<tokio::sync::Mutex<LaunchConfig>>,
+    pub claude: Option<Arc<claude::Runtime>>,
     pub denied_roots: Vec<String>,
     /// Host folders whose files may be copied into a conversation after the
     /// owner explicitly clicks a local link. Bot workspaces are always
@@ -145,6 +148,8 @@ pub struct RuntimeCatalog {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOption {
+    pub agent_family: AgentFamily,
+    pub capabilities: ModelCapabilities,
     pub id: String,
     pub display_name: String,
     pub description: Option<String>,
@@ -154,6 +159,24 @@ pub struct ModelOption {
     pub default_reasoning_effort: Option<String>,
     pub service_tiers: Vec<ChoiceOption>,
     pub default_service_tier: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCapabilities {
+    pub guide: bool,
+    pub goals: bool,
+    pub image_generation: bool,
+}
+impl ModelCapabilities {
+    fn for_family(family: AgentFamily) -> Self {
+        let codex = family == AgentFamily::Codex;
+        Self {
+            guide: codex,
+            goals: codex,
+            image_generation: codex,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -235,9 +258,10 @@ impl RuntimeCatalog {
                 .and_then(serde_json::Value::as_array)
                 .map(|values| values.iter().filter_map(choice_option).collect())
                 .unwrap_or_default();
-            if !service_tiers
-                .iter()
-                .any(|option: &ChoiceOption| option.id == "default")
+            if AgentFamily::for_model(Some(id)) == AgentFamily::Codex
+                && !service_tiers
+                    .iter()
+                    .any(|option: &ChoiceOption| option.id == "default")
             {
                 service_tiers.insert(
                     0,
@@ -248,7 +272,10 @@ impl RuntimeCatalog {
                     },
                 );
             }
+            let family = AgentFamily::for_model(Some(id));
             let option = ModelOption {
+                agent_family: family,
+                capabilities: ModelCapabilities::for_family(family),
                 id: id.to_owned(),
                 display_name: model
                     .get("displayName")
@@ -3573,6 +3600,7 @@ fn host_readiness_state(public_origin: Option<&str>) -> &'static str {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BotSummary {
+    agent_family: AgentFamily,
     permission_mode: Option<String>,
     approval_mode: Option<String>,
     id: String,
@@ -4537,6 +4565,7 @@ fn bot_summary(bot: StoredBot) -> BotSummary {
         .map(|palette| palette.body.to_owned())
         .or_else(|| bot.avatar_color.clone());
     BotSummary {
+        agent_family: bot.agent_family,
         permission_mode: bot.permission_mode.clone(),
         approval_mode: bot.approval_mode.clone(),
         permission_profile: bot.effective_permission_profile().to_owned(),
@@ -4662,6 +4691,15 @@ async fn bot_update_endpoint(
         current.system_prompt = value.trim().to_owned();
     }
     if let Some(value) = request.model {
+        if !value.trim().is_empty()
+            && AgentFamily::for_model(Some(value.trim())) != current.agent_family
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Choose a model from this Bot’s agent family.",
+            )
+                .into_response();
+        }
         current.model = (!value.trim().is_empty()).then(|| value.trim().to_owned());
     }
     if let Some(value) = request.reasoning_effort {
@@ -4722,9 +4760,7 @@ async fn bot_update_endpoint(
         {
             return (StatusCode::BAD_REQUEST, error).into_response();
         }
-        if let Err(error) =
-            permission_modes::verify(&state, &mut *state.app_server.lock().await, &current).await
-        {
+        if let Err(error) = permission_modes::verify_selected(&state, &current).await {
             return (StatusCode::BAD_REQUEST, error).into_response();
         }
     }
@@ -6980,7 +7016,13 @@ fn effective_settings(
     let model = settings
         .and_then(|settings| settings.model.clone())
         .or_else(|| bot.model.clone())
-        .or_else(|| model_option(catalog, None).map(|model| model.id.clone()));
+        .or_else(|| {
+            catalog
+                .models
+                .iter()
+                .find(|m| !m.hidden && AgentFamily::for_model(Some(&m.id)) == bot.agent_family)
+                .map(|m| m.id.clone())
+        });
     let model_definition = model_option(catalog, model.as_deref());
     let effort = settings
         .and_then(|settings| settings.reasoning_effort.clone())
@@ -7091,7 +7133,9 @@ async fn conversation_composer_options(
         models: catalog
             .models
             .iter()
-            .filter(|model| !model.hidden)
+            .filter(|model| {
+                !model.hidden && AgentFamily::for_model(Some(&model.id)) == bot.agent_family
+            })
             .cloned()
             .collect(),
         permission_profiles,
@@ -7174,6 +7218,9 @@ fn validate_setting_value(
     service_tier: Option<&str>,
     permission_profile: Option<&str>,
 ) -> Result<(), &'static str> {
+    if model.is_some_and(|m| AgentFamily::for_model(Some(m)) != bot.agent_family) {
+        return Err("Choose a model from this Bot’s agent family.");
+    }
     // Conversation/automation overrides may select a different model than the
     // Bot default. Managed reviewer requirements apply to that effective model.
     let mut execution_bot = bot.clone();
@@ -7213,18 +7260,23 @@ fn validate_setting_value(
         {
             return Err("Change access in Bot settings. Conversation access cannot override this Bot's mode.");
         }
-        let allowed = catalog
-            .profiles_for(bot.execution_directory())
-            .iter()
-            .any(|profile| {
-                profile.id == permission_profile
-                    && profile.allowed
-                    && catalog
-                        .allowed_permission_profiles
-                        .get(permission_profile)
-                        .copied()
-                        .unwrap_or(!catalog.permission_profiles_restricted)
-            });
+        let allowed = if bot.agent_family == AgentFamily::Claude {
+            bot.permission_mode.is_some()
+                && permission_profile == bot.effective_permission_profile()
+        } else {
+            catalog
+                .profiles_for(bot.execution_directory())
+                .iter()
+                .any(|profile| {
+                    profile.id == permission_profile
+                        && profile.allowed
+                        && catalog
+                            .allowed_permission_profiles
+                            .get(permission_profile)
+                            .copied()
+                            .unwrap_or(!catalog.permission_profiles_restricted)
+                })
+        };
         if !allowed {
             return Err("selected access profile is unavailable");
         }
@@ -7239,6 +7291,9 @@ pub(crate) async fn ensure_execution_permission_cache(
     state: &AppState,
     bot: &StoredBot,
 ) -> Result<(), String> {
+    if bot.agent_family == AgentFamily::Claude {
+        return claude::policy(state, bot).await.map(|_| ());
+    }
     let needs_cache = {
         let catalog = state.runtime_catalog.read().await;
         !catalog
@@ -8123,8 +8178,17 @@ async fn create_bot(
     Extension(_authority): Extension<OwnerAuthority>,
     Json(mut request): Json<CreateBotRequest>,
 ) -> Response {
-    let uses_default_permissions =
-        request.permission_mode.is_none() && request.approval_mode.is_none();
+    let uses_default_permissions = AgentFamily::for_model(request.model.as_deref())
+        == AgentFamily::Codex
+        && request.permission_mode.is_none()
+        && request.approval_mode.is_none();
+    if AgentFamily::for_model(request.model.as_deref()) == AgentFamily::Claude
+        && request.permission_mode.is_none()
+        && request.approval_mode.is_none()
+    {
+        request.permission_mode = Some(permission_modes::PermissionMode::Workspace);
+        request.approval_mode = Some(permission_modes::ApprovalMode::AskForApproval);
+    }
     if let Err(message) = permission_modes::normalize_create_request(&mut request) {
         return (StatusCode::BAD_REQUEST, message).into_response();
     }
@@ -8385,6 +8449,7 @@ async fn create_bot(
     };
 
     Json(BotSummary {
+        agent_family: wonder_store::AgentFamily::Codex,
         permission_mode: None,
         approval_mode: None,
         id,
@@ -8453,8 +8518,9 @@ async fn start_bot_thread(
         "model": resolved.model,
         "serviceTier": resolved.service_tier,
         "developerInstructions": bot_onboarding::instructions(bot, onboarding),
-        "config": teaching::runtime_config(state, &app_server.rpc(), bot.execution_directory()).await?,
+        "config": if bot.agent_family == AgentFamily::Codex { teaching::runtime_config(state, &app_server.rpc(), bot.execution_directory()).await? } else { serde_json::json!({}) },
     });
+    claude::configure_thread(state, bot, &mut params).await?;
     let computer = state.computer_use_enabled
         && state.computer_use_bin.is_some()
         && group_collaboration::allows_computer(state, conversation_id, &bot.id).await?;
@@ -8500,7 +8566,13 @@ async fn start_bot_thread(
     let session_id = thread.get("sessionId").and_then(serde_json::Value::as_str);
     state
         .store
-        .set_conversation_thread(conversation_id, &thread_id, session_id, &state.started_at)
+        .bind_runtime(
+            conversation_id,
+            bot.agent_family,
+            &thread_id,
+            session_id,
+            &state.started_at,
+        )
         .await
         .map_err(|error| error.to_string())?;
     state
@@ -8931,6 +9003,12 @@ async fn steer_turn(
     if let Some(response) = subagents::reject_user_mutation(&state, &conversation_id).await {
         return response;
     }
+    if matches!(
+        claude::conversation_family(&state, &conversation_id).await,
+        Ok(AgentFamily::Claude)
+    ) {
+        return (StatusCode::CONFLICT, "Claude cannot take Guide input during a response yet. Queue your message or stop the response first.").into_response();
+    }
     if (request.body.trim().is_empty() && request.attachment_ids.is_empty())
         || request.body.len() > 65536
         || !valid_attachment_ids(&request.attachment_ids)
@@ -9305,7 +9383,10 @@ async fn interrupt_turn(
     if !matches!(message.state.as_str(), "accepted_by_codex" | "streaming") {
         return (StatusCode::CONFLICT, "turn is no longer active").into_response();
     }
-    let runtime = state.app_server.lock().await.rpc();
+    let runtime = match claude::for_thread(&state, thread_id).await {
+        Ok(runtime) => runtime,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    };
     let response = runtime
         .request(
             "turn/interrupt",
@@ -9807,7 +9888,11 @@ async fn dispatch_to_codex_inner(
         };
         let onboarding = bot_onboarding::enabled(&state, &message.conversation_id, &bot).await?;
         file_access::dispatch_check(&state, &bot, &resolved.permission_profile).await?;
-        let mut app_server = state.app_server.lock().await;
+        let client = claude::client(&state, bot.agent_family)?;
+        let mut app_server = client.lock().await;
+        if let Some(binding) = state.store.runtime_binding(&message.conversation_id).await.map_err(|e| e.to_string())? {
+            if binding.family != bot.agent_family { return Err("This conversation belongs to a different agent family.".into()); }
+        }
         let existing_thread_id = state
             .store
             .conversation_thread(&message.conversation_id)
@@ -9837,7 +9922,7 @@ async fn dispatch_to_codex_inner(
             // restarts. Re-register persisted conversations with that new
             // process before starting the next turn; otherwise turn/start
             // rejects a perfectly valid thread id as unknown.
-            let resume_params = serde_json::json!({
+            let mut resume_params = serde_json::json!({
                 "threadId": thread_id,
                 "cwd": bot.execution_directory(),
                 "permissions": resolved.permission_profile,
@@ -9847,8 +9932,9 @@ async fn dispatch_to_codex_inner(
                 "model": resolved.model,
                 "serviceTier": resolved.service_tier,
                 "developerInstructions": bot_onboarding::instructions(&bot, onboarding),
-                "config": teaching::runtime_config(&state, &app_server.rpc(), bot.execution_directory()).await?,
+                "config": if bot.agent_family == AgentFamily::Codex { teaching::runtime_config(&state, &app_server.rpc(), bot.execution_directory()).await? } else { serde_json::json!({}) },
             });
+            claude::configure_thread(&state, &bot, &mut resume_params).await?;
             let response = app_server
                 .request("thread/resume", resume_params)
                 .await
@@ -9889,10 +9975,7 @@ async fn dispatch_to_codex_inner(
             .await
             .map_err(|error| error.to_string())?;
         submitting = true;
-        let response = app_server
-            .request(
-                "turn/start",
-                serde_json::json!({
+        let mut turn_params = serde_json::json!({
                     "threadId": thread_id,
                     "clientUserMessageId": message.client_message_id,
                     "input": input,
@@ -9904,10 +9987,11 @@ async fn dispatch_to_codex_inner(
                     "model": resolved.model,
                     "effort": resolved.effort,
                     "serviceTier": resolved.service_tier,
-                }),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+                });
+        if bot.agent_family == AgentFamily::Claude {
+            turn_params["wonderInternal"] = serde_json::json!(state.store.bot_initialization_messages(&message.conversation_id).await.map_err(|e| e.to_string())?.iter().any(|m| m.id == message.id));
+        }
+        let response = app_server.request("turn/start", turn_params).await.map_err(|e| e.to_string())?;
         if let Some(error) = response.error {
             return Err(format!("App Server turn/start rejected: {error:?}"));
         }
@@ -10246,6 +10330,17 @@ async fn restart_and_reconcile(
         let turn_id = dispatch::find_accepted_turn(state, message).await.ok()??;
         return Some(ReconcileResult::Accepted { thread_id, turn_id });
     }
+    if claude::conversation_family(state, &message.conversation_id)
+        .await
+        .ok()?
+        == AgentFamily::Claude
+    {
+        let turn_id = dispatch::find_accepted_turn(state, message).await.ok()??;
+        return Some(ReconcileResult::Accepted {
+            thread_id: message.codex_thread_id.clone()?,
+            turn_id,
+        });
+    }
     let thread_id = state
         .store
         .conversation_thread(&message.conversation_id)
@@ -10488,6 +10583,9 @@ async fn rediscover_runtime(
         .await
         .map_err(|error| error.to_string())?;
     for bot in bots {
+        if bot.agent_family != AgentFamily::Codex {
+            continue;
+        }
         let response = app_server
             .request(
                 "permissionProfile/list",
@@ -10519,7 +10617,15 @@ async fn rediscover_runtime(
         file_access::verify(state, app_server, &bot).await?;
         catalog.apply_permission_profiles(&bot.workspace_path, &result);
     }
-    *state.runtime_catalog.write().await = catalog;
+    let mut current = state.runtime_catalog.write().await;
+    catalog.models.extend(
+        current
+            .models
+            .iter()
+            .filter(|m| AgentFamily::for_model(Some(&m.id)) == AgentFamily::Claude)
+            .cloned(),
+    );
+    *current = catalog;
     Ok(())
 }
 
@@ -11310,6 +11416,9 @@ fn redact_approval_params(method: &str, params: &serde_json::Value) -> serde_jso
                     {
                         safe.insert(key.into(), value.clone());
                     }
+                }
+                if let Some(value) = object.get("multiSelect").filter(|value| value.is_boolean()) {
+                    safe.insert("multiSelect".into(), value.clone());
                 }
                 if let Some(options) = object.get("options").and_then(|value| value.as_array()) {
                     let safe_options = options
@@ -13252,6 +13361,10 @@ mod tests {
     fn bot_runtime_settings_must_match_catalog() {
         let catalog = RuntimeCatalog {
             models: vec![ModelOption {
+                agent_family: wonder_store::AgentFamily::Codex,
+                capabilities: crate::ModelCapabilities::for_family(
+                    wonder_store::AgentFamily::Codex,
+                ),
                 id: "model-a".into(),
                 display_name: "Model A".into(),
                 description: None,
@@ -14042,6 +14155,7 @@ for line in sys.stdin:
             .await
             .expect("sync epoch");
         let state = AppState {
+            claude: None,
             ingestion: crate::ingestion::Ingestion::default(),
             store,
             logger,
@@ -14076,6 +14190,10 @@ for line in sys.stdin:
             reasoning_effort: None,
             runtime_catalog: Arc::new(RwLock::new(RuntimeCatalog {
                 models: vec![ModelOption {
+                    agent_family: wonder_store::AgentFamily::Codex,
+                    capabilities: crate::ModelCapabilities::for_family(
+                        wonder_store::AgentFamily::Codex,
+                    ),
                     id: "fake-model".into(),
                     display_name: "Fake model".into(),
                     description: None,
@@ -14472,6 +14590,11 @@ for line in sys.stdin:
             )
             .await
             .expect("map pending turn");
+        state
+            .store
+            .set_conversation_thread("pending-conversation", "thread-contract", None, "now")
+            .await
+            .unwrap();
         drain_pending_app_server_notifications(&state, "thread-contract", "turn-pending").await;
         assert_eq!(
             state

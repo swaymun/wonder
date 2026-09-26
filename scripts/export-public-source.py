@@ -21,6 +21,7 @@ FORBIDDEN_PARTS = {'.git', '.local', '.research', '.impeccable', '.build',
                    'node_modules', 'target', 'DerivedData', 'xcuserdata',
                    '__pycache__', '.venv', '.wrangler', '.swiftpm'}
 FORBIDDEN_ROOTS = {'docs', 'artifacts', 'output', 'evidence', 'dist'}
+PRIVATE_CLAUDE_PATHS = ('research/CLAUDE_', 'scripts/claude-sdk-smoke/')
 FORBIDDEN_SUFFIXES = {'.ipa', '.dmg', '.pkg', '.zip', '.p12', '.p8', '.pem',
                       '.key', '.mobileprovision', '.sqlite', '.sqlite3', '.db',
                       '.log', '.xcresult', '.trace', '.profraw', '.pyc'}
@@ -43,6 +44,7 @@ def digest(data):
 def safe_name(name):
     path = PurePosixPath(name)
     return (bool(path.parts) and not path.is_absolute() and name == path.as_posix()
+            and not name.startswith(PRIVATE_CLAUDE_PATHS)
             and '..' not in path.parts and '\\' not in name
             and not any(part in FORBIDDEN_PARTS for part in path.parts)
             and path.parts[0] not in FORBIDDEN_ROOTS

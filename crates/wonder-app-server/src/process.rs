@@ -91,6 +91,17 @@ pub struct LaunchConfig {
     pub permission_overrides: Vec<String>,
 }
 
+/// Wonder-owned provider bridge, using the same durable JSONL transport. This
+/// has its own handshake; it never bypasses verification for a Codex process.
+#[derive(Clone, Debug)]
+pub struct BridgeLaunchConfig {
+    pub node_bin: PathBuf,
+    pub entrypoint: PathBuf,
+    pub state_dir: PathBuf,
+    pub npm_cli: Option<PathBuf>,
+    pub wonder_version: String,
+}
+
 impl LaunchConfig {
     pub fn args(&self) -> Vec<String> {
         let mut args = vec!["app-server".into()];
@@ -355,6 +366,66 @@ impl AppServerClient {
                 .env("CODEX_HOME", home)
                 .env("CODEX_SQLITE_HOME", home);
         }
+        Self::spawn_transport(
+            command,
+            config.wonder_version,
+            notification_tx,
+            notification_sink,
+            false,
+        )
+        .await
+    }
+
+    pub async fn spawn_bridge(
+        config: BridgeLaunchConfig,
+        sink: NotificationSink,
+    ) -> Result<Self, RuntimeError> {
+        let (tx, _) = tokio::sync::broadcast::channel(256);
+        Self::spawn_bridge_with_notifications(config, tx, Some(sink)).await
+    }
+
+    async fn spawn_bridge_with_notifications(
+        config: BridgeLaunchConfig,
+        notification_tx: tokio::sync::broadcast::Sender<Value>,
+        notification_sink: Option<NotificationSink>,
+    ) -> Result<Self, RuntimeError> {
+        let mut command = Command::new(tokio::fs::canonicalize(&config.node_bin).await?);
+        command.env_clear();
+        for variable in [
+            "HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL",
+        ] {
+            if let Some(value) = std::env::var_os(variable) {
+                command.env(variable, value);
+            }
+        }
+        command
+            .arg(tokio::fs::canonicalize(&config.entrypoint).await?)
+            .arg("--state-dir")
+            .arg(&config.state_dir)
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(npm) = config.npm_cli {
+            command.arg("--npm-cli").arg(npm);
+        }
+        Self::spawn_transport(
+            command,
+            config.wonder_version,
+            notification_tx,
+            notification_sink,
+            true,
+        )
+        .await
+    }
+
+    async fn spawn_transport(
+        mut command: Command,
+        wonder_version: String,
+        notification_tx: tokio::sync::broadcast::Sender<Value>,
+        notification_sink: Option<NotificationSink>,
+        bridge: bool,
+    ) -> Result<Self, RuntimeError> {
         let mut child = command.spawn()?;
         if let Some(mut stderr) = child.stderr.take() {
             tokio::spawn(async move {
@@ -464,16 +535,20 @@ impl AppServerClient {
             notification_sink,
             stdin,
             next_id: Arc::new(AtomicU64::new(1)),
-            wonder_version: config.wonder_version,
+            wonder_version,
             pending,
             notifications,
             notification_tx,
         };
-        client.initialize().await?;
+        client.initialize_protocol(bridge).await?;
         Ok(client)
     }
 
     pub async fn initialize(&mut self) -> Result<Value, RuntimeError> {
+        self.initialize_protocol(false).await
+    }
+
+    async fn initialize_protocol(&mut self, bridge: bool) -> Result<Value, RuntimeError> {
         if self.next_id.load(Ordering::SeqCst) != 1 {
             return Err(RuntimeError::Protocol(
                 "initialize may only be sent once".into(),
@@ -484,8 +559,24 @@ impl AppServerClient {
         let result = response
             .result
             .ok_or_else(|| RuntimeError::Incompatible("initialize returned no result".into()))?;
-        require_experimental_api(&result)
-            .map_err(|message| RuntimeError::Incompatible(message.into()))?;
+        if bridge {
+            if result
+                .pointer("/wonderBridge/protocolVersion")
+                .and_then(Value::as_u64)
+                != Some(1)
+                || result
+                    .pointer("/wonderBridge/family")
+                    .and_then(Value::as_str)
+                    != Some("claude")
+            {
+                return Err(RuntimeError::Protocol(
+                    "Claude bridge returned an incompatible handshake".into(),
+                ));
+            }
+        } else {
+            require_experimental_api(&result)
+                .map_err(|message| RuntimeError::Incompatible(message.into()))?;
+        }
         self.write_json(&serde_json::json!({ "method": "initialized", "params": {} }))
             .await?;
         self.next_id.store(2, Ordering::SeqCst);
@@ -556,6 +647,17 @@ impl AppServerClient {
         )
         .await?;
         *self = replacement;
+        Ok(())
+    }
+
+    pub async fn restart_bridge(&mut self, config: BridgeLaunchConfig) -> Result<(), RuntimeError> {
+        self.stop_child().await?;
+        *self = Self::spawn_bridge_with_notifications(
+            config,
+            self.notification_tx.clone(),
+            self.notification_sink.clone(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1064,6 +1166,63 @@ mod tests {
             .args()
             .iter()
             .any(|argument| argument.contains("--listen")));
+    }
+
+    // The bridge shares durable ingestion, but must not be accepted on a
+    // Codex-like handshake alone. Exercise an actual child process and pipes.
+    #[tokio::test]
+    async fn provider_bridge_checks_identity_and_persists_before_broadcast() {
+        let root = tempfile::tempdir().unwrap();
+        let entrypoint = root.path().join("bridge.py");
+        std::fs::write(&entrypoint, r#"
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get('method')=='initialize':
+        result={'wonderBridge':{'protocolVersion':1,'family':'claude'}}
+    elif value.get('method')=='account/read':
+        print(json.dumps({'method':'thread/started','params':{'thread':{'id':'claude-test'}}}),flush=True)
+        result={'connected':True}
+    else: continue
+    print(json.dumps({'id':value['id'],'result':result}),flush=True)
+"#).unwrap();
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let observed = saved.clone();
+        let sink: NotificationSink = Arc::new(move |frame| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                observed.lock().unwrap().push(frame);
+                Ok(())
+            })
+        });
+        let config = BridgeLaunchConfig {
+            node_bin: "/usr/bin/python3".into(),
+            entrypoint: entrypoint.clone(),
+            state_dir: root.path().join("state"),
+            npm_cli: None,
+            wonder_version: "test".into(),
+        };
+        let mut client = AppServerClient::spawn_bridge(config.clone(), sink.clone())
+            .await
+            .unwrap();
+        let mut notifications = client.subscribe_notifications();
+        let result = client
+            .request("account/read", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.result.unwrap()["connected"], true);
+        let frame = timeout(Duration::from_secs(2), notifications.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame["_wonderRuntimeId"], client.health().id());
+        assert_eq!(saved.lock().unwrap().as_slice(), &[frame]);
+        client.shutdown().await.unwrap();
+        let source = std::fs::read_to_string(&entrypoint)
+            .unwrap()
+            .replace("'family':'claude'", "'family':'other'");
+        std::fs::write(&entrypoint, source).unwrap();
+        assert!(AppServerClient::spawn_bridge(config, sink).await.is_err());
     }
 
     #[test]

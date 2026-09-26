@@ -37,6 +37,29 @@ If Wonder reports an incompatible runtime, stop at that message and check the
 current Wonder release requirements. Reinstalling Wonder or resetting its data
 will not fix a version mismatch. Do not bypass the compatibility check.
 
+### Claude in source builds
+
+Claude support is newer than the Mac 1.0.80 download. In a current source build,
+open Wonder’s Mac Settings and choose **Sign in to Claude**, then complete the
+official subscription login. Wonder includes the Agent SDK and its Node runtime;
+no separate Node installation, Chrome extension, or API key is required.
+
+Choose a Claude model in the defaults for new Bots or Group participation before
+creating that conversation. The chosen family stays with the Bot or Group.
+Haiku 4.5 is Claude’s default model. Connected apps come from that Claude account;
+manage them through the link in Connected apps. Computer viewing, dictation, and
+voice continue to use Wonder’s paired-Mac services.
+
+Claude’s **Ask for approval** and **Full access** choices apply within the Bot’s
+file access. Commands cannot access the network; approved web and connected-app
+tools have separate access. Claude does not provide Wonder’s Guide, goals, or
+image-generation tools. It can receive and display supported images.
+
+Claude usage appears separately in the connection’s Settings. Missing usage is
+reported as unavailable. Compatible SDK patches are checked automatically and
+activated between requests; an incompatible update leaves the working runtime
+in place.
+
 ## 2. Connect Tailscale
 
 Install [Tailscale](https://tailscale.com/download) on the Mac and phone, sign in,

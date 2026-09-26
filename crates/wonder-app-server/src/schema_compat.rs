@@ -39,6 +39,15 @@ fn preserve(reference: &Value, candidate: &Value, path: &str) -> Result<(), Stri
                     continue;
                 }
                 let next = format!("{path}.{key}");
+                // 0.158 retired this optional Windows-only response property.
+                // Wonder is a Mac host and never reads or sends it. All other
+                // removed fields, including permission contracts, still fail.
+                if key == "windowsSandboxPrivateDesktop"
+                    && path.ends_with(".definitions.ConfigRequirements.properties")
+                    && !new.contains_key(key)
+                {
+                    continue;
+                }
                 let current = new.get(key).ok_or_else(|| format!("{next} missing"))?;
                 if key == "required" || key == "enum" {
                     if !same_set(value, current) {
@@ -194,6 +203,23 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(json!("futureOption"));
+        assert!(check(&stable, &experimental).is_err());
+    }
+
+    #[test]
+    fn retired_windows_response_field_does_not_disable_the_mac_runtime() {
+        let (mut stable, mut experimental) = baseline();
+        for schema in [&mut stable, &mut experimental] {
+            schema["definitions"]["ConfigRequirements"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("windowsSandboxPrivateDesktop");
+        }
+        assert!(check(&stable, &experimental).is_ok());
+        experimental["definitions"]["TurnStartParams"]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("permissions");
         assert!(check(&stable, &experimental).is_err());
     }
 

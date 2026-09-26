@@ -1142,8 +1142,8 @@ struct ConversationView: View {
             await model.open(chat, root: rootChat, readOnly: readOnly)
             if model.previewMode, ProcessInfo.processInfo.arguments.contains("-preview-document") { workspaceRequest = WorkspaceBrowserRequest() }
         }
-        .task(id: chat.id) {
-            guard !readOnly, chat.botId != nil else { return }
+        .task(id: chat.id + ":" + model.agentFamily(chat).rawValue) {
+            guard !readOnly, chat.botId != nil, model.agentFamily(chat) == .codex else { return }
             while !Task.isCancelled {
                 await model.loadGoal(chat)
                 try? await Task.sleep(for: .seconds(5))
@@ -1263,7 +1263,7 @@ struct ConversationView: View {
                             }.accessibilityLabel("Stop response")
                                 .disabled(model.stopping.contains(chat.id) || model.accessEnded || model.previewMode)
                         }
-                        if chat.botId == nil {
+                        if chat.botId == nil || model.agentFamily(chat) == .claude {
                             Button { Task { await model.send(chat) } } label: {
                                 Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44)
                             }
@@ -2461,6 +2461,9 @@ struct AttentionRow: View {
                 QuestionNavigation(index: $questionIndex, count: request.params.questions?.count ?? 0)
                 ForEach(Array((request.params.questions ?? []).enumerated()).filter { $0.offset == questionIndex }, id: \.element.id) { _, question in
                     Text(question.question).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+                    if question.multiSelect == true {
+                        QuestionMultiChoice(question: question, draft: Binding(get: { answers[question.id] ?? "" }, set: { answers[question.id] = $0; save() }))
+                    } else {
                     ForEach(question.options ?? [], id: \.label) { option in
                         ConversationChoice(title: option.label, detail: option.description, selected: answers[question.id] == option.label) {
                             answers[question.id] = option.label; save()
@@ -2470,6 +2473,7 @@ struct AttentionRow: View {
                         SecureField("Type an answer", text: Binding(get: { answers[question.id] ?? "" }, set: { answers[question.id] = $0 }))
                     } else { TextField("Type an answer", text: Binding(get: { answers[question.id] ?? "" }, set: { answers[question.id] = $0; save() }), axis: .vertical)
                         .textFieldStyle(.roundedBorder).accessibilityLabel(question.question) }
+                    }
                 }
                 }.frame(maxWidth: .infinity, alignment: .leading) }.frame(minHeight: 44, maxHeight: 180)
                 if request.params.isBlocking != false {
@@ -2478,7 +2482,7 @@ struct AttentionRow: View {
                 HStack {
                 Button("Reply") { Task { await model.resolve(request, decision: "respond", answers: answers) } }
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.previewMode || (request.params.questions ?? []).contains { (answers[$0.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+                    .disabled(model.previewMode || (request.params.questions ?? []).contains { $0.answers(from: answers[$0.id] ?? "").isEmpty })
                 if request.params.isBlocking == false {
                     Button("Skip") { Task { await model.resolve(request, decision: "skip", answers: [:]) } }.buttonStyle(.bordered).disabled(model.previewMode)
                 }
@@ -2547,6 +2551,45 @@ struct AttentionRow: View {
         validChoices = Set(choices.filter { request.canSubmit(choice: $0, answers: answers) }.map(\.id))
     }
     private func save() { let secretIDs = Set((request.params.questions ?? []).filter { $0.isSecret == true }.map(\.id)); model.saveAnswerDraft(answers.filter { !secretIDs.contains($0.key) }, id: request.id) }
+}
+
+private struct QuestionMultiChoice: View {
+    let question: ChatQuestion
+    @Binding var draft: String
+    @State private var selected: Set<String> = []
+    @State private var other = ""
+    @State private var savedDraft: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(question.options ?? [], id: \.label) { option in
+                ConversationChoice(title: option.label, detail: option.description, selected: selected.contains(option.label)) {
+                    if selected.contains(option.label) { selected.remove(option.label) } else { selected.insert(option.label) }
+                    save()
+                }.accessibilityIdentifier("question-option-\(question.id)-\(option.label)")
+            }
+            TextField("Another answer", text: $other, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("question-other-" + question.id)
+                .onChange(of: other) { _, _ in save() }
+        }.task(id: question.id) { restore() }
+            .onChange(of: draft) { _, value in if value != savedDraft { restore() } }
+    }
+    private func restore() {
+        let values = question.answers(from: draft)
+        let labels = Set((question.options ?? []).map(\.label))
+        selected = Set(values.filter { labels.contains($0) })
+        other = values.filter { !labels.contains($0) }.joined(separator: "\n")
+    }
+    private func save() {
+        var values = (question.options ?? []).map(\.label).filter { selected.contains($0) }
+        let freeText = other.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !freeText.isEmpty { values.append(freeText) }
+        if let data = try? JSONEncoder().encode(values) {
+            let value = String(decoding: data, as: UTF8.self)
+            savedDraft = value
+            draft = value
+        }
+    }
 }
 
 /// Fields stay in the conversation's existing scroll surface and use native
@@ -3505,7 +3548,7 @@ struct QueueDock: View {
                                 }.padding(12)
                                     .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
                                     .contextMenu {
-                                        if let turn = model.activeTurn(chat.id) {
+                                        if model.agentFamily(chat) == .codex, let turn = model.activeTurn(chat.id) {
                                             Button("Guide instead", systemImage: "arrow.turn.up.right") {
                                                 steering = item.id
                                                 perform(item) { try await model.changeQueue(chat, item: item, turn: turn) }
@@ -3587,7 +3630,7 @@ struct QueueView: View {
                             Button("Move up") { move(item) }.buttonStyle(.borderless).disabled(model.queues[chat.id]?.first?.id == item.id)
                             Button("Cancel", role: .destructive) { perform { try await model.changeQueue(chat, item: item, cancel: true) } }.buttonStyle(.borderless)
                         }.frame(minHeight: 44)
-                        if let turn = model.activeTurn(chat.id) { Button("Use as Guide") { perform { try await model.changeQueue(chat, item: item, turn: turn) } }.buttonStyle(.borderless).frame(minHeight: 44) }
+                        if model.agentFamily(chat) == .codex, let turn = model.activeTurn(chat.id) { Button("Use as Guide") { perform { try await model.changeQueue(chat, item: item, turn: turn) } }.buttonStyle(.borderless).frame(minHeight: 44) }
                     }
                 }
                 if let failure { FailureDetails(message: failure); Button("Refresh queue") { refresh() } }
@@ -4613,13 +4656,13 @@ struct ComposerSettings: View {
                     } else {
                         Section("Model") {
                             modelChoice("Default model", id: "")
-                            ForEach(options?.models.filter { !$0.hidden } ?? []) { option in modelChoice(option.displayName, id: option.id) }
+                            ForEach(options?.models.filter { !$0.hidden && $0.family == (bot?.family ?? .codex) } ?? []) { option in modelChoice(option.displayName, id: option.id) }
                         }.disabled(unavailable || model.previewMode)
                     }
                     if queuedMessage == nil && model.botWorking(chat.id) {
-                        Section { Text("Changes apply to new queued messages. Guide continues the current response with its existing settings.").font(.footnote) }
+                        Section { Text(bot?.family == .claude ? "Changes apply to new queued messages." : "Changes apply to new queued messages. Guide continues the current response with its existing settings.").font(.footnote) }
                     }
-                    if let selectedModel {
+                    if let selectedModel, !selectedModel.reasoningEfforts.isEmpty {
                         Section("Reasoning") {
                             effortChoice("Default", id: "")
                             ForEach(selectedModel.reasoningEfforts) { option in effortChoice(option.label.capitalized, id: option.id) }
@@ -4642,8 +4685,9 @@ struct ComposerSettings: View {
     private var permissionMenu: some View {
         ApprovalModeMenu(
             selection: Binding(get: { approvalMode }, set: { _ in }),
-            options: options?.approvalModes,
+            options: options?.approvalChoices(model: bot?.model),
             isDisabled: saving || loading || bot == nil || model.accessEnded || model.previewMode || (queuedMessage != nil && queued == nil),
+            family: bot?.family ?? .codex,
             onChange: { mode in model.setApprovalMode(mode, target: approvalTarget, chat: chat) }
         ) {
             Image(systemName: "shield").font(.system(size: 18))

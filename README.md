@@ -29,6 +29,11 @@ repository. [Release qualification](RELEASING.md).
 Answer questions and review approval requests from your phone. Permission choices
 remain explicit, with server-confirmed settings applied before work starts.
 
+Source builds also support **Claude through the Claude Agent SDK**, using your
+Claude subscription. A Bot or Group keeps the agent family selected by its first
+model. Claude has its own permission choices, connected apps, and five-hour and
+weekly usage. This is newer than the Mac beta download linked above.
+
 **Remote screen access:** view your Mac and, with permission, control it from Wonder. Screen/control recovery qualification remains part of the beta checks.
 
 Screenshots use demo content in Wonder’s native views. They contain no personal
@@ -76,11 +81,15 @@ controlled in Settings. Installation waits for work and computer sharing to fini
 A signed automatic upgrade from 1.0.78 to 1.0.79 passed on one physical Mac;
 broader upgrade qualification remains in progress. Signed manual downloads remain
 an alternative. iPhone and iPad updates use TestFlight.
-Runtime compatibility is checked locally. The next Mac build will accept
+Runtime compatibility is checked locally. Source builds accept
 additive ChatGPT runtime changes without a Wonder update; breaking protocol
 changes still pause agent work until Wonder is updated. Teaching a task and
 replaying taught tasks are unavailable in this beta. Remaining device and
 recovery checks are tracked in the release status.
+
+The bundled Claude SDK can update independently between requests. Wonder stages
+compatible patch releases and checks them before activation, retaining a working
+fallback. Breaking SDK changes require a Wonder adapter update.
 
 [Build from source](DEVELOPMENT.md) · [Security reporting](SECURITY.md) ·
 [Release process](RELEASING.md) · [MIT license](LICENSE) ·

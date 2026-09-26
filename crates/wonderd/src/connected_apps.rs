@@ -14,6 +14,7 @@ const INTERNAL_APPS: [&str; 4] = [
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct AppQuery {
     cursor: Option<String>,
+    agent_family: Option<AgentFamily>,
     conversation_id: Option<String>,
     #[serde(default)]
     refresh: bool,
@@ -42,7 +43,31 @@ pub(super) async fn list(
     } else {
         None
     };
-    let rpc = state.app_server.lock().await.rpc();
+    let family = if let Some(conversation) = &query.conversation_id {
+        match claude::conversation_family(&state, conversation).await {
+            Ok(family)
+                if query
+                    .agent_family
+                    .is_none_or(|requested| requested == family) =>
+            {
+                family
+            }
+            _ => {
+                return (
+                    StatusCode::CONFLICT,
+                    "This conversation belongs to a different agent family.",
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        query.agent_family.unwrap_or_default()
+    };
+    let client = match claude::client(&state, family) {
+        Ok(client) => client,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    };
+    let rpc = client.lock().await.rpc();
     let result = rpc
         .request(
             "app/installed",
@@ -63,7 +88,7 @@ pub(super) async fn list(
             if query.conversation_id.is_some() {
                 "This Bot's app access is not loaded. Send it a message, then refresh."
             } else {
-                "App access could not be verified. Check Codex on your Mac, then refresh."
+                "App access could not be verified. Check your agent’s sign-in on your Mac, then refresh."
             },
         )
             .into_response();
@@ -112,7 +137,7 @@ pub(super) async fn list(
     let next_cursor = (offset + page.len() < runtime.len())
         .then(|| format!("{fingerprint}:{}", offset + page.len()));
     ([(header::CACHE_CONTROL,"no-store")],Json(json!({
-        "hostInstallationId":state.host_installation_id,"conversationId":query.conversation_id,
+        "agentFamily":family,"hostInstallationId":state.host_installation_id,"conversationId":query.conversation_id,
         "apps":apps,"nextCursor":next_cursor,"checkedAtMs":now_ms(),
         "warning":if metadata.is_none(){Some("Some app details could not be loaded. Access status is current.")}else{None}
     }))).into_response()
@@ -167,7 +192,8 @@ fn safe_url(value: &Value, setup: bool) -> Option<String> {
     }
     let host = authority.host();
     let trusted = if setup {
-        host == "chatgpt.com" && uri.path().starts_with("/apps/")
+        (host == "chatgpt.com" && uri.path().starts_with("/apps/"))
+            || (host == "claude.ai" && uri.path() == "/settings/connectors")
     } else {
         [
             "openai.com",
@@ -228,10 +254,14 @@ mod tests {
             "https://127.0.0.1/apps/a",
             "https://chatgpt.com/apps/a?token=secret",
             "https://chatgpt.com:444/apps/a",
+            "https://claude.ai/settings/connectors?token=secret",
+            "https://claude.ai.evil.test/settings/connectors",
+            "https://claude.ai/settings/billing",
         ] {
             assert!(safe_url(&json!(url), true).is_none());
         }
         assert!(safe_url(&json!("https://chatgpt.com/apps/calendar"), true).is_some());
+        assert!(safe_url(&json!("https://claude.ai/settings/connectors"), true).is_some());
         assert!(safe_url(&json!("https://cdn.oaistatic.com/icon.png"), false).is_some());
         assert!(safe_url(&json!("https://unknown.test/icon.png"), false).is_none());
     }

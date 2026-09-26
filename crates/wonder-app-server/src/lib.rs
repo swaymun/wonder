@@ -8,8 +8,8 @@ mod schema_compat;
 
 pub use process::verify_runtime;
 pub use process::{
-    build_permission_override, permission_filesystem, AppServerClient, LaunchConfig,
-    NotificationSink, RpcClient, RuntimeError, RuntimeHealth,
+    build_permission_override, permission_filesystem, AppServerClient, BridgeLaunchConfig,
+    LaunchConfig, NotificationSink, RpcClient, RuntimeError, RuntimeHealth,
 };
 
 pub const CODEX_VERSION: &str = "codex-cli 0.155.0-alpha.9";

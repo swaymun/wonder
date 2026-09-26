@@ -2,6 +2,17 @@ import XCTest
 import CryptoKit
 @testable import WonderPairing
 final class AttentionTests: XCTestCase {
+    func testMultiSelectQuestionDraftPreservesCommaLabelsAcrossReload() throws {
+        let request = try phoneRequest("item/tool/requestUserInput", ["questions":[["id":"fixtures", "question":"Which fixtures?", "multiSelect":true, "options":[["label":"A, B"],["label":"C"]]]]])
+        let question = try XCTUnwrap(request.params.questions?.first)
+        let draft = String(decoding: try JSONEncoder().encode(["A, B", "C"]), as: UTF8.self)
+        let restored = try JSONDecoder().decode(ChatQuestion.self, from: JSONEncoder().encode(question))
+        XCTAssertEqual(restored.answers(from: draft), ["A, B", "C"])
+        XCTAssertTrue(restored.answers(from: "[]").isEmpty)
+        XCTAssertTrue(restored.answers(from: "malformed").isEmpty)
+        let single = try JSONDecoder().decode(ChatQuestion.self, from: Data(#"{"id":"one","question":"Choose"}"#.utf8))
+        XCTAssertEqual(single.answers(from: "A, B"), ["A, B"])
+    }
     private func phoneRequest(_ method: String, _ params: [String: Any]) throws -> AttentionRequest {
         try JSONDecoder().decode(AttentionRequest.self, from: JSONSerialization.data(withJSONObject: [
             "approvalId":"phone-request", "actionNonce":"nonce", "resolutionIdempotencyKey":"identity",

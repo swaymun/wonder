@@ -194,7 +194,7 @@ struct BotFileAccessView: View {
         Form {
             if loaded {
                 Section { LabeledContent("Permissions", value: permissionMode?.title ?? "Workspace") } footer: {
-                    Text(permissionMode?.scopeDescription ?? BotPermissionMode.selectedWorkspaceDescription)
+                    Text(permissionMode?.scopeDescription(for: bot.family) ?? BotPermissionMode.selectedWorkspaceDescription)
                 }
                 BotFileAccessFields(selection: selectionBinding, workspacePath: bot.workspacePath, permissionMode: permissionMode, adding: $adding)
             }

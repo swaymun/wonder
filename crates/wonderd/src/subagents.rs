@@ -366,7 +366,8 @@ async fn route_matches_parent(
             .map_err(|error| error.to_string())?
             .is_some_and(|message| message.conversation_id == parent_conversation_id));
     }
-    let health = state.app_server.lock().await.health();
+    let rpc = crate::claude::for_thread(state, parent_thread_id).await?;
+    let health = rpc.health();
     Ok(health.is_alive() && health.id() == route.runtime_id)
 }
 

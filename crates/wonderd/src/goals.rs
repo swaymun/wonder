@@ -34,12 +34,18 @@ async fn direct_thread(
                 .into_response(),
         ));
     }
-    if bot_for_conversation(state, conversation)
+    let bot = bot_for_conversation(state, conversation)
         .await
         .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?
-        .is_none()
-    {
-        return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
+        .ok_or_else(|| Box::new(StatusCode::NOT_FOUND.into_response()))?;
+    if bot.agent_family == wonder_store::AgentFamily::Claude {
+        return Err(Box::new(
+            (
+                StatusCode::CONFLICT,
+                "Goals are not available for Claude yet.",
+            )
+                .into_response(),
+        ));
     }
     state
         .store

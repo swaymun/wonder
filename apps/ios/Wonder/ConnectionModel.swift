@@ -18,6 +18,7 @@ struct CodexUsageWindow: Decodable, Identifiable, Sendable {
 }
 
 struct CodexUsageResponse: Decodable, Sendable {
+    var agentFamily: String? = nil
     let checkedAtMs: UInt64
     let windows: [CodexUsageWindow]
 }
@@ -124,7 +125,7 @@ struct ManagedBotListMutationState {
                 oldValue?.credential.deviceId != connection?.credential.deviceId || oldValue?.origin != connection?.origin {
                 cancelApprovalSettings()
                 connectedAppsCache = [:]
-                codexUsageCache = [:]
+                codexUsageCache = [:]; claudeUsageCache = [:]
                 goals = [:]; goalErrors = [:]; goalMutationTokens = [:]
                 resetImagePreviews()
                 dictation.connectionChanged()
@@ -134,6 +135,7 @@ struct ManagedBotListMutationState {
     }
     var connectedAppsCache: [String: ConnectedAppCacheEntry] = [:]
     @Published var codexUsageCache: [String: CodexUsageCacheEntry] = [:]
+    @Published var claudeUsageCache: [String: CodexUsageCacheEntry] = [:]
     let imagePreviews = ToolImagePreviews()
     private(set) var imagePreviewScope = UUID()
     private func resetImagePreviews() {
@@ -145,7 +147,7 @@ struct ManagedBotListMutationState {
     @Published var busy = false
     @Published var verification: String?
     @Published var error: String?
-    @Published var accessEnded = false { didSet { if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
+    @Published var accessEnded = false { didSet { if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
     @Published var chats: [ChatSummary] = []
     @Published var subagents: [String: [SubagentSummary]] = [:]
     @Published var subagentAvailability: [String: Bool] = [:]
@@ -462,7 +464,7 @@ struct ManagedBotListMutationState {
             }
             if ProcessInfo.processInfo.arguments.contains("-question-preview") {
                 let json = """
-                {"approvalId":"fixture-question","method":"item/tool/requestUserInput","actionNonce":"fixture","params":{"threadId":"fixture-thread","isBlocking":false,"questions":[{"id":"day","question":"Which day works best?","options":[{"label":"Saturday","description":"Keep Sunday free."},{"label":"Sunday"}]}]}}
+                {"approvalId":"fixture-question","method":"item/tool/requestUserInput","actionNonce":"fixture","params":{"threadId":"fixture-thread","isBlocking":false,"questions":[{"id":"day","question":"Which day works best?","options":[{"label":"Saturday","description":"Keep Sunday free."},{"label":"Sunday"}]},{"id":"fixtures","question":"Which fixtures should I check?","multiSelect":true,"options":[{"label":"A, B"},{"label":"C"}]}]}}
                 """
                 if let value = try? JSONDecoder().decode(AttentionRequest.self, from: Data(json.utf8)) { attention = [value] }
             }
@@ -607,31 +609,39 @@ struct ManagedBotListMutationState {
     #endif
 
     func loadCodexUsage(force: Bool = false) async throws {
+        try await loadUsage(family: .codex, force: force)
+    }
+    func loadUsage(family: AgentFamily, force: Bool = false) async throws {
         guard let saved = connection, !accessEnded else { return }
         let scope = assignmentScope
         let origin = saved.origin
-        if !force, let cached = codexUsageCache[scope], Date().timeIntervalSince(cached.fetchedAt) < 300 {
+        if !force, let cached = (family == .claude ? claudeUsageCache : codexUsageCache)[scope], Date().timeIntervalSince(cached.fetchedAt) < 300 {
             return
         }
 
         #if WONDER_DIAGNOSTICS
         if ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-fixture") {
             let fixture = CodexUsageResponse(
+                agentFamily: family.rawValue,
                 checkedAtMs: 1_700_000_000_000,
                 windows: [
-                    CodexUsageWindow(id: "five-hours", label: "5 hours", usedPercent: 27, remainingPercent: 73, windowDurationMins: 300, resetsAt: 1_700_018_000_000),
-                    CodexUsageWindow(id: "weekly", label: "Weekly", usedPercent: 41, remainingPercent: 59, windowDurationMins: 10_080, resetsAt: 1_700_604_800_000)
+                    CodexUsageWindow(id: family == .claude ? "five_hour" : "five-hours", label: "5 hours", usedPercent: family == .claude ? 14 : 27, remainingPercent: family == .claude ? 86 : 73, windowDurationMins: 300, resetsAt: 1_700_018_000_000),
+                    CodexUsageWindow(id: family == .claude ? "seven_day" : "weekly", label: "Weekly", usedPercent: family == .claude ? 8 : 41, remainingPercent: family == .claude ? 92 : 59, windowDurationMins: 10_080, resetsAt: 1_700_604_800_000)
                 ]
             )
             guard scope == assignmentScope, connection?.origin == origin, !accessEnded else { return }
-            codexUsageCache[scope] = CodexUsageCacheEntry(response: fixture, fetchedAt: Date())
+            if family == .claude { claudeUsageCache[scope] = CodexUsageCacheEntry(response: fixture, fetchedAt: Date()) }
+            else { codexUsageCache[scope] = CodexUsageCacheEntry(response: fixture, fetchedAt: Date()) }
             return
         }
         #endif
 
-        let response: CodexUsageResponse = try await api.request("/api/v1/account/usage", origin: saved.origin, credential: saved.credential)
+        let path = "/api/v1/account/usage" + (family == .claude ? "?agentFamily=claude" : "")
+        let response: CodexUsageResponse = try await api.request(path, origin: saved.origin, credential: saved.credential)
         guard scope == assignmentScope, connection?.origin == origin, !accessEnded else { return }
-        codexUsageCache[scope] = CodexUsageCacheEntry(response: response, fetchedAt: Date())
+        guard response.agentFamily == family.rawValue || (family == .codex && response.agentFamily == nil) else { throw ReadFailure.resync }
+        if family == .claude { claudeUsageCache[scope] = CodexUsageCacheEntry(response: response, fetchedAt: Date()) }
+        else { codexUsageCache[scope] = CodexUsageCacheEntry(response: response, fetchedAt: Date()) }
     }
 
     func pair(link: String, address: String, code: String) {
@@ -864,8 +874,13 @@ struct ManagedBotListMutationState {
         subagentSummary(for: chat.id) != nil
     }
 
+    func agentFamily(_ chat: ChatSummary) -> AgentFamily {
+        if let group = groups[chat.id]?.collaboration { return AgentFamily(model: group.configuration.routing.model) }
+        return managedBots.first(where: { $0.id == chat.botId })?.family ?? .codex
+    }
+
     func loadGoal(_ chat: ChatSummary) async {
-        guard chat.botId != nil, !isSubagent(chat), !previewMode,
+        guard chat.botId != nil, agentFamily(chat) == .codex, !isSubagent(chat), !previewMode,
               let saved = connection, !accessEnded else { return }
         let key = partition
         let mutation = goalMutationTokens[chat.id]
@@ -1097,7 +1112,7 @@ struct ManagedBotListMutationState {
         return snapshots[chat]?.thread.turns?.first(where: { $0.id == turnID })
     }
     func canGuide(_ chat: ChatSummary) -> Bool {
-        !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id) && chat.botId != nil && activeTurn(chat.id) != nil && connection != nil && !accessEnded
+        agentFamily(chat) == .codex && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id) && chat.botId != nil && activeTurn(chat.id) != nil && connection != nil && !accessEnded
             && !isSubagent(chat)
             && !sending.contains(chat.id)
             && composers[chat.id]?.pending == nil && composerErrors[chat.id] == nil
@@ -1902,7 +1917,9 @@ struct ManagedBotListMutationState {
             } else {
                 var response = responseJSON
                 if request.isQuestion {
-                    let values = answers.mapValues { ["answers": [$0]] }
+                    let values = Dictionary(uniqueKeysWithValues: (request.params.questions ?? []).map {
+                        ($0.id, ["answers": $0.answers(from: answers[$0.id] ?? "")])
+                    })
                     let data = try JSONSerialization.data(withJSONObject: ["answers": values], options: [.sortedKeys, .withoutEscapingSlashes])
                     response = String(decoding: data, as: UTF8.self)
                 }

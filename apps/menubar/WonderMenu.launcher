@@ -34,7 +34,7 @@ fi
 export WONDER_SERVICE_DIR="$WONDER_DATA_DIR/Service"
 rm -f "$WONDER_SERVICE_DIR/stop" "$WONDER_SERVICE_DIR/stopped" "$WONDER_SERVICE_DIR/update-ready"
 export WONDER_PUBLIC_ORIGIN_FILE="$WONDER_SERVICE_DIR/tunnel.jsonl"
-export WONDER_CODEX_BIN="${WONDER_CODEX_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex}"
+export WONDER_CODEX_BIN="${WONDER_CODEX_BIN:-$("$RESOURCES/wonderd" --locate-runtime)}"
 TUNNEL_PID=""; DAEMON_PID=""; MENU_PID=""
 stop_child() {
   local pid="$1"

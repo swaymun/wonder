@@ -694,6 +694,11 @@ async fn http_post(
 #[tokio::test]
 async fn recovery_reads_beyond_thirty_two_pages_without_collecting_other_turns() {
     let (dir, state) = crate::ingestion::tests::fixture().await;
+    state
+        .store
+        .set_conversation_thread("bot", "thread", None, "now")
+        .await
+        .unwrap();
     std::fs::write(dir.path().join("long-history"), "").unwrap();
     let items = hydrate_app_server_turn_items(&state, "thread", "turn")
         .await

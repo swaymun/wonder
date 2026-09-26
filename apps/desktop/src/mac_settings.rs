@@ -425,6 +425,10 @@ impl MacSettings {
             self.flag("serviceBusy"),
             cx,
         ));
+        actions = actions.child(self.action(
+            "claude-sign-in", "Sign in to Claude", json!({"action":"claude-sign-in"}),
+            self.flag("serviceBusy"), cx,
+        ));
         let mut remote_view = stack().gap_2().child(heading("Remote access")).child(row(
             if remote {
                 "Available for paired devices."

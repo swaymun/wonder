@@ -2,6 +2,21 @@ import XCTest
 @testable import WonderPairing
 
 final class ManagementTests: XCTestCase {
+    // The creation request must use the selected provider's approval choices,
+    // including an SDK model with no reasoning control and additive metadata.
+    func testClaudeCreationUsesItsOwnPermissionsAndAcceptsAdditiveModelMetadata() throws {
+        let options = try JSONDecoder().decode(BotOptions.self, from: Data(#"{"models":[{"id":"claude:haiku","agentFamily":"claude","displayName":"Haiku 4.5","hidden":false,"reasoningEfforts":[],"capabilities":{"guide":false,"goals":false,"imageGeneration":false,"futureCapability":true},"futureSDKField":{}}],"allowedApprovalPolicies":[],"approvalModes":[{"id":"approve-for-me","allowed":true}],"permissionsByFamily":{"claude":{"permissionModes":[{"id":"workspace","allowed":true}],"approvalModes":[{"id":"ask-for-approval","allowed":true},{"id":"full-access","allowed":true}]}}}"#.utf8))
+        XCTAssertEqual(options.models.first?.family, .claude)
+        XCTAssertEqual(options.models.first?.capabilities?.guide, false)
+        XCTAssertEqual(try NewBotDefaults(model: "claude:haiku").creationValues(options: options), ["model":"claude:haiku", "approvalMode":"ask-for-approval"])
+        XCTAssertThrowsError(try NewBotDefaults(model: "claude:haiku", approvalMode: .approveForMe).creationValues(options: options))
+        XCTAssertThrowsError(try NewBotDefaults(model: "claude:haiku", reasoningEffort: "high").creationValues(options: options))
+        var draft = ManagementDraft()
+        draft.values = ["model":"claude:haiku", "approvalMode":"approve-for-me"]
+        XCTAssertFalse(draft.canSaveBotApproval(options: options))
+        draft.values["approvalMode"] = "full-access"
+        XCTAssertTrue(draft.canSaveBotApproval(options: options))
+    }
     func testGlobalDefaultsSurviveConnectionRemovalAndFreezeCreationRetries() throws {
         let suite = "WonderDefaultsTests." + UUID().uuidString
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))

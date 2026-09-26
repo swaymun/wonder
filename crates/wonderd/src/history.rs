@@ -1112,7 +1112,7 @@ pub(super) async fn hydrate_app_server_turn_items(
     thread_id: &str,
     target_turn: &str,
 ) -> Option<Vec<AppServerThreadItem>> {
-    let app_server = state.app_server.lock().await.rpc();
+    let app_server = crate::claude::for_thread(state, thread_id).await.ok()?;
     let mut cursor = None;
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();

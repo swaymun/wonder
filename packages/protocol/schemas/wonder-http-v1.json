@@ -85,7 +85,7 @@
       "post": { "request": { "$ref": "#/$defs/startComputerSessionRequest" }, "response": { "$ref": "#/$defs/computerSession" }, "successStatus": 201 }
     },
     "/api/v1/account/usage": {
-      "get": { "response": { "$ref": "#/$defs/accountUsage" }, "failureStatus": 503 }
+      "get": { "query": { "type": "object", "properties": { "agentFamily": { "$ref": "#/$defs/agentFamily" } }, "additionalProperties": false }, "response": { "$ref": "#/$defs/accountUsage" }, "failureStatus": 503 }
     },
     "/api/v1/computer/sessions/{id}": {
       "get": { "query": { "$ref": "#/$defs/computerSessionGenerationQuery" }, "response": { "$ref": "#/$defs/computerSession" } },
@@ -425,7 +425,7 @@
       "type": "object",
       "required": ["id", "label", "usedPercent", "remainingPercent"],
       "properties": {
-        "id": { "type": "string", "enum": ["primary", "secondary", "window-1", "window-2", "window-3", "window-4", "window-5", "window-6", "window-7", "window-8"] },
+        "id": { "type": "string", "enum": ["primary", "secondary", "window-1", "window-2", "window-3", "window-4", "window-5", "window-6", "window-7", "window-8", "five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus"] },
         "label": { "type": "string", "maxLength": 32 },
         "usedPercent": { "type": "number", "minimum": 0, "maximum": 100 },
         "remainingPercent": { "type": "number", "minimum": 0, "maximum": 100 },
@@ -438,6 +438,7 @@
       "type": "object",
       "required": ["checkedAtMs", "windows"],
       "properties": {
+        "agentFamily": { "$ref": "#/$defs/agentFamily" },
         "checkedAtMs": { "type": "integer", "minimum": 0 },
         "windows": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/accountUsageWindow" } }
       },
@@ -1205,10 +1206,19 @@
         "staged": { "type": "boolean" }
       }
     },
+    "agentFamily": { "type": "string", "enum": ["codex", "claude"] },
+    "providerPermissions": {
+      "type": "object", "required": ["permissionModes", "approvalModes"],
+      "properties": {
+        "permissionModes": { "type": "array", "items": { "$ref": "#/$defs/permissionModeOption" } },
+        "approvalModes": { "type": "array", "items": { "$ref": "#/$defs/approvalModeOption" } }
+      }, "additionalProperties": false
+    },
     "botSummary": {
       "type": "object",
       "required": ["id", "name", "role", "systemPrompt", "workspacePath", "permissionProfile", "model", "reasoningEffort", "serviceTier", "isArchived"],
       "properties": {
+        "agentFamily": { "$ref": "#/$defs/agentFamily" },
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1, "maxLength": 80 },
         "role": { "type": "string", "minLength": 1, "maxLength": 160 },
@@ -1259,6 +1269,8 @@
       "type": "object",
       "required": ["models", "allowedApprovalPolicies"],
       "properties": {
+        "agentProviders": { "type": "array", "items": { "type": "object", "required": ["id", "installed", "ready", "detail"], "properties": { "id": { "$ref": "#/$defs/agentFamily" }, "installed": { "type": "boolean" }, "ready": { "type": "boolean" }, "detail": { "type": "string" } }, "additionalProperties": false } },
+        "permissionsByFamily": { "type": "object", "properties": { "codex": { "$ref": "#/$defs/providerPermissions" }, "claude": { "$ref": "#/$defs/providerPermissions" } }, "additionalProperties": false },
         "groupCollaboration": { "type": "boolean" },
         "models": { "type": "array", "items": { "type": "object" } },
         "permissionProfiles": { "type": "array", "items": { "type": "object" } },

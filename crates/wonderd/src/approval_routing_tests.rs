@@ -76,6 +76,33 @@ async fn direct_approval_routes_from_exact_turn_and_preserves_nonce() {
 }
 
 #[tokio::test]
+async fn phone_question_preserves_multiple_choice_semantics_through_redaction() {
+    let (_dir, state) = crate::ingestion::tests::fixture().await;
+    message(&state, "question", "bot", "thread", "turn").await;
+    let params = json!({"threadId":"thread","turnId":"turn","questions":[
+        {"id":"q","question":"Which fixtures?","multiSelect":true,"privateField":"hidden",
+         "options":[{"label":"A, B"},{"label":"C"}]}]});
+    state
+        .store
+        .insert_pending_approval(
+            "question",
+            "item/tool/requestUserInput",
+            &params.to_string(),
+            "1",
+        )
+        .await
+        .unwrap();
+    let visible = list(&state).await;
+    let question = &visible[0]["params"]["questions"][0];
+    assert_eq!(question["multiSelect"], true);
+    assert_eq!(question["options"][0]["label"], "A, B");
+    assert!(question.get("privateField").is_none());
+    let reply = json!({"answers":{"q":{"answers":["A, B","C"]}}});
+    assert!(validate_user_input_response(&params.to_string(), &reply).is_ok());
+    state.app_server.lock().await.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn group_worker_and_guided_worker_approvals_route_to_persisted_parent_chat() {
     let (_dir, state) = crate::ingestion::tests::fixture().await;
     state

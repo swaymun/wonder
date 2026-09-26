@@ -61,6 +61,7 @@ struct ApprovalModeMenu<LabelContent: View>: View {
     @Binding var selection: BotApprovalMode
     let options: [BotOptions.ApprovalMode]?
     let isDisabled: Bool
+    let family: AgentFamily
     let onChange: (BotApprovalMode) -> Void
     let label: () -> LabelContent
 
@@ -68,25 +69,27 @@ struct ApprovalModeMenu<LabelContent: View>: View {
         selection: Binding<BotApprovalMode>,
         options: [BotOptions.ApprovalMode]?,
         isDisabled: Bool = false,
+        family: AgentFamily = .codex,
         onChange: @escaping (BotApprovalMode) -> Void,
         @ViewBuilder label: @escaping () -> LabelContent
     ) {
         _selection = selection
         self.options = options
         self.isDisabled = isDisabled
+        self.family = family
         self.onChange = onChange
         self.label = label
     }
 
     var body: some View {
         Menu {
-            ForEach(BotApprovalMode.allCases) { mode in
+            ForEach(BotApprovalMode.allCases.filter { family != .claude || $0 != .approveForMe }) { mode in
                 Button {
                     selection = mode
                     onChange(mode)
                 } label: {
                     Text(mode.title)
-                    Text(mode.description)
+                    Text(mode.description(for: family))
                     if mode == selection { Image(systemName: "checkmark") }
                 }
                 .disabled(options?.first(where: { $0.id == mode.rawValue })?.allowed != true)
@@ -1001,7 +1004,19 @@ struct BotEditor: View {
     @State private var adding: FileAccessChoice?
     @State private var botWorkspacePath: String?
     private var key: String { "bot." + (bot?.id ?? "new") }
-    private func field(_ key: String) -> Binding<String> { Binding(get: { draft.values[key] ?? "" }, set: { draft.values[key] = $0; if key == "model" { draft.values["reasoningEffort"] = "" }; if key == "approvalMode" { draft.values["_approvalChanged"] = "true" }; persist() }) }
+    private func field(_ key: String) -> Binding<String> {
+        Binding(get: { draft.values[key] ?? "" }, set: { value in
+            draft.values[key] = value
+            if key == "model" {
+                draft.values["reasoningEffort"] = ""
+                if family == .claude && approvalMode == .approveForMe {
+                    draft.values["approvalMode"] = BotApprovalMode.askForApproval.rawValue
+                }
+            }
+            if key == "approvalMode" { draft.values["_approvalChanged"] = "true" }
+            persist()
+        })
+    }
     private func persist() { do { try model.managementDrafts?.save(draft, key: key) } catch { failure = "This draft could not be saved on this device." } }
     private var fileSelection: Binding<BotFileSelection> {
         Binding(get: { BotFileSelection.draft(draft.values["_fileAccess"]) }, set: { draft.values["_fileAccess"] = $0.encodedDraft; persist() })
@@ -1040,9 +1055,15 @@ struct BotEditor: View {
     }
     private var permissionMode: BotPermissionMode? { draft.values["permissionMode"].flatMap(BotPermissionMode.init(rawValue:)) }
     private var approvalMode: BotApprovalMode { draft.values["approvalMode"].flatMap(BotApprovalMode.init(rawValue:)) ?? .askForApproval }
-    private var approvalAvailable: Bool { draft.canSaveBotApproval(options: options) && options?.approvalModes != nil }
+    private var family: AgentFamily {
+        if let bot { return bot.family }
+        let selected = draft.values["model"].flatMap { $0.isEmpty ? nil : $0 }
+        return options?.models.first(where: { $0.id == selected })?.family
+            ?? AgentFamily(model: selected ?? options?.models.first(where: { !$0.hidden })?.id)
+    }
+    private var approvalAvailable: Bool { draft.canSaveBotApproval(options: options) && options?.approvalChoices(model: draft.values["model"]) != nil }
     private var permissionDescription: String {
-        permissionMode?.scopeDescription ?? "This Bot keeps its current selected-location access. Choose a mode to change its permissions."
+        permissionMode?.scopeDescription(for: family) ?? "This Bot keeps its current selected-location access. Choose a mode to change its permissions."
     }
     var body: some View {
         NavigationStack {
@@ -1062,8 +1083,9 @@ struct BotEditor: View {
                 Section {
                     ApprovalModeMenu(
                         selection: Binding(get: { approvalMode }, set: { field("approvalMode").wrappedValue = $0.rawValue }),
-                        options: options?.approvalModes,
+                        options: options?.approvalChoices(model: draft.values["model"]),
                         isDisabled: busy,
+                        family: family,
                         onChange: { _ in }
                     ) {
                         LabeledContent("Approval", value: approvalMode.title)
@@ -1072,7 +1094,7 @@ struct BotEditor: View {
                     .accessibilityIdentifier("bot-permission-mode")
                     if options?.approvalModes == nil { Text("Update Wonder on your Mac to change approval settings.").font(.footnote).foregroundStyle(.secondary) }
                     else if !approvalAvailable { Text("This approval choice is unavailable on your Mac. Choose an available option before saving.").font(.footnote).foregroundStyle(.secondary) }
-                } header: { Text("Approval") } footer: { Text(approvalMode.description) }
+                } header: { Text("Approval") } footer: { Text(approvalMode.description(for: family)) }
                 if bot == nil { BotFileAccessFields(selection: fileSelection, workspacePath: nil, permissionMode: permissionMode, adding: $adding) }
                 Section {
                     DisclosureGroup("Advanced settings") {

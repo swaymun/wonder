@@ -630,14 +630,14 @@ import UIKit
         XCTAssertTrue(app.staticTexts["View only"].exists)
         let zoomValue = app.buttons["computer-session-more"]
         XCTAssertTrue(zoomValue.exists)
-        XCTAssertEqual(zoomValue.value as? String, "100 percent")
+        XCTAssertEqual(zoomValue.label, "More, zoom 100 percent")
         XCTAssertFalse(app.staticTexts["Waiting for a verified computer stream."].exists)
         retainMenuScreenshot(app, name: "Computer session unavailable")
 
         selectComputerMoreAction(app, identifier: "computer-session-zoom-in")
-        XCTAssertEqual(zoomValue.value as? String, "125 percent")
+        XCTAssertEqual(zoomValue.label, "More, zoom 125 percent")
         selectComputerMoreAction(app, identifier: "computer-session-fit")
-        XCTAssertEqual(zoomValue.value as? String, "100 percent")
+        XCTAssertEqual(zoomValue.label, "More, zoom 100 percent")
         app.buttons["computer-session-close"].tap()
         XCTAssertFalse(computerContainer.waitForExistence(timeout: 2))
     }
@@ -748,6 +748,11 @@ import UIKit
     }
 
     private func selectComputerMoreAction(_ app: XCUIApplication, identifier: String) {
+        // A notification banner overlaps the toolbar on physical iPhones.
+        // Let it disappear instead of tapping through it into another screen.
+        let banner = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            .descendants(matching: .any).matching(identifier: "NotificationShortLookView").firstMatch
+        if banner.exists { XCTAssertTrue(waitUntilGone(banner, timeout: 15)) }
         app.buttons["computer-session-more"].tap()
         // iOS 27's native section-backed menu items expose their spoken label
         // but may omit the SwiftUI accessibility identifier.
@@ -885,6 +890,14 @@ import UIKit
     }
 
     func testPhysicalComputerViewStartsAuthenticatedMacStreamAndCloses() throws {
+        try checkPhysicalComputerView()
+    }
+
+    func testPhysicalClaudeAnswersQuestionAndViewsComputer() throws {
+        try checkPhysicalComputerView(chatName: "Claude acceptance")
+    }
+
+    private func checkPhysicalComputerView(chatName: String? = nil) throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
@@ -909,11 +922,38 @@ import UIKit
                            "The expected Local Network permission alert was not dismissed.")
         }
 
-        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:")).firstMatch
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:"))
+        let row = chatName.map { rows.matching(NSPredicate(format: "label CONTAINS %@", $0)).firstMatch } ?? rows.firstMatch
+        if chatName != nil { XCTAssertTrue(row.waitForExistence(timeout: 20), "Prepare the exact owned Claude acceptance Bot before this test") }
         guard row.waitForExistence(timeout: 20) else {
             throw XCTSkip("Requires an unlocked physical device paired with the updated Wonder host.")
         }
         row.tap()
+        if chatName != nil {
+            let model = app.buttons["composer-model"]
+            XCTAssertTrue(model.waitForExistence(timeout: 10))
+            expectation(for: NSPredicate(format: "value == %@", "Haiku 4.5"), evaluatedWith: model)
+            waitForExpectations(timeout: 10)
+            // Only answer the prepared synthetic request. This test never
+            // submits a prompt or approves file, command, or connector work.
+            let first = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND identifier ENDSWITH %@", "question-option-", "-A, B")).firstMatch
+            let second = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND identifier ENDSWITH %@", "question-option-", "-C")).firstMatch
+            let finalReply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Phone acceptance complete")).firstMatch
+            // A device rerun can verify the durable completed reply without
+            // spending another subscription prompt for the same fixture.
+            if !finalReply.exists {
+                XCTAssertTrue(first.waitForExistence(timeout: 30))
+                first.tap(); second.tap()
+                XCTAssertTrue(first.isSelected && second.isSelected)
+                let reply = app.buttons["Reply"]
+                XCTAssertTrue(reply.isEnabled)
+                retainMenuScreenshot(app, name: "Live Claude multi-select question")
+                reply.tap()
+            }
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Phone acceptance complete")).firstMatch.waitForExistence(timeout: 60))
+            XCTAssertTrue(app.buttons["subagent-status-pill"].waitForExistence(timeout: 15))
+            retainMenuScreenshot(app, name: "Live Claude reply and helper")
+        }
         let details = app.buttons["Conversation details"]
         XCTAssertTrue(details.waitForExistence(timeout: 15))
         details.tap()
@@ -972,10 +1012,14 @@ import UIKit
         }
 
         let zoom = app.buttons["computer-session-more"]
-        selectComputerMoreAction(app, identifier: "computer-session-zoom-in")
-        XCTAssertEqual(zoom.value as? String, "125 percent")
-        selectComputerMoreAction(app, identifier: "computer-session-fit")
-        XCTAssertEqual(zoom.value as? String, "100 percent")
+        for _ in 0..<10 {
+            selectComputerMoreAction(app, identifier: "computer-session-zoom-in")
+            let zoomed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "More, zoom 125 percent"), object: zoom)
+            XCTAssertEqual(XCTWaiter.wait(for: [zoomed], timeout: 5), .completed, zoom.debugDescription)
+            selectComputerMoreAction(app, identifier: "computer-session-fit")
+            let fitted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "More, zoom 100 percent"), object: zoom)
+            XCTAssertEqual(XCTWaiter.wait(for: [fitted], timeout: 5), .completed, zoom.debugDescription)
+        }
 
         // Backgrounding must close the session and never reveal a stale frame
         // when Wonder returns to the foreground.
@@ -3168,6 +3212,8 @@ import UIKit
         }
     }
 
+    // Provider cache mix-ups must be visible here: each fixture has distinct
+    // percentages, and both providers stay in the existing connection settings.
     func testDiagnosticsCodexUsageIsInlineInConnectionSettings() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
@@ -3192,6 +3238,45 @@ import UIKit
         XCTAssertTrue(app.switches["connection-notifications"].exists)
         XCTAssertTrue(app.switches["connection-notifications"].isEnabled)
         retainMenuScreenshot(app, name: "Codex usage inline settings")
+        let claudeFive = app.descendants(matching: .any).matching(identifier: "claude-usage-window:five_hour").firstMatch
+        for _ in 0..<4 where !claudeFive.isHittable { app.swipeUp() }
+        XCTAssertTrue(claudeFive.waitForExistence(timeout: 10))
+        XCTAssertEqual(claudeFive.value as? String, "86% left")
+        let claudeWeek = app.descendants(matching: .any).matching(identifier: "claude-usage-window:seven_day").firstMatch
+        XCTAssertTrue(claudeWeek.exists)
+        XCTAssertEqual(claudeWeek.value as? String, "92% left")
+        XCTAssertFalse(app.navigationBars["Claude usage"].exists)
+        retainMenuScreenshot(app, name: "Claude usage inline settings")
+    }
+
+    func testQuestionMultipleChoicesSurviveQuestionNavigation() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        for size in ["UICTContentSizeCategoryL", "UICTContentSizeCategoryAccessibilityXXL"] {
+            app.launchArguments = ["-read-preview", "-send-preview", "-question-preview", "-UIPreferredContentSizeCategoryName", size]
+            app.launch()
+            let next = app.buttons["Next question"]
+            XCTAssertTrue(next.waitForExistence(timeout: 10))
+            next.tap()
+            let first = app.buttons["question-option-fixtures-A, B"]
+            let second = app.buttons["question-option-fixtures-C"]
+            XCTAssertTrue(first.waitForExistence(timeout: 5))
+            first.tap()
+            second.tap()
+            for _ in 0..<10 {
+                XCTAssertTrue(first.isSelected)
+                XCTAssertTrue(second.isSelected)
+                app.buttons["Previous question"].tap()
+                next.tap()
+            }
+            XCTAssertTrue(first.isSelected)
+            XCTAssertTrue(second.isSelected)
+            second.tap()
+            XCTAssertFalse(second.isSelected)
+            XCTAssertTrue(first.isSelected, "A comma in one label must not select another answer")
+            retainMenuScreenshot(app, name: "Multiple question choices " + size)
+            app.terminate()
+        }
     }
 
     func testPhysicalNewBotCreationOpensAndArchivesExactChat() throws {

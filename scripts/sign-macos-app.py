@@ -62,6 +62,16 @@ def sign(app, sha, name):
             raise SystemExit(f'Missing required executable: {relative}')
         codesign(path, identifier)
     helper_app = app / 'Contents/Resources/WonderComputerUse.app'
+    # Node and the SDK's native executable retain their vendor JIT entitlements.
+    # Inspect Mach-O magic, not filename extensions (the SDK binary is `claude`).
+    magic = {b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe',
+             b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
+    for directory in ['node', 'claude-runtime']:
+        for path in (app / 'Contents/Resources' / directory).rglob('*'):
+            if path.is_file() and not path.is_symlink():
+                with path.open('rb') as binary:
+                    if binary.read(4) in magic:
+                        codesign(path, preserve=True)
     if not helper_app.is_dir():
         raise SystemExit('Missing required app bundle: Resources/WonderComputerUse.app')
     codesign(helper_app, 'com.saimun.wonder.computer-use', preserve=True)

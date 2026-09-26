@@ -622,6 +622,7 @@ struct ConnectionDetail: View {
             } header: {
                 Text("Codex usage").accessibilityIdentifier("codex-usage-section")
             }
+            ClaudeUsageSection(model: model)
             Section {
                 Button("Remove connection", role: .destructive) { removing = true }.disabled(model.busy)
             }
@@ -667,6 +668,42 @@ struct ConnectionDetail: View {
             } else {
                 codexUsageFailure = "Usage couldn’t be loaded. Try again."
             }
+        }
+    }
+}
+
+private struct ClaudeUsageSection: View {
+    @ObservedObject var model: ConnectionModel
+    @State private var loading = false
+    @State private var failure: String?
+    var body: some View {
+        Section {
+            if let cached = model.claudeUsageCache[model.assignmentScope] {
+                ForEach(cached.response.windows) { window in
+                    HStack {
+                        Text(window.label)
+                        Spacer(minLength: 12)
+                        Text("\(window.roundedRemainingPercent)% left").foregroundStyle(.secondary).monospacedDigit()
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityIdentifier("claude-usage-window:" + window.id)
+                    .accessibilityLabel(window.label)
+                    .accessibilityValue("\(window.roundedRemainingPercent)% left")
+                }
+            } else if loading { ProgressView("Loading usage…") }
+            if let failure { Text(failure).foregroundStyle(.secondary) }
+            Button("Refresh Claude usage") { Task { await load(force: true) } }.disabled(loading)
+        } header: { Text("Claude usage").accessibilityIdentifier("claude-usage-section") }
+        .task(id: model.assignmentScope) { await load(force: false) }
+    }
+    private func load(force: Bool) async {
+        let scope = model.assignmentScope
+        loading = true; failure = nil
+        defer { if scope == model.assignmentScope { loading = false } }
+        do { try await model.loadUsage(family: .claude, force: force) }
+        catch {
+            guard scope == model.assignmentScope, !model.accessEnded else { return }
+            failure = "Claude usage couldn’t be loaded. Check your Claude sign-in in Wonder on your Mac, then refresh."
         }
     }
 }
@@ -765,6 +802,7 @@ struct ConnectedApp: Decodable, Identifiable, Sendable {
     }
 }
 struct ConnectedAppPage: Decodable, Sendable {
+    let agentFamily: String?
     let hostInstallationId: String
     let conversationId: String?
     let apps: [ConnectedApp]
@@ -785,10 +823,19 @@ struct ConnectedAppsView: View {
     @State private var failure: String?
     @State private var warning: String?
     @State private var visited: Set<String> = []
+    @State private var selectedFamily: AgentFamily = .codex
+    @State private var reportedFamily: AgentFamily?
+    @State private var loadingScope: String?
+    @State private var loadID = UUID()
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         List {
+            if conversationId == nil {
+                Picker("Connections", selection: $selectedFamily) {
+                    ForEach(AgentFamily.allCases) { family in Text(family.title).tag(family) }
+                }.pickerStyle(.segmented)
+            }
             if let failure { FailureDetails(message: failure) }
             if let warning { Text(warning).foregroundStyle(.secondary) }
             Section {
@@ -808,24 +855,29 @@ struct ConnectedAppsView: View {
                 else if cursor != nil { Button("Load more") { Task { await load(more: true) } } }
                 else if apps.isEmpty && failure == nil { Text("No apps were found for this scope.").foregroundStyle(.secondary) }
             } footer: {
-                Text("Based on Codex connections.")
+                Text("Based on \((reportedFamily ?? selectedFamily).title) connections.")
+                if (reportedFamily ?? selectedFamily) == .claude {
+                    Link("Manage Claude connections", destination: URL(string: "https://claude.ai/settings/connectors")!)
+                }
             }
         }
         .navigationTitle("Connected apps")
         .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { Task { await load(refresh: true) } }.disabled(loading) }
-        .task(id: scope) { apps = []; cursor = nil; visited = []; await load() }
+        .task(id: scope) { apps = []; cursor = nil; visited = []; reportedFamily = nil; await load() }
         .onChange(of: model.accessEnded) { _, ended in if ended { apps = []; cursor = nil; warning = nil; failure = "Access has ended. Reconnect in Settings." } }
         .onChange(of: scenePhase) { _, next in if next == .active { Task { await load() } } }
     }
-    private var scope: String { model.assignmentScope + ":" + (conversationId ?? "host") }
+    private var scope: String { model.assignmentScope + ":" + (conversationId ?? "host:" + selectedFamily.rawValue) }
     @MainActor private func load(more: Bool = false, refresh: Bool = false) async {
-        guard !loading, let saved = model.connection, !model.accessEnded else { return }
+        guard !loading || loadingScope != scope, let saved = model.connection, !model.accessEnded else { return }
+        let requestID = UUID(); loadID = requestID; loadingScope = scope
         loading = true; failure = nil
-        defer { loading = false }
+        defer { if loadID == requestID { loading = false } }
         var components = URLComponents()
         components.path = "/api/v1/connected-apps"
         components.queryItems = [URLQueryItem(name: "refresh", value: refresh ? "true" : "false")]
         if let conversationId { components.queryItems?.append(URLQueryItem(name: "conversationId", value: conversationId)) }
+        else { components.queryItems?.append(URLQueryItem(name: "agentFamily", value: selectedFamily.rawValue)) }
         if more, let cursor { components.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
         let savedScope = scope
         let cacheKey = savedScope + ":" + (more ? cursor ?? "" : "")
@@ -846,6 +898,8 @@ struct ConnectedAppsView: View {
             guard savedScope == scope,
                 page.hostInstallationId == saved.credential.hostInstallationId, page.conversationId == conversationId,
                 !model.accessEnded else { return }
+            reportedFamily = page.agentFamily.flatMap(AgentFamily.init(rawValue:)) ?? .codex
+            if conversationId == nil, reportedFamily != selectedFamily { throw ReadFailure.resync }
             if !more { apps = []; visited = [] }
             var ids = Set(apps.map(\.id))
             apps += page.apps.filter { ids.insert($0.id).inserted }
@@ -889,7 +943,8 @@ struct NewBotModelSettings: View {
             Section {
                 if let options {
                     Picker("Model", selection: Binding(get: { defaults.model }, set: { value in
-                        save(NewBotDefaults(model: value, approvalMode: defaults.approvalMode))
+                        let approval = AgentFamily(model: value) == .claude && defaults.approvalMode == .approveForMe ? BotApprovalMode.askForApproval : defaults.approvalMode
+                        save(NewBotDefaults(model: value, approvalMode: approval))
                     })) {
                         Text(automaticModel).tag("")
                         ForEach(options.models.filter { !$0.hidden }) { Text($0.displayName).tag($0.id) }
@@ -919,12 +974,12 @@ struct NewBotModelSettings: View {
                         Picker("Mode", selection: Binding(get: { defaults.approvalMode }, set: { value in
                             save(NewBotDefaults(model: defaults.model, reasoningEffort: defaults.reasoningEffort, serviceTier: defaults.serviceTier, approvalMode: value))
                         })) {
-                            ForEach(BotApprovalMode.allCases) { mode in Text(mode.title).tag(mode) }
+                            ForEach(BotApprovalMode.allCases.filter { selected?.family != .claude || $0 != .approveForMe }) { mode in Text(mode.title).tag(mode) }
                         }
                         .disabled(options.approvalModes == nil)
                         if options.approvalModes == nil {
                             Text("Update Wonder on your Mac to change approval settings.").font(.footnote).foregroundStyle(.secondary)
-                        } else if options.approvalModes?.first(where: { $0.id == defaults.approvalMode.rawValue })?.allowed != true {
+                        } else if options.approvalChoices(model: selected?.id)?.first(where: { $0.id == defaults.approvalMode.rawValue })?.allowed != true {
                             Text("This approval choice is unavailable on your Mac. Choose an available option before creating a Bot.").font(.footnote).foregroundStyle(.secondary)
                         }
                     }

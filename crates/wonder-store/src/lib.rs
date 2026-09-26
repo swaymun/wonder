@@ -10,13 +10,15 @@ mod push;
 pub use push::{PushDelivery, PushPreview, PushRevocation};
 mod questions;
 pub use questions::AsyncQuestion;
+mod runtime_bindings;
+pub use runtime_bindings::{AgentFamily, RuntimeBinding};
 
 use std::{cmp::Ordering, collections::HashMap, time::Duration};
 
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use wonder_api::{HostEventEnvelope, WonderEvent};
 
-pub const MIGRATION_NAMES: [&str; 73] = [
+pub const MIGRATION_NAMES: [&str; 74] = [
     "0001_initial.sql",
     "0002_message_body.sql",
     "0003_conversations.sql",
@@ -90,6 +92,7 @@ pub const MIGRATION_NAMES: [&str; 73] = [
     "0071_push.sql",
     "0072_push_previews_presence.sql",
     "0073_goal_time_limits.sql",
+    "0074_agent_families.sql",
 ];
 
 mod bot_management;
@@ -380,6 +383,7 @@ pub struct StoredSession {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredBot {
+    pub agent_family: AgentFamily,
     pub id: String,
     pub name: String,
     pub role: String,
@@ -874,12 +878,17 @@ impl Store {
     }
 
     pub async fn list_bots(&self) -> Result<Vec<StoredBot>, sqlx::Error> {
-        let rows = sqlx::query("SELECT bots.id, bots.name, bots.role, bots.system_prompt, bots.workspace_path, bots.working_directory, bots.avatar_color, bots.avatar_shape, bots.avatar_palette, bots.avatar_legacy_color, bots.permission_profile, bots.permission_mode, bots.approval_mode, bots.model, bots.reasoning_effort, bots.service_tier, bots.is_archived, bot_workspaces.conversation_id FROM bots LEFT JOIN bot_workspaces ON bot_workspaces.bot_id = bots.id WHERE NOT EXISTS(SELECT 1 FROM bot_creation_requests r WHERE r.bot_id=bots.id AND r.completed=0) ORDER BY bots.is_archived ASC, bots.created_at ASC")
+        let rows = sqlx::query("SELECT bots.id, bots.agent_family, bots.name, bots.role, bots.system_prompt, bots.workspace_path, bots.working_directory, bots.avatar_color, bots.avatar_shape, bots.avatar_palette, bots.avatar_legacy_color, bots.permission_profile, bots.permission_mode, bots.approval_mode, bots.model, bots.reasoning_effort, bots.service_tier, bots.is_archived, bot_workspaces.conversation_id FROM bots LEFT JOIN bot_workspaces ON bot_workspaces.bot_id = bots.id WHERE NOT EXISTS(SELECT 1 FROM bot_creation_requests r WHERE r.bot_id=bots.id AND r.completed=0) ORDER BY bots.is_archived ASC, bots.created_at ASC")
             .fetch_all(&self.pool)
             .await?;
         Ok(rows
             .into_iter()
             .map(|row| StoredBot {
+                agent_family: if row.get::<String, _>("agent_family") == "claude" {
+                    AgentFamily::Claude
+                } else {
+                    AgentFamily::Codex
+                },
                 id: row.get("id"),
                 name: row.get("name"),
                 role: row.get("role"),
@@ -903,7 +912,7 @@ impl Store {
     }
 
     pub async fn bot(&self, id: &str) -> Result<Option<StoredBot>, sqlx::Error> {
-        sqlx::query("SELECT bots.id, bots.name, bots.role, bots.system_prompt, bots.workspace_path, bots.working_directory, bots.avatar_color, bots.avatar_shape, bots.avatar_palette, bots.avatar_legacy_color, bots.permission_profile, bots.permission_mode, bots.approval_mode, bots.model, bots.reasoning_effort, bots.service_tier, bots.is_archived, bot_workspaces.conversation_id FROM bots LEFT JOIN bot_workspaces ON bot_workspaces.bot_id = bots.id WHERE bots.id = ?")
+        sqlx::query("SELECT bots.id, bots.agent_family, bots.name, bots.role, bots.system_prompt, bots.workspace_path, bots.working_directory, bots.avatar_color, bots.avatar_shape, bots.avatar_palette, bots.avatar_legacy_color, bots.permission_profile, bots.permission_mode, bots.approval_mode, bots.model, bots.reasoning_effort, bots.service_tier, bots.is_archived, bot_workspaces.conversation_id FROM bots LEFT JOIN bot_workspaces ON bot_workspaces.bot_id = bots.id WHERE bots.id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -1480,6 +1489,9 @@ impl Store {
             .bind(verified_at)
             .execute(&mut *tx)
             .await?;
+            sqlx::query("INSERT INTO runtime_bindings(conversation_id,agent_family,runtime_thread_id,updated_at) VALUES(?,COALESCE((SELECT agent_family FROM runtime_bindings WHERE conversation_id=?),'codex'),?,?)")
+                .bind(conversation_id).bind(parent_conversation_id).bind(thread_id).bind(verified_at)
+                .execute(&mut *tx).await?;
             sqlx::query(
                 "INSERT INTO subagent_ownership (conversation_id, parent_conversation_id, thread_id, parent_thread_id, agent_nickname, agent_role, agent_path, source_json, runtime_id, can_accept_direct_input, status, is_archived, verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
@@ -3247,16 +3259,14 @@ impl Store {
         session_id: Option<&str>,
         now: &str,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO conversations (id, codex_thread_id, session_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET codex_thread_id = excluded.codex_thread_id, session_id = COALESCE(excluded.session_id, conversations.session_id)",
+        self.bind_runtime(
+            conversation_id,
+            AgentFamily::Codex,
+            codex_thread_id,
+            session_id,
+            now,
         )
-        .bind(conversation_id)
-        .bind(codex_thread_id)
-        .bind(session_id)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
     pub async fn conversation_dynamic_tools_version(
@@ -3663,6 +3673,11 @@ async fn cleanup_taught_task_sections(pool: &SqlitePool) -> Result<(), sqlx::Err
 
 fn stored_bot(row: &sqlx::sqlite::SqliteRow) -> StoredBot {
     StoredBot {
+        agent_family: if row.get::<String, _>("agent_family") == "claude" {
+            AgentFamily::Claude
+        } else {
+            AgentFamily::Codex
+        },
         id: row.get("id"),
         name: row.get("name"),
         role: row.get("role"),

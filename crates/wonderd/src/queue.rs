@@ -132,9 +132,7 @@ pub(super) async fn edit(
             {
                 return (StatusCode::BAD_REQUEST, error).into_response();
             }
-            if let Err(error) =
-                permission_modes::verify(&state, &mut *state.app_server.lock().await, &bot).await
-            {
+            if let Err(error) = permission_modes::verify_selected(&state, &bot).await {
                 return (StatusCode::BAD_REQUEST, error).into_response();
             }
         }

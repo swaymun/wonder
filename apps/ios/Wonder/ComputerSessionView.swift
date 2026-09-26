@@ -1032,6 +1032,9 @@ struct ComputerSessionView: View {
                 } label: {
                     Label("More", systemImage: "ellipsis")
                 }
+                // Native toolbar menus omit accessibilityValue on iOS 27.
+                // Keep zoom available to VoiceOver in the spoken label too.
+                .accessibilityLabel("More, zoom \(Int((sessionModel.zoomScale * 100).rounded())) percent")
                 .accessibilityValue("\(Int((sessionModel.zoomScale * 100).rounded())) percent")
                 .accessibilityIdentifier("computer-session-more")
             }

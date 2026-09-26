@@ -98,7 +98,16 @@ public enum ScienceAvatarCatalog {
     }
 }
 
+public enum AgentFamily: String, Codable, CaseIterable, Sendable, Identifiable {
+    case codex, claude
+    public var id: String { rawValue }
+    public var title: String { self == .claude ? "Claude" : "Codex" }
+    public init(model: String?) { self = model?.hasPrefix("claude:") == true ? .claude : .codex }
+}
+
 public struct ManagedBot: Codable, Identifiable, Sendable {
+    public var agentFamily: String? = nil
+    public var family: AgentFamily { agentFamily.flatMap(AgentFamily.init(rawValue:)) ?? AgentFamily(model: model) }
     public let id: String
     public let name: String
     public let role: String
@@ -131,6 +140,14 @@ public enum BotPermissionMode: String, CaseIterable, Codable, Sendable, Identifi
         case .fullAccess: "Access files and the network without Codex sandbox restrictions or approval prompts. Saved locations do not limit access. macOS protections still apply."
         }
     }
+    public func scopeDescription(for family: AgentFamily) -> String {
+        guard family == .claude else { return scopeDescription }
+        switch self {
+        case .readOnly: return "Read files without editing them. Wonder’s private data stays protected."
+        case .workspace: return "Edit the Workspace and folders added with write access. Wonder’s private data stays protected."
+        case .fullAccess: return "Edit files across your Mac. Wonder’s private data and macOS protections still apply."
+        }
+    }
 }
 
 public enum BotApprovalMode: String, CaseIterable, Codable, Sendable, Identifiable {
@@ -152,9 +169,27 @@ public enum BotApprovalMode: String, CaseIterable, Codable, Sendable, Identifiab
         case .fullAccess: "Allow unrestricted file and network access without approval prompts."
         }
     }
+    public func description(for family: AgentFamily) -> String {
+        guard family == .claude else { return description }
+        return self == .fullAccess
+            ? "Allow actions within this Bot’s file access without approval prompts. Commands cannot access the network."
+            : "Ask before file changes, commands, web requests and connected-app actions. Commands cannot access the network."
+    }
 }
 
 public struct BotOptions: Decodable, Sendable {
+    public struct Provider: Decodable, Identifiable, Sendable {
+        public let id: String
+        public let installed: Bool
+        public let ready: Bool
+        public let detail: String
+    }
+    public struct ProviderPermissions: Decodable, Sendable {
+        public let permissionModes: [PermissionMode]
+        public let approvalModes: [ApprovalMode]
+    }
+    public var agentProviders: [Provider]? = nil
+    public var permissionsByFamily: [String: ProviderPermissions]? = nil
     public let groupCollaboration: Bool?
     public struct PermissionMode: Decodable, Identifiable, Sendable { public let id: String; public let allowed: Bool }
     public let permissionModes: [PermissionMode]?
@@ -171,6 +206,14 @@ public struct BotOptions: Decodable, Sendable {
         public let description: String?
     }
     public struct Model: Decodable, Identifiable, Sendable {
+        public var agentFamily: String? = nil
+        public var family: AgentFamily { agentFamily.flatMap(AgentFamily.init(rawValue:)) ?? AgentFamily(model: id) }
+        public struct Capabilities: Decodable, Sendable {
+            public let guide: Bool?
+            public let goals: Bool?
+            public let imageGeneration: Bool?
+        }
+        public var capabilities: Capabilities? = nil
         public let id: String
         public let displayName: String
         public let hidden: Bool
@@ -182,6 +225,10 @@ public struct BotOptions: Decodable, Sendable {
     public let models: [Model]
     public let timezone: String?
     public let allowedApprovalPolicies: [String]
+    public func approvalChoices(model: String?) -> [ApprovalMode]? {
+        let family = AgentFamily(model: (model?.isEmpty == false ? model : models.first(where: { !$0.hidden })?.id))
+        return permissionsByFamily?[family.rawValue]?.approvalModes ?? approvalModes
+    }
 }
 public struct ManagedAutomation: Codable, Identifiable, Sendable {
     public let id: String
@@ -240,7 +287,7 @@ public struct ManagementDraft: Codable, Equatable, Sendable {
     }
     public func canSaveBotApproval(options: BotOptions?) -> Bool {
         guard let selected = values["approvalMode"] else { return true }
-        return options?.approvalModes?.first(where: { $0.id == selected })?.allowed == true
+        return options?.approvalChoices(model: values["model"])?.first(where: { $0.id == selected })?.allowed == true
     }
     /// A submitted create is an immutable retry payload, including omitted fields.
     public mutating func prepareBotPermission(isNew: Bool, currentMode: String?) {
@@ -399,7 +446,7 @@ public struct NewBotDefaults: Codable, Equatable, Sendable {
     public func creationValues(options: BotOptions) throws -> [String: String] {
         let selected = model.isEmpty ? options.models.first(where: { !$0.hidden }) : options.models.first(where: { $0.id == model && !$0.hidden })
         guard let selected else { throw SelectionError.unavailableModel }
-        guard let approvalModes = options.approvalModes else { throw SelectionError.unavailableApprovalMode }
+        guard let approvalModes = options.approvalChoices(model: selected.id) else { throw SelectionError.unavailableApprovalMode }
         guard approvalModes.first(where: { $0.id == approvalMode.rawValue })?.allowed == true else { throw SelectionError.unavailableApprovalMode }
         let effort = reasoningEffort.isEmpty ? selected.defaultReasoningEffort : reasoningEffort
         if let effort, !selected.reasoningEfforts.contains(where: { $0.id == effort }) { throw SelectionError.unavailableEffort }

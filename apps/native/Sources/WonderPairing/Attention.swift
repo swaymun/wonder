@@ -574,12 +574,20 @@ public enum DecisionValue: Codable, Sendable {
 }
 public struct RequestedFileChange: Codable, Sendable { public let path: String; public let kind: String? }
 public struct ChatQuestion: Codable, Identifiable, Sendable {
+    public var multiSelect: Bool? = nil
     public let id: String
     public let header: String?
     public let isSecret: Bool?
     public let isOther: Bool?
     public let question: String
     public let options: [QuestionOption]?
+    /// Multi-choice drafts store an array, never comma-delimited labels.
+    /// Legacy single-choice/free-text drafts retain their exact text.
+    public func answers(from draft: String) -> [String] {
+        guard multiSelect == true else { return draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? [] : [draft] }
+        return ((try? JSONDecoder().decode([String].self, from: Data(draft.utf8))) ?? [])
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
 }
 public struct QuestionOption: Codable, Sendable { public let label: String; public let description: String? }
 

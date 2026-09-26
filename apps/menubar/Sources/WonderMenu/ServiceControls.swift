@@ -133,17 +133,17 @@ final class ServiceControls: ObservableObject {
         }
     }
 
-    func repair(signIn: Bool = false) {
+    func repair(signIn: Bool = false, claude: Bool = false) {
         guard !busy, let resources = environment["WONDER_RESOURCES"],
               let directory = serviceDirectory else {
             message = "Open the installed Wonder app to finish setup."
             return
         }
         busy = true
-        message = signIn ? "Complete sign-in in your browser. Wonder will reconnect afterward." : "Checking ChatGPT’s installed runtime…"
+        message = signIn ? "Complete sign-in in your browser. Wonder will reconnect afterward." : (claude ? "Checking your Claude subscription…" : "Checking ChatGPT’s installed runtime…")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [resources + "/manage-runtime.sh", signIn ? "login" : "check"]
+        process.arguments = [resources + "/manage-runtime.sh", (claude ? "claude-" : "") + (signIn ? "login" : "check")]
         process.environment = environment
         let log = directory.appendingPathComponent("repair.log")
         FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
@@ -158,7 +158,9 @@ final class ServiceControls: ObservableObject {
                     self.busy = false
                     self.operation = nil
                     if finished.terminationStatus == 0 {
-                        self.restart()
+                        if claude {
+                            self.message = "Claude is connected. Its models will appear shortly."
+                        } else { self.restart() }
                     } else {
                         self.message = "Setup did not finish. Check your connection and free disk space, then try again. Your saved chats are kept."
                     }

@@ -18,30 +18,42 @@ struct UsageWindow {
     resets_at: Option<u64>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct UsageQuery {
+    #[serde(default)]
+    agent_family: AgentFamily,
+}
+
 pub(super) async fn read(
     State(state): State<AppState>,
     Extension(_authority): Extension<OwnerAuthority>,
+    Query(query): Query<UsageQuery>,
 ) -> Response {
-    let result = state
-        .app_server
-        .lock()
-        .await
-        .rpc()
-        .request("account/rateLimits/read", json!({}))
-        .await;
+    let client = match claude::client(&state, query.agent_family) {
+        Ok(client) => client,
+        Err(_) => return unavailable(query.agent_family),
+    };
+    let rpc = client.lock().await.rpc();
+    let result = rpc.request("account/rateLimits/read", json!({})).await;
     let Some(runtime) = result
         .ok()
         .filter(|response| response.error.is_none())
         .and_then(|response| response.result)
     else {
-        return unavailable();
+        return unavailable(query.agent_family);
     };
-    let Some(windows) = project_windows(&runtime) else {
-        return unavailable();
+    let Some(windows) = (if query.agent_family == AgentFamily::Claude {
+        project_claude_windows(&runtime)
+    } else {
+        project_windows(&runtime)
+    }) else {
+        return unavailable(query.agent_family);
     };
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(json!({
+            "agentFamily": query.agent_family,
             "checkedAtMs": now_ms(),
             "windows": windows,
         })),
@@ -49,13 +61,47 @@ pub(super) async fn read(
         .into_response()
 }
 
-fn unavailable() -> Response {
+fn unavailable(family: AgentFamily) -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         [(header::CACHE_CONTROL, "no-store")],
-        "Codex usage is temporarily unavailable. Check Codex on your Mac, then refresh.",
+        match family {
+            AgentFamily::Codex => "Codex usage is temporarily unavailable. Check Codex on your Mac, then refresh.",
+            AgentFamily::Claude => "Claude usage is temporarily unavailable. Check your Claude subscription on your Mac, then refresh.",
+        },
     )
         .into_response()
+}
+
+fn project_claude_windows(runtime: &Value) -> Option<Vec<UsageWindow>> {
+    let mut windows = Vec::new();
+    let values = runtime.get("windows")?.as_array()?;
+    for id in [
+        "five_hour",
+        "seven_day",
+        "seven_day_sonnet",
+        "seven_day_opus",
+    ] {
+        let Some(value) = values
+            .iter()
+            .take(MAX_INSPECTED_LEGACY_WINDOWS)
+            .find(|v| v["id"] == id)
+        else {
+            continue;
+        };
+        if let Some(mut window) = project_window(value, id.into()) {
+            window.window_duration_mins = Some(if id == "five_hour" { 300 } else { 10_080 });
+            window.label = match id {
+                "five_hour" => "5 hours",
+                "seven_day_sonnet" => "Weekly · Sonnet",
+                "seven_day_opus" => "Weekly · Opus",
+                _ => "Weekly",
+            }
+            .into();
+            windows.push(window);
+        }
+    }
+    (!windows.is_empty()).then_some(windows)
 }
 
 fn project_windows(runtime: &Value) -> Option<Vec<UsageWindow>> {
@@ -144,6 +190,20 @@ mod tests {
 
     fn project(value: Value) -> Vec<UsageWindow> {
         project_windows(&value).unwrap_or_default()
+    }
+
+    #[test]
+    fn claude_windows_are_provider_scoped_and_missing_usage_is_not_zero() {
+        assert!(project_claude_windows(&json!({"windows":[]})).is_none());
+        let windows = project_claude_windows(&json!({"windows":[{"id":"five_hour","usedPercent":20,"remainingPercent":999,"resetsAt":1700000000},{"id":"seven_day","usedPercent":3},{"id":"future_secret","usedPercent":12}]})).unwrap();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].remaining_percent, 80.0);
+        assert_eq!(windows[0].resets_at, Some(1700000000));
+        assert_eq!(windows[1].label, "Weekly");
+        crate::tests::validate_http_contract(
+            "accountUsage",
+            &json!({"agentFamily":"claude", "checkedAtMs":1, "windows": windows}),
+        );
     }
 
     #[test]

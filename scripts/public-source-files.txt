@@ -310,6 +310,7 @@ crates/wonder-store/migrations/0070_computer_tool_calls.sql
 crates/wonder-store/migrations/0071_push.sql
 crates/wonder-store/migrations/0072_push_previews_presence.sql
 crates/wonder-store/migrations/0073_goal_time_limits.sql
+crates/wonder-store/migrations/0074_agent_families.sql
 crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs
@@ -328,6 +329,7 @@ crates/wonder-store/src/push.rs
 crates/wonder-store/src/questions.rs
 crates/wonder-store/src/queue.rs
 crates/wonder-store/src/retention.rs
+crates/wonder-store/src/runtime_bindings.rs
 crates/wonder-store/src/search.rs
 crates/wonder-store/src/sync.rs
 crates/wonder-store/src/teaching.rs
@@ -341,6 +343,7 @@ crates/wonderd/src/automation_tests.rs
 crates/wonderd/src/bot_management.rs
 crates/wonderd/src/bot_management_tests.rs
 crates/wonderd/src/bot_onboarding.rs
+crates/wonderd/src/claude.rs
 crates/wonderd/src/computer_sessions.rs
 crates/wonderd/src/computer_tools.rs
 crates/wonderd/src/connected_apps.rs
@@ -483,6 +486,7 @@ scripts/install-parakeet-model.sh
 scripts/install-signed-app.py
 scripts/manage-runtime.sh
 scripts/nemo-speech-worker.py
+scripts/package-claude-runtime.py
 scripts/package-dev-app.sh
 scripts/package-dev-pkg.sh
 scripts/package-macos-dmg.sh
@@ -510,6 +514,21 @@ scripts/verify-package-lifecycle.sh
 scripts/verify-package-release-gates.py
 scripts/verify-package-release-gates.sh
 scripts/verify-release-docs.py
+services/claude-runtime/.gitignore
+services/claude-runtime/bridge.mjs
+services/claude-runtime/main.mjs
+services/claude-runtime/manage.mjs
+services/claude-runtime/package-lock.json
+services/claude-runtime/package.json
+services/claude-runtime/permissions.mjs
+services/claude-runtime/projection.mjs
+services/claude-runtime/runtime-updates.mjs
+services/claude-runtime/sdk-runtime.mjs
+services/claude-runtime/sessions.mjs
+services/claude-runtime/test/bridge.test.mjs
+services/claude-runtime/test/permissions.test.mjs
+services/claude-runtime/test/projection.test.mjs
+services/claude-runtime/test/runtime-updates.test.mjs
 services/push/.gitignore
 services/push/README.md
 services/push/migrations/0001_push.sql

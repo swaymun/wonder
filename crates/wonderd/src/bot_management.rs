@@ -76,6 +76,11 @@ pub(super) async fn prepare_private_home(
 }
 
 pub(super) async fn options(State(state): State<AppState>) -> Response {
+    let mut providers = Vec::new();
+    for family in [AgentFamily::Codex, AgentFamily::Claude] {
+        let readiness = state.ingestion.readiness_for(&state.store, family).await;
+        providers.push(serde_json::json!({"id":family,"installed": family == AgentFamily::Codex || state.claude.is_some(), "ready":readiness.ready,"detail":readiness.detail}));
+    }
     let catalog = state.runtime_catalog.read().await;
     let timezone = std::fs::read_link("/etc/localtime")
         .ok()
@@ -85,7 +90,10 @@ pub(super) async fn options(State(state): State<AppState>) -> Response {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| "UTC".into());
-    Json(serde_json::json!({"groupCollaboration":true,"models":catalog.models.iter().filter(|m| !m.hidden).collect::<Vec<_>>(),"timezone":timezone,"allowedApprovalPolicies":if catalog.approval_policies_restricted {catalog.allowed_approval_policies.clone()} else {vec!["on-request".to_owned(),"never".to_owned()]},"permissionModes":permission_modes::options(&catalog),"approvalModes":permission_modes::approval_options(&catalog, None)})).into_response()
+    Json(serde_json::json!({"agentProviders":providers,"permissionsByFamily":{
+        "codex":{"permissionModes":permission_modes::options(&catalog),"approvalModes":permission_modes::approval_options(&catalog, None)},
+        "claude":{"permissionModes":[{"id":"read-only","allowed":true},{"id":"workspace","allowed":true},{"id":"full-access","allowed":true}],"approvalModes":[{"id":"ask-for-approval","allowed":true},{"id":"full-access","allowed":true}]}
+    },"groupCollaboration":true,"models":catalog.models.iter().filter(|m| !m.hidden).collect::<Vec<_>>(),"timezone":timezone,"allowedApprovalPolicies":if catalog.approval_policies_restricted {catalog.allowed_approval_policies.clone()} else {vec!["on-request".to_owned(),"never".to_owned()]},"permissionModes":permission_modes::options(&catalog),"approvalModes":permission_modes::approval_options(&catalog, None)})).into_response()
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

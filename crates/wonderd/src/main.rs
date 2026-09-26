@@ -21,6 +21,10 @@ use wonderd::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--locate-runtime") {
+        println!("{}", resolve_codex().await?.display());
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("--verify-runtime") {
         let path = std::env::args_os().nth(2).ok_or("runtime path required")?;
         wonder_app_server::verify_runtime(Path::new(&path)).await?;
@@ -100,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bots = store.list_bots().await?;
     let mut permission_overrides = vec![bootstrap_profile];
     for bot in &bots {
-        if bot.permission_mode.is_some() {
+        if bot.permission_mode.is_some() || bot.agent_family == wonder_store::AgentFamily::Claude {
             continue;
         }
         let access = store.bot_file_access(&bot.id).await?;
@@ -167,7 +171,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let linked_file_roots = std::env::var_os("WONDER_LINKED_FILE_ROOTS")
         .map(|paths| std::env::split_paths(&paths).collect())
         .unwrap_or_default();
+    let claude = wonderd::claude::Runtime::configured(&data_dir, &store);
     let state = AppState {
+        claude,
         ingestion: wonderd::ingestion::Ingestion::default(),
         store,
         logger: Arc::clone(&logger),
@@ -339,6 +345,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.computer_supervisor.shutdown(&state).await;
     let mut app_server = app_server.lock().await;
     app_server.shutdown().await?;
+    if let Some(claude) = &state.claude {
+        claude.client.lock().await.shutdown().await?;
+    }
     logger.record("info", "daemon_stopped", serde_json::json!({}))?;
     Ok(())
 }
@@ -347,9 +356,15 @@ async fn resolve_codex() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Ok(path) = std::env::var("WONDER_CODEX_BIN") {
         return Ok(PathBuf::from(path));
     }
-    Ok(PathBuf::from(
-        "/Applications/ChatGPT.app/Contents/Resources/codex",
-    ))
+    let resources = Path::new("/Applications/ChatGPT.app/Contents/Resources");
+    // The supported launcher preserves adjacency with codex-code-mode-host.
+    // Do not select the nested Mach-O directly; its helper lives elsewhere.
+    let current = resources.join("codex-cli/bin/codex");
+    Ok(if current.is_file() {
+        current
+    } else {
+        resources.join("codex")
+    })
 }
 
 fn data_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -410,6 +425,8 @@ fn sensitive_roots(codex_state: &Path) -> Result<Vec<PathBuf>, Box<dyn std::erro
     let home = PathBuf::from(home);
     let mut roots = vec![
         codex_state.to_path_buf(),
+        home.join(".claude"),
+        home.join(".claude.json"),
         home.join(".ssh"),
         home.join(".aws"),
         home.join(".gnupg"),

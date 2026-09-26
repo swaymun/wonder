@@ -27,6 +27,18 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
     }))
 }
 
+async fn message_ready(state: &AppState, message: &wonder_store::StoredMessage) -> bool {
+    let Ok(family) = crate::claude::conversation_family(state, &message.conversation_id).await
+    else {
+        return false;
+    };
+    state
+        .ingestion
+        .readiness_for(&state.store, family)
+        .await
+        .ready
+}
+
 async fn tick(state: &AppState) -> Result<(), String> {
     {
         let _guard = state.dispatch_lock.lock().await;
@@ -44,6 +56,9 @@ async fn tick(state: &AppState) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?
         {
+            if !message_ready(state, &message).await {
+                continue;
+            }
             if let Some(turn_id) = find_accepted_turn(state, &message).await? {
                 state
                     .store
@@ -73,7 +88,9 @@ async fn tick(state: &AppState) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
     {
-        let _ = crate::dispatch_guide(state.clone(), message, turn).await;
+        if message_ready(state, &message).await {
+            let _ = crate::dispatch_guide(state.clone(), message, turn).await;
+        }
     }
     for message in state
         .store
@@ -81,8 +98,8 @@ async fn tick(state: &AppState) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
     {
-        if !state.ingestion.readiness(&state.store).await.ready {
-            break;
+        if !message_ready(state, &message).await {
+            continue;
         }
         crate::dispatch_to_codex(state.clone(), message).await;
     }
@@ -126,14 +143,19 @@ pub(crate) async fn find_accepted_turn(
         crate::ensure_execution_permission_cache(state, &bot).await?;
         let resolved = crate::permission_modes::resolve(&bot);
         let roots = crate::permission_modes::runtime_roots(state, &bot).await?;
-        let runtime = state.app_server.lock().await.rpc();
-        let response = runtime.request("thread/resume", json!({
-        "threadId":thread_id,"excludeTurns":true,"cwd":bot.execution_directory(),
-        "permissions":resolved.permission_profile,"runtimeWorkspaceRoots":roots,
-        "approvalPolicy":resolved.approval_policy,"approvalsReviewer":resolved.approvals_reviewer,
-        "developerInstructions":wonder_harness::instructions(&format!("{}\n\n{}", crate::teaching::BETA_POLICY, bot.system_prompt)),
-        "config":crate::teaching::runtime_config(state, &runtime, bot.execution_directory()).await?
-    })).await.map_err(|e| e.to_string())?;
+        let runtime = crate::claude::for_thread(state, thread_id).await?;
+        let mut resume_params = json!({
+            "threadId":thread_id,"excludeTurns":true,"cwd":bot.execution_directory(),
+            "permissions":resolved.permission_profile,"runtimeWorkspaceRoots":roots,
+            "approvalPolicy":resolved.approval_policy,"approvalsReviewer":resolved.approvals_reviewer,
+            "developerInstructions":wonder_harness::instructions(&format!("{}\n\n{}", crate::teaching::BETA_POLICY, bot.system_prompt)),
+            "config":if bot.agent_family == wonder_store::AgentFamily::Codex { crate::teaching::runtime_config(state, &runtime, bot.execution_directory()).await? } else { json!({}) }
+        });
+        crate::claude::configure_thread(state, &bot, &mut resume_params).await?;
+        let response = runtime
+            .request("thread/resume", resume_params)
+            .await
+            .map_err(|e| e.to_string())?;
         if response.error.is_some() {
             return Ok(None);
         }

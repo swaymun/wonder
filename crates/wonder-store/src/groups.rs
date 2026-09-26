@@ -307,6 +307,10 @@ mod tests {
             .save_collaboration_config("group", r#"{"routing":{"model":"changed"}}"#)
             .await
             .unwrap();
+        assert!(store
+            .save_collaboration_config("group", r#"{"routing":{"model":"claude:haiku"}}"#)
+            .await
+            .is_err());
         assert_eq!(
             store
                 .collaboration_context(&parent.id)
