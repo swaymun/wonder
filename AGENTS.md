@@ -216,7 +216,8 @@ another Wonder checkout for profiling.
   and distinguish simulator, scenario, and physical acceptance. MetricKit delivery
   is delayed; mark interrupted sessions without inferring a crash absent an OS report.
 - Live tests send no messages or start model work unless explicitly requested.
-  `/api/v1/bots/new` starts model-backed onboarding. Use the existing explicit
+  `/api/v1/bots/new` creates an unstarted conversational Bot; its first Send selects
+  the agent family. For routine read-only fixtures, use the existing explicit
   `POST /api/v1/bots` path for a dedicated read-only test Bot, persist its request/ID
   before creation, recover interrupted cleanup, and archive only that exact Bot.
   Verify its message count stays zero. Retain fixture ownership through cleanup.

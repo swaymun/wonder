@@ -104,21 +104,29 @@ impl Store {
         .await?
         .is_some_and(|saved| saved == hash))
     }
-    pub async fn finish_bot_creation(&self, id: &str) -> Result<(), sqlx::Error> {
+    pub async fn finish_bot_creation(&self, id: &str, conversational: bool) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if conversational {
+            sqlx::query("INSERT OR IGNORE INTO bot_model_drafts(bot_id) SELECT bot_id FROM bot_creation_requests WHERE bot_id=? AND completed=0 AND NOT EXISTS(SELECT 1 FROM conversation_metadata c JOIN messages m ON m.conversation_id=c.id WHERE c.bot_id=?) AND NOT EXISTS(SELECT 1 FROM conversation_metadata c JOIN runtime_bindings r ON r.conversation_id=c.id WHERE c.bot_id=?)")
+                .bind(id).bind(id).bind(id).execute(&mut *tx).await?;
+        }
         sqlx::query("UPDATE bot_creation_requests SET completed=1 WHERE bot_id=?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+            .bind(id).execute(&mut *tx).await?;
+        tx.commit().await
     }
     pub async fn update_managed_bot(
         &self,
         bot: &StoredBot,
         clear_overrides: [bool; 3],
     ) -> Result<(), sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE bots SET name=?,role=?,system_prompt=?,model=?,reasoning_effort=?,service_tier=?,avatar_color=?,avatar_shape=?,avatar_palette=?,avatar_legacy_color=?,working_directory=?,permission_mode=?,approval_mode=? WHERE id=?")
-            .bind(&bot.name).bind(&bot.role).bind(&bot.system_prompt).bind(&bot.model).bind(&bot.reasoning_effort).bind(&bot.service_tier).bind(&bot.avatar_color).bind(&bot.avatar_shape).bind(&bot.avatar_palette).bind(&bot.avatar_legacy_color).bind(&bot.working_directory).bind(&bot.permission_mode).bind(&bot.approval_mode).bind(&bot.id).execute(&mut *tx).await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let revision: Option<i64> = sqlx::query_scalar("SELECT revision FROM bot_model_drafts WHERE bot_id=? AND first_message_id IS NULL")
+            .bind(&bot.id).fetch_optional(&mut *tx).await?;
+        if revision != bot.model_selection_revision { return Err(sqlx::Error::Protocol("model_selection_changed".into())); }
+        sqlx::query("UPDATE bots SET name=?,role=?,system_prompt=?,model=?,reasoning_effort=?,service_tier=?,avatar_color=?,avatar_shape=?,avatar_palette=?,avatar_legacy_color=?,working_directory=?,permission_mode=?,approval_mode=?,agent_family=? WHERE id=?")
+            .bind(&bot.name).bind(&bot.role).bind(&bot.system_prompt).bind(&bot.model).bind(&bot.reasoning_effort).bind(&bot.service_tier).bind(&bot.avatar_color).bind(&bot.avatar_shape).bind(&bot.avatar_palette).bind(&bot.avatar_legacy_color).bind(&bot.working_directory).bind(&bot.permission_mode).bind(&bot.approval_mode).bind(bot.agent_family.as_str()).bind(&bot.id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE bot_model_drafts SET revision=revision+1 WHERE bot_id=? AND first_message_id IS NULL")
+            .bind(&bot.id).execute(&mut *tx).await?;
         // An explicitly chosen Bot default must also win in previously customized chats.
         sqlx::query("UPDATE conversation_settings SET model=CASE WHEN ? THEN NULL ELSE model END, reasoning_effort=CASE WHEN ? THEN NULL ELSE reasoning_effort END, service_tier=CASE WHEN ? THEN NULL ELSE service_tier END WHERE conversation_id IN (SELECT id FROM conversation_metadata WHERE bot_id=?)")
             .bind(clear_overrides[0]).bind(clear_overrides[1]).bind(clear_overrides[2]).bind(&bot.id)
@@ -308,7 +316,10 @@ impl Store {
         access: &BotFileAccess,
         followup: Option<&str>,
     ) -> Result<bool, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
+        if followup.is_some() { self.ensure_local_desktop("folder-approval").await?; }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let unstarted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bot_model_drafts WHERE bot_id=? AND first_message_id IS NULL)")
+            .bind(&request.bot_id).fetch_one(&mut *tx).await?;
         let changed = sqlx::query("UPDATE bot_file_requests SET state='approved' WHERE bot_id=? AND id=? AND state='pending'")
             .bind(&request.bot_id).bind(&request.id).execute(&mut *tx).await?.rows_affected();
         if changed != 1 {
@@ -324,7 +335,10 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
-        if let Some(body) = followup {
+        // Folder setup before first Send changes settings, but starts no model work.
+        sqlx::query("UPDATE bot_model_drafts SET revision=revision+1 WHERE bot_id=? AND first_message_id IS NULL")
+            .bind(&request.bot_id).execute(&mut *tx).await?;
+        if let Some(body) = followup.filter(|_| !unstarted) {
             use sha2::{Digest, Sha256};
             let conversation: String =
                 sqlx::query_scalar("SELECT conversation_id FROM bot_workspaces WHERE bot_id=?")
@@ -390,85 +404,59 @@ mod tests {
         }
         store
     }
+    // Owner: durable acceptance and Bot settings transactions. Protect against a
+    // stale second device, a lost receipt, and reopening after the first Send.
     #[tokio::test]
-    async fn startup_question_recovers_once_and_does_not_require_an_answer() {
+    async fn first_message_locks_family_and_retry_identity_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", dir.path().join("draft.db").display());
+        let store = Store::connect(&url).await.unwrap();
+        store.ensure_local_desktop("now").await.unwrap();
+        assert!(store.reserve_bot_creation("draft", "hash").await.unwrap());
+        store.upsert_bot("draft", "Luna", "purpose", "instructions", "/tmp", ":workspace", Some("gpt-test"), None, "1").await.unwrap();
+        store.ensure_bot_workspace("draft", "Luna", "1").await.unwrap();
+        store.finish_bot_creation("draft", true).await.unwrap();
+        let mut bot = store.bot("draft").await.unwrap().unwrap();
+        assert_eq!(bot.model_selection_revision, Some(0));
+        bot.agent_family = AgentFamily::Claude;
+        bot.model = Some("claude:claude-haiku-4-5".into());
+        store.update_managed_bot(&bot, [true; 3]).await.unwrap();
+        assert!(store.update_managed_bot(&bot, [true; 3]).await.is_err(), "A stale settings save must fail");
+        let stale = store.bot("draft").await.unwrap().unwrap();
+        assert_eq!(stale.model_selection_revision, Some(1));
+        for revision in [None, Some(0)] {
+            assert!(store.insert_dispatch_message_with_model_selection("wonder-desktop", "first", "Hello", "body", "bot:draft", &[], "2", true, revision).await.is_err());
+        }
+        assert!(store.messages_for_conversation("bot:draft").await.unwrap().is_empty());
+        let MessageInsert::Inserted(first) = store.insert_dispatch_message_with_model_selection("wonder-desktop", "first", "Hello", "body", "bot:draft", &[], "2", true, Some(1)).await.unwrap() else { panic!("First request was not inserted") };
+        assert!(store.bot("draft").await.unwrap().unwrap().model_selection_revision.is_none());
+        assert!(store.update_managed_bot(&stale, [true; 3]).await.is_err(), "A save racing after acceptance must fail");
+        let mut locked = store.bot("draft").await.unwrap().unwrap();
+        locked.agent_family = AgentFamily::Codex;
+        locked.model = Some("gpt-test".into());
+        assert!(store.update_managed_bot(&locked, [true; 3]).await.is_err(), "SQL boundary must enforce the family");
+        drop(store);
+        let store = Store::connect(&url).await.unwrap();
+        store.finish_bot_creation("draft", true).await.unwrap();
+        assert!(store.bot("draft").await.unwrap().unwrap().model_selection_revision.is_none());
+        assert!(matches!(store.insert_dispatch_message_with_model_selection("wonder-desktop", "first", "Hello", "body", "bot:draft", &[], "3", true, Some(1)).await.unwrap(), MessageInsert::Existing(_)));
+        assert!(matches!(store.insert_dispatch_message_with_model_selection("wonder-desktop", "first", "Hello", "body", "bot:draft", &[], "3", true, Some(2)).await.unwrap(), MessageInsert::Conflict));
+        assert!(store.insert_dispatch_message_with_model_selection("wonder-desktop", "second", "Other", "other", "bot:draft", &[], "3", true, Some(1)).await.is_err());
+        assert!(matches!(store.insert_dispatch_message("wonder-desktop", "second", "Other", "other", "bot:draft", &[], "3", true).await.unwrap(), MessageInsert::Inserted(_)));
+        let (accepted, frozen) = store.message_execution_bot(&first.id, locked).await.unwrap();
+        assert!(frozen);
+        assert_eq!(accepted.model.as_deref(), Some("claude:claude-haiku-4-5"));
+    }
+
+    #[tokio::test]
+    async fn empty_legacy_bots_do_not_become_family_drafts() {
         let store = fixture().await;
-        store
-            .initialize_bot("one", "private initialization", "2")
-            .await
-            .unwrap();
-        assert!(store
-            .bot_initialization("bot:one", 1)
-            .await
-            .unwrap()
-            .unwrap()
-            .question_id
-            .is_none());
-        assert!(store
-            .bot_initialization("bot:two", 1)
-            .await
-            .unwrap()
-            .is_none());
-        assert!(store.pending_queue("bot:one").await.unwrap().is_empty());
-        let init = store
-            .bot_initialization_messages("bot:one")
-            .await
-            .unwrap()
-            .remove(0);
-        assert!(!store
-            .edit_pending("bot:one", &init.id, 1, Some(("edit", "hash")))
-            .await
-            .unwrap());
-        store
-            .update_message_delivery(&init.id, "failed", None, None)
-            .await
-            .unwrap();
-        let recovered = store
-            .bot_initialization("bot:one", 10)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(recovered.question_id.is_some());
-        let repeated = store
-            .bot_initialization("bot:one", 11)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(recovered.question_id, repeated.question_id);
-        store
-            .save_async_question(
-                "bot:one",
-                "late-thread",
-                "late-turn",
-                "wonder-purpose",
-                "[]",
-                300000,
-            )
-            .await
-            .unwrap();
-        let questions = store.async_questions("bot:one", 12).await.unwrap();
-        assert_eq!(questions.len(), 1);
-        assert_eq!(questions[0].state, "pending");
-        assert_eq!(
-            questions[0].questions[0]["title"],
-            "What should I help with?"
-        );
-        store
-            .insert_message(
-                "wonder-desktop",
-                "user-task",
-                "Build an app",
-                "hash",
-                "bot:one",
-                "3",
-            )
-            .await
-            .unwrap();
-        assert!(store
-            .bot_initialization("bot:one", 13)
-            .await
-            .unwrap()
-            .is_none());
+        store.finish_bot_creation("one", true).await.unwrap();
+        let mut legacy = store.bot("one").await.unwrap().unwrap();
+        assert!(legacy.model_selection_revision.is_none());
+        legacy.agent_family = AgentFamily::Claude;
+        legacy.model = Some("claude:claude-haiku-4-5".into());
+        assert!(store.update_managed_bot(&legacy, [true; 3]).await.is_err());
     }
 
     #[tokio::test]

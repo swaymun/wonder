@@ -548,6 +548,8 @@ struct LocalOwnerAuthority;
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageRequest {
     #[serde(default)]
+    pub model_selection_revision: Option<i64>,
+    #[serde(default)]
     pub group_routing: Option<group_collaboration::ModelSettings>,
     pub device_id: String,
     pub client_message_id: String,
@@ -3600,6 +3602,7 @@ fn host_readiness_state(public_origin: Option<&str>) -> &'static str {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BotSummary {
+    model_selection_revision: Option<i64>,
     agent_family: AgentFamily,
     permission_mode: Option<String>,
     approval_mode: Option<String>,
@@ -3811,6 +3814,7 @@ struct CreateBotRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateBotRequest {
+    model_selection_revision: Option<i64>,
     permission_mode: Option<permission_modes::PermissionMode>,
     approval_mode: Option<permission_modes::ApprovalMode>,
     avatar_color: Option<String>,
@@ -4036,6 +4040,9 @@ async fn automation_target_available(
             StatusCode::CONFLICT,
             "Restore this Bot before running or enabling its automations.",
         ));
+    }
+    if scope_type == "bot" && bot.model_selection_revision.is_some() {
+        return Err((StatusCode::CONFLICT, "Send this Bot its first message before enabling automations."));
     }
     if scope_type == "group_chat" {
         let group = state
@@ -4565,6 +4572,7 @@ fn bot_summary(bot: StoredBot) -> BotSummary {
         .map(|palette| palette.body.to_owned())
         .or_else(|| bot.avatar_color.clone());
     BotSummary {
+        model_selection_revision: bot.model_selection_revision,
         agent_family: bot.agent_family,
         permission_mode: bot.permission_mode.clone(),
         approval_mode: bot.approval_mode.clone(),
@@ -4647,6 +4655,11 @@ async fn bot_update_endpoint(
     let Ok(Some(mut current)) = state.store.bot(&bot_id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if request.model.is_some() && current.model_selection_revision.is_some()
+        && request.model_selection_revision != current.model_selection_revision {
+        return (StatusCode::CONFLICT, "Model settings changed. Reload before choosing a model.").into_response();
+    }
+    let mut family_changed = false;
     // Appearance changes are safe during work. Existing clients also echo
     // unchanged profile fields when saving an avatar, so compare their values.
     let requires_idle = request
@@ -4694,11 +4707,15 @@ async fn bot_update_endpoint(
         if !value.trim().is_empty()
             && AgentFamily::for_model(Some(value.trim())) != current.agent_family
         {
-            return (
-                StatusCode::BAD_REQUEST,
-                "Choose a model from this Bot’s agent family.",
-            )
-                .into_response();
+            if current.model_selection_revision.is_none() {
+                return (StatusCode::BAD_REQUEST, "Choose a model from this Bot’s agent family.").into_response();
+            }
+            current.agent_family = AgentFamily::for_model(Some(value.trim()));
+            family_changed = true;
+            // Claude has no automatic approval reviewer. Switching never broadens access.
+            if current.agent_family == AgentFamily::Claude && current.approval_mode.as_deref() == Some("approve-for-me") {
+                current.approval_mode = Some("ask-for-approval".into());
+            }
         }
         current.model = (!value.trim().is_empty()).then(|| value.trim().to_owned());
     }
@@ -4750,7 +4767,7 @@ async fn bot_update_endpoint(
             return (StatusCode::BAD_REQUEST, message).into_response();
         }
     }
-    if (current.permission_mode.is_some() || request.approval_mode.is_some()) && permissions_changed
+    if (current.permission_mode.is_some() || request.approval_mode.is_some()) && (permissions_changed || family_changed)
     {
         let access = match state.store.bot_file_access(&bot_id).await {
             Ok(access) => access,
@@ -4764,19 +4781,17 @@ async fn bot_update_endpoint(
             return (StatusCode::BAD_REQUEST, error).into_response();
         }
     }
-    if state
-        .store
-        .update_managed_bot(&current, clear_overrides)
-        .await
-        .is_err()
-    {
+    if let Err(error) = state.store.update_managed_bot(&current, clear_overrides).await {
+        if matches!(&error, sqlx::Error::Protocol(message) if message == "model_selection_changed") {
+            return (StatusCode::CONFLICT, "The first message already selected this Bot’s model. Reload settings.").into_response();
+        }
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Could not save Bot settings. Try again.",
         )
             .into_response();
     }
-    Json(bot_summary(current)).into_response()
+    bot_get_endpoint(State(state.clone()), Path(bot_id)).await
 }
 
 async fn bot_archive_endpoint(
@@ -7134,7 +7149,7 @@ async fn conversation_composer_options(
             .models
             .iter()
             .filter(|model| {
-                !model.hidden && AgentFamily::for_model(Some(&model.id)) == bot.agent_family
+                !model.hidden && (bot.model_selection_revision.is_some() || AgentFamily::for_model(Some(&model.id)) == bot.agent_family)
             })
             .cloned()
             .collect(),
@@ -8449,6 +8464,7 @@ async fn create_bot(
     };
 
     Json(BotSummary {
+        model_selection_revision: None,
         agent_family: wonder_store::AgentFamily::Codex,
         permission_mode: None,
         approval_mode: None,
@@ -8583,7 +8599,7 @@ async fn start_bot_thread(
                 "{}{}",
                 pm_tools::version(computer, pm),
                 if onboarding {
-                    "+wonder-bot-profile-v4"
+                    "+wonder-bot-profile-v5"
                 } else {
                     ""
                 }
@@ -8633,7 +8649,7 @@ async fn conversation_needs_tool_migration(
                 "{}{}",
                 pm_tools::version(computer, pm),
                 if onboarding {
-                    "+wonder-bot-profile-v4"
+                    "+wonder-bot-profile-v5"
                 } else {
                     ""
                 }
@@ -8896,26 +8912,11 @@ async fn send_message_inner(
             }
         }
     };
-    match state
-        .store
-        .bot_initialization(&conversation_id, now_ms() as i64)
-        .await
-    {
-        Ok(Some(initialization)) if initialization.question_id.is_none() => {
-            return (
-                StatusCode::CONFLICT,
-                "Your Bot is getting ready. Wait for its first question before sending.",
-            )
-                .into_response();
-        }
-        Ok(_) => {}
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
     let body_sha256 = hex::encode(Sha256::digest(request.body.as_bytes()));
     let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let insert = match state
         .store
-        .insert_dispatch_message(
+        .insert_dispatch_message_with_model_selection(
             &request.device_id,
             &request.client_message_id,
             &request.body,
@@ -8924,10 +8925,14 @@ async fn send_message_inner(
             &request.attachment_ids,
             &created_at,
             channel_id.is_none(),
+            request.model_selection_revision,
         )
         .await
     {
         Ok(insert) => insert,
+        Err(sqlx::Error::Protocol(message)) if message == "model_selection_changed" => {
+            return (StatusCode::PRECONDITION_FAILED, "Model settings changed. Your message was not sent. Reload and send again.").into_response();
+        }
         Err(error) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
         }
@@ -12593,6 +12598,7 @@ mod tests {
             axum::extract::Path(child.clone()),
             None,
             axum::Json(super::SendMessageRequest {
+                model_selection_revision: None,
                 device_id: "owner".into(),
                 client_message_id: uuid::Uuid::new_v4().to_string(),
                 body: "keep this unsent".into(),

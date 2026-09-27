@@ -404,6 +404,7 @@ mod tests {
         let allowed = root.join("allowed.txt");
         std::fs::write(&allowed, "allowed").unwrap();
         let bot = StoredBot {
+            model_selection_revision: None,
             agent_family: wonder_store::AgentFamily::Codex,
             id: "bot".into(),
             name: "Test".into(),

@@ -2809,43 +2809,25 @@ import UIKit
         }
     }
 
-    func testNewBotWaitsForPurposeQuestionBeforeShowingComposer() throws {
+    func testNewBotOpensComposerWithoutSetupQuestion() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
-        for waiting in [true, false] {
-            app.launchArguments = ["-read-preview", "-onboarding-preview"] + (waiting ? ["-onboarding-loading-preview"] : [])
-            app.launch()
-            let chat = app.staticTexts["Luna"].firstMatch
-            XCTAssertTrue(chat.waitForExistence(timeout: 10))
-            chat.tap()
-            let header = app.otherElements["conversation-avatar-header"]
-            XCTAssertTrue(header.waitForExistence(timeout: 10))
-            XCTAssertTrue(header.label.contains("Luna character, Ocean palette"))
-            if waiting {
-                let progress = app.activityIndicators["bot-initialization-progress"]
-                XCTAssertTrue(progress.waitForExistence(timeout: 5))
-                let conversationBar = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
-                XCTAssertTrue(conversationBar.exists)
-                let navigation = conversationBar.frame
-                // iPad's detail navigation bar spans behind the floating sidebar.
-                let sidebar = app.collectionViews["Sidebar"]
-                let leading = sidebar.exists && sidebar.frame.intersects(app.frame) && sidebar.frame.maxX < header.frame.midX
-                    ? sidebar.frame.maxX : navigation.minX
-                let area = CGRect(x: leading, y: navigation.maxY, width: navigation.maxX - leading,
-                                  height: app.frame.maxY - navigation.maxY)
-                XCTAssertEqual(progress.frame.midX, area.midX, accuracy: 3)
-                XCTAssertEqual(progress.frame.midY, area.midY, accuracy: 30)
-                XCTAssertFalse(app.textViews["Message Luna"].exists)
-                XCTAssertFalse(app.buttons["Send message"].exists)
-            } else {
-                XCTAssertTrue(app.staticTexts["What should I help with?"].waitForExistence(timeout: 5))
-                XCTAssertTrue(app.textViews["Message Luna"].exists)
-                XCTAssertTrue(app.buttons["Skip"].exists)
-                XCTAssertFalse(app.activityIndicators["bot-initialization-progress"].exists)
-            }
-            retainMenuScreenshot(app, name: waiting ? "Bot preparing" : "Bot first question ready")
-            app.terminate()
-        }
+        app.launchArguments = ["-read-preview", "-new-bot-preview"]
+        app.launch()
+        let chat = app.staticTexts["Luna"].firstMatch
+        XCTAssertTrue(chat.waitForExistence(timeout: 10))
+        chat.tap()
+        let header = app.otherElements["conversation-avatar-header"]
+        XCTAssertTrue(header.waitForExistence(timeout: 10))
+        XCTAssertTrue(header.label.contains("Luna character, Ocean palette"))
+        XCTAssertTrue(app.textViews["Message Luna"].exists)
+        XCTAssertFalse(app.staticTexts["What should I help with?"].exists)
+        XCTAssertFalse(app.buttons["Skip"].exists)
+        XCTAssertFalse(app.activityIndicators["bot-initialization-progress"].exists)
+        app.buttons["composer-model"].tap()
+        XCTAssertTrue(app.buttons["Claude Haiku 4.5"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["GPT-6 Astra"].exists)
+        retainMenuScreenshot(app, name: "New Bot family selection")
     }
 
     func testBotSettingsUsesCompactAvatarSection() throws {

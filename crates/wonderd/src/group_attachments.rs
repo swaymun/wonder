@@ -499,6 +499,7 @@ mod tests {
             None,
             Some(Extension(LocalOwnerAuthority)),
             Json(SendMessageRequest {
+                model_selection_revision: None,
                 group_routing: None,
                 device_id: "owner".into(),
                 client_message_id: uuid::Uuid::new_v4().to_string(),

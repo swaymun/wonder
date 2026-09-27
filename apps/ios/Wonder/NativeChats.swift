@@ -882,12 +882,7 @@ struct ConversationView: View {
         let answeredQuestions = answeredQuestionsOutsideTimeline(timeline)
         let disclosureRevision = disclosureEntries
         Group {
-            if !readOnly && model.waitingForInitialQuestion(chat) {
-                ProgressView("Getting your Bot ready…")
-                    .font(.subheadline)
-                    .accessibilityIdentifier("bot-initialization-progress")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if model.snapshots[chat.id] != nil || model.groups[chat.id] != nil {
+            if model.snapshots[chat.id] != nil || model.groups[chat.id] != nil {
                 ConversationScroller(model: model, chat: chat, entries: entries, nodeIDs: nodes.map(\.id),
                     isCovered: conversationCovered,
                     requestedScrollID: $requestedScrollID) {
@@ -1080,7 +1075,7 @@ struct ConversationView: View {
         }
         .sheet(isPresented: $editingGroup) { GroupEditor(model: model, group: model.groups[chat.id]) }
         .safeAreaInset(edge: .bottom) {
-            if !readOnly && !model.waitingForInitialQuestion(chat) {
+            if !readOnly {
                 composer
             }
         }
@@ -1158,9 +1153,7 @@ struct ConversationView: View {
     private var composer: some View {
             let attachments = composerAttachments
             return VStack(alignment: .leading, spacing: 8) {
-                if !model.waitingForInitialQuestion(chat) {
-                    DictationControls(controller: model.dictation, model: model, chat: chat)
-                }
+                DictationControls(controller: model.dictation, model: model, chat: chat)
                 if let request = model.requests(for: chat).first(where: { !$0.isQuestion }) {
                     Button("Review request", systemImage: "hand.raised") {
                         requestedScrollID = "approval-" + request.id
@@ -4644,7 +4637,7 @@ struct ComposerSettings: View {
                     .accessibilityIdentifier("composer-approval-error")
             }
         }
-        .task(id: model.assignmentScope + ":" + botID) { options = nil; await load() }
+        .task(id: model.assignmentScope + ":" + botID + ":" + (bot?.modelSelectionRevision == nil ? "started" : "new")) { options = nil; await load() }
         .sheet(isPresented: $showingModel) {
             NavigationStack {
                 Form {
@@ -4656,7 +4649,7 @@ struct ComposerSettings: View {
                     } else {
                         Section("Model") {
                             modelChoice("Default model", id: "")
-                            ForEach(options?.models.filter { !$0.hidden && $0.family == (bot?.family ?? .codex) } ?? []) { option in modelChoice(option.displayName, id: option.id) }
+                            ForEach(options?.models.filter { !$0.hidden && (bot?.modelSelectionRevision != nil || $0.family == (bot?.family ?? .codex)) } ?? []) { option in modelChoice(option.displayName, id: option.id) }
                         }.disabled(unavailable || model.previewMode)
                     }
                     if queuedMessage == nil && model.botWorking(chat.id) {
@@ -4742,7 +4735,7 @@ struct ComposerSettings: View {
     private func load() async {
         if model.previewMode {
             if ProcessInfo.processInfo.arguments.contains("-settings-unavailable-preview") { loadFailed = true; return }
-            let fixture: [String: Any] = ["models": [["id":"preview-model", "displayName":"GPT-6 Astra", "hidden":false, "reasoningEfforts":[["id":"low","label":"Low"],["id":"medium","label":"Medium"],["id":"high","label":"High"]], "serviceTiers":[["id":"default","label":"Standard","description":"Standard speed, standard usage"],["id":"priority","label":"Fast","description":"2x speed, increased usage"]]]], "permissionModes": BotPermissionMode.allCases.map { ["id":$0.rawValue,"allowed":true] as [String:Any] }, "approvalModes": BotApprovalMode.allCases.map { ["id":$0.rawValue,"allowed":true] as [String:Any] }, "timezone":"America/New_York", "allowedApprovalPolicies":["on-request"]]
+            let fixture: [String: Any] = ["models": [["id":"claude:claude-haiku-4-5","displayName":"Claude Haiku 4.5","hidden":false,"reasoningEfforts":[]], ["id":"preview-model", "displayName":"GPT-6 Astra", "hidden":false, "reasoningEfforts":[["id":"low","label":"Low"],["id":"medium","label":"Medium"],["id":"high","label":"High"]], "serviceTiers":[["id":"default","label":"Standard","description":"Standard speed, standard usage"],["id":"priority","label":"Fast","description":"2x speed, increased usage"]]]], "permissionModes": BotPermissionMode.allCases.map { ["id":$0.rawValue,"allowed":true] as [String:Any] }, "approvalModes": BotApprovalMode.allCases.map { ["id":$0.rawValue,"allowed":true] as [String:Any] }, "timezone":"America/New_York", "allowedApprovalPolicies":["on-request"]]
             options = try? JSONDecoder().decode(BotOptions.self, from: JSONSerialization.data(withJSONObject: fixture))
             return
         }
@@ -4770,7 +4763,9 @@ struct ComposerSettings: View {
                 await load()
                 return
             }
-            let saved: ManagedBot = try await model.manage("/api/v1/bots/\(ConnectionModel.escape(botID))", method: "PATCH", values: values)
+            var payload: [String: Any] = values
+            if let revision = bot?.modelSelectionRevision { payload["modelSelectionRevision"] = revision }
+            let saved: ManagedBot = try await model.manage("/api/v1/bots/\(ConnectionModel.escape(botID))", method: "PATCH", body: JSONSerialization.data(withJSONObject: payload))
             guard scope == model.assignmentScope, !model.accessEnded else { return }
             model.applyConfirmedManagedBot(saved)
             await load()

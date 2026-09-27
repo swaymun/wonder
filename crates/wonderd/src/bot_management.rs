@@ -93,7 +93,7 @@ pub(super) async fn options(State(state): State<AppState>) -> Response {
     Json(serde_json::json!({"agentProviders":providers,"permissionsByFamily":{
         "codex":{"permissionModes":permission_modes::options(&catalog),"approvalModes":permission_modes::approval_options(&catalog, None)},
         "claude":{"permissionModes":[{"id":"read-only","allowed":true},{"id":"workspace","allowed":true},{"id":"full-access","allowed":true}],"approvalModes":[{"id":"ask-for-approval","allowed":true},{"id":"full-access","allowed":true}]}
-    },"groupCollaboration":true,"models":catalog.models.iter().filter(|m| !m.hidden).collect::<Vec<_>>(),"timezone":timezone,"allowedApprovalPolicies":if catalog.approval_policies_restricted {catalog.allowed_approval_policies.clone()} else {vec!["on-request".to_owned(),"never".to_owned()]},"permissionModes":permission_modes::options(&catalog),"approvalModes":permission_modes::approval_options(&catalog, None)})).into_response()
+    },"firstMessageModelSelection":true,"groupCollaboration":true,"models":catalog.models.iter().filter(|m| !m.hidden).collect::<Vec<_>>(),"timezone":timezone,"allowedApprovalPolicies":if catalog.approval_policies_restricted {catalog.allowed_approval_policies.clone()} else {vec!["on-request".to_owned(),"never".to_owned()]},"permissionModes":permission_modes::options(&catalog),"approvalModes":permission_modes::approval_options(&catalog, None)})).into_response()
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -113,7 +113,7 @@ pub(super) async fn create(
     Extension(authority): Extension<OwnerAuthority>,
     Json(request): Json<CreateBotRequest>,
 ) -> Response {
-    create_inner(state, authority, request, None, None, None).await
+    create_inner(state, authority, request, None, None, None, false).await
 }
 
 pub(super) async fn create_with_avatar(
@@ -134,6 +134,7 @@ pub(super) async fn create_with_avatar(
         avatar_shape,
         avatar_palette,
         payload,
+        false,
     )
     .await
 }
@@ -156,6 +157,7 @@ pub(super) async fn create_conversational(
         request.avatar_shape,
         request.avatar_palette,
         payload,
+        true,
     )
     .await
 }
@@ -167,6 +169,7 @@ async fn create_inner(
     requested_shape: Option<String>,
     requested_palette: Option<String>,
     payload: Option<Vec<u8>>,
+    conversational: bool,
 ) -> Response {
     if let Err(message) = validate_avatar(
         requested_shape.as_deref(),
@@ -226,7 +229,7 @@ async fn create_inner(
                         )
                         .await
                         .is_err())
-                    || state.store.finish_bot_creation(id).await.is_err()
+                    || state.store.finish_bot_creation(id, conversational).await.is_err()
                 {
                     return problem(
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -236,6 +239,10 @@ async fn create_inner(
                 return bot_get_endpoint(State(state), Path(id.to_owned())).await;
             }
         }
+    }
+    let mut request = request;
+    if conversational && request.approval_mode.is_none() {
+        request.approval_mode = Some(permission_modes::ApprovalMode::AskForApproval);
     }
     let response =
         super::create_bot(State(state.clone()), Extension(authority), Json(request)).await;
@@ -265,7 +272,7 @@ async fn create_inner(
         .save_bot_presentation(id, Some(&shape), Some(&palette), color.as_deref(), None)
         .await
         .is_err()
-        || state.store.finish_bot_creation(id).await.is_err()
+        || state.store.finish_bot_creation(id, conversational).await.is_err()
     {
         return problem(
             StatusCode::SERVICE_UNAVAILABLE,

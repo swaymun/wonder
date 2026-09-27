@@ -4,6 +4,7 @@ import WonderPairing
 private struct EmptyReply: Decodable, Sendable {}
 func managementError(_ error: Error) -> String {
     if let error = error as? NewBotDefaults.SelectionError { return error.localizedDescription }
+    if (error as NSError).domain == "Wonder" { return error.localizedDescription }
     if case PairingFailure.response(let status) = error {
         switch status {
         case 400, 422: return "These settings could not be saved. Check the fields and try again."
@@ -1528,8 +1529,11 @@ extension ConnectionModel {
     @MainActor func createConversationalBot() async throws -> String? {
         let key = "bot.conversational-new"
         var draft = managementDrafts?.load(key) ?? ManagementDraft()
+        let options: BotOptions = try await manage("/api/v1/bot-options")
+        guard options.firstMessageModelSelection == true else {
+            throw NSError(domain: "Wonder", code: 0, userInfo: [NSLocalizedDescriptionKey: "Update Wonder on your Mac before creating a new Bot."])
+        }
         if draft.values["_defaultsResolved"] == nil {
-            let options: BotOptions = try await manage("/api/v1/bot-options")
             try draft.prepareNewBot(defaults: NewBotDefaults.load(), options: options)
         }
         try managementDrafts?.save(draft, key: key)

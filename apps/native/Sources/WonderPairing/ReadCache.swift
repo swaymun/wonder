@@ -98,17 +98,6 @@ public struct AssistantMessage: Codable, Identifiable, Sendable {
     }
 }
 
-public struct BotInitialization: Codable, Equatable, Sendable {
-    public let questionId: String?
-    public init(questionId: String? = nil) { self.questionId = questionId }
-
-    /// The question must reach the device before typing/sending becomes available.
-    public func isWaiting(questions: [AsyncQuestion]) -> Bool {
-        guard let questionId else { return true }
-        return !questions.contains { $0.id == questionId }
-    }
-}
-
 public struct ConversationSnapshot: Codable, Sendable {
     public init(
         conversationId: String,
@@ -116,8 +105,7 @@ public struct ConversationSnapshot: Codable, Sendable {
         lastSequence: UInt64,
         messages: [ConversationMessage],
         assistantMessages: [AssistantMessage],
-        thread: ThreadProjection,
-        initialization: BotInitialization? = nil
+        thread: ThreadProjection
     ) {
         self.conversationId = conversationId
         self.hostEpoch = hostEpoch
@@ -125,10 +113,8 @@ public struct ConversationSnapshot: Codable, Sendable {
         self.messages = messages
         self.assistantMessages = assistantMessages
         self.thread = thread
-        self.initialization = initialization
     }
 
-    public var initialization: BotInitialization?
 
     /// Local placeholders retain queued/unsent messages, but cannot supersede
     /// the newest actual runtime turn after Guide, queue cancellation, or replay.
@@ -165,7 +151,7 @@ public struct ConversationSnapshot: Codable, Sendable {
         return Self(conversationId: conversationId, hostEpoch: hostEpoch, lastSequence: lastSequence,
                     messages: Self.unique(older.messages, messages, key: \.messageId),
                     assistantMessages: Self.unique(older.assistantMessages, assistantMessages, key: \.messageId),
-                    thread: thread.mergingOlder(older.thread), initialization: initialization)
+                    thread: thread.mergingOlder(older.thread))
     }
     private static func unique<T>(_ older: [T], _ newer: [T], key: KeyPath<T, String>) -> [T] {
         let ids = Set(newer.map { $0[keyPath: key] })

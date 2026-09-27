@@ -650,6 +650,7 @@ pub(crate) mod tests {
 
     fn bot_with_modes(permission_mode: Option<&str>, approval_mode: Option<&str>) -> StoredBot {
         StoredBot {
+            model_selection_revision: None,
             agent_family: wonder_store::AgentFamily::Codex,
             id: "bot".into(),
             name: "Bot".into(),

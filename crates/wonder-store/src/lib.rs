@@ -5,7 +5,6 @@ mod automations;
 pub mod avatar;
 mod onboarding;
 pub use asr::{AsrJob, NewAsrJob};
-pub use onboarding::BotInitialization;
 mod push;
 pub use push::{PushDelivery, PushPreview, PushRevocation};
 mod questions;
@@ -383,6 +382,7 @@ pub struct StoredSession {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredBot {
+    pub model_selection_revision: Option<i64>,
     pub agent_family: AgentFamily,
     pub id: String,
     pub name: String,
@@ -878,12 +878,13 @@ impl Store {
     }
 
     pub async fn list_bots(&self) -> Result<Vec<StoredBot>, sqlx::Error> {
-        let rows = sqlx::query("SELECT bots.id, bots.agent_family, bots.name, bots.role, bots.system_prompt, bots.workspace_path, bots.working_directory, bots.avatar_color, bots.avatar_shape, bots.avatar_palette, bots.avatar_legacy_color, bots.permission_profile, bots.permission_mode, bots.approval_mode, bots.model, bots.reasoning_effort, bots.service_tier, bots.is_archived, bot_workspaces.conversation_id FROM bots LEFT JOIN bot_workspaces ON bot_workspaces.bot_id = bots.id WHERE NOT EXISTS(SELECT 1 FROM bot_creation_requests r WHERE r.bot_id=bots.id AND r.completed=0) ORDER BY bots.is_archived ASC, bots.created_at ASC")
+        let rows = sqlx::query("SELECT (SELECT revision FROM bot_model_drafts WHERE bot_id=bots.id AND first_message_id IS NULL) AS model_selection_revision, bots.id, bots.agent_family, bots.name, bots.role, bots.system_prompt, bots.workspace_path, bots.working_directory, bots.avatar_color, bots.avatar_shape, bots.avatar_palette, bots.avatar_legacy_color, bots.permission_profile, bots.permission_mode, bots.approval_mode, bots.model, bots.reasoning_effort, bots.service_tier, bots.is_archived, bot_workspaces.conversation_id FROM bots LEFT JOIN bot_workspaces ON bot_workspaces.bot_id = bots.id WHERE NOT EXISTS(SELECT 1 FROM bot_creation_requests r WHERE r.bot_id=bots.id AND r.completed=0) ORDER BY bots.is_archived ASC, bots.created_at ASC")
             .fetch_all(&self.pool)
             .await?;
         Ok(rows
             .into_iter()
             .map(|row| StoredBot {
+                model_selection_revision: row.get("model_selection_revision"),
                 agent_family: if row.get::<String, _>("agent_family") == "claude" {
                     AgentFamily::Claude
                 } else {
@@ -912,7 +913,7 @@ impl Store {
     }
 
     pub async fn bot(&self, id: &str) -> Result<Option<StoredBot>, sqlx::Error> {
-        sqlx::query("SELECT bots.id, bots.agent_family, bots.name, bots.role, bots.system_prompt, bots.workspace_path, bots.working_directory, bots.avatar_color, bots.avatar_shape, bots.avatar_palette, bots.avatar_legacy_color, bots.permission_profile, bots.permission_mode, bots.approval_mode, bots.model, bots.reasoning_effort, bots.service_tier, bots.is_archived, bot_workspaces.conversation_id FROM bots LEFT JOIN bot_workspaces ON bot_workspaces.bot_id = bots.id WHERE bots.id = ?")
+        sqlx::query("SELECT (SELECT revision FROM bot_model_drafts WHERE bot_id=bots.id AND first_message_id IS NULL) AS model_selection_revision, bots.id, bots.agent_family, bots.name, bots.role, bots.system_prompt, bots.workspace_path, bots.working_directory, bots.avatar_color, bots.avatar_shape, bots.avatar_palette, bots.avatar_legacy_color, bots.permission_profile, bots.permission_mode, bots.approval_mode, bots.model, bots.reasoning_effort, bots.service_tier, bots.is_archived, bot_workspaces.conversation_id FROM bots LEFT JOIN bot_workspaces ON bot_workspaces.bot_id = bots.id WHERE bots.id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -2044,6 +2045,22 @@ impl Store {
         now: &str,
         durable_dispatch: bool,
     ) -> Result<MessageInsert, sqlx::Error> {
+        self.insert_dispatch_message_with_model_selection(device_id, client_message_id, body, body_sha256, conversation_id, attachment_ids, now, durable_dispatch, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_dispatch_message_with_model_selection(
+        &self,
+        device_id: &str,
+        client_message_id: &str,
+        body: &str,
+        body_sha256: &str,
+        conversation_id: &str,
+        attachment_ids: &[String],
+        now: &str,
+        durable_dispatch: bool,
+        model_selection_revision: Option<i64>,
+    ) -> Result<MessageInsert, sqlx::Error> {
         self.insert_work_message(
             device_id,
             client_message_id,
@@ -2054,6 +2071,7 @@ impl Store {
             now,
             durable_dispatch,
             None,
+            model_selection_revision,
         )
         .await
     }
@@ -2080,6 +2098,7 @@ impl Store {
             now,
             false,
             Some(turn),
+            None,
         )
         .await
     }
@@ -2096,8 +2115,11 @@ impl Store {
         now: &str,
         durable_dispatch: bool,
         guide_turn: Option<&str>,
+        model_selection_revision: Option<i64>,
     ) -> Result<MessageInsert, sqlx::Error> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let draft: Option<(String, i64, Option<String>)> = sqlx::query_as("SELECT d.bot_id,d.revision,d.first_message_id FROM bot_model_drafts d JOIN conversation_metadata c ON c.bot_id=d.bot_id WHERE c.id=? AND NOT EXISTS(SELECT 1 FROM channels WHERE conversation_id=c.id) AND NOT EXISTS(SELECT 1 FROM subagent_ownership WHERE conversation_id=c.id)")
+            .bind(conversation_id).fetch_optional(&mut *transaction).await?;
         if let Some(row) = sqlx::query(
             "SELECT id, device_id, client_message_id, body, body_sha256, conversation_id, state, created_at, codex_thread_id, codex_turn_id FROM messages WHERE device_id = ? AND client_message_id = ?",
         )
@@ -2107,6 +2129,8 @@ impl Store {
         .await?
         {
             let existing = stored_message(&row);
+            let accepted_revision = draft.as_ref().filter(|(_, _, first)| first.as_deref() == Some(&existing.id)).map(|(_, revision, _)| *revision);
+            if accepted_revision != model_selection_revision { return Ok(MessageInsert::Conflict); }
             let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dispatch_work WHERE message_id = ?")
                 .bind(&existing.id).fetch_one(&mut *transaction).await?;
             let saved_guide: Option<String> = sqlx::query_scalar("SELECT expected_turn_id FROM guide_work WHERE message_id=?").bind(&existing.id).fetch_optional(&mut *transaction).await?;
@@ -2138,6 +2162,10 @@ impl Store {
             return Ok(MessageInsert::Existing(existing));
         }
 
+        let expected_revision = draft.as_ref().filter(|(_, _, first)| first.is_none()).map(|(_, revision, _)| *revision);
+        if expected_revision != model_selection_revision || (expected_revision.is_some() && (!durable_dispatch || guide_turn.is_some())) {
+            return Err(sqlx::Error::Protocol("model_selection_changed".into()));
+        }
         let mut requested_attachments = attachment_ids.to_vec();
         requested_attachments.sort();
         requested_attachments.dedup();
@@ -2164,6 +2192,10 @@ impl Store {
         }
 
         let id = uuid::Uuid::new_v4().to_string();
+        if let Some((bot, _, None)) = &draft {
+            sqlx::query("UPDATE bot_model_drafts SET first_message_id=? WHERE bot_id=?")
+                .bind(&id).bind(bot).execute(&mut *transaction).await?;
+        }
         let queue_position = if durable_dispatch {
             Some(
                 sqlx::query_scalar::<_, i64>(
@@ -3673,6 +3705,7 @@ async fn cleanup_taught_task_sections(pool: &SqlitePool) -> Result<(), sqlx::Err
 
 fn stored_bot(row: &sqlx::sqlite::SqliteRow) -> StoredBot {
     StoredBot {
+        model_selection_revision: row.get("model_selection_revision"),
         agent_family: if row.get::<String, _>("agent_family") == "claude" {
             AgentFamily::Claude
         } else {

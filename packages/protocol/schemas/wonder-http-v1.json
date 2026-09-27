@@ -1218,6 +1218,7 @@
       "type": "object",
       "required": ["id", "name", "role", "systemPrompt", "workspacePath", "permissionProfile", "model", "reasoningEffort", "serviceTier", "isArchived"],
       "properties": {
+        "modelSelectionRevision": { "type": ["integer", "null"], "minimum": 0, "description": "Present only before the first accepted message. Send and model changes must echo this revision; retries retain it." },
         "agentFamily": { "$ref": "#/$defs/agentFamily" },
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1, "maxLength": 80 },
@@ -1271,6 +1272,7 @@
       "properties": {
         "agentProviders": { "type": "array", "items": { "type": "object", "required": ["id", "installed", "ready", "detail"], "properties": { "id": { "$ref": "#/$defs/agentFamily" }, "installed": { "type": "boolean" }, "ready": { "type": "boolean" }, "detail": { "type": "string" } }, "additionalProperties": false } },
         "permissionsByFamily": { "type": "object", "properties": { "codex": { "$ref": "#/$defs/providerPermissions" }, "claude": { "$ref": "#/$defs/providerPermissions" } }, "additionalProperties": false },
+        "firstMessageModelSelection": { "type": "boolean" },
         "groupCollaboration": { "type": "boolean" },
         "models": { "type": "array", "items": { "type": "object" } },
         "permissionProfiles": { "type": "array", "items": { "type": "object" } },
@@ -1336,6 +1338,7 @@
       "type": "object",
       "minProperties": 1,
       "properties": {
+        "modelSelectionRevision": { "type": ["integer", "null"], "minimum": 0, "description": "Present only before the first accepted message. Send and model changes must echo this revision; retries retain it." },
         "permissionMode": { "anyOf": [{ "$ref": "#/$defs/permissionMode" }, { "type": "null" }] },
         "approvalMode": { "anyOf": [{ "$ref": "#/$defs/approvalMode" }, { "type": "null" }] },
         "avatarColor": { "type": ["string", "null"] },
@@ -1849,6 +1852,7 @@
       "type": "object",
       "required": ["deviceId", "clientMessageId", "body"],
       "properties": {
+        "modelSelectionRevision": { "type": ["integer", "null"], "minimum": 0, "description": "Present only before the first accepted message. Send and model changes must echo this revision; retries retain it." },
         "deviceId": { "type": "string", "minLength": 1 },
         "clientMessageId": { "type": "string", "minLength": 1 },
         "body": { "type": "string", "minLength": 1, "maxLength": 65536 },

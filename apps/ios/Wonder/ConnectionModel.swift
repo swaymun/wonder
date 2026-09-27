@@ -533,18 +533,14 @@ struct ManagedBotListMutationState {
                     groups = [:]; snapshots = ["preview":snapshot]; chats = [chat]; composers["preview"] = ComposerIntent()
                 }
             }
-            if ProcessInfo.processInfo.arguments.contains("-onboarding-preview") {
-                let waiting = arguments.contains("-onboarding-loading-preview")
-                let fixture: [String: Any] = ["conversationId":"preview", "hostEpoch":"preview", "lastSequence":0, "messages":[], "assistantMessages":[], "thread":["hydrated":true], "initialization": waiting ? [:] : ["questionId":"onboarding-fixture"]]
+            if ProcessInfo.processInfo.arguments.contains("-new-bot-preview") {
+                let fixture: [String: Any] = ["conversationId":"preview", "hostEpoch":"preview", "lastSequence":0, "messages":[], "assistantMessages":[], "thread":["hydrated":true]]
                 let summary: [String: Any] = ["conversationId":"preview", "botId":"ada", "title":"Luna", "messageCount":0, "hasUnread":false, "isArchived":false, "isPinned":false]
                 if let data = try? JSONSerialization.data(withJSONObject: fixture), let snapshot = try? JSONDecoder().decode(ConversationSnapshot.self, from: data),
                    let data = try? JSONSerialization.data(withJSONObject: summary), let chat = try? JSONDecoder().decode(ChatSummary.self, from: data) {
                     groups = [:]; snapshots = ["preview":snapshot]; chats = [chat]; composers["preview"] = ComposerIntent()
-                    // Recorded Luna questionnaire; only the preview supplies fixture content.
-                    let question: [String: Any] = ["id":"onboarding-fixture", "conversationId":"preview", "turnId":"fixture-turn", "itemId":"wonder-purpose", "questions":[["title":"What should I help with?", "options":["Build and debug software", "Research and explain ideas", "Plan and organize projects"]]], "state":"pending", "expiresAtMs":UInt64(Date().timeIntervalSince1970 * 1000) + 300_000]
-                    if !waiting, let data = try? JSONSerialization.data(withJSONObject: question), let value = try? JSONDecoder().decode(AsyncQuestion.self, from: data) { asyncQuestions["preview"] = [value] }
-                    if waiting { asyncQuestions["preview"] = [] }
-                    let appearance = #"{"id":"ada","name":"Luna","role":"Test","systemPrompt":"","workspacePath":"/preview","permissionProfile":":workspace","isArchived":false,"avatarShape":"luna","avatarPalette":"ocean"}"#
+                    asyncQuestions["preview"] = []
+                    let appearance = #"{"modelSelectionRevision":0,"id":"ada","name":"Luna","role":"Test","systemPrompt":"","workspacePath":"/preview","permissionProfile":":workspace","isArchived":false,"avatarShape":"luna","avatarPalette":"ocean"}"#
                     if let bot = try? JSONDecoder().decode(ManagedBot.self, from: Data(appearance.utf8)) { managedBots = [bot] }
                 }
             }
@@ -1155,13 +1151,9 @@ struct ManagedBotListMutationState {
         }
     }
 
-    func waitingForInitialQuestion(_ chat: ChatSummary) -> Bool {
-        snapshots[chat.id]?.initialization?.isWaiting(questions: asyncQuestions[chat.id] ?? []) == true
-    }
-
     func canSend(_ chat: ChatSummary) -> Bool {
         let draft = composers[chat.id]?.draft ?? ""
-        return !waitingForInitialQuestion(chat) && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && (chat.botId != nil || groups[chat.id] != nil) && connection != nil && !accessEnded
+        return !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && (chat.botId != nil || groups[chat.id] != nil) && connection != nil && !accessEnded
             && !isSubagent(chat)
             // Both direct and Group sends have durable host-side acceptance.
             // Replay invalidation does not revoke permission to submit intent.
@@ -1207,7 +1199,7 @@ struct ManagedBotListMutationState {
               !approvalSettingsBlockSending(chat.id) else { return }
         do {
             var next = composers[chat.id] ?? ComposerIntent()
-            try next.begin(device: saved.credential.deviceId, groupRouting: routing)
+            try next.begin(device: saved.credential.deviceId, groupRouting: routing, modelSelectionRevision: groups[chat.id] == nil ? managedBots.first(where: { $0.id == chat.botId })?.modelSelectionRevision : nil)
             try saveComposer(next, chat: chat.id)
         } catch {
             guard assignmentScope == scope else { return }
@@ -1242,10 +1234,22 @@ struct ManagedBotListMutationState {
             try next.accept(receipt, conversation: chat.id)
             try intentStore.saveComposer(next, conversation: chat.id)
             composers[chat.id] = next
+            if pending.request.modelSelectionRevision != nil, let index = managedBots.firstIndex(where: { $0.id == chat.botId }) {
+                var started = managedBots[index]
+                started.modelSelectionRevision = nil
+                applyConfirmedManagedBot(started)
+            }
             composerErrors[chat.id] = nil
             if foreground { await refreshConversation(chat) }
         } catch {
             guard partition == key else { return }
+            if case PairingFailure.response(412) = error, pending.request.expectedTurnId == nil, var intent = composers[chat.id] {
+                intent.markRejected()
+                if intent.draft.isEmpty { try? intent.restoreRejected() }
+                do { try saveComposer(intent, chat: chat.id) } catch { composerErrors[chat.id] = "Your unsent message could not be restored. Free some storage and reopen the chat." }
+                controlErrors[chat.id] = "Model settings changed. Your message was not sent. Check the model and send again."
+                await loadChats(force: true)
+            }
             if case PairingFailure.response(412) = error, var intent = composers[chat.id], intent.pending?.request.expectedTurnId != nil {
                 intent.markRejected()
                 if intent.draft.isEmpty { try? intent.restoreRejected() }

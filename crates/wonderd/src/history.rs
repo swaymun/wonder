@@ -32,7 +32,6 @@ pub(super) struct ConversationAssistantMessage {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ConversationSnapshot {
-    pub(super) initialization: Option<wonder_store::BotInitialization>,
     pub(super) conversation_id: String,
     pub(super) host_epoch: String,
     pub(super) last_sequence: u64,
@@ -1243,14 +1242,6 @@ pub(super) async fn conversation_snapshot(
         Ok(messages) => messages,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let initialization = match state
-        .store
-        .bot_initialization(&conversation_id, now_ms() as i64)
-        .await
-    {
-        Ok(value) => value,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
     let followups = match state
         .store
         .bot_workspace_followup_messages(&conversation_id)
@@ -1300,7 +1291,6 @@ pub(super) async fn conversation_snapshot(
         .collect::<Vec<_>>();
     thread.next_cursor = next_cursor.map(|cursor| encode_history_cursor(&conversation_id, &cursor));
     Json(ConversationSnapshot {
-        initialization,
         conversation_id,
         host_epoch: state.host_epoch.clone(),
         last_sequence,

@@ -46,7 +46,7 @@ Use `--session UUID` to isolate one run. Reports separate network, decoding, pro
 
 ## Repeatable verification
 
-The Diagnostics section exposes 30 expansion cycles, a ten-minute live session, an interleaved recording-overhead comparison, Stop, and test-Bot cleanup. The runner navigates the actual paired conversation views and uses the same expansion actions. It sends no messages and uses the existing explicit Bot-creation endpoint, which does not start the normal New Bot model-backed onboarding turn. It creates and archives only its own read-only test Bot, retaining its idempotency key and identifiers until cleanup succeeds. Runner success verifies state changes and layout execution; it does not certify gestures.
+The Diagnostics section exposes 30 expansion cycles, a ten-minute live session, an interleaved recording-overhead comparison, Stop, and test-Bot cleanup. The runner navigates the actual paired conversation views and uses the same expansion actions. It sends no messages and uses the existing explicit Bot-creation endpoint, which creates its dedicated fixture with explicit settings. It creates and archives only its own read-only test Bot, retaining its idempotency key and identifiers until cleanup succeeds. Runner success verifies state changes and layout execution; it does not certify gestures.
 
 Launch arguments for development tooling:
 
@@ -73,19 +73,14 @@ The optional `WonderUITests/WonderUITests/testLiveImagePreview` case expects a d
 
 ## Bot startup and appearance regression
 
-`WonderUITests/WonderUITests/testNewBotWaitsForPurposeQuestionBeforeShowingComposer`
-uses `-read-preview -onboarding-preview`, adding `-onboarding-loading-preview`
-for the waiting state. These offline fixtures exercise the real conversation
-header, questionnaire, and composer; they never connect or start model work.
-The test checks the initial Luna name and saved Luna/Ocean identity, centered
-startup indicator, absence of the composer during initialization, and its
-presence alongside the optional first question afterward.
-Run it on iPhone and iPad. `BotStartupTests` in the native package covers the
-host-scoped read-cache round trip, compatibility with caches lacking Bot metadata,
-question arrival ordering, and stable varied defaults.
-
-Evidence for the September 14 change is under `.local/bot-startup-*` in the main
-checkout. Physical-device acceptance remains separate from these fixture checks.
+`WonderUITests/WonderUITests/testNewBotOpensComposerWithoutSetupQuestion`
+uses `-read-preview -new-bot-preview`. It checks the saved Luna/Ocean identity,
+immediately available composer, absence of a setup question, and both Codex and
+Claude in the existing model sheet. The offline fixture starts no model work.
+Run it on iPhone and iPad. `BotStartupTests` covers legacy read-cache decoding,
+durable first-send model revision and stable avatar defaults. Host tests own
+zero-work creation, revision conflicts, first-message acceptance and family lock.
+Physical and live paired-host acceptance remain separate from fixture checks.
 
 ## Avatar geometry and compact picker regression
 

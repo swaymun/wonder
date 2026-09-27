@@ -620,16 +620,9 @@ mod tests {
         .await
         .unwrap();
         old.start_event_epoch("epoch").await.unwrap();
-        old.insert_message(
-            "owner",
-            "pending",
-            "unsent",
-            "hash",
-            "chat",
-            "1700000000000",
-        )
-        .await
-        .unwrap();
+        // Write the historical schema directly; current send code requires new migrations.
+        sqlx::query("INSERT INTO messages(id,device_id,client_message_id,body,body_sha256,conversation_id,state,created_at) VALUES('pending','owner','pending','unsent','hash','chat','accepted_by_wonder','1700000000000')")
+            .execute(&old.pool).await.unwrap();
         let event=HostEventEnvelope {event_id:"tool".into(),host_epoch:"epoch".into(),sequence:1,occurred_at:"1700000000001".into(),conversation_id:Some("chat".into()),thread_id:Some("thread".into()),turn_id:Some("turn".into()),item_id:Some("command".into()),request_id:None,device_id:None,message_id:None,approval_id:None,event:WonderEvent::Activity {category:"thread_item_upsert".into(),state:"updated".into(),detail:Some(serde_json::json!({"itemId":"command","turnId":"turn","state":"completed","item":{"id":"command","type":"commandExecution","command":"echo saved","status":"completed"}}).to_string())}};
         sqlx::query("INSERT INTO events(event_id,host_epoch,sequence,occurred_at,payload_json) VALUES ('tool','epoch',1,'1700000000001',?)").bind(serde_json::to_string(&event).unwrap()).execute(&old.pool).await.unwrap();
         old.pool.close().await;

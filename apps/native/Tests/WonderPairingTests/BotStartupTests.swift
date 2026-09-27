@@ -21,18 +21,22 @@ final class BotStartupTests: XCTestCase {
         XCTAssertNil(migrated.managedBots)
     }
 
-    func testStartupWaitsUntilItsQuestionIsOnTheDeviceAndDoesNotRequireAnAnswer() throws {
-        let question = try JSONDecoder().decode(AsyncQuestion.self, from: Data(#"{"id":"purpose","conversationId":"bot","turnId":"init","itemId":"wonder-purpose","questions":[{"title":"What should I help with?","options":["Build","Research"]}],"state":"pending","expiresAtMs":9999999999999}"#.utf8))
-        XCTAssertTrue(BotInitialization().isWaiting(questions: []))
-        XCTAssertTrue(BotInitialization(questionId: "purpose").isWaiting(questions: []))
-        XCTAssertTrue(BotInitialization(questionId: "other").isWaiting(questions: [question]))
-        XCTAssertFalse(BotInitialization(questionId: "purpose").isWaiting(questions: [question]))
-
-        var snapshot = ConversationSnapshot(conversationId: "bot", hostEpoch: "epoch", lastSequence: 1, messages: [], assistantMessages: [], thread: ThreadProjection(nextCursor: nil, hydrated: false), initialization: BotInitialization())
-        let cached = try JSONDecoder().decode(ConversationSnapshot.self, from: JSONEncoder().encode(snapshot))
-        XCTAssertTrue(try XCTUnwrap(cached.initialization).isWaiting(questions: []))
-        snapshot.initialization = nil
-        XCTAssertNil(try snapshot.mergingOlder(cached).initialization, "Fresh readiness must win over a cached loading state")
+    func testFirstModelRevisionSurvivesOutboxAndReadCache() throws {
+        let bot = try JSONDecoder().decode(ManagedBot.self, from: Data(#"{"id":"bot","name":"Luna","role":"Test","systemPrompt":"","workspacePath":"/Bot","permissionProfile":":workspace","isArchived":false,"modelSelectionRevision":3}"#.utf8))
+        XCTAssertEqual(bot.modelSelectionRevision, 3)
+        var intent = ComposerIntent()
+        intent.draft = "First task"
+        try intent.begin(device: "phone", modelSelectionRevision: bot.modelSelectionRevision)
+        let restored = try JSONDecoder().decode(ComposerIntent.self, from: JSONEncoder().encode(intent))
+        XCTAssertEqual(restored.pending?.request.modelSelectionRevision, 3)
+        XCTAssertEqual(restored.pending?.request.clientMessageId, intent.pending?.request.clientMessageId)
+        XCTAssertEqual(restored.pending?.request.body, "First task")
+        var oldRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(restored.pending!.request)) as? [String: Any])
+        oldRequest.removeValue(forKey: "modelSelectionRevision")
+        XCTAssertNil(try JSONDecoder().decode(SendRequest.self, from: JSONSerialization.data(withJSONObject: oldRequest)).modelSelectionRevision)
+        var state = ProjectionState()
+        state.managedBots = [bot]
+        XCTAssertEqual(try JSONDecoder().decode(ProjectionState.self, from: JSONEncoder().encode(state)).managedBots?.first?.modelSelectionRevision, 3)
     }
 
     func testNewBotDefaultsVaryAndRemainStable() {

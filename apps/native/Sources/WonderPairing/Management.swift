@@ -106,6 +106,7 @@ public enum AgentFamily: String, Codable, CaseIterable, Sendable, Identifiable {
 }
 
 public struct ManagedBot: Codable, Identifiable, Sendable {
+    public var modelSelectionRevision: Int? = nil
     public var agentFamily: String? = nil
     public var family: AgentFamily { agentFamily.flatMap(AgentFamily.init(rawValue:)) ?? AgentFamily(model: model) }
     public let id: String
@@ -178,6 +179,7 @@ public enum BotApprovalMode: String, CaseIterable, Codable, Sendable, Identifiab
 }
 
 public struct BotOptions: Decodable, Sendable {
+    public var firstMessageModelSelection: Bool? = nil
     public struct Provider: Decodable, Identifiable, Sendable {
         public let id: String
         public let installed: Bool
