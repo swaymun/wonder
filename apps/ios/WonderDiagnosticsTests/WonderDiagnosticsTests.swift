@@ -8,6 +8,21 @@ import WonderPairing
 @testable import Wonder
 
 final class WonderDiagnosticsTests: XCTestCase {
+    // Asset packaging owns this contract: known connectors must render a real
+    // bundled image in both appearances, even with no network or runtime logo URL.
+    @MainActor func testConnectedAppAssetsAreAvailableOffline() throws {
+        for name in ["Gmail", "Google Calendar", "Google Drive", "Claude Docs"] {
+            let data = try JSONSerialization.data(withJSONObject: ["id": name, "name": name, "status": "available"])
+            let app = try JSONDecoder().decode(ConnectedApp.self, from: data)
+            let asset = try XCTUnwrap(app.bundledIcon)
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                let image = try XCTUnwrap(UIImage(named: asset, in: .main, compatibleWith: UITraitCollection(userInterfaceStyle: style)))
+                XCTAssertGreaterThan(image.size.width, 0)
+                XCTAssertGreaterThan(image.size.height, 0)
+            }
+        }
+    }
+
     func testPushPreviewAuthenticatesContentAndRouting() throws {
         let key = try XCTUnwrap(Data(pushBase64URL: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"))
         var payload: [String: String] = ["eventId": "00000000-0000-4000-8000-000000000003", "preview": "AAECAwQFBgcICQoLPCCicrGJpzm3Y8Xk0I1YGfG_9xQyzH8tTQKW8XQGbpAtMsyTy7gwolbzF4Tr7whcjyBA-jWkyKkAt9qGj3AaVn8eu2CVVyfnz0FMKbT7GBkXrL4", "registrationId": "00000000-0000-4000-8000-000000000001", "routeId": "00000000-0000-4000-8000-000000000002"]

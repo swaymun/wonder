@@ -25,6 +25,16 @@ export function selectedModel(value) {
   return model;
 }
 
+function modelDisplayName(model) {
+  // Keep selection aliases stable, but label the model they resolve to today.
+  // Haiku is intentionally pinned by selectedModel, regardless of its alias.
+  const resolved = model.id === "haiku" ? HAIKU_MODEL : model.resolvedModel ?? model.id;
+  const match = /^claude-([a-z]+)-(\d{1,2})(?:-(\d{1,2}))?(?:-\d{8})?(?:\[1m\])?$/.exec(resolved);
+  if (!match) return model.name;
+  const [, family, major, minor] = match;
+  return `${family[0].toUpperCase()}${family.slice(1)} ${major}${minor ? `.${minor}` : ""}`;
+}
+
 function sdkToolResult(result) {
   const content = (result?.contentItems ?? []).flatMap(block => {
     if (block.type === "inputText") return [{ type: "text", text: block.text }];
@@ -113,7 +123,7 @@ export class ClaudeBridge {
     if (method === "model/list") {
       const catalog = await this.catalog();
       return { data: catalog.models.filter(m => m.id !== "default").sort((a, b) => Number(b.id === "haiku") - Number(a.id === "haiku")).map(m => ({ id: `claude:${m.id}`, model: `claude:${m.id}`,
-        displayName: m.id === "haiku" ? "Haiku 4.5" : m.name, description: m.description, hidden: false,
+        displayName: modelDisplayName(m), description: m.description, hidden: false,
         agentFamily: "claude", isDefault: m.id === "haiku", supportedReasoningEfforts: (m.efforts ?? []).map(effort => ({ reasoningEffort: effort, description: `${effort[0].toUpperCase()}${effort.slice(1)}` })), defaultReasoningEffort: null })), nextCursor: null };
     }
     if (method === "account/rateLimits/read") {
@@ -127,7 +137,8 @@ export class ClaudeBridge {
       const servers = running?.query ? await running.query.mcpServerStatus() : (await this.catalog(params.forceRefetch || params.forceRefresh)).servers;
       const visible = servers.filter(s => s.source !== "sdk" && s.name !== "wonder");
       if (method === "mcpServerStatus/list") return { data: visible, nextCursor: null };
-      return { apps: visible.map(s => ({ id: `claude:${s.name}`, runtimeName: s.name, name: s.name,
+      return { apps: visible.map(s => ({ id: `claude:${s.name}`, runtimeName: s.name,
+        name: s.source === "claudeai" ? s.name.replace(/^claude\.ai\s+/, "") : s.name,
         installUrl: "https://claude.ai/settings/connectors", enabled: s.status !== "disabled", callable: s.status === "connected", isEnabled: s.status !== "disabled", isAccessible: s.status === "connected" })), nextCursor: null };
     }
     if (method === "thread/start") {

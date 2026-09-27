@@ -367,6 +367,14 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         guard let url = request.url else { finish(status: 400, body: Data("{}".utf8)); return }
         let method = request.httpMethod ?? "GET"
         let path = url.path
+        if path == "/api/v1/connected-apps" {
+            let family = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "agentFamily" }?.value ?? "codex"
+            let names = family == "claude" ? ["Claude Docs", "Gmail", "Google Calendar", "Google Drive", "Custom app"] : ["Gmail", "Google Drive"]
+            finish(status: 200, body: json([
+                "hostInstallationId": DiagnosticSubagentFixture.hostID, "agentFamily": family,
+                "apps": names.map { ["id": "\(family):\($0)", "name": $0, "status": $0 == "Custom app" ? "not_connected" : "available"] }
+            ])); return
+        }
         let body: Data?
         if let data = request.httpBody { body = data }
         else if let stream = request.httpBodyStream {
@@ -600,6 +608,14 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                 "items": [["id": "fixture-child-reply", "type": "agentMessage", "state": "completed", "createdAt": "2000", "text": "I am the verified Scout child."]]
             ]]]
         ]
+    }
+}
+
+struct DiagnosticConnectedAppsFixtureView: View {
+    @StateObject private var model = DiagnosticSubagentFixture.model()
+    var body: some View {
+        NavigationStack { ConnectedAppsView(model: model) }
+            .preferredColorScheme(ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps-dark") ? .dark : .light)
     }
 }
 

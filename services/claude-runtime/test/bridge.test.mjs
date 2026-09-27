@@ -44,6 +44,60 @@ async function fixture(t, { authenticated = true, messages = [] } = {}) {
   const finish = async () => { await new Promise(resolve => setImmediate(resolve)); await bridge.active.get(thread.id)?.finished; };
   return { root, sessions, bridge, thread, frames, inputs, capturedOptions, finish };
 }
+
+// Catalog labels must describe actual execution without changing saved model or
+// MCP identities. Older SDKs and unfamiliar future IDs keep their runtime label.
+test("model labels use resolved versions while preserving selections and pinned Haiku", async t => {
+  const f = await fixture(t);
+  const cases = [
+    ["opus", "claude-opus-5-5", "Opus", "Opus 5.5"],
+    ["sonnet", "claude-sonnet-5", "Sonnet", "Sonnet 5"],
+    ["haiku", "claude-haiku-9", "Haiku", "Haiku 4.5"],
+    ["claude-fable-5-1[1m]", "claude-fable-5-1", "Fable", "Fable 5.1"],
+    ["claude-opus-4-1-20250805", undefined, "Opus", "Opus 4.1"],
+    ["claude-sonnet-5-20260901", undefined, "Sonnet", "Sonnet 5"],
+    ["legacy-alias", undefined, "Legacy model", "Legacy model"],
+    ["future-alias", "claude-next-special", "Next special", "Next special"],
+  ];
+  f.bridge.inspect = async () => ({ models: [
+    { id: "default", name: "Default" },
+    ...cases.map(([id, resolvedModel, name]) => ({ id, resolvedModel, name, efforts: ["low", "high"] })),
+  ] });
+  const { data } = await f.bridge.request("model/list", {});
+  assert.equal(data.length, cases.length);
+  assert.equal(data[0].id, "claude:haiku");
+  for (const [id, , , expected] of cases) {
+    const model = data.find(m => m.id === `claude:${id}`);
+    assert.equal(model.model, `claude:${id}`);
+    assert.equal(model.displayName, expected);
+    assert.deepEqual(model.supportedReasoningEfforts.map(e => e.reasoningEffort), ["low", "high"]);
+  }
+  assert.equal(f.inputs.length, 0);
+});
+
+test("connector labels strip the Claude account prefix without changing MCP identity", async t => {
+  const f = await fixture(t);
+  const servers = [
+    { name: "claude.ai Gmail", source: "claudeai", status: "connected" },
+    { name: "claude.ai Google Calendar", source: "claudeai", status: "disabled" },
+    { name: "claude.ai in a custom name", source: "user", status: "connected" },
+    { name: "Custom claude.ai Gmail", source: "claudeai", status: "failed" },
+    { name: "wonder", source: "sdk", status: "connected" },
+  ];
+  f.bridge.inspect = async () => ({ servers });
+  for (const method of ["app/installed", "app/read"]) {
+    const { apps } = await f.bridge.request(method, {});
+    assert.deepEqual(apps.map(a => a.name), ["Gmail", "Google Calendar", "claude.ai in a custom name", "Custom claude.ai Gmail"]);
+    assert.equal(apps[0].id, "claude:claude.ai Gmail");
+    assert.equal(apps[0].runtimeName, "claude.ai Gmail");
+    assert.equal(apps[0].callable, true);
+    assert.equal(apps[1].enabled, false);
+    assert.equal(apps[3].callable, false);
+  }
+  assert.deepEqual((await f.bridge.request("mcpServerStatus/list", {})).data, servers.slice(0, 4));
+  assert.equal(f.inputs.length, 0);
+});
+
 test("duplicate delivery executes once and commits the terminal receipt before publishing", async t => {
   const f = await fixture(t, { messages: [
     { type: "assistant", message: { id: "reply", content: [{ type: "text", text: "Hello" }] } },

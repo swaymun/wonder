@@ -72,7 +72,7 @@ test("control discovery waits for pending connections before closing the SDK", a
   const runtime = { version: "0.3.283", sdk: { query: () => ({
     initializationResult: async () => ({}),
     accountInfo: async () => ({ apiProvider: "firstParty", subscriptionType: "Claude Pro" }),
-    supportedModels: async () => [{ value: "haiku" }],
+    supportedModels: async () => [{ value: "haiku", resolvedModel: "claude-haiku-4-5-20251001" }],
     mcpServerStatus: async () => {
       assert.equal(closed, false);
       if (++calls === 1) return [];
@@ -82,6 +82,7 @@ test("control discovery waits for pending connections before closing the SDK", a
   }) } };
   const result = await inspectSdk(runtime, { connectors: true });
   assert.equal(result.servers[0].status, "connected");
+  assert.equal(result.models[0].resolvedModel, "claude-haiku-4-5-20251001");
   assert.equal(calls, 3);
   assert.equal(closed, true);
 });

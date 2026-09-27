@@ -65,6 +65,13 @@ def read_inventory(root):
 
 def reviewed_binary(name):
     return (name == 'apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/AppIcon.png'
+            or name in {
+                'apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/claude-docs.png',
+                'apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/claude-docs-dark.png',
+                'apps/ios/Wonder/Assets.xcassets/ConnectorGmail.imageset/gmail.png',
+                'apps/ios/Wonder/Assets.xcassets/ConnectorGoogleCalendar.imageset/calendar.png',
+                'apps/ios/Wonder/Assets.xcassets/ConnectorGoogleDrive.imageset/drive.png',
+            }
             or name == 'apps/menubar/Resources/WonderMenuIcon.pdf'
             or name == 'research/assets/wonder-brand/wonder-sun-logo-source.png'
             or name == 'licenses/Rust-COPYRIGHT.html.gz'

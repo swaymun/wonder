@@ -90,7 +90,7 @@ export async function inspectSdk(runtime, { cwd, includeUsage = false, connector
       servers = await query.mcpServerStatus();
     }
     return { version: runtime.version, connected, subscription: connected ? account.subscriptionType : null,
-      models: models.map(m => ({ id: m.value, name: m.displayName, description: m.description,
+      models: models.map(m => ({ id: m.value, resolvedModel: m.resolvedModel, name: m.displayName, description: m.description,
         efforts: m.supportsEffort ? (m.supportedEffortLevels ?? []).filter(e => ["low", "medium", "high", "xhigh", "max"].includes(e)) : [] })),
       usageSupported: typeof usageMethod === "function", windows,
       servers: servers.map(s => ({ name: s.name, status: s.status, source: s.source })) };

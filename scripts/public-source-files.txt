@@ -45,6 +45,7 @@ apps/desktop/src/media.rs
 apps/desktop/src/menu_bar.rs
 apps/desktop/src/read_acknowledgements.rs
 apps/desktop/src/science_avatar.rs
+apps/ios/CONNECTOR_ICONS.md
 apps/ios/DIAGNOSTICS.md
 apps/ios/ExportOptions.plist
 apps/ios/PushShared/PushPreview.swift
@@ -55,6 +56,15 @@ apps/ios/Wonder.xcodeproj/xcshareddata/xcschemes/Diagnostics.xcscheme
 apps/ios/Wonder.xcodeproj/xcshareddata/xcschemes/Wonder.xcscheme
 apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/AppIcon.png
 apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/Contents.json
+apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/Contents.json
+apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/claude-docs-dark.png
+apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/claude-docs.png
+apps/ios/Wonder/Assets.xcassets/ConnectorGmail.imageset/Contents.json
+apps/ios/Wonder/Assets.xcassets/ConnectorGmail.imageset/gmail.png
+apps/ios/Wonder/Assets.xcassets/ConnectorGoogleCalendar.imageset/Contents.json
+apps/ios/Wonder/Assets.xcassets/ConnectorGoogleCalendar.imageset/calendar.png
+apps/ios/Wonder/Assets.xcassets/ConnectorGoogleDrive.imageset/Contents.json
+apps/ios/Wonder/Assets.xcassets/ConnectorGoogleDrive.imageset/drive.png
 apps/ios/Wonder/Assets.xcassets/Contents.json
 apps/ios/Wonder/AssignmentViews.swift
 apps/ios/Wonder/BuildInfo.plist

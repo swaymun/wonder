@@ -10,6 +10,7 @@ import VisionKit
         WindowGroup {
             #if WONDER_DIAGNOSTICS
             if ProcessInfo.processInfo.arguments.contains("-diagnostics-avatar-fixture") { ScienceAvatarDiagnosticFixtureView() }
+            else if ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps") { DiagnosticConnectedAppsFixtureView() }
             else if DiagnosticSubagentFixture.chatLayoutFixture { DiagnosticChatLayoutFixtureView() }
             else if ProcessInfo.processInfo.arguments.contains("-diagnostics-subagent-fixture") { DiagnosticSubagentFixtureView() }
             else if ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-session-fixture") { ComputerSessionDiagnosticFixtureView() }
@@ -791,6 +792,15 @@ struct ConnectedApp: Decodable, Identifiable, Sendable {
     let status: String
     let logoUrl: String?
     let logoUrlDark: String?
+    var bundledIcon: String? {
+        switch name {
+        case "Gmail": "ConnectorGmail"
+        case "Google Calendar": "ConnectorGoogleCalendar"
+        case "Google Drive": "ConnectorGoogleDrive"
+        case "Claude Docs": "ConnectorClaudeDocs"
+        default: nil
+        }
+    }
     var label: String {
         switch status {
         case "available": "Available"
@@ -828,6 +838,7 @@ struct ConnectedAppsView: View {
     @State private var loadingScope: String?
     @State private var loadID = UUID()
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         List {
@@ -841,12 +852,23 @@ struct ConnectedAppsView: View {
             Section {
                 ForEach(apps) { app in
                     HStack(alignment: .top, spacing: 12) {
-                        AsyncImage(url: URL(string: (colorScheme == .dark ? app.logoUrlDark ?? app.logoUrl : app.logoUrl) ?? "")) { image in
-                            image.resizable().scaledToFit()
-                        } placeholder: { Image(systemName: "app").foregroundStyle(.secondary) }
+                        Group {
+                            if let icon = app.bundledIcon {
+                                Image(icon).resizable().scaledToFit()
+                            } else {
+                                AsyncImage(url: URL(string: (colorScheme == .dark ? app.logoUrlDark ?? app.logoUrl : app.logoUrl) ?? "")) { image in
+                                    image.resizable().scaledToFit()
+                                } placeholder: { Image(systemName: "app").foregroundStyle(.secondary) }
+                            }
+                        }
                         .frame(width: 32, height: 32).accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 4) {
-                            HStack { Text(app.name).font(.headline); Spacer(); Text(failure == nil ? app.label : "Not verified").font(.subheadline).foregroundStyle(.secondary) }
+                            if dynamicTypeSize.isAccessibilitySize {
+                                Text(app.name).font(.headline)
+                                Text(failure == nil ? app.label : "Not verified").font(.subheadline).foregroundStyle(.secondary)
+                            } else {
+                                HStack { Text(app.name).font(.headline); Spacer(); Text(failure == nil ? app.label : "Not verified").font(.subheadline).foregroundStyle(.secondary) }
+                            }
                             if let description = app.description { Text(description).font(.subheadline).foregroundStyle(.secondary).lineLimit(2) }
                         }
                     }.padding(.vertical, 4)
@@ -862,6 +884,7 @@ struct ConnectedAppsView: View {
             }
         }
         .navigationTitle("Connected apps")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { Task { await load(refresh: true) } }.disabled(loading) }
         .task(id: scope) { apps = []; cursor = nil; visited = []; reportedFamily = nil; await load() }
         .onChange(of: model.accessEnded) { _, ended in if ended { apps = []; cursor = nil; warning = nil; failure = "Access has ended. Reconnect in Settings." } }

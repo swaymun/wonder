@@ -3194,6 +3194,44 @@ import UIKit
         }
     }
 
+    func testConnectedAppsKeepNamesAndIconsAcrossFamilies() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        for (style, size) in [("Light", "UICTContentSizeCategoryL"), ("Dark", "UICTContentSizeCategoryAccessibilityXXL")] {
+            app.launchArguments = ["-diagnostics-connected-apps", "-AppleInterfaceStyle", style,
+                                   "-UIPreferredContentSizeCategoryName", size]
+            if style == "Dark" { app.launchArguments.append("-diagnostics-connected-apps-dark") }
+            app.launch()
+            let claude = app.segmentedControls.buttons["Claude"]
+            let codex = app.segmentedControls.buttons["Codex"]
+            XCTAssertTrue(claude.waitForExistence(timeout: 10))
+            XCTAssertTrue(app.staticTexts["Gmail"].waitForExistence(timeout: 10))
+            for _ in 0..<5 {
+                claude.tap()
+                XCTAssertTrue(app.staticTexts["Claude Docs"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.staticTexts["Gmail"].exists)
+                XCTAssertFalse(app.staticTexts["claude.ai Gmail"].exists)
+                codex.tap()
+                XCTAssertTrue(app.staticTexts["Gmail"].waitForExistence(timeout: 5))
+                XCTAssertFalse(app.staticTexts["Claude Docs"].exists)
+            }
+            claude.tap()
+            XCTAssertTrue(app.staticTexts["Claude Docs"].waitForExistence(timeout: 5))
+            if style == "Dark" {
+                let gmail = app.cells.containing(.staticText, identifier: "Gmail").firstMatch
+                XCTAssertGreaterThanOrEqual(gmail.staticTexts["Available"].frame.minY, gmail.staticTexts["Gmail"].frame.maxY,
+                                           "Accessibility text should stack the status below the name")
+            }
+            retainMenuScreenshot(app, name: "Connected apps \(style) \(size)")
+            let custom = app.staticTexts["Custom app"]
+            for _ in 0..<4 where !custom.isHittable { app.swipeUp() }
+            XCTAssertTrue(custom.isHittable)
+            XCTAssertTrue(app.staticTexts["Not connected"].exists)
+            retainMenuScreenshot(app, name: "Connected apps fallback \(style)")
+            app.terminate()
+        }
+    }
+
     // Provider cache mix-ups must be visible here: each fixture has distinct
     // percentages, and both providers stay in the existing connection settings.
     func testDiagnosticsCodexUsageIsInlineInConnectionSettings() throws {
