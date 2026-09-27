@@ -165,7 +165,7 @@ export class ClaudeBridge {
       const content = await sdkInput(params.input, policy);
       const { turn, duplicate } = await this.sessions.accept(session, params);
       if (!duplicate) {
-        const run = { turn, abort: new AbortController(), query: null, children: new Map(), stopped: false, authorizedTools: new Map(), toolResults: new Map() };
+        const run = { turn, abort: new AbortController(), query: null, children: new Map(), childTasks: new Map(), stopped: false, authorizedTools: new Map(), toolResults: new Map() };
         this.active.set(session.id, run);
         // Return the durable receipt before the SDK can produce an event.
         run.finished = new Promise((resolve, reject) => setImmediate(() => {
@@ -226,9 +226,12 @@ export class ClaudeBridge {
     const output = [];
     const projection = new TurnProjection({ threadId: session.id, turnId: run.turn.id, internal: policy.internal,
       emit: event => output.push(event), onSession: id => { session.sdkSessionId = id; session.sdkStarted = true; },
-      onChild: message => run.childMessages.push(message) });
+      onChild: message => { if (!options.wonderPlanning) run.childMessages.push(message); } });
     run.childMessages = [];
     const flush = async (terminal = false) => {
+      // Child cleanup may append its last parent activity after the parent's
+      // result. Publish all item updates before the terminal turn snapshot.
+      if (terminal) output.sort((a, b) => Number(a.method === "turn/completed") - Number(b.method === "turn/completed"));
       while (output.length && (terminal || output[0].method !== "turn/completed")) await this.send(output.shift());
     };
     try {
@@ -286,7 +289,7 @@ export class ClaudeBridge {
       for await (const message of query) {
         projection.accept(message);
         if (message.type === "system" && message.subtype === "init") await this.sessions.save(session);
-        while (run.childMessages.length) await this.child(session, run, run.childMessages.shift());
+        while (run.childMessages.length) await this.child(session, run, run.childMessages.shift(), projection);
         await flush();
         // Complete internal setup deterministically; the SDK must not manufacture
         // a follow-up user request merely to elicit a visible greeting.
@@ -300,7 +303,9 @@ export class ClaudeBridge {
       projection.finish(run.initialized ? "completed" : run.stopped ? "interrupted" : "failed", run.initialized ? undefined : error.message);
     } finally {
       submit.resolve(); done.resolve(); query?.close(); run.abort.abort();
-      for (const child of run.children.values()) {
+      // Finish descendants first so each owner's durable snapshot includes its
+      // children's final state, including when the whole query is interrupted.
+      for (const child of [...run.children.values()].reverse()) {
         if (!child.projection.terminal) child.projection.finish(run.stopped ? "interrupted" : "failed", "The parent response ended before this task confirmed completion.");
         await child.flush();
       }
@@ -311,31 +316,72 @@ export class ClaudeBridge {
       await lease?.release();
     }
   }
-  async child(parent, run, message) {
-    const toolId = message.parent_tool_use_id ?? message.tool_use_id;
+  async child(parent, run, message, parentProjection) {
+    const taskId = message.task_id ?? message.result?.agentId;
+    const toolId = message.parent_tool_use_id ?? message.tool_use_id ?? run.childTasks.get(taskId)
+      ?? (message.subtype === "task_started" && taskId ? `task:${taskId}` : null);
     if (!toolId || message.ambient || message.skip_transcript) return;
-    if (message.subtype === "task_started" && message.task_type !== "local_agent") return;
     let child = run.children.get(toolId);
     if (!child) {
-      const depth = message.spawn_depth ?? 1;
-      if (depth < 1 || depth > 16) return;
+      // Progress and completion events also belong to shell/MCP/housekeeping
+      // tasks. Only a visible local-agent start establishes child ownership.
+      if (message.type !== "system" || message.subtype !== "task_started" || message.task_type !== "local_agent") {
+        if (message.type === "agent_result" && message.is_error) {
+          const call = parentProjection.agentTools.get(toolId);
+          const item = parentProjection.startItem({ type: "subAgentActivity", id: toolId,
+            agentNickname: call?.input?.description ?? "Agent", kind: "failed", status: "inProgress", success: false,
+            error: { message: typeof message.content === "string" ? message.content.slice(0, 2000) : "The agent could not start." } });
+          parentProjection.finishItem(item);
+        }
+        return;
+      }
+      const owner = [...run.children.values()].find(c => c.projection.agentTools.has(toolId));
+      if (owner) { parent = owner.session; parentProjection = owner.projection; }
+      const expectedDepth = (parent.parent?.depth ?? 0) + 1;
+      const depth = message.spawn_depth ?? expectedDepth;
+      if (!Number.isInteger(depth) || depth !== expectedDepth || depth > 16) return;
       const session = await this.sessions.create(parent.options, { threadId: parent.id, depth,
         name: String(message.description ?? "Helper").slice(0, 100), role: message.subagent_type ?? "Helper" });
       const turn = { id: randomUUID(), status: "inProgress", items: [] }; session.turns.push(turn);
       const output = [];
-      const projection = new TurnProjection({ threadId: session.id, turnId: turn.id, emit: event => output.push(event) });
+      const projection = new TurnProjection({ threadId: session.id, turnId: turn.id, emit: event => output.push(event),
+        onChild: message => run.childMessages.push(message) });
+      const activity = { type: "subAgentActivity", id: toolId, agentThreadId: session.id,
+        agentNickname: session.parent.name, agentRole: session.parent.role, kind: "started", status: "running" };
       child = { session, turn, projection, flush: async () => {
         const terminal = output.findLast(e => e.method === "turn/completed")?.params.turn;
-        if (terminal) { Object.assign(turn, terminal); await this.sessions.save(session); }
+        // History reads while the task is running must see the same items as
+        // the stream. Persist once at completion, not once per text delta.
+        if (turn.items.length !== projection.items.size) turn.items = [...projection.items.values()];
+        if (terminal) {
+          Object.assign(turn, terminal); await this.sessions.save(session);
+          activity.status = terminal.status; activity.kind = terminal.status;
+          if (terminal.error) activity.error = terminal.error;
+          parentProjection.notify("item/completed", { item: { ...activity } });
+        }
         while (output.length) await this.send(output.shift());
+        await owner?.flush();
       } };
       run.children.set(toolId, child);
+      if (taskId) run.childTasks.set(taskId, toolId);
       await this.sessions.save(session);
       await this.send({ method: "thread/started", params: { thread: this.sessions.describe(session), agentFamily: "claude" } });
+      parentProjection.startItem(activity);
       projection.start();
     }
     if (message.parent_tool_use_id) child.projection.accept({ ...message, parent_tool_use_id: null });
-    if (message.subtype === "task_notification") child.projection.finish(message.status === "completed" ? "completed" : message.status === "stopped" ? "interrupted" : "failed");
+    const completedResult = message.type === "agent_result" && !message.is_error && message.result?.status === "completed";
+    if (message.subtype === "task_notification" || completedResult || (message.type === "agent_result" && message.is_error)) {
+      if (!child.projection.terminal) {
+        const status = completedResult ? "completed" : message.status === "completed" ? "completed" : message.status === "stopped" ? "interrupted" : "failed";
+        const summary = completedResult ? message.result.content?.filter(b => b.type === "text").map(b => b.text).join("\n\n") : message.summary;
+        // Foreground agents sometimes emit only the task report, without child
+        // assistant frames. Never parse the model-directed tool-result trailer.
+        if (typeof summary === "string" && summary.trim() && ![...child.projection.items.values()].some(i => i.type === "agentMessage" && i.text.trim() === summary.trim()))
+          child.projection.completeText(`task:${toolId}:result`, summary);
+        child.projection.finish(status, status === "failed" ? summary ?? "The agent task failed." : undefined);
+      }
+    }
     await child.flush();
   }
   async close() {

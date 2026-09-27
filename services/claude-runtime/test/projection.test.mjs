@@ -37,10 +37,13 @@ test("tool failure remains failed within a successful conversation turn", () => 
   assert.equal(events.at(-1).params.turn.status, "completed");
 });
 test("internal initialization and synthetic user output never create chat text", () => {
-  const { projection: p, events } = fixture({ internal: true });
+  const { projection: p, events, children } = fixture({ internal: true });
   p.accept({ type: "user", message: { content: [{ type: "text", text: "Produce visible output" }] } });
   p.accept({ type: "assistant", message: { id: "greeting", content: [{ type: "text", text: "Hello" }] } });
+  p.accept({ type: "system", subtype: "task_started", task_type: "local_agent", tool_use_id: "internal" });
+  p.accept({ type: "assistant", parent_tool_use_id: "internal", message: { content: [{ type: "text", text: "Private planning" }] } });
   p.finish("completed");
+  assert.equal(children.length, 0);
   assert.deepEqual(events.map(e => e.method), ["turn/started", "turn/completed"]);
 });
 test("child messages never leak into the parent reply", () => {

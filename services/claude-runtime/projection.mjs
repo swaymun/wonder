@@ -66,7 +66,7 @@ export function usageWindow(type, source, timestamp = Date.now()) {
 export class TurnProjection {
   constructor({ threadId, turnId, emit, onSession = () => {}, onUsage = () => {}, onChild = () => {}, internal = false }) {
     Object.assign(this, { threadId, turnId, emit, onSession, onUsage, onChild, internal });
-    this.items = new Map(); this.textByMessage = new Map(); this.blocks = new Map();
+    this.items = new Map(); this.textByMessage = new Map(); this.blocks = new Map(); this.agentTools = new Map();
     this.messageId = null; this.terminal = false; this.completedTexts = new Set();
   }
   notify(method, params = {}, threadId = this.threadId, turnId = this.turnId) {
@@ -92,8 +92,11 @@ export class TurnProjection {
       if (window) this.onUsage(window);
       return;
     }
-    if (message.parent_tool_use_id) { this.onChild(message); return; }
-    if (message.type === "system" && ["task_started", "task_progress", "task_notification"].includes(message.subtype)) { this.onChild(message); return; }
+    if (message.parent_tool_use_id) { if (!this.internal) this.onChild(message); return; }
+    if (message.type === "system" && ["task_started", "task_progress", "task_notification"].includes(message.subtype)) {
+      if (!this.internal) this.onChild(message);
+      return;
+    }
     if (message.type === "stream_event") this.stream(message.event);
     if (message.type === "assistant") {
       const id = message.message?.id;
@@ -104,7 +107,7 @@ export class TurnProjection {
     }
     if (message.type === "user" && Array.isArray(message.message?.content)) {
       // Runtime synthetic user instructions are not messages written by the owner.
-      for (const block of message.message.content) if (block.type === "tool_result") this.toolResult(block);
+      for (const block of message.message.content) if (block.type === "tool_result") this.toolResult(block, message.tool_use_result);
     }
     if (message.type === "result") {
       this.structuredOutput = message.structured_output;
@@ -141,12 +144,22 @@ export class TurnProjection {
     item.text = text; this.finishItem(item);
   }
   startTool(block) {
+    if (["Agent", "Task"].includes(block.name)) {
+      // The verified task lifecycle supplies the existing agent activity row.
+      // Launch acknowledgements contain internal IDs/paths, not a user reply.
+      this.agentTools.set(block.id, block);
+      return;
+    }
     const wonder = block.name?.startsWith("mcp__wonder__") ? block.name.slice("mcp__wonder__".length) : null;
     this.startItem(wonder
       ? { type: "dynamicToolCall", id: block.id, tool: wonder, arguments: block.input, status: "inProgress" }
       : { type: "mcpToolCall", id: block.id, server: "Claude", tool: block.name, arguments: block.input, status: "inProgress" });
   }
-  toolResult(block) {
+  toolResult(block, result) {
+    if (this.agentTools.has(block.tool_use_id)) {
+      if (!this.internal) this.onChild({ type: "agent_result", tool_use_id: block.tool_use_id, result, is_error: block.is_error, content: block.content });
+      return;
+    }
     const item = this.items.get(block.tool_use_id);
     if (!item || ["completed", "failed"].includes(item.status)) return;
     item.success = block.is_error !== true;

@@ -20,7 +20,7 @@ async function fixture(t, { authenticated = true, messages = [] } = {}) {
         for await (const input of prompt) {
           inputs.push(input);
           yield { type: "system", subtype: "init", session_id: options.sessionId ?? options.resume };
-          for (const message of messages) yield message;
+          for await (const message of messages) yield message;
           return;
         }
       })();
@@ -62,6 +62,127 @@ test("duplicate delivery executes once and commits the terminal receipt before p
   const restarted = await new Sessions(join(f.root, "sessions")).initialize();
   assert.equal(restarted.get(f.thread.id).turns[0].status, "completed");
   assert.equal(f.capturedOptions[0].model, "claude-haiku-4-5-20251001");
+});
+
+// Contract: only actual agent tasks reach the existing agent roster/activity
+// renderer. SDK background launches are acknowledgements, not completed work;
+// task IDs still identify completion when the optional tool ID is absent.
+test("agent lifecycle links the parent activity to a readable child without launch metadata", async t => {
+  let f;
+  const messages = (async function* () {
+    yield { type: "assistant", message: { content: [{ type: "tool_use", id: "agent-call", name: "Agent",
+      input: { description: "Review guide", subagent_type: "general-purpose", run_in_background: true, prompt: "Private task instructions" } }] } };
+    yield { type: "system", subtype: "task_started", task_type: "local_agent", task_id: "agent-task",
+      tool_use_id: "agent-call", description: "Review guide", spawn_depth: 1, is_backgrounded: true };
+    yield { type: "user", tool_use_result: { status: "async_launched", isAsync: true, agentId: "agent-task" },
+      message: { content: [{ type: "tool_result", tool_use_id: "agent-call", content: "Internal launch metadata and output file path" }] } };
+    yield { type: "assistant", parent_tool_use_id: "agent-call", message: { id: "child-reply", content: [{ type: "text", text: "Checked the guide." }] } };
+    const child = [...f.sessions.values.values()].find(s => s.parent);
+    const live = await f.bridge.request("thread/read", { threadId: child.id, includeTurns: true });
+    assert.equal(live.thread.status.type, "active");
+    assert.equal(live.thread.turns[0].items[0].text, "Checked the guide.");
+    yield { type: "system", subtype: "task_notification", task_id: "agent-task", status: "completed", summary: "Checked the guide." };
+    yield { type: "system", subtype: "task_notification", task_id: "agent-task", tool_use_id: "agent-call", status: "completed", summary: "Checked the guide." };
+    yield { type: "result", subtype: "success" };
+  })();
+  f = await fixture(t, { messages });
+  await f.bridge.request("turn/start", { threadId: f.thread.id, input: [{ type: "text", text: "Review" }] });
+  await f.finish();
+  const children = [...f.sessions.values.values()].filter(s => s.parent);
+  assert.equal(children.length, 1);
+  const child = children[0];
+  assert.equal(child.turns[0].status, "completed");
+  assert.equal(child.turns[0].items.filter(i => i.type === "agentMessage").length, 1);
+  const activity = f.sessions.get(f.thread.id).turns[0].items.filter(i => i.type !== "userMessage");
+  assert.equal(activity.length, 1);
+  assert.equal(activity[0].type, "subAgentActivity");
+  assert.equal(activity[0].agentThreadId, child.id);
+  assert.equal(activity[0].agentNickname, "Review guide");
+  assert.equal(activity[0].status, "completed");
+  assert.doesNotMatch(JSON.stringify(f.frames), /Internal launch metadata|Private task instructions/);
+  assert.equal(f.frames.filter(e => e.method === "turn/completed" && e.params.threadId === child.id).length, 1);
+  const restarted = await new Sessions(join(f.root, "sessions")).initialize();
+  assert.equal(restarted.get(child.id).turns[0].items[0].text, "Checked the guide.");
+  await assert.rejects(f.bridge.request("turn/start", { threadId: child.id, input: [{ type: "text", text: "Change" }] }), /parent conversation/);
+});
+
+test("shell, ambient and unknown task events never create phantom agents", async t => {
+  const messages = [];
+  for (const [id, fields] of [["shell", { task_type: "local_bash" }], ["quiet", { task_type: "local_agent", ambient: true }],
+    ["hidden", { task_type: "local_agent", skip_transcript: true }], ["future", { task_type: "future_task" }]]) {
+    messages.push({ type: "system", subtype: "task_started", task_id: id, tool_use_id: id, ...fields },
+      { type: "system", subtype: "task_progress", task_id: id, tool_use_id: id, description: "Working" },
+      { type: "assistant", parent_tool_use_id: id, message: { id, content: [{ type: "text", text: "Hidden helper text" }] } },
+      { type: "system", subtype: "task_notification", task_id: id, tool_use_id: id, status: "completed", summary: "Done" });
+  }
+  messages.push({ type: "system", subtype: "task_notification", task_id: "orphan", tool_use_id: "orphan", status: "completed", summary: "Done" },
+    { type: "result", subtype: "success" });
+  const f = await fixture(t, { messages });
+  await f.bridge.request("turn/start", { threadId: f.thread.id, input: [{ type: "text", text: "Check" }] });
+  await f.finish();
+  assert.equal(f.sessions.values.size, 1);
+  assert.doesNotMatch(JSON.stringify(f.frames), /Hidden helper text/);
+});
+
+test("foreground helpers retain their final report and failed or stopped tasks stay honest", async t => {
+  for (const [status, expected] of [["completed", "completed"], ["failed", "failed"], ["stopped", "interrupted"]]) {
+    const f = await fixture(t, { messages: [
+      { type: "system", subtype: "task_started", task_type: "local_agent", task_id: "task", tool_use_id: "call", description: "Check", is_backgrounded: false },
+      // Foreground SDK captures may omit the child assistant message entirely.
+      { type: "system", subtype: "task_notification", task_id: "task", status, summary: "Final task report" },
+      { type: "result", subtype: "success" },
+    ] });
+    await f.bridge.request("turn/start", { threadId: f.thread.id, input: [{ type: "text", text: "Check" }] });
+    await f.finish();
+    const child = [...f.sessions.values.values()].find(s => s.parent);
+    assert.equal(child.turns[0].status, expected);
+    assert.equal(child.turns[0].items[0].text, "Final task report");
+    const activity = f.sessions.get(f.thread.id).turns[0].items.find(i => i.type === "subAgentActivity");
+    assert.equal(activity.status, expected);
+  }
+});
+
+test("structured agent results complete a task without exposing the model-directed trailer", async t => {
+  const f = await fixture(t, { messages: [
+    { type: "assistant", message: { content: [{ type: "tool_use", id: "call", name: "Agent", input: { description: "Review" } }] } },
+    { type: "system", subtype: "task_started", task_type: "local_agent", task_id: "task", tool_use_id: "call", description: "Review" },
+    { type: "user", tool_use_result: { status: "completed", agentId: "task", content: [{ type: "text", text: "Clean report" }] },
+      message: { content: [{ type: "tool_result", tool_use_id: "call", content: "Clean report\nInternal agentId and usage trailer" }] } },
+    { type: "result", subtype: "success" },
+  ] });
+  await f.bridge.request("turn/start", { threadId: f.thread.id, input: [{ type: "text", text: "Check" }] });
+  await f.finish();
+  const child = [...f.sessions.values.values()].find(s => s.parent);
+  assert.equal(child.turns[0].status, "completed");
+  assert.equal(child.turns[0].items[0].text, "Clean report");
+  assert.doesNotMatch(JSON.stringify(f.frames), /usage trailer/);
+});
+
+test("nested agents belong to their actual parent and unfinished work is never shown as completed", async t => {
+  for (const finished of [true, false]) {
+    const f = await fixture(t, { messages: [
+      { type: "system", subtype: "task_started", task_type: "local_agent", task_id: "outer", tool_use_id: "outer-call", description: "Research", spawn_depth: 1 },
+      { type: "assistant", parent_tool_use_id: "outer-call", message: { content: [{ type: "tool_use", id: "inner-call", name: "Agent", input: { description: "Check source" } }] } },
+      { type: "system", subtype: "task_started", task_type: "local_agent", task_id: "inner", tool_use_id: "inner-call", description: "Check source", spawn_depth: 2 },
+      ...(finished ? [{ type: "system", subtype: "task_notification", task_id: "inner", status: "completed", summary: "Source checked" }] : []),
+      { type: "result", subtype: "success" },
+    ] });
+    await f.bridge.request("turn/start", { threadId: f.thread.id, input: [{ type: "text", text: "Check" }] });
+    await f.finish();
+    const children = [...f.sessions.values.values()].filter(s => s.parent);
+    const outer = children.find(s => s.parent.depth === 1), inner = children.find(s => s.parent.depth === 2);
+    assert.equal(inner.parent.threadId, outer.id);
+    assert.equal(outer.parent.threadId, f.thread.id);
+    assert.equal(inner.turns[0].status, finished ? "completed" : "failed");
+    assert.equal(outer.turns[0].status, "failed");
+    assert.equal(outer.turns[0].items[0].agentThreadId, inner.id);
+    assert.equal(outer.turns[0].items[0].status, finished ? "completed" : "failed");
+    const restarted = await new Sessions(join(f.root, "sessions")).initialize();
+    assert.equal(restarted.get(outer.id).turns[0].items[0].status, finished ? "completed" : "failed");
+    assert.equal(f.frames.at(-1).method, "turn/completed");
+    assert.equal(f.frames.at(-1).params.threadId, f.thread.id);
+    assert.equal(f.frames.at(-1).params.turn.items.find(i => i.type === "subAgentActivity").status, "failed");
+  }
 });
 test("failed runtime results remain failed while the next message resumes the same SDK session", async t => {
   const messages = [{ type: "result", subtype: "error_max_turns", is_error: true, errors: ["Reached maximum number of turns (64)"] }];
