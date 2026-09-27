@@ -392,7 +392,7 @@ mod tests {
         let (_, options) = call(&state, "GET", &options_path, json!({})).await;
         assert!(options["models"].as_array().unwrap().iter().any(|m| m["id"] == "fake"));
         assert!(options["models"].as_array().unwrap().iter().any(|m| m["id"] == "claude:claude-haiku-4-5"));
-        let (status, selected) = call(&state, "PATCH", &path, json!({"model":"claude:claude-haiku-4-5","modelSelectionRevision":0})).await;
+        let (status, selected) = call(&state, "PATCH", &path, json!({"model":"claude:claude-haiku-4-5","reasoningEffort":"","serviceTier":"","modelSelectionRevision":0})).await;
         assert!(status.is_success(), "{selected}");
         assert_eq!(selected["agentFamily"], "claude");
         assert_eq!(selected["approvalMode"], "ask-for-approval");

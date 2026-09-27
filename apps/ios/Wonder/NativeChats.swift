@@ -4705,7 +4705,7 @@ struct ComposerSettings: View {
         }.disabled(saving || approvalChange?.saving == true).accessibilityLabel("Model").accessibilityValue(modelTitle).accessibilityIdentifier("composer-model")
     }
     private func modelChoice(_ title: String, id: String) -> some View {
-        Button { Task { await save(["model": id, "reasoningEffort": "", "serviceTier": "default"]) } } label: {
+        Button { Task { await save(["model": id, "reasoningEffort": "", "serviceTier": ""]) } } label: {
             HStack { Text(title); Spacer(); if (bot?.model ?? "") == id { Image(systemName: "checkmark") } }
         }
     }
