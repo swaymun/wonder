@@ -312,6 +312,7 @@ crates/wonder-store/migrations/0072_push_previews_presence.sql
 crates/wonder-store/migrations/0073_goal_time_limits.sql
 crates/wonder-store/migrations/0074_agent_families.sql
 crates/wonder-store/migrations/0075_first_message_model.sql
+crates/wonder-store/migrations/0076_draft_bot_group_isolation.sql
 crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs

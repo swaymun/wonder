@@ -416,12 +416,16 @@ mod tests {
         store.upsert_bot("draft", "Luna", "purpose", "instructions", "/tmp", ":workspace", Some("gpt-test"), None, "1").await.unwrap();
         store.ensure_bot_workspace("draft", "Luna", "1").await.unwrap();
         store.finish_bot_creation("draft", true).await.unwrap();
+        store.create_channel("group", "group-chat", "Group", None, "draft", &[("draft", "coordinator")], "1").await.unwrap();
+        store.bind_runtime("group-chat", AgentFamily::Codex, "group-thread", None, "1").await.unwrap();
+        store.insert_dispatch_message("wonder-desktop", "group-first", "Group task", "group-body", "group-chat", &[], "1", false).await.unwrap();
         let mut bot = store.bot("draft").await.unwrap().unwrap();
         assert_eq!(bot.model_selection_revision, Some(0));
         bot.agent_family = AgentFamily::Claude;
         bot.model = Some("claude:claude-haiku-4-5".into());
         store.update_managed_bot(&bot, [true; 3]).await.unwrap();
         assert!(store.update_managed_bot(&bot, [true; 3]).await.is_err(), "A stale settings save must fail");
+        assert_eq!(store.runtime_binding("group-chat").await.unwrap().unwrap().family, AgentFamily::Codex, "The Group keeps its independently selected family");
         let stale = store.bot("draft").await.unwrap().unwrap();
         assert_eq!(stale.model_selection_revision, Some(1));
         for revision in [None, Some(0)] {
