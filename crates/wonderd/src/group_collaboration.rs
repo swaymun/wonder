@@ -107,6 +107,14 @@ pub(super) struct Create {
 fn error(e: impl ToString) -> Response {
     (StatusCode::BAD_REQUEST, e.to_string()).into_response()
 }
+/// Team suggestions show the reason on the phone; clients read `error`.
+fn proposal_error(e: impl ToString) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": e.to_string()})),
+    )
+        .into_response()
+}
 async fn config(state: &AppState, id: &str) -> Result<Option<Config>, String> {
     state
         .store
@@ -274,16 +282,46 @@ async fn structured(
                     .join("\n");
                 return decode_plan(&text);
             }
-            Some("failed" | "interrupted") => {
-                return Err("Planning did not finish. Try again.".into())
-            }
+            Some("failed" | "interrupted") => return Err(planning_failure(family, t)),
             _ => {}
         }
     }
     let _ = rpc
         .request("turn/interrupt", json!({"threadId":thread,"turnId":turn}))
         .await;
-    Err("Planning timed out. Try again.".into())
+    Err(planning_timeout(family, parent.is_none()))
+}
+/// Claude reports actionable subscription, network and output-format failures
+/// in the failed turn; Codex keeps its established generic message.
+fn planning_failure(family: AgentFamily, turn: &Value) -> String {
+    const GENERIC: &str = "Planning did not finish. Try again.";
+    if family != AgentFamily::Claude || turn["status"] == "interrupted" {
+        return GENERIC.into();
+    }
+    let Some(detail) = turn["error"]["message"]
+        .as_str()
+        .map(|m| {
+            m.trim_start_matches("Claude Code returned an error result:")
+                .trim()
+        })
+        .and_then(|m| m.lines().next())
+        .filter(|m| !m.is_empty())
+    else {
+        return GENERIC.into();
+    };
+    let detail: String = detail.chars().take(300).collect();
+    format!("Claude couldn’t finish planning: {detail}")
+}
+fn planning_timeout(family: AgentFamily, creation: bool) -> String {
+    if family != AgentFamily::Claude {
+        return "Planning timed out. Try again.".into();
+    }
+    let setting = if creation {
+        "Group creation"
+    } else {
+        "Group participation"
+    };
+    format!("Claude took longer than 5 minutes to plan. Try again, or choose a lower reasoning effort or a faster model in Settings → Model settings → {setting}.")
 }
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
@@ -293,11 +331,11 @@ fn strings() -> Value {
 }
 pub(super) async fn propose(State(state): State<AppState>, Json(input): Json<Propose>) -> Response {
     if input.description.trim().is_empty() || input.description.len() > 8000 {
-        return error("Describe your group in 1–8000 bytes.");
+        return proposal_error("Describe your group in 1–8000 bytes.");
     }
     let bots = match state.store.list_bots().await {
         Ok(b) => b,
-        Err(e) => return error(e),
+        Err(e) => return proposal_error(e),
     };
     let roster: Vec<_> = bots
         .iter()
@@ -308,7 +346,13 @@ pub(super) async fn propose(State(state): State<AppState>, Json(input): Json<Pro
         json!({"name":{"type":"string"},"purpose":{"type":"string"},"memberBotIds":strings(),"newBots":{"type":"array","items":object(json!({"name":{"type":"string"},"purpose":{"type":"string"},"instructions":{"type":"string"}}),&["name","purpose","instructions"])}}),
         &["name", "purpose", "memberBotIds", "newBots"],
     );
-    let prompt=format!("Propose a small useful team for this group. Reuse relevant existing Bots; propose new ones only for missing roles. Name <=80 bytes, purpose <=500 characters. New Bot purposes <=160 bytes and standing instructions <=8000 bytes. No duplicate roles or invented existing IDs. This is only a proposal for user review.\nDescription: {}\nExisting Bots: {}",input.description,json!(roster));
+    // Keep generated standing instructions compact and easy to review.
+    let brevity = if AgentFamily::for_model(Some(&input.settings.model)) == AgentFamily::Claude {
+        " Keep each new Bot's standing instructions to at most five short sentences (under 800 characters); the user can expand them later."
+    } else {
+        ""
+    };
+    let prompt=format!("Propose a small useful team for this group. Reuse relevant existing Bots; propose new ones only for missing roles. Name <=80 bytes, purpose <=500 characters. New Bot purposes <=160 bytes and standing instructions <=8000 bytes.{brevity} No duplicate roles or invented existing IDs. This is only a proposal for user review.\nDescription: {}\nExisting Bots: {}",input.description,json!(roster));
     match structured(&state, &input.settings, prompt, schema, None).await {
         Ok(v) => match serde_json::from_value::<Proposal>(v) {
             Ok(p)
@@ -319,9 +363,9 @@ pub(super) async fn propose(State(state): State<AppState>, Json(input): Json<Pro
             {
                 Json(p).into_response()
             }
-            _ => error("The proposed team is invalid. Try again."),
+            _ => proposal_error("The proposed team is invalid. Try again."),
         },
-        Err(e) => error(e),
+        Err(e) => proposal_error(e),
     }
 }
 pub(super) async fn create(
@@ -1650,6 +1694,51 @@ mod tests {
         );
         assert!(decode_plan("Here is your team").is_err());
     }
+    // A planning thread has no persisted history. Its completed result must
+    // still reach the proposal response when subagent discovery cannot read it.
+    #[tokio::test]
+    async fn proposal_completes_when_ephemeral_history_is_unavailable() {
+        use crate::permission_modes::tests::{call, fixture};
+        let (dir, state) = fixture().await;
+        let path = dir.path().join("runtime.py");
+        let source = std::fs::read_to_string(&path).unwrap().replacen(
+            "    result = {}\n",
+            r#"    if method == 'thread/read' and r.get('params', {}).get('threadId') == 'thread':
+        print(json.dumps({'id':r['id'],'error':{'code':-32000,'message':'Ephemeral thread has no persisted history'}}),flush=True)
+        continue
+    if method == 'turn/start' and 'outputSchema' in r.get('params', {}):
+        proposal = {'name':'Test team','purpose':'Test','memberBotIds':['bot'],'newBots':[]}
+        print(json.dumps({'id':r['id'],'result':{'turn':{'id':'plan-turn'}}}),flush=True)
+        print(json.dumps({'method':'turn/completed','params':{'threadId':'thread','turn':{'id':'plan-turn','status':'completed','items':[{'type':'agentMessage','id':'answer','text':json.dumps(proposal)}]}}}),flush=True)
+        continue
+    result = {}
+"#,
+            1,
+        );
+        std::fs::write(&path, source).unwrap();
+        state
+            .app_server
+            .lock()
+            .await
+            .restart(state.launch_config.lock().await.clone())
+            .await
+            .unwrap();
+        let _service = crate::ingestion::spawn(state.clone()).await;
+        let response = tokio::time::timeout(Duration::from_secs(5), call(
+            &state, "POST", "/api/v1/group-chats/propose",
+            json!({"description":"Suggest a test team", "settings":{"model":"fake","reasoningEffort":"","serviceTier":null}}),
+        )).await.expect("A completed planning result must not wait for runtime history");
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        assert_eq!(response.1["name"], "Test team");
+        assert!(state
+            .store
+            .pending_app_server_notifications_for_thread_and_turn("thread", "plan-turn")
+            .await
+            .unwrap()
+            .is_empty());
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
     #[test]
     fn mentions_bypass_routing_only_for_unquoted_unambiguous_members() {
         let members = vec![member("a", "Design Scout"), member("b", "Reviewer")];

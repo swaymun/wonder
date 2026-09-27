@@ -259,7 +259,9 @@ export class ClaudeBridge {
         hooks: { PreToolUse: [{ hooks: [(input) => policy.beforeTool(input)] }],
           PostToolUse: [{ hooks: [async () => run.initialized ? { continue: false, stopReason: "The optional question was posted. Initialization is complete." } : {}] }] },
         permissionMode: "default", sandbox: policy.sandbox(), includePartialMessages: true,
-        persistSession: true, verbatimPrompts: true, maxTurns: 64,
+        // Ordinary tasks run until completion, cancellation, or the subscription limit.
+        // A fixed tool-turn cap otherwise abandons valid long-running work.
+        persistSession: true, verbatimPrompts: true,
         settings: { ...base.settings, availableModels: [model], enforceAvailableModels: true },
         ...(model === HAIKU_MODEL ? { thinking: { type: "disabled" } } : options.effort ? { effort: options.effort } : {}),
         ...(options.outputSchema ? { outputFormat: { type: "json_schema", schema: options.outputSchema } } : {}),

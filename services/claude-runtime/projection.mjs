@@ -109,7 +109,7 @@ export class TurnProjection {
     if (message.type === "result") {
       this.structuredOutput = message.structured_output;
       const success = message.subtype === "success" && !message.is_error;
-      this.finish(success ? "completed" : "failed", success ? undefined : (message.errors?.[0] ?? "Claude could not complete this response."));
+      this.finish(success ? "completed" : "failed", success ? undefined : (message.errors?.[0] ?? message.result ?? "Claude could not complete this response."));
     }
   }
   stream(event) {

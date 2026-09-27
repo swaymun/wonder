@@ -514,7 +514,14 @@ pub(crate) async fn observe(
         }
         return Ok(None);
     }
-    let thread = read_thread(&route, thread_id).await?;
+    // Unknown threads include ephemeral planners with no readable history.
+    // Keep their envelopes pending for normal receipt/planning correlation;
+    // failed discovery must not block the shared notification queue. Verified
+    // children still take the strict ownership path above.
+    let thread = match read_thread(&route, thread_id).await {
+        Ok(thread) => thread,
+        Err(_) => return Ok(None),
+    };
     // A thread/read response is not by itself evidence of a subagent. Do not
     // reject replayed ordinary threads merely because this observer saw them;
     // canonical parent/source verification is required before child routing.

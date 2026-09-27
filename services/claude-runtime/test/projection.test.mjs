@@ -73,3 +73,18 @@ test("usage distinguishes SDK fractions from endpoint percentages and unknown", 
   assert.equal(usageWindow("seven_day", {}), null);
   assert.equal(usageWindow("future_window", { utilization: 0 }), null);
 });
+
+// SDK connection/quota failures can use the success variant with is_error and
+// a result string. Preserve the actual error instead of a generic failure.
+test("error results preserve their reason and never become successful replies", () => {
+  for (const message of [
+    { type: "result", subtype: "success", is_error: true, result: "API Error: Cannot reach server" },
+    { type: "result", subtype: "error_max_turns", errors: ["Reached maximum number of turns (64)"] },
+  ]) {
+    const { projection, events } = fixture();
+    projection.accept(message);
+    assert.equal(events.at(-1).params.turn.status, "failed");
+    assert.equal(events.at(-1).params.turn.error.message, message.result ?? message.errors[0]);
+    assert.equal(events.at(-1).params.turn.items.length, 0);
+  }
+});
