@@ -63,13 +63,21 @@ test("duplicate delivery executes once and commits the terminal receipt before p
   assert.equal(restarted.get(f.thread.id).turns[0].status, "completed");
   assert.equal(f.capturedOptions[0].model, "claude-haiku-4-5-20251001");
 });
-test("failed runtime results stay failed after the sidecar restarts", async t => {
-  const f = await fixture(t, { messages: [{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["Failed"] }] });
-  await f.bridge.request("turn/start", { threadId: f.thread.id, input: [{ type: "text", text: "Hi" }] });
+test("failed runtime results remain failed while the next message resumes the same SDK session", async t => {
+  const messages = [{ type: "result", subtype: "error_max_turns", is_error: true, errors: ["Reached maximum number of turns (64)"] }];
+  const f = await fixture(t, { messages });
+  await f.bridge.request("turn/start", { threadId: f.thread.id, clientUserMessageId: "first", input: [{ type: "text", text: "Hi" }] });
   await f.finish();
   const restarted = await new Sessions(join(f.root, "sessions")).initialize();
   assert.equal(restarted.get(f.thread.id).turns[0].status, "failed");
   assert.equal(f.frames.at(-1).params.turn.status, "failed");
+  f.bridge.sessions = restarted;
+  messages.splice(0, 1, { type: "result", subtype: "success" });
+  await f.bridge.request("turn/start", { threadId: f.thread.id, clientUserMessageId: "continue", input: [{ type: "text", text: "Continue" }] });
+  await f.finish();
+  assert.equal(f.capturedOptions[1].resume, f.capturedOptions[0].sessionId);
+  assert.equal(f.inputs.length, 2);
+  assert.deepEqual(restarted.get(f.thread.id).turns.map(turn => turn.status), ["failed", "completed"]);
 });
 test("missing subscription fails before the generator can submit a prompt", async t => {
   const f = await fixture(t, { authenticated: false });
