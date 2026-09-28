@@ -4,10 +4,94 @@ import UIKit
 import SwiftUI
 import ImageIO
 import UniformTypeIdentifiers
+import Vision
 import WonderPairing
 @testable import Wonder
 
 final class WonderDiagnosticsTests: XCTestCase {
+    // Observe rendered opening frames inside the app process: an external
+    // XCTest query waits for idleness and misses the brief wrong-position flash.
+    // The existing fixture owns both saved-anchor and unsaved-bottom content.
+    @MainActor func testChatOpeningFramesStartAtTheIntendedReadingPosition() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.keyWindow
+        for savedReply in [6, 12] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let chat = DiagnosticSubagentFixture.parentChat()
+            MessageRecoveryURLProtocol.reset()
+            let model = recoveryModel(root: root)
+            model.chats = [chat]
+            model.macConnected = false
+            model.snapshots[chat.id] = try JSONDecoder().decode(ConversationSnapshot.self,
+                from: JSONSerialization.data(withJSONObject: DiagnosticSubagentFixture.chatLayoutSnapshot()))
+            if savedReply == 6 {
+                let anchor = try XCTUnwrap(ChatFeedEntry.grouping(model.feedRows(for: chat)).first {
+                    $0.rows.contains { $0.text.hasPrefix("Reply 6.") }
+                }?.id)
+                model.savePosition(anchor, chat: chat.id)
+            }
+            let window = UIWindow(windowScene: scene)
+            window.rootViewController = UIHostingController(rootView:
+                NavigationStack { ConversationView(model: model, chat: chat) }
+                    .environment(\.dynamicTypeSize, .large))
+            window.makeKeyAndVisible()
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+                previousWindow?.makeKey()
+                try? FileManager.default.removeItem(at: root)
+            }
+            let format = UIGraphicsImageRendererFormat(); format.scale = 1
+            let renderer = UIGraphicsImageRenderer(bounds: window.bounds, format: format)
+            var frames: [UIImage] = []
+            let deadline = Date().addingTimeInterval(1.5)
+            repeat {
+                frames.append(renderer.image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: false) })
+                try await Task.sleep(for: .milliseconds(16))
+            } while Date() < deadline
+            struct Line: Sendable { let text: String; let bounds: CGRect }
+            let images = try frames.map { try XCTUnwrap($0.pngData()) }
+            let recognized = try await Task.detached {
+                // Recognize identical pixels once; still check every captured
+                // frame, including the very first one and any changed position.
+                var cache: [Data: [Line]] = [:]
+                return try images.map { data in
+                    if let lines = cache[data] { return lines }
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.usesLanguageCorrection = false
+                    try VNImageRequestHandler(data: data).perform([request])
+                    let lines = (request.results ?? []).map { Line(text: $0.topCandidates(1).first?.string ?? "", bounds: $0.boundingBox) }
+                    cache[data] = lines
+                    return lines
+                }
+            }.value
+            var firstY: CGFloat?
+            var visibleFrames = 0
+            for (index, lines) in recognized.enumerated() {
+                let transcript = lines.filter { $0.text.hasPrefix("Reply ") || $0.text.hasPrefix("Question ") }
+                guard !transcript.isEmpty else { continue }
+                let expected = transcript.first { $0.text.hasPrefix("Reply \(savedReply).") }
+                let shifted = expected.map { line in firstY.map { abs(line.bounds.minY - $0) * window.bounds.height > 2 } ?? false } ?? false
+                if expected == nil || shifted {
+                    let attachment = XCTAttachment(image: frames[index])
+                    attachment.name = "Opening frame \(index), intended reply \(savedReply)"
+                    attachment.lifetime = .keepAlways; add(attachment)
+                }
+                XCTAssertNotNil(expected, "Every readable opening frame must contain the intended reply; frame \(index)")
+                if let expected {
+                    let y = expected.bounds.minY
+                    if let firstY { XCTAssertEqual(y * window.bounds.height, firstY * window.bounds.height, accuracy: 2, "The first visible reply must not jump after opening") }
+                    else { firstY = y }
+                    visibleFrames += 1
+                }
+            }
+            XCTAssertGreaterThan(visibleFrames, 2, "The chat must finish opening, not stay hidden")
+            let evidence = XCTAttachment(string: "Intended reply: \(savedReply); captured frames: \(frames.count); readable correct frames: \(visibleFrames)")
+            evidence.lifetime = .keepAlways; add(evidence)
+        }
+    }
+
     // Asset packaging owns this contract: known connectors must render a real
     // bundled image in both appearances, even with no network or runtime logo URL.
     @MainActor func testConnectedAppAssetsAreAvailableOffline() throws {

@@ -54,9 +54,13 @@ done
 "$CONTENTS_PATH/Resources/node/bin/node" --input-type=module -e '
   const {pathToFileURL}=await import("node:url");
   const {resolve}=await import("node:path");
+  const {realpath}=await import("node:fs/promises");
   const {loadSdk}=await import(pathToFileURL(resolve(process.argv[1])).href);
   const sdk=await loadSdk();
-  if(!sdk.executable.startsWith(resolve(process.argv[2])+"/")) throw new Error("Claude executable escaped the bundle");
+  // Node resolves /var mount aliases to /private/var. Compare canonical paths
+  // while still rejecting an executable symlink that actually leaves the app.
+  const root=await realpath(process.argv[2]);
+  if(!(await realpath(sdk.executable)).startsWith(root+"/")) throw new Error("Claude executable escaped the bundle");
   console.log("Claude SDK "+sdk.version+" packaged");
 ' "$CONTENTS_PATH/Resources/claude-runtime/sdk-runtime.mjs" "$CONTENTS_PATH/Resources/claude-runtime"
 

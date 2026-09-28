@@ -322,19 +322,53 @@ private struct LatestReadVisibilityKey: PreferenceKey {
 private struct ConversationReadViewportKey: EnvironmentKey {
     static let defaultValue: CGRect = .zero
 }
+private struct ConversationInitialTargetKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+private struct ConversationPositionReadyKey: EnvironmentKey {
+    static let defaultValue = true
+}
 extension EnvironmentValues {
     fileprivate var conversationReadViewport: CGRect {
         get { self[ConversationReadViewportKey.self] }
         set { self[ConversationReadViewportKey.self] = newValue }
     }
+    fileprivate var conversationInitialTarget: String? {
+        get { self[ConversationInitialTargetKey.self] }
+        set { self[ConversationInitialTargetKey.self] = newValue }
+    }
+    fileprivate var conversationPositionReady: Bool {
+        get { self[ConversationPositionReadyKey.self] }
+        set { self[ConversationPositionReadyKey.self] = newValue }
+    }
 }
-private struct LatestReadMarker: View {
-    let receipt: VisibleReadReceipt
+private struct InitialConversationTargetFrame: Equatable {
+    let id: String
+    let frame: CGRect
+}
+private struct InitialConversationTargetFrameKey: PreferenceKey {
+    static var defaultValue: InitialConversationTargetFrame? { nil }
+    static func reduce(value: inout InitialConversationTargetFrame?, nextValue: () -> InitialConversationTargetFrame?) {
+        if let next = nextValue() { value = next }
+    }
+}
+private struct VisibleConversationNodesKey: PreferenceKey {
+    static var defaultValue: Set<String> { [] }
+    static func reduce(value: inout Set<String>, nextValue: () -> Set<String>) { value.formUnion(nextValue()) }
+}
+private struct ConversationRowMarker: View {
+    let id: String
+    let receipt: VisibleReadReceipt?
     @Environment(\.conversationReadViewport) private var viewport
+    @Environment(\.conversationInitialTarget) private var initialTarget
     var body: some View {
         GeometryReader { geometry in
             Color.clear.preference(key: LatestReadVisibilityKey.self,
                 value: ReadVisibility.latestEndIsVisible(frame: geometry.frame(in: .global), viewport: viewport) ? receipt : nil)
+                .preference(key: VisibleConversationNodesKey.self,
+                    value: geometry.frame(in: .global).intersects(viewport) ? [id] : [])
+                .preference(key: InitialConversationTargetFrameKey.self,
+                    value: initialTarget == id ? InitialConversationTargetFrame(id: id, frame: geometry.frame(in: .global)) : nil)
         }
     }
 }
@@ -371,7 +405,7 @@ private struct PhotoAttachmentPicker: ViewModifier {
     }
 }
 
-/// The lazy stack mounts this row when the reader approaches the beginning.
+/// The list mounts this row when the reader approaches the beginning.
 /// Each cursor loads once; failures expose recovery without a permanent paging button.
 private struct OlderMessagesLoader: View {
     @ObservedObject var model: ConnectionModel
@@ -379,6 +413,7 @@ private struct OlderMessagesLoader: View {
     let cursor: String
     @State private var failure: String?
     @State private var retry = 0
+    @Environment(\.conversationPositionReady) private var positionReady
     var body: some View {
         Group {
             if let failure {
@@ -391,26 +426,14 @@ private struct OlderMessagesLoader: View {
             }
         }
         .frame(maxWidth: .infinity).frame(minHeight: 28)
-        .task(id: cursor + "-" + String(retry)) {
+        .task(id: positionReady ? cursor + "-" + String(retry) : nil) {
+            guard positionReady else { return }
             failure = nil
             while model.loadingConversationIDs.contains(chat.id) {
                 do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
             }
             guard !Task.isCancelled else { return }
             failure = await model.loadOlder(chat)
-        }
-    }
-}
-
-private struct ScrollBottomVisibility: ViewModifier {
-    @Binding var isVisible: Bool
-    func body(content: Content) -> some View {
-        if #available(iOS 18, *) {
-            content.onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentSize.height - geometry.visibleRect.maxY <= 24
-            } action: { _, visible in isVisible = visible }
-        } else {
-            content
         }
     }
 }
@@ -424,50 +447,23 @@ private struct ConversationScrollRequest: Equatable {
 }
 
 private struct ConversationScrollPosition: ViewModifier {
-    @Binding var position: String?
     @Binding var request: ConversationScrollRequest?
-
-    func body(content: Content) -> some View {
-        if #available(iOS 18, *) {
-            content.modifier(SemanticConversationScrollPosition(position: $position, request: $request))
-        } else {
-            ScrollViewReader { proxy in
-                content.defaultScrollAnchor(.bottom)
-                    .scrollPosition(id: $position, anchor: .top)
-                    .onChange(of: request, initial: true) { _, value in
-                        guard let value else { return }
-                        if value.id == "conversation-bottom" { proxy.scrollTo(value.id, anchor: .bottom) }
-                        else { position = value.id }
-                        request = nil
-                    }
-            }
-        }
-    }
-}
-
-@available(iOS 18, *)
-private struct SemanticConversationScrollPosition: ViewModifier {
-    @Binding var position: String?
-    @Binding var request: ConversationScrollRequest?
-    @State private var scrollPosition = ScrollPosition(id: "conversation-bottom", anchor: .bottom)
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
-        content.scrollPosition($scrollPosition)
-            .defaultScrollAnchor(.bottom, for: .alignment)
-            .onChange(of: request, initial: true) { _, value in
-                guard let value else { return }
-                var transaction = Transaction(animation: value.animated && !reduceMotion ? .easeOut(duration: 0.2) : nil)
-                transaction.disablesAnimations = !value.animated || reduceMotion
-                withTransaction(transaction) {
-                    // Resolve the actual last target in the lazy stack instead
-                    // of its estimated content edge, including after collapse.
-                    scrollPosition.scrollTo(id: value.id,
-                        anchor: value.id == "conversation-bottom" ? .bottom : value.anchor)
+        ScrollViewReader { proxy in
+            content
+                .onChange(of: request, initial: true) { _, value in
+                    guard let value else { return }
+                    let animate = value.animated && !reduceMotion
+                    var transaction = Transaction(animation: animate ? .easeOut(duration: 0.2) : nil)
+                    transaction.disablesAnimations = !animate
+                    withTransaction(transaction) {
+                        proxy.scrollTo(value.id, anchor: value.id == "conversation-bottom" ? .bottom : value.anchor)
+                    }
+                    request = nil
                 }
-                request = nil
-            }
-            .onChange(of: scrollPosition.viewID(type: String.self), initial: true) { _, value in position = value }
+        }
     }
 }
 
@@ -505,15 +501,17 @@ private struct ConversationScroller<Content: View>: View {
     @State private var position: String?
     @State private var scrollRequest: ConversationScrollRequest?
     @State private var restored = false
+    @State private var initialTarget: String?
     @State private var presented = false
     @State private var visibleLatestReceipt: VisibleReadReceipt?
     @State private var readViewport: CGRect = .zero
-    @State private var bottomVisible = true
+    @State private var bottomVisible = false
     @Environment(\.scenePhase) private var phase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let bottomID = "conversation-bottom"
 
     private var readingPosition: String? { restored ? (bottomVisible ? bottomID : position) : nil }
+    private var waitingForPosition: Bool { !restored && !nodeIDs.isEmpty }
 
     private var visibleReadReceipt: VisibleReadReceipt? {
         guard restored, phase == .active, !model.previewMode, !model.accessEnded,
@@ -543,36 +541,66 @@ private struct ConversationScroller<Content: View>: View {
                 entry.rows.contains { row in row.id == saved || saved.hasPrefix("file:" + row.id + ":") }
             }?.id
         }
+        initialTarget = target ?? bottomID
         scrollRequest = ConversationScrollRequest(id: target ?? bottomID, anchor: .top)
-        restored = true
+        if initialTarget == bottomID && bottomVisible { restored = true }
     }
 
     var body: some View {
         Group {
-            ScrollView {
+            List {
                 content
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
             }
+            .accessibilityIdentifier("conversation-scroll")
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 0)
+            .buttonStyle(.borderless)
+            .contentMargins(.horizontal, 0, for: .scrollContent)
             .contentMargins(.vertical, 16, for: .scrollContent)
-            .modifier(ConversationScrollPosition(position: $position, request: $scrollRequest))
-            .background { ConversationPresentationReady { presented = true }.frame(width: 0, height: 0) }
-            .modifier(ScrollBottomVisibility(isVisible: $bottomVisible))
+            .modifier(ConversationScrollPosition(request: $scrollRequest))
+            .background { ConversationPresentationReady { presented = true }.frame(width: 0, height: 0).accessibilityHidden(true) }
             // Keyboard/rotation changes resize only the viewport; the latest
             // row re-evaluates its visibility against the new bounds.
             .environment(\.conversationReadViewport, readViewport)
+            .environment(\.conversationInitialTarget, restored ? nil : initialTarget)
+            .environment(\.conversationPositionReady, !waitingForPosition)
             .background { GeometryReader { geometry in Color.clear.preference(key: ReadViewportKey.self, value: geometry.frame(in: .global)) } }
             .onPreferenceChange(LatestReadVisibilityKey.self) { receipt in
                 if visibleLatestReceipt != receipt { visibleLatestReceipt = receipt }
             }
+            .onPreferenceChange(VisibleConversationNodesKey.self) { visibleIDs in
+                if let first = nodeIDs.first(where: visibleIDs.contains), first != position { position = first }
+            }
             .onPreferenceChange(ReadViewportKey.self) { viewport in
                 if readViewport != viewport { readViewport = viewport }
             }
+            .onPreferenceChange(InitialConversationTargetFrameKey.self) { target in
+                guard !restored, let target, target.id == initialTarget, !readViewport.isEmpty else { return }
+                let frame = target.frame
+                let fits = frame.minY >= readViewport.minY - 1 && frame.maxY <= readViewport.maxY + 1
+                let tallStartVisible = frame.height > readViewport.height && abs(frame.minY - readViewport.minY) <= 24
+                if fits || tallStartVisible { restored = true }
+            }
             .onPreferenceChange(BottomFrameKey.self) { frame in
-                if #available(iOS 18, *) { } else {
-                    let visible = frame.map { $0.maxY <= readViewport.maxY + 24 && $0.maxY >= readViewport.minY } ?? false
-                    if bottomVisible != visible { bottomVisible = visible }
+                let visible = frame.map { $0.maxY <= readViewport.maxY + 24 && $0.maxY >= readViewport.minY } ?? false
+                if bottomVisible != visible { bottomVisible = visible }
+                if !restored, initialTarget == bottomID, visible { restored = true }
+            }
+            // A scroll request is not layout completion. Keep the real list
+            // mounted but covered until its intended row/end is in the viewport.
+            .opacity(waitingForPosition ? 0 : 1)
+            .accessibilityHidden(waitingForPosition)
+            .allowsHitTesting(!waitingForPosition)
+            .overlay {
+                if waitingForPosition {
+                    ProgressView("Loading chat…")
+                        .accessibilityIdentifier("conversation-loading")
                 }
             }
-            .accessibilityIdentifier("conversation-scroll")
             .scrollDismissesKeyboard(.interactively)
             .overlay(alignment: .bottom) {
                 if restored && !bottomVisible && !entries.isEmpty {
@@ -631,12 +659,11 @@ private struct ConversationScroller<Content: View>: View {
     }
 }
 
-// A scroll target spans the viewport; the narrower, padded content stays
-// inside that target so restoring an ID cannot offset the horizontal origin.
+// Native row insets provide the outer margin; wide layouts keep the readable
+// content centered in a bounded column.
 private struct ConversationColumn: ViewModifier {
     func body(content: Content) -> some View {
         content.frame(maxWidth: 768, alignment: .leading)
-            .padding(.horizontal)
             .frame(maxWidth: .infinity)
     }
 }
@@ -908,7 +935,7 @@ struct ConversationView: View {
                 ConversationScroller(model: model, chat: chat, entries: entries, nodeIDs: nodes.map(\.id),
                     isCovered: conversationCovered,
                     requestedScrollID: $requestedScrollID) {
-                        LazyVStack(alignment: .leading, spacing: 12) {
+                        Group {
                             if let cursor = model.snapshots[chat.id]?.thread.nextCursor {
                                 OlderMessagesLoader(model: model, chat: chat, cursor: cursor)
                                     .modifier(ConversationColumn())
@@ -942,12 +969,13 @@ struct ConversationView: View {
                                 }
                                 }
                                 }.modifier(ConversationColumn()).id(node.id)
+                                .accessibilityElement(children: .contain)
                                 .background {
-                                    if node.id == nodes.last?.id, let receipt = model.readReceipt(for: chat.id) {
-                                        LatestReadMarker(receipt: receipt)
-                                    }
+                                    ConversationRowMarker(id: node.id,
+                                        receipt: node.id == nodes.last?.id ? model.readReceipt(for: chat.id) : nil)
                                 }
                             }
+                            VStack(alignment: .leading, spacing: 12) {
                             if !readOnly { QueueDock(
                                 model: model,
                                 chat: chat,
@@ -986,11 +1014,12 @@ struct ConversationView: View {
                                 AttentionRow(model: model, request: request).modifier(ConversationColumn()).id("approval-" + request.id)
                             }
                             }
-                            Color.clear.frame(height: 1).modifier(ConversationColumn()).id("conversation-bottom")
+                            Color.clear.frame(height: 1).modifier(ConversationColumn())
                                 .background { GeometryReader { geometry in
                                     Color.clear.preference(key: BottomFrameKey.self, value: geometry.frame(in: .global))
                                 } }
-                        }.scrollTargetLayout()
+                            }.id("conversation-bottom")
+                        }
                     }
             } else if let failure = model.conversationLoadFailures[chat.id] {
                 ContentUnavailableView {

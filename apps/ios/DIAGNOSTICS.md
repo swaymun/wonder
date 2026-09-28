@@ -67,6 +67,31 @@ retry, and rejection of a different host without replacing saved credentials.
 
 ## Repeatable verification
 
+The conversation uses one native reusable `List`, with stable message/activity
+IDs and expanded activity children as separate rows. A variable-height
+`LazyVStack` repeatedly alternated estimated content heights during large-text
+scrolling; changing scroll anchors or disabling animation did not resolve it.
+Keep a single virtualization owner rather than nesting a lazy stack inside a
+list cell. Reading-position and read-receipt observation publishes only visible
+IDs or visibility changes, not per-pixel frames.
+
+Conversation UI tests select the `conversation-scroll` accessibility identifier,
+independent of whether UIKit exposes it as a scroll view or collection view.
+Native row controls can expose full-width accessibility tap targets: verify
+visible padding using their label bounds, and retain the separate assertions for
+saved positions, tall replies, bottom actions, and fully visible controls.
+
+`testChatOpeningFramesStartAtTheIntendedReadingPosition` captures the first 1.5
+seconds of the real conversation view at normal text size. It checks rendered
+text for both a saved older reply and the default latest reply, including the
+first readable frame. An ordinary UI query waits for idleness and can miss a
+visible opening jump. Keep the transcript covered by its loading state until
+the requested position is measured in the viewport; do not substitute a fixed
+delay. Older-history paging starts after that initial positioning completes.
+For opening regressions, run this focused check first. Reuse existing large-text
+and lifecycle evidence when their product code is unchanged instead of repeating
+the whole suite for test, documentation, signing, or packaging changes.
+
 The Diagnostics section exposes 30 expansion cycles, a ten-minute live session, an interleaved recording-overhead comparison, Stop, and test-Bot cleanup. The runner navigates the actual paired conversation views and uses the same expansion actions. It sends no messages and uses the existing explicit Bot-creation endpoint, which creates its dedicated fixture with explicit settings. It creates and archives only its own read-only test Bot, retaining its idempotency key and identifiers until cleanup succeeds. Runner success verifies state changes and layout execution; it does not certify gestures.
 
 Launch arguments for development tooling:

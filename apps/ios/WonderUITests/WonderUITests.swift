@@ -51,24 +51,26 @@ import UIKit
         let draft = app.textViews["message-draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 10))
         let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Reply 12.")).firstMatch
-        XCTAssertTrue(reply.waitForExistence(timeout: 10))
+        let replyExists = reply.waitForExistence(timeout: 10)
+        if !replyExists { retainMenuScreenshot(app, name: "Initial chat missing latest reply") }
+        XCTAssertTrue(replyExists)
         let work = app.buttons["activity-group:layout-turn-12/layout-work-12"]
         let header = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
         XCTAssertTrue(header.waitForExistence(timeout: 5))
         let before = reply.frame
-        let workBefore = work.exists ? work.frame : nil
+        let workBefore = work.exists ? work.staticTexts.firstMatch.frame : nil
         retainMenuScreenshot(app, name: "Initial chat before any drag")
-        let scroll = app.scrollViews["conversation-scroll"]
+        let scroll = anyElement(app, identifier: "conversation-scroll")
         let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
         start.press(forDuration: 0.1, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55)), withVelocity: .slow, thenHoldForDuration: 0)
         let after = reply.frame
-        let workAfter = work.exists ? work.frame : nil
+        let workAfter = work.exists ? work.staticTexts.firstMatch.frame : nil
         retainMenuScreenshot(app, name: "Chat after first short drag")
         let evidence = XCTAttachment(string: "Before: \(before)\nAfter: \(after)\nWork before: \(String(describing: workBefore))\nWork after: \(String(describing: workAfter))\nHeader: \(header.frame)\nComposer: \(draft.frame)\nHelper: \(app.buttons["subagent-status-pill"].frame)\nViewport bottom: \(conversationLayoutBottom(app, draft: draft))\nScroll: \(scroll.frame)")
         evidence.lifetime = .keepAlways; add(evidence)
         XCTAssertEqual(before.minX, after.minX, accuracy: 1, "A vertical drag must not repair a horizontal offset")
-        // Combined text accessibility bounds can extend outside the visible
-        // bubble. The identified activity control shares its padded column.
+        // Native list controls expose a full-row accessibility tap target.
+        // Measure the label to check the visible column's actual padding.
         if let workBefore {
             let workAfter = try XCTUnwrap(workAfter, "A short drag must preserve the visible activity row")
             XCTAssertEqual(workBefore.minX, workAfter.minX, accuracy: 1)
@@ -100,11 +102,9 @@ import UIKit
             XCTAssertLessThanOrEqual(reply.frame.maxY, conversationLayoutBottom(app, draft: draft) + 1)
             XCTAssertLessThan(conversationLayoutBottom(app, draft: draft) - reply.frame.maxY, 100)
         }
-        if workBefore == nil {
-            // Opening at the end of a tall reply need not realize the preceding
-            // lazy activity row. Check initial readability before revealing it.
-            XCTAssertTrue(extra.contains("-diagnostics-chat-layout-unsaved"))
-            XCTAssertGreaterThan(before.height, viewportHeight)
+        if extra.contains("-diagnostics-chat-layout-unsaved"), before.height > viewportHeight {
+            // Exercise a real drag to the preceding row even if the native
+            // list has already prepared its offscreen accessibility element.
             for _ in 0..<8 {
                 if work.exists, work.frame.minY >= viewportTop,
                    work.frame.maxY <= conversationLayoutBottom(app, draft: draft) { break }
@@ -117,7 +117,7 @@ import UIKit
             XCTAssertTrue(work.exists, "Bounded scrolling must reveal the preceding activity row")
             XCTAssertGreaterThanOrEqual(work.frame.minY, viewportTop)
             XCTAssertLessThanOrEqual(work.frame.maxY, conversationLayoutBottom(app, draft: draft))
-            XCTAssertGreaterThanOrEqual(work.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
+            XCTAssertGreaterThanOrEqual(work.staticTexts.firstMatch.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
         }
         app.terminate()
     }
@@ -134,13 +134,13 @@ import UIKit
         XCTAssertTrue(draft.waitForExistence(timeout: 10))
         let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Reply 6.")).firstMatch
         XCTAssertTrue(reply.waitForExistence(timeout: 10))
-        let scroll = app.scrollViews["conversation-scroll"]
+        let scroll = anyElement(app, identifier: "conversation-scroll")
         let header = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
         XCTAssertTrue(header.waitForExistence(timeout: 5))
         let olderWork = app.buttons["activity-group:layout-turn-6/layout-work-6"]
         XCTAssertTrue(olderWork.waitForExistence(timeout: 5))
         retainConversationLayoutEvidence(app, name: "Older saved reply restored without a drag", reply: reply, header: header, draft: draft)
-        XCTAssertGreaterThanOrEqual(olderWork.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
+        XCTAssertGreaterThanOrEqual(olderWork.staticTexts.firstMatch.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
         XCTAssertGreaterThan(reply.frame.maxY, header.frame.maxY)
         XCTAssertLessThan(reply.frame.minY, conversationLayoutBottom(app, draft: draft))
         if !row.isHittable {
@@ -162,14 +162,14 @@ import UIKit
         XCTAssertLessThan(conversationLayoutBottom(app, draft: draft) - latest.frame.maxY, 100)
         let work = app.buttons["activity-group:layout-turn-12/layout-work-12"]
         XCTAssertTrue(work.waitForExistence(timeout: 5))
-        XCTAssertGreaterThanOrEqual(work.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
+        XCTAssertGreaterThanOrEqual(work.staticTexts.firstMatch.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
         XCTAssertEqual(work.value as? String, "Collapsed")
         work.tap()
         XCTAssertEqual(work.value as? String, "Expanded")
         work.tap()
         XCTAssertEqual(work.value as? String, "Collapsed")
         retainConversationLayoutEvidence(app, name: "Activity expands and collapses above the helper dock", reply: latest, header: header, draft: draft)
-        XCTAssertGreaterThanOrEqual(work.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
+        XCTAssertGreaterThanOrEqual(work.staticTexts.firstMatch.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
         XCTAssertLessThanOrEqual(latest.frame.maxY, conversationLayoutBottom(app, draft: draft))
         XCTAssertLessThan(conversationLayoutBottom(app, draft: draft) - latest.frame.maxY, 100)
         app.terminate()
@@ -185,7 +185,7 @@ import UIKit
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.tap()
         let work = app.buttons["activity-group:layout-turn-6/layout-work-6"]
-        let scroll = app.scrollViews["conversation-scroll"]
+        let scroll = anyElement(app, identifier: "conversation-scroll")
         let draft = app.textViews["message-draft"]
         let header = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
         XCTAssertTrue(work.waitForExistence(timeout: 10))
@@ -221,7 +221,7 @@ import UIKit
     private func retainConversationLayoutEvidence(_ app: XCUIApplication, name: String, reply: XCUIElement, header: XCUIElement, draft: XCUIElement) {
         retainMenuScreenshot(app, name: name)
         let pill = app.buttons["subagent-status-pill"]
-        let evidence = XCTAttachment(string: "Reply: \(reply.frame)\nHeader: \(header.frame)\nComposer: \(draft.frame)\nHelper: \(pill.exists ? String(describing: pill.frame) : "absent")\nViewport bottom: \(conversationLayoutBottom(app, draft: draft))\nScroll: \(app.scrollViews["conversation-scroll"].frame)")
+        let evidence = XCTAttachment(string: "Reply: \(reply.frame)\nHeader: \(header.frame)\nComposer: \(draft.frame)\nHelper: \(pill.exists ? String(describing: pill.frame) : "absent")\nViewport bottom: \(conversationLayoutBottom(app, draft: draft))\nScroll: \(anyElement(app, identifier: "conversation-scroll").frame)")
         evidence.name = name + " geometry"
         evidence.lifetime = .keepAlways
         add(evidence)
@@ -287,7 +287,7 @@ import UIKit
                 group.tap()
             }
             XCTAssertEqual(group.value as? String, "Expanded")
-            let scroll = app.scrollViews.firstMatch
+            let scroll = anyElement(app, identifier: "conversation-scroll")
             for _ in 0..<4 {
                 if workingImage.exists && workingImage.isHittable { break }
                 scroll.swipeUp(velocity: .slow)
@@ -636,14 +636,14 @@ import UIKit
         XCTAssertTrue(parentDraft.waitForExistence(timeout: 10))
         parentDraft.tap(); parentDraft.typeText("parent draft")
         if app.keyboards.firstMatch.exists {
-            let scroll = app.scrollViews["conversation-scroll"]
+            let scroll = anyElement(app, identifier: "conversation-scroll")
             let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.19))
             start.press(forDuration: 0.1, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.86)),
                         withVelocity: .slow, thenHoldForDuration: 0.1)
         }
         let groups = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "activity-group:"))
         for _ in 0..<5 where !groups.firstMatch.exists {
-            let scroll = app.scrollViews["conversation-scroll"]
+            let scroll = anyElement(app, identifier: "conversation-scroll")
             let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.19))
             start.press(forDuration: 0.1, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.32)))
         }
@@ -1903,7 +1903,7 @@ import UIKit
         let chat = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Wonder iOS")).firstMatch
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation.") }
         chat.tap()
-        let scroll = app.scrollViews.firstMatch
+        let scroll = anyElement(app, identifier: "conversation-scroll")
         XCTAssertTrue(scroll.waitForExistence(timeout: 15))
         let screen = app.frame
         if app.buttons["scroll-to-bottom"].exists { app.buttons["scroll-to-bottom"].tap() }
@@ -1953,7 +1953,7 @@ import UIKit
         let chat = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Wonder iOS")).firstMatch
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation with a generated image.") }
         chat.tap()
-        let scroll = app.scrollViews.firstMatch
+        let scroll = anyElement(app, identifier: "conversation-scroll")
         XCTAssertTrue(scroll.waitForExistence(timeout: 15))
         let bottom = app.buttons["scroll-to-bottom"]
         if bottom.exists { bottom.tap() }
@@ -2025,7 +2025,7 @@ import UIKit
                 guard chat.waitForExistence(timeout: 15) else { XCTFail("Missing conversation row \(id)"); return }
                 let start = Date()
                 chat.tap()
-                let scroll = app.scrollViews["conversation-scroll"]
+                let scroll = anyElement(app, identifier: "conversation-scroll")
                 guard scroll.waitForExistence(timeout: 20), app.textViews["message-draft"].waitForExistence(timeout: 20) else {
                     XCTFail("Conversation \(id) did not open"); return
                 }
@@ -2863,7 +2863,7 @@ import UIKit
                 XCTAssertLessThanOrEqual(queued.frame.maxY, composer.frame.minY,
                                          "The queued message belongs to the timeline above the floating composer.")
 
-                let scroll = app.scrollViews.firstMatch
+                let scroll = anyElement(app, identifier: "conversation-scroll")
                 for _ in 0..<8 {
                     let bounds = scroll.frame.insetBy(dx: 0, dy: 5)
                     if queuedWithAttachments.frame.minY >= bounds.minY && queuedWithAttachments.frame.maxY <= bounds.maxY { break }
@@ -3685,6 +3685,16 @@ import UIKit
         XCTAssertTrue(status.label.contains("live cycles"))
         XCTAssertEqual(app.state, .runningForeground)
         retainMenuScreenshot(app, name: "Physical ten-minute live scenario completed")
+        // The existing scenario owns recorder overhead on the same warmed
+        // device and chat. Keep the physical session alive through both modes.
+        let compare = app.buttons["scenario-compare"]
+        XCTAssertTrue(compare.waitForExistence(timeout: 5))
+        compare.tap()
+        let compared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label BEGINSWITH %@", "Recording comparison saved:"), object: status)
+        XCTAssertEqual(XCTWaiter.wait(for: [compared], timeout: 240), .completed)
+        XCTAssertEqual(app.state, .runningForeground)
+        retainMenuScreenshot(app, name: "Physical recording comparison completed")
     }
     func testLiveActivityAndScrolling() throws {
         continueAfterFailure = false
@@ -3694,7 +3704,7 @@ import UIKit
 
         // Keep this performance check independent of whatever live chat happens
         // to be selected on the simulator. The fixture uses the production
-        // ConversationView/activity renderers with deterministic turn status,
+        // activity renderers with deterministic turn status,
         // compaction markers, and stable row identities.
         selectDiagnosticFixture("Turn lifecycle", in: app)
 

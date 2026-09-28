@@ -16,6 +16,7 @@ import WonderPairing
     @Published private(set) var microphoneDenied = false
     private weak var model: ConnectionModel?
     private var recorder: AVAudioRecorder?
+    private var audioSessionActive = false
     private var work: Task<Void, Never>?
     private var timer: Task<Void, Never>?
     private var interruptions: Task<Void, Never>?
@@ -131,6 +132,7 @@ import WonderPairing
             var values = URLResourceValues(); values.isExcludedFromBackup = true; try directory.setResourceValues(values)
             try AVAudioSession.sharedInstance().setCategory(.record, mode: .measurement)
             try AVAudioSession.sharedInstance().setActive(true)
+            audioSessionActive = true
             let next = DictationIntent(hostID: host, deviceID: device, conversationID: chat.id, conversationTitle: chat.title, modelID: modelID)
             try model.persistDictationIntent(next)
             intent = next
@@ -351,7 +353,11 @@ import WonderPairing
         interruptions?.cancel(); interruptions = nil
         // Stopping the recorder alone does not release the app's audio session.
         // Revocation and connection replacement must release it just like Finish.
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // Restoring an idle controller must not activate the audio service at launch.
+        if audioSessionActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            audioSessionActive = false
+        }
     }
     private func removeAudio() { if let url = audioURL, FileManager.default.fileExists(atPath: url.path) { try? FileManager.default.removeItem(at: url) } }
     private func persist() { if let intent { do { try model?.persistDictationIntent(intent) } catch { failure = "This recording could not be saved on this device." } } }
