@@ -230,6 +230,12 @@ enum DiagnosticSubagentFixture {
     static var marketingApprovalFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-marketing-approval") }
     static var approvalSettingsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-optimistic-approval") }
     static var goalFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-goal-fixture") }
+    static var goalFixtureStatus: String {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-diagnostics-goal-status"), arguments.indices.contains(index + 1),
+              ["active", "paused", "complete", "blocked", "usageLimited", "budgetLimited"].contains(arguments[index + 1]) else { return "active" }
+        return arguments[index + 1]
+    }
     static var approvalDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.approval-settings")! }
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
     static var readStatusFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-read-status") }
@@ -316,7 +322,7 @@ enum DiagnosticSubagentFixture {
             state.childStatus = "completed"
             state.goalPresent = goalFixture
             state.goalObjective = "Prepare a reliable beta launch with the Scout helper."
-            state.goalStatus = "active"
+            state.goalStatus = goalFixtureStatus
             state.goalTokenBudget = 1_000
             state.goalTimeBudgetSeconds = 600
         }
@@ -352,7 +358,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var readAttempts = 0
         var goalPresent = DiagnosticSubagentFixture.goalFixture
         var goalObjective = "Prepare a reliable beta launch with the Scout helper."
-        var goalStatus = "active"
+        var goalStatus = DiagnosticSubagentFixture.goalFixtureStatus
         var goalTokenBudget: Int? = 1_000
         var goalTimeBudgetSeconds: Int? = 600
     }

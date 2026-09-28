@@ -472,6 +472,44 @@ import UIKit
         try checkGoalSheet(contentSize: "UICTContentSizeCategoryAccessibilityXXL")
     }
 
+    func testDiagnosticsGoalPillStatusIconsKeepDetailsAccessible() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        for (status, label, detail) in [
+            ("paused", "paused", "Paused"), ("complete", "complete", "Complete"),
+            ("blocked", "needs attention", "Needs attention"),
+            ("usageLimited", "usage limited", "Usage limit reached"),
+            ("budgetLimited", "budget reached", "Budget reached")
+        ] {
+            app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-goal-fixture",
+                                   "-diagnostics-goal-status", status]
+            app.launch()
+            let parent = app.buttons["chat-row:fixture-parent-conversation"]
+            XCTAssertTrue(parent.waitForExistence(timeout: 10)); parent.tap()
+            let goal = app.buttons["goal-status-pill"]
+            let agents = app.buttons["subagent-status-pill"]
+            XCTAssertTrue(goal.waitForExistence(timeout: 10))
+            XCTAssertTrue(agents.waitForExistence(timeout: 5))
+            XCTAssertEqual(goal.label, "Goal " + label)
+            XCTAssertEqual(goal.staticTexts.count, 0)
+            XCTAssertEqual(goal.frame.height, agents.frame.height, accuracy: 1)
+            XCTAssertEqual(goal.frame.midY, agents.frame.midY, accuracy: 1)
+            XCTAssertGreaterThanOrEqual(goal.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(goal.frame.width, 64, "The goal retains its icon beside the status symbol")
+            XCTAssertLessThan(goal.frame.width, 90, "The goal stays a compact pair of icons")
+            retainMenuScreenshot(app, name: "Goal status " + status)
+            goal.tap()
+            XCTAssertTrue(app.staticTexts["goal-objective"].waitForExistence(timeout: 5))
+            let statusDetail = app.descendants(matching: .any).matching(identifier: "goal-metadata-status").firstMatch
+            XCTAssertEqual(statusDetail.label, "Status, " + detail)
+            if status == "complete" { XCTAssertFalse(app.buttons["goal-resume"].exists) }
+            else { XCTAssertTrue(app.buttons["goal-resume"].exists) }
+            app.buttons["goal-done"].tap()
+            XCTAssertEqual(goal.value as? String, "Collapsed")
+            app.terminate()
+        }
+    }
+
     private func checkGoalSheet(contentSize: String) throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
@@ -489,6 +527,12 @@ import UIKit
         XCTAssertTrue(goalPill.waitForExistence(timeout: 10))
         XCTAssertTrue(agentPill.waitForExistence(timeout: 5))
         XCTAssertGreaterThanOrEqual(goalPill.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(goalPill.frame.width, 44)
+        XCTAssertEqual(goalPill.frame.height, agentPill.frame.height, accuracy: 1)
+        XCTAssertEqual(goalPill.frame.midY, agentPill.frame.midY, accuracy: 1)
+        XCTAssertEqual(goalPill.label, "Goal active")
+        XCTAssertEqual(goalPill.staticTexts.count, 0, "The single goal uses its goal and status icons without redundant text")
+        XCTAssertEqual(agentPill.staticTexts.firstMatch.label, "2", "The roster control displays only its count beside the avatars")
         XCTAssertLessThan(goalPill.frame.maxX, agentPill.frame.minX)
         XCTAssertLessThanOrEqual(agentPill.frame.minX - goalPill.frame.maxX, 8)
         XCTAssertLessThanOrEqual(agentPill.frame.maxX, draft.frame.maxX + 24)
@@ -499,12 +543,31 @@ import UIKit
         let objective = app.staticTexts["goal-objective"]
         XCTAssertTrue(objective.waitForExistence(timeout: 5))
         XCTAssertTrue((objective.label).contains("reliable beta launch"))
-        XCTAssertTrue(app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", "Token budget")).firstMatch.exists)
+        let metadata = app.descendants(matching: .any)
+        XCTAssertEqual(metadata.matching(identifier: "goal-metadata-tokens").firstMatch.label,
+                       "Tokens used, 50. Token budget, 1,000")
+        XCTAssertEqual(metadata.matching(identifier: "goal-metadata-time").firstMatch.label,
+                       "Active time, 0 min. Time limit, 10 min")
+        let edit = app.buttons["goal-edit"]
+        let pause = app.buttons["goal-pause"]
+        let remove = app.buttons["goal-remove"]
+        for control in [edit, pause, remove] {
+            XCTAssertGreaterThanOrEqual(control.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(control.frame.height, 44)
+            XCTAssertEqual(control.frame.midY, edit.frame.midY, accuracy: 1)
+        }
+        XCTAssertEqual(edit.label, "Edit goal")
+        XCTAssertEqual(pause.label, "Pause goal")
+        XCTAssertEqual(remove.label, "Remove goal")
         retainMenuScreenshot(app, name: "Goal details half sheet")
 
         tapGoalControl("goal-pause", in: app)
         XCTAssertTrue(app.buttons["goal-resume"].waitForExistence(timeout: 5))
+        app.buttons["goal-done"].tap()
+        XCTAssertEqual(goalPill.label, "Goal paused")
+        XCTAssertEqual(goalPill.frame.height, agentPill.frame.height, accuracy: 1)
+        retainMenuScreenshot(app, name: "Paused goal and agent pills")
+        goalPill.tap()
         tapGoalControl("goal-resume", in: app)
         XCTAssertTrue(app.buttons["goal-pause"].waitForExistence(timeout: 5))
         tapGoalControl("goal-edit", in: app)
@@ -535,11 +598,30 @@ import UIKit
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: control)
         XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed)
         let scroll = app.scrollViews["goal-details-scroll"]
-        for _ in 0..<3 where !control.isHittable {
-            if identifier == "goal-edit" { scroll.swipeDown() }
-            else { scroll.swipeUp() }
+        // XCTest may report an offscreen SwiftUI button as hittable even
+        // when its frame sits beneath the software keyboard. Reveal the full
+        // control within the actual unobscured scroll viewport before tapping.
+        func visibleBounds() -> CGRect {
+            var bounds = identifier == "goal-save" ? app.frame : scroll.frame.intersection(app.frame)
+            if app.keyboards.firstMatch.exists {
+                bounds.size.height = max(0, min(bounds.maxY, app.keyboards.firstMatch.frame.minY) - bounds.minY)
+            }
+            return bounds.insetBy(dx: 0, dy: 8)
+        }
+        for _ in 0..<5 {
+            let bounds = visibleBounds()
+            if control.isHittable && bounds.contains(control.frame) { break }
+            let down = control.frame.minY < bounds.minY
+            let top = bounds.minY + 24
+            let bottom = bounds.maxY - 24
+            // Start inside the padded content; the outer gutter is not hit-testable.
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: bounds.midX, dy: down ? top : bottom))
+            let end = origin.withOffset(CGVector(dx: bounds.midX, dy: down ? bottom : top))
+            start.press(forDuration: 0.1, thenDragTo: end)
         }
         XCTAssertTrue(control.isHittable)
+        XCTAssertTrue(visibleBounds().contains(control.frame), "Goal control must be fully visible before tapping")
         control.tap()
     }
 
@@ -1905,6 +1987,63 @@ import UIKit
         XCTAssertEqual(app.state, .runningForeground)
     }
 
+    /// Read-only physical performance pass over explicitly selected, already
+    /// read conversations. It opens, scrolls through older history, returns to
+    /// the bottom and switches chats. No message, read-state change or model
+    /// work is requested beyond what opening an already-read chat does.
+    func testLiveConversationOpenScrollAndSwitch() throws {
+        continueAfterFailure = false
+        let ids = (ProcessInfo.processInfo.environment["WONDER_PERF_CONVERSATION_IDS"] ?? "")
+            .split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !ids.isEmpty else { throw XCTSkip("Supply WONDER_PERF_CONVERSATION_IDS with already-read conversation IDs.") }
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        app.launchEnvironment["WONDER_DIAGNOSTICS_CAPTURE"] = "1"
+        let launchStart = Date()
+        app.launch()
+        func row(_ id: String) -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "identifier ENDSWITH %@", ":" + id)).firstMatch
+        }
+        guard row(ids[0]).waitForExistence(timeout: 30) else {
+            retainMenuScreenshot(app, name: "Selected conversation rows missing")
+            let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:")).allElementsBoundByIndex.prefix(40).map(\.identifier)
+            let evidence = XCTAttachment(string: "state=\(app.state.rawValue)\nrows=\(rows.joined(separator: "\n"))")
+            evidence.name = "Visible chat rows"; evidence.lifetime = .keepAlways; add(evidence)
+            throw XCTSkip("Requires a paired device listing the selected conversations.")
+        }
+        var samples = ["listVisibleAfterLaunchMs=\(Int(Date().timeIntervalSince(launchStart) * 1000))"]
+        var openDurations: [Double] = []
+        let options = XCTMeasureOptions()
+        options.iterationCount = Int(ProcessInfo.processInfo.environment["WONDER_PERF_ITERATIONS"] ?? "") ?? 5
+        measure(metrics: [XCTClockMetric(), XCTCPUMetric(application: app), XCTMemoryMetric(application: app), XCTOSSignpostMetric.scrollingAndDecelerationMetric], options: options) {
+            for id in ids {
+                let chat = row(id)
+                if !chat.isHittable {
+                    // Edge swipe back: a top-left tap can land on a notification banner.
+                    app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+                        .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)))
+                }
+                guard chat.waitForExistence(timeout: 15) else { XCTFail("Missing conversation row \(id)"); return }
+                let start = Date()
+                chat.tap()
+                let scroll = app.scrollViews["conversation-scroll"]
+                guard scroll.waitForExistence(timeout: 20), app.textViews["message-draft"].waitForExistence(timeout: 20) else {
+                    XCTFail("Conversation \(id) did not open"); return
+                }
+                openDurations.append(Date().timeIntervalSince(start) * 1000)
+                for _ in 0..<4 { scroll.swipeDown(velocity: .fast) }
+                let bottom = app.buttons["scroll-to-bottom"]
+                if bottom.waitForExistence(timeout: 2) { bottom.tap() } else { for _ in 0..<4 { scroll.swipeUp(velocity: .fast) } }
+                for _ in 0..<2 { scroll.swipeDown(); scroll.swipeUp() }
+            }
+        }
+        let sorted = openDurations.sorted()
+        func percentile(_ p: Double) -> Int { sorted.isEmpty ? 0 : Int(sorted[min(sorted.count - 1, Int(Double(sorted.count - 1) * p))]) }
+        samples.append("openToComposerMs n=\(sorted.count) p50=\(percentile(0.5)) p95=\(percentile(0.95)) max=\(Int(sorted.last ?? 0))")
+        let evidence = XCTAttachment(string: samples.joined(separator: "\n"))
+        evidence.name = "Live open/scroll/switch timings"; evidence.lifetime = .keepAlways; add(evidence)
+        XCTAssertEqual(app.state, .runningForeground)
+    }
+
     func testLiveImagePreview() throws {
         continueAfterFailure=false
         let app=XCUIApplication(bundleIdentifier:"com.swaymun.wonder")
@@ -3161,6 +3300,62 @@ import UIKit
         }, object: nil)], timeout: 60), .completed)
         XCTAssertTrue(app.buttons["Add computer"].isHittable)
         retainMenuScreenshot(app, name: "Physical pairing completed")
+    }
+
+    // Exercise the real App/WindowGroup boundary. A view-only fixture cannot
+    // catch a root builder invoked by SwiftUI's asynchronous renderer.
+    func testRootSceneSurvivesRepeatedLaunchAndForeground() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        app.launchArguments = ["-connections-preview", "-show-connections"]
+        for _ in 0..<10 {
+            app.launch()
+            XCTAssertTrue(app.buttons["Add computer"].waitForExistence(timeout: 15))
+            for _ in 0..<2 {
+                // iPad exposes its top tabs as buttons outside a TabBar.
+                app.buttons["Chats"].firstMatch.tap()
+                XCUIDevice.shared.press(.home)
+                app.activate()
+                XCTAssertTrue(app.buttons["Settings"].firstMatch.waitForExistence(timeout: 10))
+                app.buttons["Settings"].firstMatch.tap()
+                XCTAssertTrue(app.buttons["Add computer"].waitForExistence(timeout: 10))
+                XCTAssertEqual(app.state, .runningForeground)
+            }
+            app.terminate()
+        }
+    }
+
+    func testPairedConnectionSurvivesRelaunchAndForeground() throws {
+        continueAfterFailure = false
+        guard let host = ProcessInfo.processInfo.environment["WONDER_PAIRING_HOST_NAME"] else {
+            throw XCTSkip("An explicit paired host is required.")
+        }
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        app.launchArguments = ["-show-connections"]
+        for pass in 0..<10 {
+            app.launch()
+            let computer = app.buttons[host]
+            XCTAssertTrue(computer.waitForExistence(timeout: 15))
+            computer.tap()
+            let check = app.buttons["Check connection"]
+            XCTAssertTrue(check.waitForExistence(timeout: 10))
+            check.tap()
+            let connected = app.staticTexts["Connected to your computer."]
+            if !connected.waitForExistence(timeout: 25) {
+                retainMenuScreenshot(app, name: "Connection failure")
+                XCTFail("Connection failed: \(app.staticTexts["connection-status"].label)")
+            }
+            XCTAssertFalse(app.buttons["Pair again"].exists)
+            for _ in 0..<2 {
+                XCUIDevice.shared.press(.home)
+                app.activate()
+                XCTAssertTrue(connected.waitForExistence(timeout: 25))
+                XCTAssertTrue(check.isEnabled)
+                XCTAssertFalse(app.buttons["Pair again"].exists)
+            }
+            if pass == 9 { retainMenuScreenshot(app, name: "Paired connection after ten launches and twenty resumes") }
+            app.terminate()
+        }
     }
 
     func testPhysicalPairingRelaunchRenewsAndReadsExistingChats() throws {

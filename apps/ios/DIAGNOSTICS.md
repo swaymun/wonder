@@ -44,6 +44,27 @@ python3 scripts/analyze-ios-diagnostics.py /path/to/diagnostics --json /path/to/
 
 Use `--session UUID` to isolate one run. Reports separate network, decoding, projection, and local interaction distributions (sample count, p50, p95, maximum). Chat-open and history request durations may include network work. Readiness and display-callback timings are proxies; they do not prove that a frame appeared. MetricKit delivery is delayed and supplemental, not a live dashboard.
 
+## Startup and reconnection
+
+`testRootSceneSurvivesRepeatedLaunchAndForeground` exercises the real App and
+WindowGroup with the existing isolated connections preview: ten cold launches
+and twenty foreground returns. It catches failures outside individual view
+fixtures, including the build 57 root-builder actor assertion. Keep app-owned
+state reads outside WindowGroup's asynchronously evaluated content builder;
+the builder returns a prepared view, whose body owns actor-isolated work.
+
+`testPairedConnectionSurvivesRelaunchAndForeground` repeats the same lifecycle
+against the explicit `WONDER_PAIRING_HOST_NAME` host. It checks connection
+renewal without opening conversations, sending messages, or starting Bot work.
+Missing pairing or unavailable XCTest automation is not a passed live check.
+Retain OS crash reports and distinguish direct device launch checks from UI
+automation and simulator results.
+
+The three `testConnectionRenewal...` diagnostics tests use the existing synthetic
+HTTP transport and an in-memory signing identity. They cover offline/DNS/timeout
+feedback followed by successful renewal, stale background responses followed by
+retry, and rejection of a different host without replacing saved credentials.
+
 ## Repeatable verification
 
 The Diagnostics section exposes 30 expansion cycles, a ten-minute live session, an interleaved recording-overhead comparison, Stop, and test-Bot cleanup. The runner navigates the actual paired conversation views and uses the same expansion actions. It sends no messages and uses the existing explicit Bot-creation endpoint, which creates its dedicated fixture with explicit settings. It creates and archives only its own read-only test Bot, retaining its idempotency key and identifiers until cleanup succeeds. Runner success verifies state changes and layout execution; it does not certify gestures.

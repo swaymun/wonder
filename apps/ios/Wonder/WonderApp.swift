@@ -7,25 +7,36 @@ import VisionKit
     @StateObject private var library = ConnectionLibrary()
     @StateObject private var preview = ConnectionModel(saved: nil, persistConnection: { _ in })
     var body: some Scene {
-        WindowGroup {
-            #if WONDER_DIAGNOSTICS
-            if ProcessInfo.processInfo.arguments.contains("-diagnostics-avatar-fixture") { ScienceAvatarDiagnosticFixtureView() }
-            else if ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps") { DiagnosticConnectedAppsFixtureView() }
-            else if DiagnosticSubagentFixture.chatLayoutFixture { DiagnosticChatLayoutFixtureView() }
-            else if ProcessInfo.processInfo.arguments.contains("-diagnostics-subagent-fixture") { DiagnosticSubagentFixtureView() }
-            else if ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-session-fixture") { ComputerSessionDiagnosticFixtureView() }
-            else if ProcessInfo.processInfo.arguments.contains("-diagnostics-teaching-fixture") { TeachingDiagnosticFixtureView() }
-            else if ProcessInfo.processInfo.arguments.contains("-diagnostics-fixtures") { DiagnosticFixtureView() }
-            else if DiagnosticScenarioLaunch.requested { DiagnosticLaunchView(library: library) }
-            else { normalRoot }
-            #else
-            normalRoot
-            #endif
-        }
+        // WindowGroup can invoke its lazy builder on SwiftUI.AsyncRenderer.
+        // Read app-owned state here; let the View body own actor-isolated work.
+        let root = WonderRoot(library: library, preview: preview)
+        let makeContent: @Sendable () -> WonderRoot = { root }
+        WindowGroup(makeContent: makeContent)
+    }
+}
+
+private struct WonderRoot: View {
+    @ObservedObject var library: ConnectionLibrary
+    @ObservedObject var preview: ConnectionModel
+
+    var body: some View {
+        #if WONDER_DIAGNOSTICS
+        if ProcessInfo.processInfo.arguments.contains("-diagnostics-avatar-fixture") { ScienceAvatarDiagnosticFixtureView() }
+        else if ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps") { DiagnosticConnectedAppsFixtureView() }
+        else if DiagnosticSubagentFixture.chatLayoutFixture { DiagnosticChatLayoutFixtureView() }
+        else if ProcessInfo.processInfo.arguments.contains("-diagnostics-subagent-fixture") { DiagnosticSubagentFixtureView() }
+        else if ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-session-fixture") { ComputerSessionDiagnosticFixtureView() }
+        else if ProcessInfo.processInfo.arguments.contains("-diagnostics-teaching-fixture") { TeachingDiagnosticFixtureView() }
+        else if ProcessInfo.processInfo.arguments.contains("-diagnostics-fixtures") { DiagnosticFixtureView() }
+        else if DiagnosticScenarioLaunch.requested { DiagnosticLaunchView(library: library) }
+        else { normalRoot }
+        #else
+        normalRoot
+        #endif
     }
     @ViewBuilder private var normalRoot: some View {
-            if preview.previewMode && !library.isPreview { ChatsView(model: preview) }
-            else { ClientRoot(library: library) }
+        if preview.previewMode && !library.isPreview { ChatsView(model: preview) }
+        else { ClientRoot(library: library) }
     }
 }
 
@@ -139,7 +150,8 @@ struct UnifiedChatsView: View {
     private var chats: [(address: ComputerChatAddress, chat: ChatSummary, model: ConnectionModel)] {
         visibleComputers.flatMap { saved in
             let model = library.model(for: saved)
-            guard model.hasConnectedThisLaunch && !model.accessEnded else { return [(address: ComputerChatAddress, chat: ChatSummary, model: ConnectionModel)]() }
+            // Saved chats appear immediately; the connection check refreshes them.
+            guard !model.accessEnded else { return [(address: ComputerChatAddress, chat: ChatSummary, model: ConnectionModel)]() }
             return model.chats.filter { $0.matchesName(searchText) }.map {
                 (address: ComputerChatAddress(host: saved.credential.hostInstallationId, chat: $0.id), chat: $0, model: model)
             }
@@ -203,8 +215,16 @@ struct UnifiedChatsView: View {
                     .contextMenu { ChatContextMenu(actions: chatActions, model: entry.model, chat: entry.chat) }
                 }
                 }
-                if chats.isEmpty && visibleComputers.allSatisfy({ library.model(for: $0).macConnected == true }) {
-                    ContentUnavailableView(library.saved.connections.isEmpty ? "Add a computer in Settings" : "No chats", systemImage: "bubble.left.and.bubble.right")
+                if chats.isEmpty {
+                    if visibleComputers.contains(where: { let model = library.model(for: $0); return model.macConnected == nil && !model.accessEnded }) {
+                        // First launch or an empty cache: say what is happening, compactly.
+                        ProgressView("Loading chats…")
+                            .frame(maxWidth: .infinity)
+                            .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                            .accessibilityIdentifier("chats-loading")
+                    } else if visibleComputers.allSatisfy({ library.model(for: $0).macConnected == true }) {
+                        ContentUnavailableView(library.saved.connections.isEmpty ? "Add a computer in Settings" : "No chats", systemImage: "bubble.left.and.bubble.right")
+                    }
                 }
                 if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     ForEach(visibleComputers, id: \.credential.hostInstallationId) { saved in
@@ -434,6 +454,10 @@ private struct ComputerConnectionNotice: View {
         if model.accessEnded {
             Text("\(model.macName): pair again in Settings.").font(.caption).foregroundStyle(.secondary)
                 .listRowBackground(Color.clear)
+        } else if model.macConnected == false {
+            Text("Can’t reach \(model.macName). Showing saved chats.").font(.caption).foregroundStyle(.secondary)
+                .listRowBackground(Color.clear)
+                .accessibilityIdentifier("computer-offline-notice")
         }
     }
 }
@@ -442,9 +466,12 @@ private struct ComputerConversation: View {
     @ObservedObject var model: ConnectionModel
     let chatID: String
     var body: some View {
-        if model.hasConnectedThisLaunch && !model.accessEnded, let chat = model.chats.first(where: { $0.id == chatID }) {
+        if !model.accessEnded, let chat = model.chats.first(where: { $0.id == chatID }) {
             ConversationView(model: model, chat: chat)
-        } else { ContentUnavailableView("Computer unavailable", systemImage: "desktopcomputer", description: Text("Check this computer in Settings.")) }
+        } else if !model.accessEnded, model.macConnected == nil || model.chats.isEmpty && model.isRefreshing {
+            // A notification or restored selection can arrive before saved chats load.
+            ProgressView("Loading chat…").accessibilityIdentifier("conversation-loading")
+        } else { ContentUnavailableView("Chat unavailable", systemImage: "bubble.left", description: Text(model.accessEnded ? "Pair this computer again in Settings." : "This chat is no longer on \(model.macName).")) }
     }
 }
 
@@ -646,7 +673,7 @@ struct ConnectionDetail: View {
         }) { PairComputerView(model: library.pairingModel()) }
         .alert("Remove \(model.macName)?", isPresented: $removing) {
             Button("Cancel", role: .cancel) { }
-            Button("Remove connection", role: .destructive) { model.forget() }
+            Button("Remove connection", role: .destructive) { Task { await model.forget() } }
         } message: {
             Text("This removes this computer’s saved chats, drafts and credentials from this device. Other connections stay saved. To revoke this device’s access, use Wonder on the computer.")
         }

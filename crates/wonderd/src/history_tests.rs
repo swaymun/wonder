@@ -715,3 +715,76 @@ async fn recovery_reads_beyond_thirty_two_pages_without_collecting_other_turns()
     );
     state.app_server.lock().await.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn compact_history_view_omits_unrendered_screenshot_data_only_when_requested() {
+    let (_dir, state) = crate::ingestion::tests::fixture().await;
+    state
+        .store
+        .set_conversation_thread("bot", "thread", None, "now")
+        .await
+        .unwrap();
+    let wonder_store::MessageInsert::Inserted(message) = state
+        .store
+        .insert_message("owner", "shot-client", "look", "hash", "bot", "1700000000000")
+        .await
+        .unwrap()
+    else {
+        panic!("message");
+    };
+    state
+        .store
+        .update_message_delivery(&message.id, "completed", Some("thread"), Some("turn"))
+        .await
+        .unwrap();
+    let image_url = format!("data:image/png;base64,{}", "A".repeat(200_000));
+    let mut event = HostEventEnvelope {
+        event_id: "shot".into(),
+        host_epoch: state.host_epoch.clone(),
+        sequence: 0,
+        occurred_at: "1700000001000".into(),
+        conversation_id: Some("bot".into()),
+        thread_id: Some("thread".into()),
+        turn_id: Some("turn".into()),
+        request_id: None,
+        device_id: None,
+        message_id: Some(message.id.clone()),
+        item_id: Some("screenshot-call".into()),
+        approval_id: None,
+        event: WonderEvent::ComputerUseScreenshot { image_url: image_url.clone() },
+    };
+    state.store.commit_event(&mut event).await.unwrap();
+    async fn page(state: &AppState, compact: bool) -> (usize, serde_json::Value) {
+        let mut headers = HeaderMap::new();
+        if compact {
+            headers.insert(history::COMPACT_VIEW_HEADER, HeaderValue::from_static("compact"));
+        }
+        let response = conversation_snapshot(State(state.clone()), Path("bot".into()), Query(Default::default()), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 10_000_000).await.unwrap();
+        (body.len(), serde_json::from_slice(&body).unwrap())
+    }
+    let (full_bytes, full) = page(&state, false).await;
+    let (compact_bytes, compact) = page(&state, true).await;
+    let screenshot = |page: &serde_json::Value| -> serde_json::Value {
+        page["thread"]["turns"].as_array().unwrap().iter()
+            .flat_map(|turn| turn["items"].as_array().unwrap().iter())
+            .find(|item| item["type"] == "imageView")
+            .cloned()
+            .expect("screenshot item")
+    };
+    // The web client still receives both copies it renders from.
+    assert_eq!(screenshot(&full)["payload"]["imageUrl"], image_url);
+    assert!(!full["events"].as_array().unwrap().is_empty());
+    // Native clients keep the item (and its turn) but not the unrendered data.
+    let item = screenshot(&compact);
+    assert!(item["payload"].get("imageUrl").is_none());
+    assert_eq!(item["state"], "completed");
+    assert_eq!(compact["events"], serde_json::json!([]));
+    assert_eq!(compact["lastSequence"], full["lastSequence"]);
+    assert!(compact_bytes < 10_000 && full_bytes > 400_000, "{compact_bytes} vs {full_bytes}");
+    let mut replay = event.clone();
+    history::compact_event(&mut replay);
+    assert_eq!(replay.sequence, event.sequence);
+    assert!(matches!(replay.event, WonderEvent::ComputerUseScreenshot { ref image_url } if image_url.is_empty()));
+}

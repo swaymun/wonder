@@ -57,6 +57,20 @@ final class ReadAcknowledgementTests: XCTestCase {
         XCTAssertFalse(projection.summaries[0].hasUnread)
         XCTAssertEqual(projection.summaries[0].title, "Renamed")
     }
+    func testUnrelatedReplayDuringReadRequestDoesNotDiscardAcknowledgement() throws {
+        var projection = ProjectionState()
+        let seen = try snapshot()
+        projection.install(seen)
+        projection.summaries = [try summary(unread: true)]
+        let visible = VisibleReadReceipt(snapshot: seen)
+        for sequence in UInt64(5)...20 {
+            try projection.consume(ReplayEvent(eventId: String(sequence), hostEpoch: "epoch",
+                sequence: sequence, occurredAt: "now", conversationId: "other-chat", event: EventBody(type: "activity")))
+        }
+        XCTAssertTrue(projection.applyReadAcknowledgement(try summary(unread: false), visible: visible, startedAtSequence: 4))
+        XCTAssertFalse(projection.summaries[0].hasUnread)
+        XCTAssertTrue(projection.dirty.contains("other-chat"))
+    }
     func testGroupsRequireDaemonWatermarkAndOnlyApplyMatchingVisibleRead() throws {
         let old = #"{"id":"group","conversationId":"chat","name":"Developers","isArchived":false,"messages":[]}"#
         let legacy = try JSONDecoder().decode(GroupRead.self, from: Data(old.utf8))
@@ -74,6 +88,8 @@ final class ReadAcknowledgementTests: XCTestCase {
         XCTAssertFalse(projection.applyGroupReadAcknowledgement(reply, visible: receipt, startedAtSequence: 4))
         XCTAssertTrue(projection.summaries[0].hasUnread)
         projection.dirty.remove("chat")
+        try projection.consume(ReplayEvent(eventId: "other", hostEpoch: "epoch", sequence: 5,
+            occurredAt: "now", conversationId: "other-chat", event: EventBody(type: "activity")))
         XCTAssertTrue(projection.applyGroupReadAcknowledgement(reply, visible: receipt, startedAtSequence: 4))
         XCTAssertFalse(projection.summaries[0].hasUnread)
         XCTAssertEqual(projection.groups["chat"]?.lastSequence, 4)

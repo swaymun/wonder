@@ -168,4 +168,120 @@ final class ReadCacheTests: XCTestCase {
         XCTAssertTrue(state.dirty.contains("a"))
         XCTAssertEqual(state.lastSequence, 11)
     }
+
+    private func event(_ sequence: UInt64, conversation: String?, body: EventBody = EventBody(type: "activity")) -> ReplayEvent {
+        ReplayEvent(eventId: String(sequence), hostEpoch: "epoch", sequence: sequence, occurredAt: "now", conversationId: conversation, event: body)
+    }
+
+    /// Streaming in another chat must not keep the open chat stale; its read
+    /// acknowledgement and live status wait on its own invalidations only.
+    func testOpenChatBecomesCurrentWhileAnotherChatStreams() throws {
+        var state = ProjectionState()
+        state.install(snapshot("a")); state.install(snapshot("b"))
+        try state.consume(event(11, conversation: "a"))
+        XCTAssertEqual(state.dirty, ["a"])
+        // Chat b streams while the refresh of a is in flight.
+        for sequence in UInt64(12)...40 { try state.consume(event(sequence, conversation: "b")) }
+        state.install(snapshot("a", sequence: 11))
+        XCTAssertEqual(state.dirty, ["b"])
+        XCTAssertEqual(state.lastSequence, 40)
+        // A snapshot read before b's newest change leaves b stale.
+        state.install(snapshot("b", sequence: 39))
+        XCTAssertTrue(state.dirty.contains("b"))
+        state.install(snapshot("b", sequence: 40))
+        XCTAssertTrue(state.dirty.isEmpty)
+    }
+
+    func testHostWideEventsInvalidateEveryChatButRuntimeNoticesDoNot() throws {
+        var state = ProjectionState()
+        state.install(snapshot("a")); state.install(snapshot("b"))
+        let notice = try JSONDecoder().decode(ReplayEvent.self, from: Data(#"{"eventId":"n","hostEpoch":"epoch","sequence":11,"occurredAt":"now","conversationId":null,"event":{"type":"activity","data":{"category":"App Server","state":"unhandled","detail":"account/rateLimits/updated"}}}"#.utf8))
+        state.listDirty = false
+        try state.consume(notice)
+        XCTAssertEqual(state.lastSequence, 11)
+        XCTAssertTrue(state.dirty.isEmpty)
+        XCTAssertFalse(state.listDirty)
+        // Other payload shapes decode and stay conservative.
+        let unknown = try JSONDecoder().decode(ReplayEvent.self, from: Data(#"{"eventId":"u","hostEpoch":"epoch","sequence":12,"occurredAt":"now","event":{"type":"future_kind","data":"opaque"}}"#.utf8))
+        try state.consume(unknown)
+        XCTAssertEqual(state.dirty, ["a", "b"])
+        XCTAssertTrue(state.listDirty)
+        state.install(snapshot("a", sequence: 12))
+        XCTAssertEqual(state.dirty, ["b"])
+    }
+
+    func testCacheWithoutInvalidationMarksNeedsTheGlobalCursor() throws {
+        var legacy = ProjectionState()
+        legacy.install(snapshot("a"))
+        legacy.lastSequence = 20
+        legacy.dirty = ["a"]
+        let encoded = try JSONEncoder().encode(legacy)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "invalidatedThrough")
+        var restored = try JSONDecoder().decode(ProjectionState.self, from: JSONSerialization.data(withJSONObject: object))
+        restored.install(snapshot("a", sequence: 19))
+        XCTAssertTrue(restored.dirty.contains("a"))
+        restored.install(snapshot("a", sequence: 20))
+        XCTAssertFalse(restored.dirty.contains("a"))
+    }
+
+    func testComputerScreenshotDataIsDroppedBeforeCaching() throws {
+        let data = "data:image/png;base64," + String(repeating: "A", count: 200_000)
+        let json = #"{"id":"shot","type":"imageView","state":"completed","text":"Computer screenshot","createdAt":"1","payload":{"imageUrl":"\#(data)","alt":"Screen"}}"#
+        let item = try JSONDecoder().decode(ReadItem.self, from: Data(json.utf8))
+        XCTAssertNil(item.payload?["imageUrl"])
+        XCTAssertEqual(item.payload?["alt"]?.string, "Screen")
+        XCTAssertLessThan(try JSONEncoder().encode(item).count, 1_000)
+        let linked = try JSONDecoder().decode(ReadItem.self, from: Data(#"{"id":"link","type":"imageView","state":"completed","createdAt":"1","payload":{"imageUrl":"https://example.com/a.png"}}"#.utf8))
+        XCTAssertEqual(linked.payload?["imageUrl"]?.string, "https://example.com/a.png")
+    }
+
+    func testWriterKeepsNewestStateAndRemovalCannotBeUndoneByPendingWrite() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ReadStore(root: root, host: "mac", device: "phone")
+        let writes = LockedCounter()
+        let writer = ProjectionWriter(store: store, delay: .milliseconds(50)) { result, _ in
+            if case .success = result { writes.increment() }
+        }
+        var state = ProjectionState(); state.install(snapshot())
+        for sequence in UInt64(11)...60 { state.lastSequence = sequence; writer.schedule(state) }
+        await writer.flush()
+        XCTAssertEqual(try store.load().lastSequence, 60)
+        XCTAssertLessThan(writes.value, 5, "A burst must coalesce instead of encoding every state")
+        state.lastSequence = 61
+        writer.schedule(state)
+        try await writer.remove()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.directory.path))
+        writer.schedule(state); await writer.flush()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.directory.path))
+    }
+
+    func testReplacementLoadsRetiringWritersFinalStateBeforeWriting() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ReadStore(root: root, host: "mac", device: "phone")
+        let previous = ProjectionWriter(store: store, delay: .seconds(30))
+        var state = ProjectionState(); state.install(snapshot())
+        previous.schedule(state)
+        previous.retire()
+        var loaded = try await ProjectionWriter.load(store)
+        XCTAssertEqual(loaded.lastSequence, state.lastSequence)
+        let replacement = ProjectionWriter(store: store)
+        loaded.lastSequence += 1
+        replacement.schedule(loaded)
+        state.lastSequence += 100
+        previous.schedule(state)
+        await previous.flush()
+        await replacement.flush()
+        XCTAssertEqual(try store.load().lastSequence, loaded.lastSequence)
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func increment() { lock.lock(); count += 1; lock.unlock() }
 }

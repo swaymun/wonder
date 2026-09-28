@@ -1378,6 +1378,32 @@ async fn process_app_server_notification(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     });
+    if let Some(active) = notification
+        .get("_wonderRuntimeId")
+        .and_then(serde_json::Value::as_str)
+        .zip(thread_id.as_deref())
+        .and_then(|(runtime, thread)| state.ingestion.planning_thread_active(runtime, thread))
+    {
+        // These threads were created by Wonder itself with tools disabled.
+        // Only the completion is needed, and reading ephemeral thread history
+        // here can otherwise stall the shared notification consumer for 30s.
+        if active && method == "turn/completed" {
+            let identity_key = app_server_notification_key(method, &notification, &params);
+            return enqueue_pending_app_server_notification(
+                state,
+                method,
+                &notification,
+                &params,
+                thread_id.as_deref(),
+                turn_id.as_deref(),
+                item_id.as_deref(),
+                identity_key.as_deref(),
+            )
+            .await
+            .is_ok();
+        }
+        return true;
+    }
     if matches!(method, "thread/goal/updated" | "thread/goal/cleared") {
         let Some(thread) = thread_id.as_deref() else {
             return false;
@@ -10661,7 +10687,8 @@ async fn events_socket(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value == state.loopback_capability);
     let session = cookie_value(&headers, "__Host-wonder_session");
-    ws.on_upgrade(move |socket| stream_events(socket, state, session, local_capability))
+    let compact = history::wants_compact_view(&headers);
+    ws.on_upgrade(move |socket| stream_events(socket, state, session, local_capability, compact))
 }
 
 async fn event_challenge(

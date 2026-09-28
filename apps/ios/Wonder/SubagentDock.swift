@@ -1,6 +1,20 @@
 import SwiftUI
 import WonderPairing
 
+/// One shared visual envelope keeps both controls aligned as text scales.
+private struct ComposerStatusPill: ViewModifier {
+    @ScaledMetric(relativeTo: .subheadline) private var height: CGFloat = 36
+    func body(content: Content) -> some View {
+        content
+            .font(.subheadline.weight(.medium))
+            .padding(.horizontal, 12)
+            .frame(minWidth: 44, minHeight: height)
+            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+    }
+}
+
 /// Small, value-only surface: opening the roster never replaces the parent route.
 struct SubagentDock: View {
     let agents: [SubagentSummary]
@@ -12,9 +26,9 @@ struct SubagentDock: View {
 
     private var active: [SubagentSummary] { agents.filter { !$0.isFinished } }
     private var completed: [SubagentSummary] { agents.filter(\.isFinished) }
+    private var running: Int { agents.filter { ["active", "running", "inProgress"].contains($0.status) }.count }
+    private var count: Int { available && running > 0 ? running : agents.count }
     private var label: String {
-        let running = agents.filter { ["active", "running", "inProgress"].contains($0.status) }.count
-        let count = available && running > 0 ? running : agents.count
         return "\(count) \(count == 1 ? "agent" : "agents")" + (available && running > 0 ? " running" : "")
     }
 
@@ -23,13 +37,9 @@ struct SubagentDock: View {
             Button { isPresented.toggle() } label: {
                 HStack(spacing: 6) {
                     familyIcon
-                    Text(label).fixedSize(horizontal: false, vertical: true)
+                    Text(count.formatted()).monospacedDigit().fixedSize()
                 }
-                    .font(.subheadline.weight(.medium))
-                    .padding(.horizontal, 12).padding(.vertical, 5)
-                    .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
-                    .frame(minHeight: 44, alignment: .bottom)
-                    .contentShape(Rectangle())
+                    .modifier(ComposerStatusPill())
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("subagent-status-pill")
@@ -88,12 +98,14 @@ struct GoalDock: View {
     let pause: () async -> Void
     let resume: () async -> Void
     let clear: () async -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .subheadline) private var iconSize: CGFloat = 20
 
     private var statusLabel: String {
         switch goal.status {
         case "active": "active"
         case "paused": "paused"
-        case "blocked": "blocked"
+        case "blocked": "needs attention"
         case "usageLimited": "usage limited"
         case "budgetLimited": "budget reached"
         case "complete": "complete"
@@ -101,19 +113,32 @@ struct GoalDock: View {
         }
     }
 
+    @ViewBuilder private var statusIcon: some View {
+        switch goal.status {
+        case "active":
+            if reduceMotion { Image(systemName: "hourglass") }
+            else { ProgressView().tint(.primary) }
+        case "paused", "usageLimited", "budgetLimited": Image(systemName: "pause.fill")
+        case "complete": Image(systemName: "checkmark")
+        case "blocked": Image(systemName: "exclamationmark.circle")
+        default: Image(systemName: "questionmark.circle")
+        }
+    }
+
     var body: some View {
         Button { isPresented = true } label: {
-            Label("1 goal \(statusLabel)", systemImage: "scope")
-                .font(.subheadline.weight(.medium))
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12).padding(.vertical, 5)
-                .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
-                .frame(minHeight: 44, alignment: .bottom)
-                .contentShape(Rectangle())
+            HStack(spacing: 6) {
+                Image(systemName: "scope")
+                    .frame(width: iconSize, height: iconSize)
+                statusIcon
+                    .frame(width: iconSize, height: iconSize)
+            }
+            .accessibilityHidden(true)
+            .modifier(ComposerStatusPill())
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("goal-status-pill")
-        .accessibilityLabel("1 goal \(statusLabel)")
+        .accessibilityLabel("Goal \(statusLabel)")
         .accessibilityValue(isPresented ? "Expanded" : "Collapsed")
         .accessibilityHint("Show goal details and controls")
         .sheet(isPresented: $isPresented) {
@@ -188,48 +213,36 @@ private struct GoalDetailsSheet: View {
                         if let validationError {
                             Text(validationError).font(.footnote).foregroundStyle(.red)
                         }
-                        HStack {
-                            Button("Cancel") { editing = false; validationError = nil }
-                            Spacer()
-                            Button("Save") { saveDraft() }
-                                .disabled(saving || objectiveDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                .accessibilityIdentifier("goal-save")
-                        }
                     } else {
                         Text(goal.objective)
                             .font(.body)
                             .textSelection(.enabled)
                             .accessibilityIdentifier("goal-objective")
-                        Button("Edit goal", systemImage: "pencil") {
-                            objectiveDraft = goal.objective
-                            budgetDraft = goal.tokenBudget.map(String.init) ?? ""
-                            timeBudgetDraft = goal.timeBudgetSeconds.map { String(($0 + 59) / 60) } ?? ""
-                            originalTimeBudgetDraft = timeBudgetDraft
-                            editing = true
-                            detent = .large
-                        }
-                        .disabled(saving)
-                        .accessibilityIdentifier("goal-edit")
+                        actionRow
                     }
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        LabeledContent("Status", value: statusTitle)
-                        LabeledContent("Elapsed", value: elapsedText)
-                        if goal.timeBudgetSeconds != nil {
-                            LabeledContent("Active time", value: durationText(goal.timeUsedSeconds))
+                    VStack(alignment: .leading, spacing: 12) {
+                        metadataRow {
+                            metadata(statusTitle, icon: statusSymbol, meaning: "Status, " + statusTitle, id: "status")
+                            metadata(elapsedText, icon: "clock", meaning: "Elapsed, " + elapsedText, id: "elapsed")
                         }
+                        metadataRow {
                         if goal.tokensUsed > 0 || goal.tokenBudget != nil {
-                            LabeledContent("Tokens used", value: goal.tokensUsed.formatted())
-                        }
-                        if let budget = goal.tokenBudget {
-                            LabeledContent("Token budget", value: budget.formatted())
+                            let usage = goal.tokensUsed.formatted()
+                            let value = goal.tokenBudget.map { usage + " / " + $0.formatted() + " tokens" } ?? usage + " tokens"
+                            let meaning = "Tokens used, " + usage + (goal.tokenBudget.map { ". Token budget, " + $0.formatted() } ?? "")
+                            metadata(value, icon: "number.circle", meaning: meaning, id: "tokens")
                         }
                         if let seconds = goal.timeBudgetSeconds {
                             let minutes = max(1, (seconds + 59) / 60)
-                            LabeledContent("Time limit", value: "\(minutes) min")
+                            metadata("\(max(0, goal.timeUsedSeconds) / 60) / \(minutes) min", icon: "timer",
+                                     meaning: "Active time, " + durationText(goal.timeUsedSeconds) + ". Time limit, \(minutes) min",
+                                     id: "time")
+                        }
                         }
                     }
                     .font(.subheadline)
+                    .foregroundStyle(.secondary)
 
                     if let error {
                         Text(error)
@@ -238,22 +251,6 @@ private struct GoalDetailsSheet: View {
                             .accessibilityIdentifier("goal-error")
                     }
 
-                    if !editing {
-                        if goal.status == "active" {
-                            Button("Pause goal", systemImage: "pause.fill") { perform(pause) }
-                                .disabled(saving)
-                                .accessibilityIdentifier("goal-pause")
-                        } else if goal.status != "complete" {
-                            Button("Resume goal", systemImage: "play.fill") { perform(resume) }
-                                .disabled(saving)
-                                .accessibilityIdentifier("goal-resume")
-                        }
-                        Button("Remove goal", systemImage: "trash", role: .destructive) {
-                            showingRemoveConfirmation = true
-                        }
-                        .disabled(saving)
-                        .accessibilityIdentifier("goal-remove")
-                    }
                     if saving { ProgressView("Updating goal…") }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -262,9 +259,23 @@ private struct GoalDetailsSheet: View {
             .accessibilityIdentifier("goal-details-scroll")
             .navigationTitle("Goal")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) {
-                Button("Done") { dismiss() }.accessibilityIdentifier("goal-done")
-            } }
+            .toolbar {
+                if editing {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { editing = false; validationError = nil }
+                            .disabled(saving)
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") { saveDraft() }
+                            .disabled(saving || objectiveDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityIdentifier("goal-save")
+                    }
+                } else {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }.accessibilityIdentifier("goal-done")
+                    }
+                }
+            }
             .presentationDetents([.medium, .large], selection: $detent)
             .presentationDragIndicator(.visible)
             .confirmationDialog("Remove this goal?", isPresented: $showingRemoveConfirmation, titleVisibility: .visible) {
@@ -275,6 +286,74 @@ private struct GoalDetailsSheet: View {
                 Text("This removes the goal from this conversation.")
             }
         }
+    }
+
+    private var statusSymbol: String {
+        switch goal.status {
+        case "active": "play.circle"
+        case "paused", "usageLimited", "budgetLimited": "pause.circle"
+        case "complete": "checkmark.circle"
+        case "blocked": "exclamationmark.circle"
+        default: "questionmark.circle"
+        }
+    }
+
+    private func metadataRow<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 20) { content() }
+                .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 12) { content() }
+        }
+    }
+
+    private func metadata(_ value: String, icon: String, meaning: String, id: String) -> some View {
+        Label(value, systemImage: icon)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(meaning)
+            .accessibilityIdentifier("goal-metadata-" + id)
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 16) {
+            Button {
+                objectiveDraft = goal.objective
+                budgetDraft = goal.tokenBudget.map(String.init) ?? ""
+                timeBudgetDraft = goal.timeBudgetSeconds.map { String(($0 + 59) / 60) } ?? ""
+                originalTimeBudgetDraft = timeBudgetDraft
+                editing = true
+                detent = .large
+            } label: {
+                Label("Edit goal", systemImage: "pencil").frame(minWidth: 48, minHeight: 48)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("goal-edit")
+            if goal.status == "active" {
+                Button { perform(pause) } label: {
+                    Label("Pause goal", systemImage: "pause.fill").frame(minWidth: 48, minHeight: 48)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityIdentifier("goal-pause")
+            } else if goal.status != "complete" {
+                Button { perform(resume) } label: {
+                    Label("Resume goal", systemImage: "play.fill").frame(minWidth: 48, minHeight: 48)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityIdentifier("goal-resume")
+            }
+            Spacer(minLength: 0)
+            Button(role: .destructive) { showingRemoveConfirmation = true } label: {
+                Label("Remove goal", systemImage: "trash").frame(minWidth: 48, minHeight: 48)
+                    .contentShape(Rectangle())
+            }
+            .foregroundStyle(.red)
+            .accessibilityIdentifier("goal-remove")
+        }
+        .labelStyle(.iconOnly)
+        .font(.title3)
+        .buttonStyle(.plain)
+        .foregroundStyle(.tint)
+        .disabled(saving)
     }
 
     private func saveDraft() {

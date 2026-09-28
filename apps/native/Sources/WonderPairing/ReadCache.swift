@@ -304,6 +304,25 @@ public struct ReadItem: Codable, Sendable {
     public var payload: [String: ThreadValue]? = nil
 }
 
+extension ReadItem {
+    private enum CodingKeys: String, CodingKey { case id, type, state, text, createdAt, payload }
+    /// Hosts attach each computer-use screenshot inline as a multi-megabyte
+    /// base64 data URL. Native clients never render that field, so drop it
+    /// before it reaches row projection, the timeline or the on-device cache.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        type = try container.decode(String.self, forKey: .type)
+        state = try container.decode(String.self, forKey: .state)
+        text = try container.decodeIfPresent(String.self, forKey: .text)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+        payload = try container.decodeIfPresent([String: ThreadValue].self, forKey: .payload)
+        if type == "imageView", payload?["imageUrl"]?.string?.hasPrefix("data:") == true {
+            payload?["imageUrl"] = nil
+        }
+    }
+}
+
 /// Retains the daemon's sanitized structured payload through disk cache/replay.
 /// Unknown tool fields survive without making the whole conversation undecodable.
 public enum ThreadValue: Codable, Equatable, Sendable {
@@ -345,6 +364,29 @@ public struct ReplayEvent: Codable, Sendable {
 
 public struct EventBody: Codable, Sendable {
     public let type: String
+    /// Activity category/state, read only to recognize host-wide runtime
+    /// notices. Other payload shapes decode as nil rather than failing replay.
+    public let category: String?
+    public let state: String?
+    public init(type: String, category: String? = nil, state: String? = nil) {
+        self.type = type; self.category = category; self.state = state
+    }
+    private enum CodingKeys: String, CodingKey { case type, data }
+    private struct Activity: Codable { let category: String?; let state: String? }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decode(String.self, forKey: .type)
+        let activity = (try? container.decodeIfPresent(Activity.self, forKey: .data)) ?? nil
+        category = activity?.category; state = activity?.state
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        if category != nil || state != nil { try container.encode(Activity(category: category, state: state), forKey: .data) }
+    }
+    /// Runtime status the host journals without a conversation (MCP startup,
+    /// rate limits, app lists, warnings). It changes no chat, list or Bot data.
+    public var isHostRuntimeNotice: Bool { type == "activity" && category == "App Server" && state == "unhandled" }
 }
 
 public struct ProjectionState: Codable, Sendable {
@@ -352,9 +394,34 @@ public struct ProjectionState: Codable, Sendable {
     public var managedBots: [ManagedBot]?
     public var groups: [String: GroupRead] = [:]
     public var dirty: Set<String> = []
+    /// The newest replay sequence that invalidated each dirty conversation. A
+    /// conversation without an entry needs a snapshot at the global cursor.
+    /// Optional so caches written before scoped invalidation still decode.
+    public var invalidatedThrough: [String: UInt64]?
     public var listDirty = true
     public var positions: [String: String] = [:]
     public init() { hostEpoch = ""; lastSequence = 0; summaries = []; snapshots = [:] }
+    /// A snapshot read at `sequence` covers this conversation's invalidations
+    /// through that sequence. Later events for other conversations do not make
+    /// it stale; the host's read fence uses the same per-conversation rule.
+    public func covers(_ conversation: String, through sequence: UInt64) -> Bool {
+        sequence >= (invalidatedThrough?[conversation] ?? lastSequence)
+    }
+    public mutating func markClean(_ conversation: String) {
+        dirty.remove(conversation)
+        invalidatedThrough?[conversation] = nil
+    }
+    /// Marks every cached conversation stale as of the current cursor, for a
+    /// cold load, resnapshot, epoch change or host-wide event.
+    public mutating func invalidateAll() {
+        var marks = invalidatedThrough ?? [:]
+        for conversation in Set(snapshots.keys).union(groups.keys) {
+            dirty.insert(conversation)
+            marks[conversation] = max(marks[conversation] ?? 0, lastSequence)
+        }
+        invalidatedThrough = marks
+        listDirty = true
+    }
     // A snapshot covers one chat, never the rest of the host.
     public mutating func install(_ snapshot: ConversationSnapshot) {
         if let existing = snapshots[snapshot.conversationId], existing.hostEpoch == snapshot.hostEpoch {
@@ -365,22 +432,28 @@ public struct ProjectionState: Codable, Sendable {
         if hostEpoch != snapshot.hostEpoch {
             hostEpoch = snapshot.hostEpoch
             lastSequence = snapshot.lastSequence
-            dirty.formUnion(snapshots.keys)
-            dirty.formUnion(groups.keys)
-            listDirty = true
+            invalidatedThrough = nil
+            invalidateAll()
         }
         snapshots[snapshot.conversationId] = snapshot
-        if snapshot.lastSequence >= lastSequence { dirty.remove(snapshot.conversationId) }
+        if covers(snapshot.conversationId, through: snapshot.lastSequence) { markClean(snapshot.conversationId) }
     }
     public mutating func consume(_ event: ReplayEvent) throws {
         guard event.event.type != "resync_required", event.hostEpoch == hostEpoch else { throw ReadFailure.resync }
         if event.sequence <= lastSequence { return }
         guard lastSequence < UInt64.max, event.sequence == lastSequence + 1 else { throw ReadFailure.resync }
-        // Unknown events conservatively invalidate all cached scopes too.
-        dirty.formUnion(snapshots.keys)
-        dirty.formUnion(groups.keys)
-        listDirty = true
         lastSequence = event.sequence
+        let conversation = event.conversationId.flatMap { $0.isEmpty ? nil : $0 }
+        if conversation == nil && event.event.isHostRuntimeNotice { return }
+        listDirty = true
+        if let conversation {
+            // Every journaled projection change names its conversation.
+            dirty.insert(conversation)
+            invalidatedThrough = (invalidatedThrough ?? [:]).merging([conversation: event.sequence]) { _, new in new }
+        } else {
+            // Host-wide or unknown events conservatively invalidate every scope.
+            invalidateAll()
+        }
     }
 
     public var hostEpoch: String
@@ -466,6 +539,11 @@ public struct ReadRow: Identifiable, Sendable {
     public let time: Double
     public let turnId: String?
     public let item: ReadItem?
+    /// Prepared once per projected row. Timeline grouping reads these for every
+    /// row; recomputing them decoded tool JSON on every SwiftUI update.
+    public private(set) var profileStatus: String?
+    public private(set) var activitySummary: ActivityPresentation?
+    public private(set) var toolFiles: [ConversationFile] = []
     /// Commentary is visible Bot speech, never private reasoning or a tool result.
     public var isCommentary: Bool { !isUser && item?.type == "agentMessage" && item?.payload?["phase"]?.string == "commentary" }
     public init(id: String, author: String, text: String, isUser: Bool, timestamp: String, authorId: String? = nil,
@@ -476,8 +554,10 @@ public struct ReadRow: Identifiable, Sendable {
         self.commandSummary = item.flatMap(CommandSummary.prepare)
         self.fileChangeSummary = item.flatMap(FileChangeSummary.prepare)
         self.id = id; self.author = author; self.authorId = authorId; self.text = text; self.isUser = isUser; self.timestamp = timestamp
-        if let milliseconds = Double(timestamp) { time = milliseconds / 1000; return }
-        time = ReadTimestamp.seconds(timestamp) ?? 0
+        time = Double(timestamp).map { $0 / 1000 } ?? ReadTimestamp.seconds(timestamp) ?? 0
+        profileStatus = makeProfileStatus()
+        activitySummary = presentation(includeDetails: false)
+        toolFiles = makeToolFiles()
     }
 }
 
@@ -494,7 +574,12 @@ public struct ReadStore: Sendable {
         guard FileManager.default.fileExists(atPath: url.path) else { return ProjectionState() }
         return try JSONDecoder().decode(ProjectionState.self, from: Data(contentsOf: url))
     }
-    public func save(_ state: ProjectionState) throws { try write(JSONEncoder().encode(state), name: "read-cache-v2.json") }
+    /// Returns the encoded size so diagnostics can relate write time to cache size.
+    @discardableResult public func save(_ state: ProjectionState) throws -> Int {
+        let data = try JSONEncoder().encode(state)
+        try write(data, name: "read-cache-v2.json")
+        return data.count
+    }
     public func savePosition(_ position: String, conversation: String) throws {
         try saveIntent(JSONEncoder().encode(position), conversation: "reading-position-v1:" + conversation)
     }
@@ -533,6 +618,88 @@ public struct ReadStore: Sendable {
         #else
         try data.write(to: directory.appendingPathComponent(name), options: .atomic)
         #endif
+    }
+}
+
+/// Writes the read projection away from the caller's thread. The whole cache
+/// can be megabytes, and replay/refresh can replace it several times a second,
+/// so writes are coalesced to the newest pending state. Each write is still one
+/// atomic replacement of a consistent state, and the serial queue guarantees an
+/// older state never lands after a newer one. Removal shares the queue, so a
+/// write accepted before `remove()` cannot recreate a forgotten cache.
+public final class ProjectionWriter: @unchecked Sendable {
+    public let store: ReadStore
+    // Replacement models can own the same partition. Serialize their loads,
+    // final writes and removals without blocking the UI during ownership changes.
+    private static let worker = DispatchQueue(label: "wonder.read-cache.writer", qos: .utility)
+    private var queue: DispatchQueue { Self.worker }
+    private let lock = NSLock()
+    private let delay: DispatchTimeInterval
+    private let completion: @Sendable (Result<Int, Error>, TimeInterval) -> Void
+    private var pending: ProjectionState?
+    private var scheduled = false
+    private var retired = false
+
+    /// `completion` runs on the writer queue after each write with the encoded
+    /// size (or error) and the elapsed write time.
+    public init(store: ReadStore, delay: DispatchTimeInterval = .milliseconds(750),
+                completion: @escaping @Sendable (Result<Int, Error>, TimeInterval) -> Void = { _, _ in }) {
+        self.store = store
+        self.delay = delay
+        self.completion = completion
+    }
+
+    public func schedule(_ state: ProjectionState) {
+        lock.lock(); defer { lock.unlock() }
+        guard !retired else { return }
+        pending = state
+        guard !scheduled else { return }
+        scheduled = true
+        queue.asyncAfter(deadline: .now() + delay) { [self] in drain() }
+    }
+
+    /// Persists the newest pending state now, without waiting for the delay.
+    public func flush(then done: @escaping @Sendable () -> Void = {}) {
+        queue.async { [self] in drain(); done() }
+    }
+
+    public func flush() async {
+        await withCheckedContinuation { continuation in
+            flush(then: { continuation.resume() })
+        }
+    }
+
+    public static func load(_ store: ReadStore) async throws -> ProjectionState {
+        try await withCheckedThrowingContinuation { continuation in
+            worker.async { continuation.resume(with: Result { try store.load() }) }
+        }
+    }
+
+    /// Stops accepting writes, drops pending ones and removes the cache
+    /// directory after any write already in progress.
+    public func remove() async throws {
+        lock.withLock { retired = true; pending = nil }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { [self] in continuation.resume(with: Result { try store.remove() }) }
+        }
+    }
+
+    /// Stops accepting writes and queues the newest accepted state for saving.
+    public func retire() {
+        lock.withLock { retired = true }
+        flush(then: {})
+    }
+
+    private func drain() {
+        lock.lock()
+        scheduled = false
+        let state = pending
+        pending = nil
+        lock.unlock()
+        guard let state else { return }
+        let start = Date()
+        do { completion(.success(try store.save(state)), Date().timeIntervalSince(start)) }
+        catch { completion(.failure(error), Date().timeIntervalSince(start)) }
     }
 }
 

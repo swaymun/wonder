@@ -24,6 +24,7 @@ pub(super) async fn stream_events(
     state: AppState,
     session_token: Option<String>,
     local_capability: bool,
+    compact: bool,
 ) {
     // Subscribe before authentication/replay so a revocation cannot race the
     // setup window and leave a live socket authorized after its device is
@@ -94,12 +95,12 @@ pub(super) async fn stream_events(
                 Some(Ok(_)) | Some(Err(_)) => return,
             },
             _ = poll.tick() => {
-                if !send_committed_events(&mut socket, &state, &mut last_sent).await { return; }
+                if !send_committed_events(&mut socket, &state, &mut last_sent, compact).await { return; }
             },
             wakeup = receiver.recv() => {
                 if matches!(wakeup, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
                 // Broadcast order and lag do not determine delivery order.
-                if !send_committed_events(&mut socket, &state, &mut last_sent).await { return; }
+                if !send_committed_events(&mut socket, &state, &mut last_sent, compact).await { return; }
             },
             revoked = revocations.recv() => match revoked {
                 Ok(device_id) if device_id == subscription.device_id => return,
@@ -114,6 +115,7 @@ async fn send_committed_events(
     socket: &mut WebSocket,
     state: &AppState,
     last_sent: &mut u64,
+    compact: bool,
 ) -> bool {
     let events = match state
         .store
@@ -130,7 +132,10 @@ async fn send_committed_events(
             return false;
         }
     };
-    for event in events {
+    for mut event in events {
+        if compact {
+            history::compact_event(&mut event);
+        }
         let Ok(payload) = serde_json::to_string(&event) else {
             return false;
         };

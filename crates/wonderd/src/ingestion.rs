@@ -3,7 +3,7 @@
 use crate::AppState;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use wonder_app_server::{NotificationSink, RuntimeHealth};
@@ -21,6 +21,32 @@ struct Status {
     consumer: Option<tokio::task::AbortHandle>,
     error: Option<String>,
     runtimes: HashMap<String, RuntimeRegistration>,
+    planning_threads: HashSet<(String, String)>,
+    retired_planning_threads: VecDeque<((String, String), Instant)>,
+}
+
+/// Internal planners have no readable transcript or child ownership to discover.
+/// Keep their runtime provenance separate from ordinary conversation routing.
+pub(crate) struct PlanningThread {
+    ingestion: Ingestion,
+    key: (String, String),
+}
+
+impl Drop for PlanningThread {
+    fn drop(&mut self) {
+        let mut status = self
+            .ingestion
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        status.planning_threads.remove(&self.key);
+        status
+            .retired_planning_threads
+            .push_back((self.key.clone(), Instant::now()));
+        while status.retired_planning_threads.len() > 256 {
+            status.retired_planning_threads.pop_front();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -65,6 +91,45 @@ pub struct Readiness {
 }
 
 impl Ingestion {
+    pub(crate) fn register_planning_thread(&self, runtime: &str, thread: &str) -> PlanningThread {
+        let key = (runtime.to_owned(), thread.to_owned());
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .planning_threads
+            .insert(key.clone());
+        PlanningThread {
+            ingestion: self.clone(),
+            key,
+        }
+    }
+
+    /// Some(true) is a waiting planner; Some(false) absorbs late buffered events
+    /// after completion/cancellation. Unknown runtime/thread pairs stay on the
+    /// normal verified child-discovery path.
+    pub(crate) fn planning_thread_active(&self, runtime: &str, thread: &str) -> Option<bool> {
+        let mut status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        while status
+            .retired_planning_threads
+            .front()
+            .is_some_and(|(_, retired)| retired.elapsed() > Duration::from_secs(60))
+        {
+            status.retired_planning_threads.pop_front();
+        }
+        let key = (runtime.to_owned(), thread.to_owned());
+        if status.planning_threads.contains(&key) {
+            Some(true)
+        } else if status
+            .retired_planning_threads
+            .iter()
+            .any(|(retired, _)| retired == &key)
+        {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn request_reconciliation(&self) {
         let mut status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         for provider in status.providers.values_mut() {
@@ -835,6 +900,52 @@ pub(crate) mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
     use wonder_app_server::{AppServerClient, LaunchConfig};
+
+    #[tokio::test]
+    async fn cancelled_planner_retires_only_its_runtime_thread_and_bounds_late_events() {
+        let ingestion = Ingestion::default();
+        let child_ingestion = ingestion.clone();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _registration = child_ingestion.register_planning_thread("runtime", "planner");
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        assert_eq!(
+            ingestion.planning_thread_active("runtime", "planner"),
+            Some(true)
+        );
+        assert_eq!(ingestion.planning_thread_active("other", "planner"), None);
+        assert_eq!(ingestion.planning_thread_active("runtime", "child"), None);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            ingestion.planning_thread_active("runtime", "planner"),
+            Some(false)
+        );
+        for index in 0..256 {
+            drop(ingestion.register_planning_thread("runtime", &format!("planner-{index}")));
+        }
+        assert_eq!(ingestion.planning_thread_active("runtime", "planner"), None);
+        assert!(ingestion.inner.lock().unwrap().planning_threads.is_empty());
+        {
+            let mut status = ingestion.inner.lock().unwrap();
+            for (_, retired) in &mut status.retired_planning_threads {
+                *retired = Instant::now() - Duration::from_secs(61);
+            }
+        }
+        assert_eq!(
+            ingestion.planning_thread_active("runtime", "planner-255"),
+            None
+        );
+        assert!(ingestion
+            .inner
+            .lock()
+            .unwrap()
+            .retired_planning_threads
+            .is_empty());
+    }
 
     pub(crate) async fn fixture() -> (tempfile::TempDir, AppState) {
         let dir = tempfile::tempdir().unwrap();

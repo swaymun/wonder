@@ -218,6 +218,9 @@ async fn structured(
         .and_then(|r| r["thread"]["id"].as_str())
         .ok_or("Planning returned no thread")?
         .to_owned();
+    let _planning_thread = state
+        .ingestion
+        .register_planning_thread(rpc.health().id(), &thread);
     let response=rpc.request("turn/start",json!({"threadId":thread,"input":[{"type":"text","text":prompt}],"model":settings.model,"effort":settings.reasoning_effort,"serviceTier":settings.service_tier,"outputSchema":schema})).await.map_err(|e|e.to_string())?;
     if let Some(e) = response.error {
         return Err(format!("Could not start planning: {e:?}"));
@@ -347,11 +350,7 @@ pub(super) async fn propose(State(state): State<AppState>, Json(input): Json<Pro
         &["name", "purpose", "memberBotIds", "newBots"],
     );
     // Keep generated standing instructions compact and easy to review.
-    let brevity = if AgentFamily::for_model(Some(&input.settings.model)) == AgentFamily::Claude {
-        " Keep each new Bot's standing instructions to at most five short sentences (under 800 characters); the user can expand them later."
-    } else {
-        ""
-    };
+    let brevity = " Keep each new Bot's standing instructions to at most five short sentences (under 800 characters); the user can expand them later.";
     let prompt=format!("Propose a small useful team for this group. Reuse relevant existing Bots; propose new ones only for missing roles. Name <=80 bytes, purpose <=500 characters. New Bot purposes <=160 bytes and standing instructions <=8000 bytes.{brevity} No duplicate roles or invented existing IDs. This is only a proposal for user review.\nDescription: {}\nExisting Bots: {}",input.description,json!(roster));
     match structured(&state, &input.settings, prompt, schema, None).await {
         Ok(v) => match serde_json::from_value::<Proposal>(v) {
@@ -1694,8 +1693,8 @@ mod tests {
         );
         assert!(decode_plan("Here is your team").is_err());
     }
-    // A planning thread has no persisted history. Its completed result must
-    // still reach the proposal response when subagent discovery cannot read it.
+    // Contract: proposals finish without reading ephemeral history, even if
+    // that RPC stalls. Exercise the real notification consumer and route.
     #[tokio::test]
     async fn proposal_completes_when_ephemeral_history_is_unavailable() {
         use crate::permission_modes::tests::{call, fixture};
@@ -1704,11 +1703,16 @@ mod tests {
         let source = std::fs::read_to_string(&path).unwrap().replacen(
             "    result = {}\n",
             r#"    if method == 'thread/read' and r.get('params', {}).get('threadId') == 'thread':
+        with open(__file__ + '.history-reads', 'a') as reads:
+            reads.write('read\n')
+        import time
+        time.sleep(10)
         print(json.dumps({'id':r['id'],'error':{'code':-32000,'message':'Ephemeral thread has no persisted history'}}),flush=True)
         continue
     if method == 'turn/start' and 'outputSchema' in r.get('params', {}):
         proposal = {'name':'Test team','purpose':'Test','memberBotIds':['bot'],'newBots':[]}
         print(json.dumps({'id':r['id'],'result':{'turn':{'id':'plan-turn'}}}),flush=True)
+        print(json.dumps({'method':'item/agentMessage/delta','params':{'threadId':'thread','turnId':'plan-turn','itemId':'answer','delta':'proposal'}}),flush=True)
         print(json.dumps({'method':'turn/completed','params':{'threadId':'thread','turn':{'id':'plan-turn','status':'completed','items':[{'type':'agentMessage','id':'answer','text':json.dumps(proposal)}]}}}),flush=True)
         continue
     result = {}
@@ -1730,6 +1734,33 @@ mod tests {
         )).await.expect("A completed planning result must not wait for runtime history");
         assert_eq!(response.0, StatusCode::OK, "{}", response.1);
         assert_eq!(response.1["name"], "Test team");
+        assert!(!dir.path().join("runtime.py.history-reads").exists());
+        let runtime_id = state.app_server.lock().await.rpc().health().id().to_owned();
+        assert_eq!(
+            state
+                .ingestion
+                .planning_thread_active(&runtime_id, "thread"),
+            Some(false)
+        );
+        assert_eq!(
+            state
+                .ingestion
+                .planning_thread_active("unrelated-runtime", "thread"),
+            None
+        );
+        // A late completion after the waiter exits must not create an orphan
+        // pending result or invoke history discovery again.
+        assert!(
+            process_app_server_notification(
+                &state,
+                json!({
+                    "_wonderRuntimeId":runtime_id,"method":"turn/completed",
+                    "params":{"threadId":"thread","turn":{"id":"plan-turn","status":"completed"}}
+                }),
+                false
+            )
+            .await
+        );
         assert!(state
             .store
             .pending_app_server_notifications_for_thread_and_turn("thread", "plan-turn")

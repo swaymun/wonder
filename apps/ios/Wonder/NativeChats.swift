@@ -312,13 +312,31 @@ struct ChatActionDialogs: ViewModifier {
     }
 }
 
-private struct LatestReadLayout: Equatable {
-    let receipt: VisibleReadReceipt
-    let frame: CGRect
+/// The receipt of the latest row while its end is inside the viewport. The row
+/// reports visibility rather than its frame, so scrolling changes the
+/// scroller's state only when visibility flips, not on every frame.
+private struct LatestReadVisibilityKey: PreferenceKey {
+    static var defaultValue: VisibleReadReceipt? { nil }
+    static func reduce(value: inout VisibleReadReceipt?, nextValue: () -> VisibleReadReceipt?) { if let next = nextValue() { value = next } }
 }
-private struct LatestReadLayoutKey: PreferenceKey {
-    static var defaultValue: LatestReadLayout? { nil }
-    static func reduce(value: inout LatestReadLayout?, nextValue: () -> LatestReadLayout?) { if let next = nextValue() { value = next } }
+private struct ConversationReadViewportKey: EnvironmentKey {
+    static let defaultValue: CGRect = .zero
+}
+extension EnvironmentValues {
+    fileprivate var conversationReadViewport: CGRect {
+        get { self[ConversationReadViewportKey.self] }
+        set { self[ConversationReadViewportKey.self] = newValue }
+    }
+}
+private struct LatestReadMarker: View {
+    let receipt: VisibleReadReceipt
+    @Environment(\.conversationReadViewport) private var viewport
+    var body: some View {
+        GeometryReader { geometry in
+            Color.clear.preference(key: LatestReadVisibilityKey.self,
+                value: ReadVisibility.latestEndIsVisible(frame: geometry.frame(in: .global), viewport: viewport) ? receipt : nil)
+        }
+    }
 }
 private struct BottomFrameKey: PreferenceKey {
     static var defaultValue: CGRect? { nil }
@@ -375,7 +393,7 @@ private struct OlderMessagesLoader: View {
         .frame(maxWidth: .infinity).frame(minHeight: 28)
         .task(id: cursor + "-" + String(retry)) {
             failure = nil
-            while model.loadingConversation {
+            while model.loadingConversationIDs.contains(chat.id) {
                 do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
             }
             guard !Task.isCancelled else { return }
@@ -408,6 +426,7 @@ private struct ConversationScrollRequest: Equatable {
 private struct ConversationScrollPosition: ViewModifier {
     @Binding var position: String?
     @Binding var request: ConversationScrollRequest?
+
     func body(content: Content) -> some View {
         if #available(iOS 18, *) {
             content.modifier(SemanticConversationScrollPosition(position: $position, request: $request))
@@ -430,12 +449,9 @@ private struct ConversationScrollPosition: ViewModifier {
 private struct SemanticConversationScrollPosition: ViewModifier {
     @Binding var position: String?
     @Binding var request: ConversationScrollRequest?
-    // The first scroll happens after presentation, once the viewport is final.
-    @State private var scrollPosition = ScrollPosition(idType: String.self)
+    @State private var scrollPosition = ScrollPosition(id: "conversation-bottom", anchor: .bottom)
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private var readingID: String? {
-        scrollPosition.edge == .bottom ? "conversation-bottom" : scrollPosition.viewID(type: String.self)
-    }
+
     func body(content: Content) -> some View {
         content.scrollPosition($scrollPosition)
             .defaultScrollAnchor(.bottom, for: .alignment)
@@ -444,12 +460,14 @@ private struct SemanticConversationScrollPosition: ViewModifier {
                 var transaction = Transaction(animation: value.animated && !reduceMotion ? .easeOut(duration: 0.2) : nil)
                 transaction.disablesAnimations = !value.animated || reduceMotion
                 withTransaction(transaction) {
-                    if value.id == "conversation-bottom" { scrollPosition.scrollTo(edge: .bottom) }
-                    else { scrollPosition.scrollTo(id: value.id, anchor: value.anchor) }
+                    // Resolve the actual last target in the lazy stack instead
+                    // of its estimated content edge, including after collapse.
+                    scrollPosition.scrollTo(id: value.id,
+                        anchor: value.id == "conversation-bottom" ? .bottom : value.anchor)
                 }
                 request = nil
             }
-            .onChange(of: readingID, initial: true) { _, value in position = value }
+            .onChange(of: scrollPosition.viewID(type: String.self), initial: true) { _, value in position = value }
     }
 }
 
@@ -488,7 +506,7 @@ private struct ConversationScroller<Content: View>: View {
     @State private var scrollRequest: ConversationScrollRequest?
     @State private var restored = false
     @State private var presented = false
-    @State private var latestReadLayout: LatestReadLayout?
+    @State private var visibleLatestReceipt: VisibleReadReceipt?
     @State private var readViewport: CGRect = .zero
     @State private var bottomVisible = true
     @Environment(\.scenePhase) private var phase
@@ -502,10 +520,9 @@ private struct ConversationScroller<Content: View>: View {
               !model.chatsReadPresentation.isCovered, !isCovered,
               model.macConnected == true, !model.cachedConversationIds.contains(chat.id),
               model.chats.first(where: { $0.id == chat.id })?.hasUnread == true,
-              let layout = latestReadLayout,
-              ReadVisibility.latestEndIsVisible(frame: layout.frame, viewport: readViewport),
-              layout.receipt == model.readReceipt(for: chat.id) else { return nil }
-        return layout.receipt
+              let receipt = visibleLatestReceipt,
+              receipt == model.readReceipt(for: chat.id) else { return nil }
+        return receipt
     }
 
     private func restorePositionIfNeeded() {
@@ -539,13 +556,16 @@ private struct ConversationScroller<Content: View>: View {
             .modifier(ConversationScrollPosition(position: $position, request: $scrollRequest))
             .background { ConversationPresentationReady { presented = true }.frame(width: 0, height: 0) }
             .modifier(ScrollBottomVisibility(isVisible: $bottomVisible))
+            // Keyboard/rotation changes resize only the viewport; the latest
+            // row re-evaluates its visibility against the new bounds.
+            .environment(\.conversationReadViewport, readViewport)
             .background { GeometryReader { geometry in Color.clear.preference(key: ReadViewportKey.self, value: geometry.frame(in: .global)) } }
-            .onPreferenceChange(LatestReadLayoutKey.self) { layout in
-                // The viewport and latest row can arrive in either order, and
-                // keyboard/rotation changes may resize only the viewport.
-                if latestReadLayout != layout { latestReadLayout = layout }
+            .onPreferenceChange(LatestReadVisibilityKey.self) { receipt in
+                if visibleLatestReceipt != receipt { visibleLatestReceipt = receipt }
             }
-            .onPreferenceChange(ReadViewportKey.self) { readViewport = $0 }
+            .onPreferenceChange(ReadViewportKey.self) { viewport in
+                if readViewport != viewport { readViewport = viewport }
+            }
             .onPreferenceChange(BottomFrameKey.self) { frame in
                 if #available(iOS 18, *) { } else {
                     let visible = frame.map { $0.maxY <= readViewport.maxY + 24 && $0.maxY >= readViewport.minY } ?? false
@@ -598,10 +618,13 @@ private struct ConversationScroller<Content: View>: View {
                 guard let receipt = visibleReadReceipt else { return }
                 // A transient failure or concurrent list refresh must not leave
                 // this stationary, visible message unread until the next scroll.
-                for delay in [750, 1500, 3000] {
+                // The receipt clears once the host confirms, ending the loop.
+                var delay = 750
+                while !Task.isCancelled {
                     do { try await Task.sleep(for: .milliseconds(delay)) } catch { return }
                     guard visibleReadReceipt == receipt, !Task.isCancelled else { return }
                     await model.acknowledgeVisibleRead(receipt)
+                    delay = min(delay * 2, 30_000)
                 }
             }
         }
@@ -708,6 +731,7 @@ struct ConversationView: View {
     }
     @ViewBuilder private func entryContent(
         _ entry: ChatFeedEntry,
+        turns: [String: ReadTurn],
         previous: [String: ReadRow],
         latestActivityEntryIDs: Set<String>,
         latestActiveActivityEntryID: String?,
@@ -723,7 +747,7 @@ struct ConversationView: View {
                                         .accessibilityElement(children: .combine)
                                 } else if entry.isActivity {
                                     ActivityGroupView(rows: entry.rows,
-                                                      turn: model.turn(entry.rows.first?.turnId, in: chat.id),
+                                                      turn: entry.rows.first?.turnId.flatMap { turns[$0] },
                                                       isLatestSegmentForTurn: latestActivityEntryIDs.contains(entry.id),
                                                       isLatestActiveSegment: latestActiveActivityEntryID == entry.id,
                                                       expanded: expandedActivityIDs.contains(entry.id)) {
@@ -791,6 +815,7 @@ struct ConversationView: View {
         }
     }
     private func answeredQuestionsOutsideTimeline(_ timeline: [ReadRow]) -> [AsyncQuestion] {
+        guard model.asyncQuestions[chat.id]?.contains(where: { $0.state == "answered" }) == true else { return [] }
         let rowIDs = Set(timeline.map(\.id))
         let turnIDs = Set(timeline.compactMap(\.turnId))
         return (model.asyncQuestions[chat.id] ?? []).filter { question in
@@ -832,11 +857,15 @@ struct ConversationView: View {
         }
     }
     var body: some View {
-        let timeline = model.feedRows(for: chat)
-        let attachmentMetadata = Dictionary(uniqueKeysWithValues: (model.files[chat.id] ?? []).map { ($0.id, $0) })
+        #if WONDER_DIAGNOSTICS
+        let timelineStart = ProcessInfo.processInfo.systemUptime
+        #endif
+        let prepared = model.timeline(for: chat, focusedRowID: model.searchFocus?.conversationID == chat.id ? model.searchFocus?.rowID : nil)
+        let timeline = prepared.rows
+        let attachmentMetadata = Dictionary((model.files[chat.id] ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let conversationImageFiles = ConversationAttachmentGallery.imageFiles(model.files[chat.id] ?? [])
         let requestedAttachmentIDs = Array(Set(
-            timeline.flatMap(\.attachmentIds)
+            prepared.attachmentIDs
                 + (model.queues[chat.id] ?? []).flatMap(\.attachmentIds)
                 + (model.composers[chat.id]?.draftAttachmentIds ?? [])
         )).sorted()
@@ -845,22 +874,12 @@ struct ConversationView: View {
             scope: model.assignmentScope,
             ids: requestedAttachmentIDs
         )
-        let previous = Dictionary(uniqueKeysWithValues: zip(timeline.dropFirst(), timeline).map { ($0.0.id, $0.1) })
-        let activeTurnIDs = model.activeTurnIDs(chat.id)
-        let entries = ChatFeedEntry.grouping(timeline, activeTurnIDs: activeTurnIDs, focusedRowID: model.searchFocus?.conversationID == chat.id ? model.searchFocus?.rowID : nil)
-        let latestActivityEntryIDs = ChatFeedEntry.latestActivityEntryIDs(entries)
-        let latestActiveActivityEntryID = ChatFeedEntry.latestActivityEntryID(entries, turnID: model.activeTurn(chat.id))
-        let disclosureEntries = entries.compactMap { entry -> ActivityDisclosurePolicy.Entry? in
-            guard entry.isActivity, let turnID = entry.rows.first?.turnId else { return nil }
-            return ActivityDisclosurePolicy.Entry(
-                conversationID: chat.id,
-                turnID: turnID,
-                entryID: entry.id,
-                lifecycle: ActivityDisclosurePolicy.lifecycle(for: model.turn(turnID, in: chat.id)),
-                autoOpenWhileActive: activeTurnIDs.contains(turnID)
-            )
-        }
-        let retainedTurnIDs = Set(model.snapshots[chat.id]?.thread.turns?.map(\.id) ?? disclosureEntries.map { $0.key.turnID })
+        let previous = prepared.previous
+        let entries = prepared.entries
+        let latestActivityEntryIDs = prepared.latestActivityEntryIDs
+        let latestActiveActivityEntryID = prepared.latestActiveActivityEntryID
+        let disclosureEntries = prepared.disclosureEntries
+        let retainedTurnIDs = prepared.retainedTurnIDs
         let reconciledDisclosure = ActivityDisclosurePolicy.reconciled(
             activityDisclosure,
             entries: disclosureEntries,
@@ -881,6 +900,9 @@ struct ConversationView: View {
         let nodes = ChatFeedNode.visible(entries, expanded: expandedActivityIDs)
         let answeredQuestions = answeredQuestionsOutsideTimeline(timeline)
         let disclosureRevision = disclosureEntries
+        #if WONDER_DIAGNOSTICS
+        let _ = DiagnosticJournal.shared.record(DiagnosticEvent(operation: "timeline.prepare", durationMs: (ProcessInfo.processInfo.systemUptime - timelineStart) * 1000, count: UInt64(timeline.count)))
+        #endif
         Group {
             if model.snapshots[chat.id] != nil || model.groups[chat.id] != nil {
                 ConversationScroller(model: model, chat: chat, entries: entries, nodeIDs: nodes.map(\.id),
@@ -906,6 +928,7 @@ struct ConversationView: View {
                                 case .entry(let entry):
                                 entryContent(
                                     entry,
+                                    turns: prepared.turns,
                                     previous: previous,
                                     latestActivityEntryIDs: latestActivityEntryIDs,
                                     latestActiveActivityEntryID: latestActiveActivityEntryID,
@@ -921,10 +944,7 @@ struct ConversationView: View {
                                 }.modifier(ConversationColumn()).id(node.id)
                                 .background {
                                     if node.id == nodes.last?.id, let receipt = model.readReceipt(for: chat.id) {
-                                        GeometryReader { geometry in
-                                            Color.clear.preference(key: LatestReadLayoutKey.self,
-                                                value: LatestReadLayout(receipt: receipt, frame: geometry.frame(in: .global)))
-                                        }
+                                        LatestReadMarker(receipt: receipt)
                                     }
                                 }
                             }
@@ -972,16 +992,26 @@ struct ConversationView: View {
                                 } }
                         }.scrollTargetLayout()
                     }
-            } else if model.loadingConversation {
-                ProgressView("Loading chat…")
-            } else if model.isSubagent(chat) {
-                ContentUnavailableView(
-                    chat.title,
-                    systemImage: "person.2",
-                    description: Text(model.subagentErrors[model.subagentSummary(for: chat.id)?.parentConversationId ?? ""] ?? "This subagent is unavailable on this host. Reopen the parent chat to retry.")
-                )
+            } else if let failure = model.conversationLoadFailures[chat.id] {
+                ContentUnavailableView {
+                    Label("Couldn’t load this chat", systemImage: "exclamationmark.bubble")
+                } description: {
+                    Text(failure)
+                } actions: {
+                    Button("Try again") { Task { await model.retryConversation(chat) } }
+                        .accessibilityIdentifier("conversation-load-retry")
+                }
+            } else if model.isSubagent(chat), !model.loadingConversationIDs.contains(chat.id),
+                      let error = model.subagentErrors[model.subagentSummary(for: chat.id)?.parentConversationId ?? ""] {
+                ContentUnavailableView(chat.title, systemImage: "person.2", description: Text(error))
+            } else if model.accessEnded || model.macConnected == false {
+                ContentUnavailableView("Not saved on this device", systemImage: "wifi.slash",
+                    description: Text("Connect to \(model.macName) to load this chat."))
             } else {
-                ContentUnavailableView("Chat unavailable", systemImage: "wifi.exclamationmark", description: Text("Reconnect to load this conversation."))
+                // Connecting or loading: saved chats never reach this branch.
+                ProgressView("Loading chat…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("conversation-loading")
             }
         }
         .toolbar(.hidden, for: .tabBar)
@@ -2015,7 +2045,28 @@ private struct ChatBubbleSurface: ViewModifier {
 
 struct BotMessageText: View {
     let text: String
-    private struct Block { let text: String; let code: Bool }
+    fileprivate struct Block { let text: String; let code: Bool; var inline: AttributedString? = nil }
+    /// Parsed once per distinct message text. Rows re-enter the lazy stack on
+    /// every scroll; settled replies keep their text, so they hit the cache.
+    @MainActor private final class Parsed {
+        let blocks: [Block]
+        init(_ blocks: [Block]) { self.blocks = blocks }
+        static let cache: NSCache<NSString, Parsed> = {
+            let cache = NSCache<NSString, Parsed>()
+            cache.countLimit = 300
+            cache.totalCostLimit = 2_000_000
+            return cache
+        }()
+    }
+    private var parsedBlocks: [Block] {
+        let key = text as NSString
+        if let hit = Parsed.cache.object(forKey: key) { return hit.blocks }
+        let parsed = blocks.map { block in
+            block.code ? block : Block(text: block.text, code: false, inline: inline(block.text))
+        }
+        Parsed.cache.setObject(Parsed(parsed), forKey: key, cost: key.length)
+        return parsed
+    }
     private var blocks: [Block] {
         var result: [Block] = []
         var lines: [String] = []
@@ -2057,7 +2108,7 @@ struct BotMessageText: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+            ForEach(Array(parsedBlocks.enumerated()), id: \.offset) { _, block in
                 if block.code {
                     ScrollView(.horizontal) {
                         Text(block.text).font(.system(.body, design: .monospaced))
@@ -2065,7 +2116,7 @@ struct BotMessageText: View {
                             .padding(10)
                     }.background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
                 } else {
-                    Text(inline(block.text)).textSelection(.enabled)
+                    Text(block.inline ?? AttributedString(block.text)).textSelection(.enabled)
                 }
             }
         }

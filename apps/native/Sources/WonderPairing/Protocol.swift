@@ -132,6 +132,7 @@ public final class PairingAPI: Sendable {
         request.httpShouldHandleCookies = false
         request.setValue(origin, forHTTPHeaderField: "Origin")
         request.setValue("__Host-wonder_session=\(connection.credential.sessionToken)", forHTTPHeaderField: "Cookie")
+        request.setValue(Self.compactView, forHTTPHeaderField: Self.compactViewHeader)
         return session.webSocketTask(with: request)
     }
     public func download(_ path: String, connection: SavedConnection, file: ConversationFile) async throws -> Data {
@@ -173,6 +174,11 @@ public final class PairingAPI: Sendable {
         if let mimeType { try ConversationFile.validateContent(data, mime: mimeType) }
         return data
     }
+    /// Asks hosts to omit history data native clients never render (the raw
+    /// event list and inline computer-use screenshots). Older hosts ignore it.
+    static let compactViewHeader = "X-Wonder-History-View"
+    static let compactView = "compact"
+
     public static func timeoutInterval(for path: String) -> TimeInterval {
         if path == "/api/v1/group-chats/propose" { return 330 }
         if path.hasSuffix("/control/acquire") { return 135 }
@@ -192,6 +198,7 @@ public final class PairingAPI: Sendable {
         request.httpBody = body
         request.setValue(origin, forHTTPHeaderField: "Origin")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if path.hasPrefix("/api/v1/conversations/") { request.setValue(Self.compactView, forHTTPHeaderField: Self.compactViewHeader) }
         request.httpShouldHandleCookies = false
         if let credential {
             request.setValue("__Host-wonder_session=\(credential.sessionToken)", forHTTPHeaderField: "Cookie")

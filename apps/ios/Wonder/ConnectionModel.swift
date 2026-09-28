@@ -131,6 +131,7 @@ struct ManagedBotListMutationState {
                 dictation.connectionChanged()
                 cameraContextID = UUID()
             }
+            noteListChange()
         }
     }
     var connectedAppsCache: [String: ConnectedAppCacheEntry] = [:]
@@ -147,9 +148,9 @@ struct ManagedBotListMutationState {
     @Published var busy = false
     @Published var verification: String?
     @Published var error: String?
-    @Published var accessEnded = false { didSet { if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
-    @Published var chats: [ChatSummary] = []
-    @Published var subagents: [String: [SubagentSummary]] = [:]
+    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
+    @Published var chats: [ChatSummary] = [] { didSet { noteListChange() } }
+    @Published var subagents: [String: [SubagentSummary]] = [:] { didSet { noteListChange() } }
     @Published var subagentAvailability: [String: Bool] = [:]
     @Published var subagentErrors: [String: String] = [:]
     @Published var goals: [String: ConversationGoal] = [:]
@@ -159,12 +160,42 @@ struct ManagedBotListMutationState {
     @Published var composerApprovalChanges: [ComposerApprovalTarget: ComposerApprovalChange] = [:]
     var composerApprovalTasks: [ComposerApprovalTarget: Task<Void, Never>] = [:]
     var composerApprovalTokens: [ComposerApprovalTarget: UUID] = [:]
-    @Published var managedBots: [ManagedBot] = []
-    @Published var snapshots: [String: ConversationSnapshot] = [:] { didSet { rowCache = nil } }
-    @Published var groups: [String: GroupRead] = [:] { didSet { rowCache = nil } }
+    @Published var managedBots: [ManagedBot] = [] { didSet { noteListChange() } }
+    @Published var snapshots: [String: ConversationSnapshot] = [:] {
+        didSet {
+            // A snapshot read is pinned to one host sequence, so an unchanged
+            // sequence, page and size means the open chat's rows are unchanged.
+            if let id = rowCache?.id {
+                let old = oldValue[id], new = snapshots[id]
+                if old?.hostEpoch != new?.hostEpoch || old?.lastSequence != new?.lastSequence || old?.thread.nextCursor != new?.thread.nextCursor
+                    || old?.messages.count != new?.messages.count || old?.assistantMessages.count != new?.assistantMessages.count
+                    || old?.thread.turns?.count != new?.thread.turns?.count || old?.thread.turns?.last?.items.count != new?.thread.turns?.last?.items.count {
+                    rowCache = nil
+                }
+            }
+            noteListChange()
+        }
+    }
+    @Published var groups: [String: GroupRead] = [:] {
+        didSet {
+            if let id = rowCache?.id, oldValue[id] != nil || groups[id] != nil,
+               groups[id]?.lastSequence == nil || oldValue[id]?.hostEpoch != groups[id]?.hostEpoch
+                || oldValue[id]?.lastSequence != groups[id]?.lastSequence
+                || oldValue[id]?.messages.count != groups[id]?.messages.count {
+                rowCache = nil
+            }
+            noteListChange()
+        }
+    }
     // Retain only the most recently presented conversation. Expansion and scroll
     // state do not change its source rows or require reparsing every timestamp.
-    private var rowCache: (id: String, title: String, rows: [ReadRow])?
+    private var rowCache: (id: String, title: String, rows: [ReadRow])? { didSet { rowRevision &+= 1 } }
+    private var rowRevision: UInt64 = 0
+    private var timelineCache: (key: ConversationTimeline.Key, value: ConversationTimeline)?
+    /// The Chats list observes this instead of every model change, so typing,
+    /// sends and per-chat state do not re-render the whole list and root.
+    @Published private(set) var listRevision: UInt64 = 0
+    private func noteListChange() { listRevision &+= 1 }
     @Published var selectedChat: ChatSummary? {
         didSet { if selectedChat?.id != oldValue?.id { visibleChat = selectedChat } }
     }
@@ -176,15 +207,19 @@ struct ManagedBotListMutationState {
     @Published var searchFocus: SearchMessageFocus?
     @Published private(set) var chatsReadPresentation = ReadPresentationFence()
     @Published var loadingChats = false
-    @Published var loadingConversation = false
-    @Published var cachedConversationIds: Set<String> = []
+    /// Conversations with a history request in flight. Per conversation so a
+    /// slow load cannot make a different chat look busy or empty.
+    @Published private(set) var loadingConversationIDs: Set<String> = []
+    /// Set only when a conversation has no saved content and loading failed.
+    @Published private(set) var conversationLoadFailures: [String: String] = [:]
+    @Published var cachedConversationIds: Set<String> = [] { didSet { noteListChange() } }
     @Published var chatsStatus = "Saved chats"
-    @Published private(set) var hasConnectedThisLaunch = false
+    @Published private(set) var hasConnectedThisLaunch = false { didSet { noteListChange() } }
     @Published private(set) var checkingConnection = false
     @Published private var listRefreshCount = 0
     var isRefreshing: Bool { checkingConnection || loadingChats || listRefreshCount > 0 }
     @Published var macConnected: Bool? {
-        didSet { if macConnected == true { hasConnectedThisLaunch = true } }
+        didSet { if macConnected == true { hasConnectedThisLaunch = true }; noteListChange() }
     }
     var macName: String { connection?.hostName ?? (previewMode ? "Studio" : "Your computer") }
     var macStatus: String {
@@ -211,7 +246,7 @@ struct ManagedBotListMutationState {
     @Published var asyncQuestions: [String: [AsyncQuestion]] = [:]
     @Published private(set) var retryableAsyncReplies: Set<String> = []
     @Published private(set) var savedAsyncReplies: [String: AsyncAnswerIntent] = [:]
-    @Published var attention: [AttentionRequest] = []
+    @Published var attention: [AttentionRequest] = [] { didSet { noteListChange() } }
     @Published var attentionErrors: [String: String] = [:]
     @Published var resolving: Set<String> = []
     @Published var stopping: Set<String> = []
@@ -231,13 +266,15 @@ struct ManagedBotListMutationState {
     } }
     #endif
     private var connectionCheck: Task<Void, Never>?
+    private var preparation: Task<Void, Never>?
+    private var writer: ProjectionWriter?
+    private var loadingTokens: [String: UUID] = [:]
     private var enrollment: Task<Void, Never>?
     private var replay: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
     private var refreshTask: Task<Void, Never>?
     private var generation = UUID()
     private var projection = ProjectionState()
-    private var summaryRevision: UInt64 = 0
     private var managedBotMutations = ManagedBotListMutationState()
     private var partition: String?
     private var retiredAfterPairing = false
@@ -574,6 +611,7 @@ struct ManagedBotListMutationState {
         connection = saved
         let fixtureStore = ReadStore(root: root, host: saved.credential.hostInstallationId, device: saved.storageDeviceId)
         store = fixtureStore
+        writer = makeWriter(fixtureStore)
         partition = saved.credential.hostInstallationId + ":" + saved.credential.deviceId
         chats = chat.map { [$0] } ?? []
         selectedChat = chat
@@ -736,6 +774,8 @@ struct ManagedBotListMutationState {
     func retireAfterPairingReplacement() {
         stopForIdentityRecovery()
         retiredAfterPairing = true
+        // A replacement model's cache load is queued behind this final write.
+        writer?.retire(); writer = nil
         store = nil
     }
 
@@ -747,7 +787,15 @@ struct ManagedBotListMutationState {
             stopReading()
             chatsStatus = "Saved chats"
             macConnected = nil
-            cachedConversationIds = Set(snapshots.keys)
+            // Replay stops here, so saved chats are unverified until the next
+            // foreground refresh. Persist that with the cursor before suspension.
+            projection.invalidateAll()
+            cachedConversationIds = projection.dirty
+            if let writer {
+                writer.schedule(projection)
+                let task = UIApplication.shared.beginBackgroundTask(withName: "Save chats")
+                writer.flush { Task { @MainActor in UIApplication.shared.endBackgroundTask(task) } }
+            }
         } else {
             Task { await loadChats(force: true) }
         }
@@ -760,50 +808,118 @@ struct ManagedBotListMutationState {
         refreshTask?.cancel(); refreshTask = nil
     }
 
-    private func prepare(_ saved: SavedConnection) {
-        guard !retiredAfterPairing else { return }
-        let key = saved.credential.hostInstallationId + ":" + saved.credential.deviceId
-        guard partition != key else { return }
-        stopReading()
-        partition = key
-        subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]
-        store = ReadStore(root: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Wonder/Hosts"), host: saved.credential.hostInstallationId, device: saved.storageDeviceId)
-        do { projection = try store?.load() ?? ProjectionState() }
-        catch { projection = ProjectionState(); chatsStatus = "Saved chats could not be read. Reconnect to refresh." }
-        projection.dirty.formUnion(projection.snapshots.keys)
-        projection.dirty.formUnion(projection.groups.keys)
-        managedBotMutations = ManagedBotListMutationState()
-        publish()
-        selectedChat = nil
-        dictation.restore(force: true)
+    private static func readStore(for saved: SavedConnection) -> ReadStore {
+        ReadStore(root: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Wonder/Hosts"), host: saved.credential.hostInstallationId, device: saved.storageDeviceId)
     }
 
-    private func publish() {
+    private func makeWriter(_ store: ReadStore) -> ProjectionWriter {
+        ProjectionWriter(store: store) { [weak self] result, elapsed in
+            #if WONDER_DIAGNOSTICS
+            if case .success(let bytes) = result {
+                DiagnosticJournal.shared.record(DiagnosticEvent(operation: "persistence.save", durationMs: elapsed * 1000, bytes: UInt64(bytes)))
+            }
+            #endif
+            guard case .failure = result else { return }
+            Task { @MainActor [weak self] in
+                self?.chatsStatus = "Chats could not be saved on this phone. Free some storage and refresh."
+            }
+        }
+    }
+
+    /// Restores this host's saved chats off the main thread. Network reads wait
+    /// for it through `check()`, so an unloaded cache is never overwritten.
+    private func prepare(_ saved: SavedConnection) async {
+        guard !retiredAfterPairing else { return }
+        let key = saved.credential.hostInstallationId + ":" + saved.credential.deviceId
+        guard partition != key else { await preparation?.value; return }
+        stopReading()
+        partition = key
+        subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]; loadingConversationIDs = []; loadingTokens = [:]; conversationLoadFailures = [:]
+        let store = Self.readStore(for: saved)
+        self.store = store
+        writer?.retire(); writer = nil
+        selectedChat = nil
+        let load = Task { [weak self] in
+            #if WONDER_DIAGNOSTICS
+            let loadStart = ProcessInfo.processInfo.systemUptime
+            #endif
+            let loaded: Result<ProjectionState, Error>
+            do { loaded = .success(try await ProjectionWriter.load(store)) }
+            catch { loaded = .failure(error) }
+            guard !Task.isCancelled, let self, self.partition == key else { return }
+            switch loaded {
+            case .success(var state):
+                state.invalidateAll()
+                self.projection = state
+            case .failure:
+                self.projection = ProjectionState()
+                self.chatsStatus = "Saved chats could not be read. Reconnect to refresh."
+            }
+            #if WONDER_DIAGNOSTICS
+            DiagnosticJournal.shared.record(DiagnosticEvent(operation: "persistence.load", durationMs: (ProcessInfo.processInfo.systemUptime - loadStart) * 1000, count: UInt64(self.projection.snapshots.count)))
+            #endif
+            self.managedBotMutations = ManagedBotListMutationState()
+            self.writer = self.makeWriter(store)
+            self.publish(.everything)
+            self.dictation.restore(force: true)
+        }
+        preparation = load
+        await load.value
+    }
+
+    private struct PublishScope: OptionSet {
+        let rawValue: Int
+        static let list = PublishScope(rawValue: 1)
+        static let snapshots = PublishScope(rawValue: 2)
+        static let groups = PublishScope(rawValue: 4)
+        static let everything: PublishScope = [.list, .snapshots, .groups]
+    }
+
+    /// Publishes only the parts of the projection a change touched. Replacing
+    /// every snapshot on each list refresh or replay event re-projected the
+    /// open conversation and re-rendered every observer.
+    private func publish(_ scope: PublishScope) {
         #if WONDER_DIAGNOSTICS
         let diagnosticStart = ProcessInfo.processInfo.systemUptime
         defer { DiagnosticJournal.shared.record(DiagnosticEvent(operation: "projection", durationMs: (ProcessInfo.processInfo.systemUptime-diagnosticStart)*1000)) }
         #endif
-        managedBots = projection.managedBots ?? []
-        chats = projection.summaries.filter { !$0.isArchived }
-        snapshots = projection.snapshots
-        groups = projection.groups
-        cachedConversationIds = projection.dirty
+        if scope.contains(.list) {
+            managedBots = projection.managedBots ?? []
+            let visible = projection.summaries.filter { !$0.isArchived }
+            if chats != visible { chats = visible }
+        }
+        if scope.contains(.snapshots) { snapshots = projection.snapshots }
+        if scope.contains(.groups) { groups = projection.groups }
+        if cachedConversationIds != projection.dirty { cachedConversationIds = projection.dirty }
     }
 
-    private func commit(_ next: ProjectionState) throws {
-        guard let store else { throw ReadFailure.resync }
-        try store.save(next)
+    /// Updates memory and the screen now; the disk copy follows off the main
+    /// thread (coalesced). Replay resumes from an older durable cursor if the
+    /// app ends before a write, so a delayed write never loses host history.
+    private func commit(_ next: ProjectionState, publishing scope: PublishScope = .everything) throws {
+        guard let writer else { throw ReadFailure.resync }
         projection = next
-        publish()
+        writer.schedule(next)
+        publish(scope)
     }
 
     func loadChats(force: Bool = false) async {
+        await loadChats(refreshVisibleConversation: true)
+    }
+
+    /// Creation needs the new list entry before navigation, not a refresh of
+    /// the conversation that happened to be open behind the creation sheet.
+    func refreshChatList() async {
+        await loadChats(refreshVisibleConversation: false)
+    }
+
+    private func loadChats(refreshVisibleConversation: Bool) async {
         guard !previewMode else { return }
         // Startup and foreground reads must use the session established by the
         // shared check, not race renewal with the credential restored from disk.
         await check()
         guard let saved = connection, !accessEnded, macConnected == true else { return }
-        prepare(saved)
+        await prepare(saved)
         if replay == nil && foreground { startReplay() }
         guard !loadingChats else { return }
         loadingChats = true
@@ -811,7 +927,7 @@ struct ManagedBotListMutationState {
         let run = generation
         do {
             try await refreshList(saved, run: run)
-            if let chat = visibleChat {
+            if refreshVisibleConversation, let chat = visibleChat {
                 if let parent = selectedChat, parent.botId != nil { await loadSubagents(parent) }
                 await refreshConversation(chat)
                 await loadAsyncQuestions(chat)
@@ -841,13 +957,22 @@ struct ManagedBotListMutationState {
         for chat in deleted { try removeDeletedConversation(chat.id) }
         var next = projection
         next.managedBots = effectiveBots
-        summaryRevision &+= 1
         next.summaries = projectVisibleChatSummaries(remote: remote, groups: groupList, activeBotIDs: activeBotIDs)
-        let groupIDs = Set(groupList.map(\.conversationId))
         next.groups = Dictionary(uniqueKeysWithValues: groupList.map { ($0.conversationId, $0) })
-        if cursor == projection.lastSequence { next.dirty.subtract(groupIDs) }
+        // The list read includes every change through `cursor`; a group stays
+        // stale only if it was invalidated after the request began.
+        for group in groupList where next.covers(group.conversationId, through: max(cursor, group.lastSequence ?? 0)) {
+            next.markClean(group.conversationId)
+        }
         next.listDirty = cursor != projection.lastSequence
-        try commit(next)
+        // Saved history is disposable. Keep it only for listed chats, their
+        // known helper conversations and the chat on screen; archived Bots'
+        // histories otherwise stay in every cache write indefinitely.
+        var retained = Set(next.summaries.map(\.id)).union(subagents.values.flatMap { $0.map(\.conversationId) })
+        if let visible = visibleChat?.id { retained.insert(visible) }
+        let pruned = next.snapshots.keys.filter { !retained.contains($0) }
+        for id in pruned { next.snapshots.removeValue(forKey: id); next.markClean(id) }
+        try commit(next, publishing: pruned.isEmpty ? [.list, .groups] : .everything)
         macConnected = true
         chatsStatus = "Connected to your computer"
     }
@@ -858,8 +983,7 @@ struct ManagedBotListMutationState {
     func applyConfirmedManagedBot(_ bot: ManagedBot) {
         managedBots = managedBotMutations.confirm(bot, current: managedBots)
         projection.managedBots = managedBots
-        do { try store?.save(projection) }
-        catch { chatsStatus = "Bot saved. Reconnect before closing the app to save its updated appearance on this device." }
+        writer?.schedule(projection)
     }
 
     func subagentSummary(for conversationID: String) -> SubagentSummary? {
@@ -990,6 +1114,32 @@ struct ManagedBotListMutationState {
         }
     }
 
+    private func connectionReady() async -> Bool {
+        await preparation?.value
+        if let connectionCheck { await connectionCheck.value }
+        return macConnected == true && !accessEnded
+    }
+
+    /// Retries a conversation that has no saved content after a failed load.
+    func retryConversation(_ chat: ChatSummary) async {
+        conversationLoadFailures[chat.id] = nil
+        if macConnected != true { await loadChats(force: true) }
+        else { await refreshConversation(chat) }
+    }
+
+    private func beginLoading(_ conversation: String) -> UUID {
+        let token = UUID()
+        loadingTokens[conversation] = token
+        loadingConversationIDs.insert(conversation)
+        return token
+    }
+
+    private func endLoading(_ conversation: String, _ token: UUID) {
+        guard loadingTokens[conversation] == token else { return }
+        loadingTokens[conversation] = nil
+        loadingConversationIDs.remove(conversation)
+    }
+
     func presentConversation(_ chat: ChatSummary, root: ChatSummary? = nil) {
         selectedChat = root ?? chat
         visibleChat = chat
@@ -1008,6 +1158,11 @@ struct ManagedBotListMutationState {
             asyncQuestions[chat.id] = items
             restoreAsyncReplies(items)
         }
+        // Saved history is already on screen. Network reads wait for the shared
+        // launch/foreground check instead of racing credential renewal.
+        guard await connectionReady(), visibleChat?.id == chat.id else { return }
+        // Helpers load first: their pill resizes the composer, and a helper
+        // route needs its parent's ownership record before its history.
         if chat.botId != nil { await loadSubagents(chat) }
         await refreshConversation(chat)
         await loadAttention()
@@ -1269,15 +1424,12 @@ struct ManagedBotListMutationState {
         #endif
         guard let saved = connection, !accessEnded else { return }
         let run = generation
-        loadingConversation = true
-        defer { if run == generation { loadingConversation = false } }
+        let loading = beginLoading(chat.id)
+        defer { endLoading(chat.id, loading) }
         do {
             if projection.groups[chat.id] != nil {
                 try await refreshList(saved, run: run)
-                if let group = groups[chat.id], var intent = composers[chat.id] {
-                    intent.reconcile(group)
-                    try saveComposer(intent, chat: chat.id)
-                }
+                try reconcileGroupIntent(chat)
                 return
             }
             var page: ConversationSnapshot = try await api.request("/api/v1/conversations/\(Self.escape(chat.id))", origin: saved.origin, credential: saved.credential)
@@ -1299,13 +1451,17 @@ struct ManagedBotListMutationState {
             }
             guard run == generation else { return }
             guard page.conversationId == chat.id else { throw ReadFailure.wrongConversation }
-            guard projection.summaries.contains(where: { $0.id == chat.id }) || isSubagent(chat) else { return }
+            guard projection.summaries.contains(where: { $0.id == chat.id }) || isSubagent(chat) else {
+                if projection.snapshots[chat.id] == nil { conversationLoadFailures[chat.id] = "This chat is no longer available." }
+                return
+            }
             var next = projection
             // Snapshot cursor only establishes an epoch at bootstrap. It never
             // skips events in this epoch, including events for other chats.
             guard next.hostEpoch.isEmpty || next.hostEpoch == page.hostEpoch else { throw ReadFailure.resync }
             next.install(page)
-            try commit(next)
+            try commit(next, publishing: .snapshots)
+            conversationLoadFailures[chat.id] = nil
             if var intent = composers[chat.id], intent.pending != nil || !(intent.recoveredPending ?? []).isEmpty {
                 intent.reconcile(page)
                 try saveComposer(intent, chat: chat.id)
@@ -1315,15 +1471,29 @@ struct ManagedBotListMutationState {
             if run == generation, case PairingFailure.response(404) = error {
                 do { try removeDeletedConversation(chat.id) } catch { readFailed(error, run: run) }
                 chatsStatus = "This conversation was removed."
-            } else { readFailed(error, run: run) }
+            } else {
+                // Saved content stays on screen; only an empty chat shows the failure.
+                if run == generation, !(error is CancellationError),
+                   projection.snapshots[chat.id] == nil, projection.groups[chat.id] == nil {
+                    conversationLoadFailures[chat.id] = "Wonder couldn’t load this chat from your computer."
+                }
+                readFailed(error, run: run)
+            }
         }
+    }
+
+    private func reconcileGroupIntent(_ chat: ChatSummary) throws {
+        guard let group = groups[chat.id], var intent = composers[chat.id],
+              intent.pending != nil || !(intent.recoveredPending ?? []).isEmpty else { return }
+        intent.reconcile(group)
+        try saveComposer(intent, chat: chat.id)
     }
 
     func removeDeletedConversation(_ id: String) throws {
         var next = projection
         next.summaries.removeAll { $0.id == id }
         next.snapshots.removeValue(forKey: id); next.groups.removeValue(forKey: id)
-        next.positions.removeValue(forKey: id); next.dirty.remove(id)
+        next.positions.removeValue(forKey: id); next.markClean(id)
         try commit(next)
         try store?.removeIntent(conversation: id)
         try store?.removeIntent(conversation: "async-list-" + id)
@@ -1339,12 +1509,12 @@ struct ManagedBotListMutationState {
         let diagnosticStart = ProcessInfo.processInfo.systemUptime
         defer { DiagnosticJournal.shared.record(DiagnosticEvent(operation: "history.load", durationMs: (ProcessInfo.processInfo.systemUptime-diagnosticStart)*1000)) }
         #endif
-        guard !loadingConversation, let saved = connection,
+        guard !loadingConversationIDs.contains(chat.id), let saved = connection,
               let current = projection.snapshots[chat.id],
               let cursor = current.thread.nextCursor else { return nil }
         let run = generation
-        loadingConversation = true
-        defer { if run == generation { loadingConversation = false } }
+        let loading = beginLoading(chat.id)
+        defer { endLoading(chat.id, loading) }
         do {
             let older: ConversationSnapshot = try await api.request("/api/v1/conversations/\(Self.escape(chat.id))/history?before=\(Self.escape(cursor))", origin: saved.origin, credential: saved.credential)
             guard run == generation else { return nil }
@@ -1356,7 +1526,7 @@ struct ManagedBotListMutationState {
             var next = projection
             next.snapshots[chat.id] = try latest.mergingOlder(older)
             guard next.snapshots[chat.id]?.thread.nextCursor != cursor else { return "Could not load earlier messages. Tap to retry." }
-            try commit(next)
+            try commit(next, publishing: .snapshots)
             return nil
         } catch {
             if Task.isCancelled || run != generation { return nil }
@@ -1973,17 +2143,52 @@ struct ManagedBotListMutationState {
     func feedRows(for chat: ChatSummary) -> [ReadRow] {
         ChatFeedEntry.visibleRows(rows(for: chat), queuedClientIDs: Set((queues[chat.id] ?? []).map(\.clientMessageId)))
     }
-    func rows(for chat: ChatSummary) -> [ReadRow] {
+    private func projectedRows(for chat: ChatSummary) -> [ReadRow] {
         if rowCache?.id != chat.id || rowCache?.title != chat.title {
+            #if WONDER_DIAGNOSTICS
+            let projectStart = ProcessInfo.processInfo.systemUptime
+            #endif
             rowCache = (chat.id, chat.title, groups[chat.id]?.rows ?? snapshots[chat.id]?.rows(author: chat.title) ?? [])
+            #if WONDER_DIAGNOSTICS
+            DiagnosticJournal.shared.record(DiagnosticEvent(operation: "rows.project", durationMs: (ProcessInfo.processInfo.systemUptime - projectStart) * 1000, count: UInt64(rowCache?.rows.count ?? 0)))
+            #endif
         }
-        var rows = rowCache?.rows ?? []
-        let pendingMessages = (composers[chat.id]?.recoveredPending ?? []) + [composers[chat.id]?.pending].compactMap { $0 }
-        for pending in pendingMessages where !rows.contains(where: { $0.id == "user-" + pending.request.clientMessageId }) {
+        return rowCache?.rows ?? []
+    }
+    private func pendingSends(_ chat: String) -> [PendingSend] {
+        (composers[chat]?.recoveredPending ?? []) + [composers[chat]?.pending].compactMap { $0 }
+    }
+    func rows(for chat: ChatSummary) -> [ReadRow] {
+        var rows = projectedRows(for: chat)
+        for pending in pendingSends(chat.id) where !rows.contains(where: { $0.id == "user-" + pending.request.clientMessageId }) {
             rows.append(ReadRow(id: "user-" + pending.request.clientMessageId, author: "You",
                 text: pending.request.body, isUser: true, timestamp: pending.createdAt, attachmentIds: pending.request.attachmentIds))
         }
         return rows
+    }
+
+    /// The open conversation's grouped timeline. Prepared once per content,
+    /// queue, pending-send, active-turn or search-focus change; typing, scroll
+    /// and unrelated model updates reuse it instead of regrouping all history.
+    func timeline(for chat: ChatSummary, focusedRowID: String?) -> ConversationTimeline {
+        _ = projectedRows(for: chat)
+        let queued = Set((queues[chat.id] ?? []).map(\.clientMessageId))
+        let key = ConversationTimeline.Key(chatID: chat.id, title: chat.title, rows: rowRevision, queued: queued,
+            pending: pendingSends(chat.id).map(\.request.clientMessageId),
+            activeTurns: activeTurnIDs(chat.id), activeTurn: activeTurn(chat.id), focusedRowID: focusedRowID)
+        if let timelineCache, timelineCache.key == key { return timelineCache.value }
+        #if WONDER_DIAGNOSTICS
+        let start = ProcessInfo.processInfo.systemUptime
+        #endif
+        let value = ConversationTimeline(chatID: chat.id,
+            rows: ChatFeedEntry.visibleRows(rows(for: chat), queuedClientIDs: queued),
+            activeTurnIDs: key.activeTurns, activeTurnID: key.activeTurn, focusedRowID: focusedRowID,
+            turns: groups[chat.id] == nil ? snapshots[chat.id]?.thread.turns : nil)
+        #if WONDER_DIAGNOSTICS
+        DiagnosticJournal.shared.record(DiagnosticEvent(operation: "timeline.group", durationMs: (ProcessInfo.processInfo.systemUptime - start) * 1000, count: UInt64(value.rows.count)))
+        #endif
+        timelineCache = (key, value)
+        return value
     }
     func setChatsModalPresented(_ presented: Bool) {
         chatsReadPresentation.setCovered(presented)
@@ -2048,7 +2253,7 @@ struct ManagedBotListMutationState {
             var next = projection
             if let latest = next.snapshots[conversation] { next.snapshots[conversation] = try latest.mergingOlder(older) }
             else { next.install(older) }
-            try commit(next)
+            try commit(next, publishing: .snapshots)
         }
     }
     func readReceipt(for conversation: String) -> VisibleReadReceipt? {
@@ -2062,7 +2267,7 @@ struct ManagedBotListMutationState {
             !projection.dirty.contains(visible.conversationId) else { return }
         let run = generation
         let cursor = projection.lastSequence
-        let summaryVersion = summaryRevision
+        let summary = projection.summaries.first { $0.id == visible.conversationId }
         let presentationRevision = chatsReadPresentation.revision
         do {
             let group = groups[visible.conversationId]
@@ -2077,7 +2282,8 @@ struct ManagedBotListMutationState {
                     origin: saved.origin, body: visible.requestBody(), credential: saved.credential, method: "PATCH")
                 groupReply = nil
             }
-            guard !Task.isCancelled, foreground, run == generation, summaryRevision == summaryVersion,
+            guard !Task.isCancelled, foreground, run == generation,
+                projection.summaries.first(where: { $0.id == visible.conversationId }) == summary,
                 chatsReadPresentation.acceptsReply(startedAt: presentationRevision),
                 visibleChat?.id == visible.conversationId,
                 connection?.credential.hostInstallationId == saved.credential.hostInstallationId,
@@ -2087,7 +2293,7 @@ struct ManagedBotListMutationState {
             if let groupReply { applied = next.applyGroupReadAcknowledgement(groupReply, visible: visible, startedAtSequence: cursor) }
             else if let botReply { applied = next.applyReadAcknowledgement(botReply, visible: visible, startedAtSequence: cursor) }
             else { applied = false }
-            if applied { summaryRevision &+= 1; try commit(next) }
+            if applied { try commit(next, publishing: group == nil ? .list : [.list, .groups]) }
         } catch {
             // Keep the unread indicator until an authoritative acknowledgement succeeds.
             if case PairingFailure.response(401) = error { readFailed(error, run: run) }
@@ -2130,16 +2336,28 @@ struct ManagedBotListMutationState {
                         let received = try await socket.receive()
                         let data: Data
                         switch received { case .data(let value): data = value; case .string(let value): data = Data(value.utf8); @unknown default: throw ReadFailure.resync }
+                        #if WONDER_DIAGNOSTICS
+                        let applyStart = ProcessInfo.processInfo.systemUptime
+                        #endif
                         let event = try JSONDecoder().decode(ReplayEvent.self, from: data)
                         guard run == self.generation else { return }
                         var next = self.projection
                         do { try next.consume(event) }
                         catch { try await self.resnapshot(saved, run: run); break }
-                        try self.commit(next)
+                        // An event only advances the cursor and marks what is stale.
+                        // Content arrives with the coalesced refresh below, so do not
+                        // republish every chat or rewrite the cache on this thread.
+                        guard let writer = self.writer else { throw ReadFailure.resync }
+                        self.projection = next
+                        writer.schedule(next)
+                        if self.cachedConversationIds != next.dirty { self.cachedConversationIds = next.dirty }
+                        #if WONDER_DIAGNOSTICS
+                        DiagnosticJournal.shared.record(DiagnosticEvent(operation: "replay.apply", durationMs: (ProcessInfo.processInfo.systemUptime - applyStart) * 1000, bytes: UInt64(data.count)))
+                        #endif
                         struct Ack: Encodable { let type = "ack"; let hostEpoch: String; let sequence: UInt64 }
                         let ack = try JSONEncoder().encode(Ack(hostEpoch: next.hostEpoch, sequence: next.lastSequence))
                         try await socket.send(.string(String(decoding: ack, as: UTF8.self)))
-                        self.scheduleRefresh(run: run)
+                        if event.conversationId != nil || !event.event.isHostRuntimeNotice { self.scheduleRefresh(run: run) }
                     }
                 } catch {
                     self.readFailed(error, run: run)
@@ -2158,12 +2376,11 @@ struct ManagedBotListMutationState {
         var next = projection
         next.hostEpoch = head.hostEpoch
         next.lastSequence = head.lastSequence
-        next.dirty.formUnion(next.snapshots.keys)
-        next.dirty.formUnion(next.groups.keys)
-        next.listDirty = true
+        next.invalidatedThrough = nil
+        next.invalidateAll()
         // Commit invalidations and head together; all stale scopes stay marked
         // until a successful authoritative read replaces them.
-        try commit(next)
+        try commit(next, publishing: [])
         try await refreshList(saved, run: run)
         if let chat = visibleChat {
             await refreshConversation(chat)
@@ -2185,7 +2402,15 @@ struct ManagedBotListMutationState {
                     do { try await self.refreshList(saved, run: run) }
                     catch { self.readFailed(error, run: run) }
                 }
-                if let chat = self.visibleChat { await self.refreshConversation(chat) }
+                if let chat = self.visibleChat {
+                    if self.projection.groups[chat.id] != nil {
+                        // The list read above already replaced Group content.
+                        try? self.reconcileGroupIntent(chat)
+                    } else if self.projection.dirty.contains(chat.id) || self.projection.snapshots[chat.id] == nil {
+                        // Events elsewhere do not re-download the open history.
+                        await self.refreshConversation(chat)
+                    }
+                }
                 if let parent = self.selectedChat, parent.botId != nil { await self.loadSubagents(parent) }
                 await self.loadAttention()
                 if let chat = self.visibleChat, chat.botId != nil { try? await self.loadQueue(chat) }
@@ -2223,7 +2448,7 @@ struct ManagedBotListMutationState {
     func check(renew: Bool = false, userInitiated: Bool = false) async {
         guard !previewMode, !retiredAfterPairing, let saved = connection else { return }
         if saved.requiresPairing {
-            if store == nil { prepare(saved) }
+            if store == nil { await prepare(saved) }
             stopForIdentityRecovery()
             return
         }
@@ -2236,7 +2461,16 @@ struct ManagedBotListMutationState {
         defer { checkingConnection = false }
         // Preparing the cache changes the read generation. Do it before a
         // renewal captures that generation, including on a cold launch.
-        prepare(saved)
+        await prepare(saved)
+        guard !Task.isCancelled, !busy, !retiredAfterPairing,
+              preparation?.isCancelled != true,
+              connection?.credential.hostInstallationId == saved.credential.hostInstallationId,
+              connection?.credential.deviceId == saved.credential.deviceId else { return }
+        // Loading saved chats suspends; join a check another caller started meanwhile.
+        if let connectionCheck {
+            await connectionCheck.value
+            return
+        }
         if userInitiated { busy = true }
         defer { if userInitiated { busy = false } }
         let task = Task { await performConnectionCheck(renew: renew || macConnected != true || accessEnded) }
@@ -2294,7 +2528,20 @@ struct ManagedBotListMutationState {
                 return
             }
             macConnected = false
-            status = "Could not connect to your computer."
+            if let network = error as? URLError {
+                switch network.code {
+                case .notConnectedToInternet:
+                    status = "Your iPhone is offline. Connect to the internet and try again."
+                case .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .timedOut:
+                    status = "Could not reach your Mac. Check that Tailscale is connected on both devices, then try again."
+                default:
+                    status = "The connection was interrupted. Try again."
+                }
+            } else if let failure = error as? PairingFailure {
+                status = failure.localizedDescription
+            } else {
+                status = "Could not connect to your computer."
+            }
             self.error = error is SigningIdentityFailure ? error.localizedDescription : nil
         }
     }
@@ -2303,21 +2550,69 @@ struct ManagedBotListMutationState {
         else { try identity.save(JSONEncoder().encode(saved), account: "connection") }
     }
 
-    func forget() {
+    func forget() async {
         guard !busy else { error = "Wait for the connection check to finish, then try again."; return }
+        busy = true
+        defer { busy = false }
         do {
             dictation.forget()
             stopReading()
-            if let saved = connection { prepare(saved) }
-            try store?.remove()
+            preparation?.cancel()
+            // Removal runs on the writer queue, after any write already started,
+            // so a pending cache write cannot recreate the forgotten chats.
+            if let writer { try await writer.remove() }
+            else if let target = store ?? connection.map(Self.readStore(for:)) { try await ProjectionWriter(store: target).remove() }
             if let saved = connection { ManagementDraftStore(host: saved.credential.hostInstallationId).removeAll() }
             if let persistConnection { try persistConnection(nil) }
             else { try identity.forgetConnection() }
-            partition = nil; store = nil; projection = ProjectionState(); publish()
+            partition = nil; store = nil; writer = nil; projection = ProjectionState(); publish(.everything)
             subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]
             selectedChat = nil; managedBots = []; managedBotMutations = ManagedBotListMutationState(); macConnected = nil; hasConnectedThisLaunch = false; connection = nil; error = nil; accessEnded = false
             status = "Connect to your computer to get started."
         }
         catch { self.error = error.localizedDescription }
+    }
+}
+
+/// A conversation's grouped rows and the per-row lookups its view needs,
+/// derived once from one projection revision.
+struct ConversationTimeline {
+    struct Key: Equatable {
+        let chatID: String
+        let title: String
+        let rows: UInt64
+        let queued: Set<String>
+        let pending: [String]
+        let activeTurns: Set<String>
+        let activeTurn: String?
+        let focusedRowID: String?
+    }
+    let rows: [ReadRow]
+    let previous: [String: ReadRow]
+    let entries: [ChatFeedEntry]
+    let latestActivityEntryIDs: Set<String>
+    let latestActiveActivityEntryID: String?
+    let disclosureEntries: [ActivityDisclosurePolicy.Entry]
+    let retainedTurnIDs: Set<String>
+    let attachmentIDs: [String]
+    let turns: [String: ReadTurn]
+
+    init(chatID: String, rows: [ReadRow], activeTurnIDs: Set<String>, activeTurnID: String?, focusedRowID: String?, turns: [ReadTurn]?) {
+        self.rows = rows
+        previous = Dictionary(zip(rows.dropFirst(), rows).map { ($0.0.id, $0.1) }, uniquingKeysWith: { first, _ in first })
+        entries = ChatFeedEntry.grouping(rows, activeTurnIDs: activeTurnIDs, focusedRowID: focusedRowID)
+        latestActivityEntryIDs = ChatFeedEntry.latestActivityEntryIDs(entries)
+        latestActiveActivityEntryID = ChatFeedEntry.latestActivityEntryID(entries, turnID: activeTurnID)
+        var byID: [String: ReadTurn] = [:]
+        for turn in turns ?? [] where byID[turn.id] == nil { byID[turn.id] = turn }
+        self.turns = byID
+        disclosureEntries = entries.compactMap { entry in
+            guard entry.isActivity, let turnID = entry.rows.first?.turnId else { return nil }
+            return ActivityDisclosurePolicy.Entry(conversationID: chatID, turnID: turnID, entryID: entry.id,
+                lifecycle: ActivityDisclosurePolicy.lifecycle(for: byID[turnID]),
+                autoOpenWhileActive: activeTurnIDs.contains(turnID))
+        }
+        retainedTurnIDs = turns.map { Set($0.map(\.id)) } ?? Set(disclosureEntries.map { $0.key.turnID })
+        attachmentIDs = rows.flatMap(\.attachmentIds)
     }
 }

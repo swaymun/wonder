@@ -1158,11 +1158,47 @@ pub(super) async fn hydrate_app_server_turn_items(
     None
 }
 
+/// Native clients ask for pages without data they never render: the raw event
+/// list and inline computer-use screenshots (megabytes each). Older hosts
+/// ignore the header and return the full page, which those clients also accept.
+pub(super) const COMPACT_VIEW_HEADER: &str = "x-wonder-history-view";
+
+pub(super) fn wants_compact_view(headers: &HeaderMap) -> bool {
+    headers
+        .get(COMPACT_VIEW_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("compact"))
+}
+
+fn is_inline_image(value: &serde_json::Value) -> bool {
+    value.as_str().is_some_and(|url| url.starts_with("data:"))
+}
+
+pub(super) fn compact_thread(thread: &mut ConversationThreadProjection) {
+    for item in thread.turns.iter_mut().flat_map(|turn| turn.items.iter_mut()) {
+        if item.item_type == "imageView" && item.payload.get("imageUrl").is_some_and(is_inline_image) {
+            if let Some(payload) = item.payload.as_object_mut() {
+                payload.remove("imageUrl");
+            }
+        }
+    }
+}
+
+/// Keeps the event identity, sequence and type for replay while dropping the
+/// inline screenshot a compact client never reads.
+pub(super) fn compact_event(event: &mut HostEventEnvelope) {
+    if let WonderEvent::ComputerUseScreenshot { image_url } = &mut event.event {
+        image_url.clear();
+    }
+}
+
 pub(super) async fn conversation_snapshot(
     State(state): State<AppState>,
     Path(conversation_id): Path<String>,
     Query(query): Query<HistoryQuery>,
+    headers: HeaderMap,
 ) -> Response {
+    let compact = wants_compact_view(&headers);
     let before = match decode_history_cursor(query.before.as_deref(), &conversation_id) {
         Ok(value) => value,
         Err(()) => {
@@ -1290,6 +1326,12 @@ pub(super) async fn conversation_snapshot(
         .filter(|m| !answers.iter().any(|hidden| hidden.id == m.id))
         .collect::<Vec<_>>();
     thread.next_cursor = next_cursor.map(|cursor| encode_history_cursor(&conversation_id, &cursor));
+    let events = if compact {
+        compact_thread(&mut thread);
+        Vec::new()
+    } else {
+        events
+    };
     Json(ConversationSnapshot {
         conversation_id,
         host_epoch: state.host_epoch.clone(),

@@ -481,6 +481,12 @@ public enum ModelDefaultPurpose: String, CaseIterable, Identifiable {
         switch self { case .newBots: "New Bots"; case .groupParticipation: "Group participation"; case .groupCreation: "Group creation" }
     }
     public var key: String { self == .newBots ? NewBotDefaults.storageKey : "wonder.\(rawValue).v1" }
-    public var initial: NewBotDefaults { self == .newBots ? NewBotDefaults() : NewBotDefaults(model: "gpt-5.6-luna", reasoningEffort: "xhigh") }
+    public var initial: NewBotDefaults {
+        switch self {
+        case .newBots: NewBotDefaults()
+        case .groupCreation: NewBotDefaults(model: "gpt-5.6-luna", reasoningEffort: "medium")
+        case .groupParticipation: NewBotDefaults(model: "gpt-5.6-luna", reasoningEffort: "xhigh")
+        }
+    }
     public func load() -> NewBotDefaults { NewBotDefaults.load(key: key, fallback: initial) }
 }

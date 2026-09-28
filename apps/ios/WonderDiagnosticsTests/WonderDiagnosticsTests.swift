@@ -244,6 +244,33 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertLessThan(PushRetry().nextAttempt, now)
     }
 
+    /// Launch must show saved chats from the on-device cache without waiting
+    /// for the Mac, and an unreachable Mac must not blank or revoke them.
+    @MainActor func testSavedChatsLoadWithoutTheMacAndStayMarkedUnverified() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let saved = Self.cameraSavedConnection()
+        let store = ReadStore(root: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Wonder/Hosts"),
+                              host: saved.credential.hostInstallationId, device: saved.storageDeviceId)
+        defer { try? store.remove() }
+        var previous = ProjectionState()
+        previous.install(try JSONDecoder().decode(ConversationSnapshot.self, from: Data(#"{"conversationId":"saved-chat","hostEpoch":"epoch","lastSequence":7,"messages":[{"messageId":"m","body":"Saved question","state":"completed","createdAt":"1700000000000","attachmentIds":[]}],"assistantMessages":[],"thread":{"hydrated":true}}"#.utf8)))
+        previous.summaries = [try Self.cameraChat(id: "saved-chat")]
+        try store.save(previous)
+        MessageRecoveryURLProtocol.fail(path: "/api/v1/pairing/session/refresh-challenge", error: .notConnectedToInternet)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MessageRecoveryURLProtocol.self]
+        let model = ConnectionModel(saved: saved, persistConnection: { _ in }, api: PairingAPI(configuration: configuration))
+        XCTAssertTrue(model.chats.isEmpty)
+        await model.check(renew: true)
+        XCTAssertEqual(model.chats.map(\.id), ["saved-chat"])
+        XCTAssertEqual(model.snapshots["saved-chat"]?.messages.first?.body, "Saved question")
+        XCTAssertEqual(model.macConnected, false)
+        XCTAssertFalse(model.accessEnded, "An unreachable Mac is not revoked access")
+        XCTAssertTrue(model.cachedConversationIds.contains("saved-chat"), "Saved content stays marked unverified")
+        XCTAssertTrue(model.loadingConversationIDs.isEmpty)
+        XCTAssertNil(model.conversationLoadFailures["saved-chat"])
+    }
+
     @MainActor func testChatListStatusPrioritizesWorkAndUsesFreshState() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -669,8 +696,27 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(model.rows(for:original.summary).first?.text,"Before")
         model.groups["chat"]=try group("After")
         XCTAssertEqual(model.rows(for:original.summary).first?.text,"After")
+        var versioned = try group("First host")
+        versioned.hostEpoch = "first"; versioned.lastSequence = 4
+        model.groups["chat"] = versioned
+        XCTAssertEqual(model.rows(for: original.summary).first?.text, "First host")
+        versioned = try group("Replacement host")
+        versioned.hostEpoch = "replacement"; versioned.lastSequence = 4
+        model.groups["chat"] = versioned
+        XCTAssertEqual(model.rows(for: original.summary).first?.text, "Replacement host")
         model.groups=[:]
         XCTAssertTrue(model.rows(for:original.summary).isEmpty)
+        for epoch in ["first", "replacement"] {
+            let data = Data("""
+            {"conversationId":"chat","hostEpoch":"\(epoch)","lastSequence":4,"messages":[],
+             "assistantMessages":[{"messageId":"reply","text":"\(epoch)","state":"completed","createdAt":"1","updatedAt":"1"}],
+             "thread":{"hydrated":true}}
+            """.utf8)
+            model.snapshots["chat"] = try JSONDecoder().decode(ConversationSnapshot.self, from: data)
+            XCTAssertEqual(model.rows(for: original.summary).first?.text, epoch)
+        }
+        model.snapshots = [:]
+        XCTAssertTrue(model.rows(for: original.summary).isEmpty)
     }
     @MainActor func testTurnLifecycleKeepsPreTurnQueueStateSeparateFromCanonicalControls() throws {
         func snapshot(turns: [[String: Any]], messages: [[String: Any]]) throws -> ConversationSnapshot {
@@ -716,6 +762,19 @@ final class WonderDiagnosticsTests: XCTestCase {
         let cameraContext = model.cameraContextID
         model.dismissConversation(parent)
         XCTAssertEqual(model.visibleChat?.id, child.id, "A late parent disappearance must not clear its child")
+
+        // A post-creation list refresh must not wait on any old conversation
+        // detail endpoint, even while a child is visible over the parent.
+        DiagnosticSubagentFixture.resetTransport()
+        await model.refreshChatList()
+        let listPaths = DiagnosticSubagentFixture.recordedPaths()
+        XCTAssertTrue(listPaths.contains("/api/v1/conversations"))
+        XCTAssertTrue(listPaths.contains("/api/v1/group-chats"))
+        XCTAssertTrue(listPaths.contains("/api/v1/bots"))
+        XCTAssertFalse(listPaths.contains { $0.hasPrefix("/api/v1/conversations/\(child.id)") })
+        XCTAssertFalse(listPaths.contains { $0.hasPrefix("/api/v1/conversations/\(parent.id)") })
+        XCTAssertEqual(model.selectedChat?.id, parent.id)
+        XCTAssertEqual(model.visibleChat?.id, child.id)
 
         DiagnosticSubagentFixture.resetTransport()
         DiagnosticSubagentFixture.updateChild(status: "inProgress")
@@ -1904,6 +1963,103 @@ extension WonderDiagnosticsTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("The expected synthetic request did not arrive: \(path)")
+    }
+
+    @MainActor func testConnectionRenewalRecoversFromNetworkFailureWithoutPairingAgain() async throws {
+        let path = "/api/v1/pairing/session/refresh-challenge"
+        for (failure, message) in [(URLError.Code.notConnectedToInternet, "Your iPhone is offline"),
+                                   (.timedOut, "Tailscale"), (.cannotFindHost, "Tailscale")] {
+            MessageRecoveryURLProtocol.reset()
+            var saved: [SavedConnection] = []
+            let model = renewalModel { if let value = $0 { saved.append(value) } }
+            MessageRecoveryURLProtocol.fail(path: path, error: failure)
+            await model.check(renew: true, userInitiated: true)
+            XCTAssertEqual(model.macConnected, false)
+            XCTAssertTrue(model.status.contains(message))
+            XCTAssertFalse(model.accessEnded)
+            XCTAssertEqual(model.connection?.requiresPairing, false)
+            XCTAssertFalse(model.busy)
+            XCTAssertFalse(model.checkingConnection)
+            XCTAssertTrue(saved.isEmpty)
+
+            try enqueueRenewal()
+            await model.check(renew: true, userInitiated: true)
+            XCTAssertEqual(model.macConnected, true)
+            XCTAssertEqual(model.status, "Connected to your computer.")
+            XCTAssertFalse(model.accessEnded)
+            XCTAssertNil(model.error)
+            XCTAssertEqual(saved.count, 1)
+            XCTAssertEqual(saved.first?.credential.deviceId, Self.cameraSavedConnection().credential.deviceId)
+            XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path).count, 2)
+        }
+    }
+
+    @MainActor func testConnectionRenewalDiscardsBackgroundResponseAndRetriesOnResume() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let path = "/api/v1/pairing/session/refresh-challenge"
+        var saves = 0
+        let model = renewalModel { _ in saves += 1 }
+        try enqueueRenewal()
+        MessageRecoveryURLProtocol.hold(path: path)
+        defer { MessageRecoveryURLProtocol.releaseHeld() }
+        let check = Task { await model.check(renew: true) }
+        try await waitForRecoveryRequests(path: path)
+        model.setForeground(false)
+        MessageRecoveryURLProtocol.releaseHeld()
+        await check.value
+        XCTAssertNil(model.macConnected)
+        XCTAssertEqual(saves, 0, "A backgrounded renewal must not publish or save a stale response")
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/pairing/session").isEmpty)
+        try enqueueRenewal()
+        await model.check(renew: true)
+        XCTAssertEqual(model.macConnected, true)
+        XCTAssertEqual(saves, 1)
+    }
+
+    @MainActor func testConnectionRenewalRejectsWrongHostWithoutReplacingCredentials() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let model = renewalModel { _ in XCTFail("A different host must not replace the saved connection") }
+        try enqueueRenewal(host: "different-host")
+        await model.check(renew: true)
+        XCTAssertEqual(model.macConnected, false)
+        XCTAssertEqual(model.connection?.credential.hostInstallationId, Self.cameraSavedConnection().credential.hostInstallationId)
+        XCTAssertFalse(model.accessEnded)
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/pairing/session").isEmpty)
+    }
+
+    @MainActor func testCancelledConnectionCheckDoesNotRenewAfterCachePreparation() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let model = renewalModel { _ in XCTFail("A cancelled check must not replace credentials") }
+        let check = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await model.check(renew: true)
+        }
+        await check.value
+        XCTAssertFalse(model.checkingConnection)
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/pairing/session/refresh-challenge", includingEmpty: true).isEmpty)
+    }
+
+    @MainActor private func renewalModel(persist: @escaping (SavedConnection?) throws -> Void) -> ConnectionModel {
+        let key = P256.Signing.PrivateKey()
+        let signing = SigningIdentity(read: { key.rawRepresentation }, save: { _ in XCTFail("Renewal must not replace the identity") },
+            restore: { _ in EnrollmentSigningIdentity(publicKey: key.publicKey, representation: key.rawRepresentation,
+                                                      sign: { try key.signature(for: $0) }) },
+            create: { throw SigningIdentityFailure.missing })
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MessageRecoveryURLProtocol.self]
+        return ConnectionModel(saved: Self.cameraSavedConnection(), persistConnection: persist,
+                               api: PairingAPI(configuration: configuration), signingIdentity: signing)
+    }
+
+    private func enqueueRenewal(host: String = "camera-unit-host") throws {
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        let challenge: [String: Any] = ["challengeId": "renewal", "deviceId": "camera-unit-device", "nonce": "synthetic",
+            "origin": "https://camera-unit.invalid", "hostInstallationId": host, "offerId": "",
+            "issuedAtMs": now, "expiresAtMs": now + 60_000]
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/pairing/session/refresh-challenge",
+                                           body: try JSONSerialization.data(withJSONObject: challenge))
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/pairing/session",
+                                           body: try JSONEncoder().encode(Self.cameraSavedConnection().credential))
     }
 
     @MainActor func testCancelledPairingDoesNotReadIdentityOrConsumeOffer() async throws {

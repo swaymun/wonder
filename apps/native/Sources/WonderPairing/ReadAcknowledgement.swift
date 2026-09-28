@@ -54,7 +54,7 @@ public enum ReadVisibility {
 extension ProjectionState {
     @discardableResult public mutating func applyGroupReadAcknowledgement(_ reply: GroupRead, visible: VisibleReadReceipt, startedAtSequence: UInt64) -> Bool {
         guard reply.conversationId == visible.conversationId, hostEpoch == visible.hostEpoch,
-            lastSequence == startedAtSequence, !dirty.contains(reply.conversationId),
+            lastSequence >= startedAtSequence, !dirty.contains(reply.conversationId),
             var current = groups[reply.conversationId], current.id == reply.id,
             VisibleReadReceipt(group: current) == visible, let unread = reply.hasUnread,
             let index = summaries.firstIndex(where: { $0.id == reply.conversationId }) else { return false }
@@ -64,10 +64,11 @@ extension ProjectionState {
         return true
     }
 
-    /// Late acknowledgements must not replace a newer summary or clear an invalidated snapshot.
+    /// Fence against this conversation's snapshot and invalidations. Advancing
+    /// another conversation's replay cursor does not invalidate a visible read.
     @discardableResult public mutating func applyReadAcknowledgement(_ reply: ChatSummary, visible: VisibleReadReceipt, startedAtSequence: UInt64) -> Bool {
         guard reply.id == visible.conversationId, hostEpoch == visible.hostEpoch,
-            lastSequence == startedAtSequence, !dirty.contains(reply.id),
+            lastSequence >= startedAtSequence, !dirty.contains(reply.id),
             let snapshot = snapshots[reply.id], VisibleReadReceipt(snapshot: snapshot) == visible,
             let index = summaries.firstIndex(where: { $0.id == reply.id }) else { return false }
         let current = summaries[index]

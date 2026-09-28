@@ -40,7 +40,18 @@ final class ManagementTests: XCTestCase {
         XCTAssertThrowsError(try NewBotDefaults(model: "model", reasoningEffort: "light").creationValues(options: options))
     }
     func testModelDefaultsSeparatePurposesAndFreezeSpeedWithPendingSend() throws {
-        let preferences = try XCTUnwrap(UserDefaults(suiteName: "group-defaults-" + UUID().uuidString))
+        let suite = "group-defaults-" + UUID().uuidString
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let creationKey = ModelDefaultPurpose.groupCreation.key
+        let creationFallback = ModelDefaultPurpose.groupCreation.initial
+        XCTAssertEqual(NewBotDefaults.load(from: preferences, key: creationKey, fallback: creationFallback).reasoningEffort, "medium")
+        XCTAssertEqual(ModelDefaultPurpose.groupParticipation.initial.reasoningEffort, "xhigh")
+        // An explicit prior choice must win over the faster unsaved default.
+        let savedCreation = NewBotDefaults(model: "luna", reasoningEffort: "xhigh", serviceTier: "priority")
+        try savedCreation.save(to: preferences, key: creationKey)
+        XCTAssertEqual(NewBotDefaults.load(from: preferences, key: creationKey, fallback: creationFallback), savedCreation)
+        preferences.removeObject(forKey: creationKey)
         let selection = NewBotDefaults(model: "luna", reasoningEffort: "xhigh", serviceTier: "priority")
         try selection.save(to: preferences, key: ModelDefaultPurpose.groupParticipation.key)
         XCTAssertEqual(NewBotDefaults.load(from: preferences, key: ModelDefaultPurpose.groupParticipation.key), selection)

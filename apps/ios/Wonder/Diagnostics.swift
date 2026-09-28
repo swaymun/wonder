@@ -222,7 +222,11 @@ final class DiagnosticJournal: @unchecked Sendable {
         DiagnosticJournal.shared.checkpoint(active: value)
         if value {
             DiagnosticJournal.shared.record(DiagnosticEvent(operation:"session",phase:"sample",metrics:["thermalState":Double(ProcessInfo.processInfo.thermalState.rawValue),"lowPowerMode":ProcessInfo.processInfo.isLowPowerModeEnabled ? 1 : 0]))
-            if !measuredLaunch { measuredLaunch=true; interaction("launch") }
+            if !measuredLaunch {
+                measuredLaunch=true; interaction("launch")
+                // Physical XCTest runs request one bounded capture explicitly.
+                if ProcessInfo.processInfo.environment["WONDER_DIAGNOSTICS_CAPTURE"] == "1" { startCapture() }
+            }
         }
         if !value { stopCapture(); pending.removeAll(); for interval in intervals.values { signposter.endInterval("Interaction", interval) }; intervals.removeAll(); link?.isPaused = true }
     }

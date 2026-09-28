@@ -128,7 +128,7 @@ struct GroupCreationView: View {
             let group: GroupRead = try await model.api.request("/api/v1/group-chats/new", origin: saved.origin, body: data, credential: saved.credential)
             guard scope == model.assignmentScope else { return }
             model.managementDrafts?.remove("group.new")
-            await model.loadChats(force: true)
+            await model.refreshChatList()
             model.selectedChat = model.chats.first { $0.id == group.conversationId }
             dismiss()
         } catch { failure = managementError(error) }

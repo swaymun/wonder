@@ -75,7 +75,7 @@ struct PhoneIdentity: Sendable {
         saved.save(connection)
         let host = connection.credential.hostInstallationId
         models[host] = model
-        observations[host] = model.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        observations[host] = model.$listRevision.dropFirst().sink { [weak self] _ in self?.objectWillChange.send() }
     }
     #endif
 
@@ -146,7 +146,9 @@ struct PhoneIdentity: Sendable {
         }
         if isPreview { model.connection = connection; model.macConnected = true; model.status = "Connected to your computer." }
         models[host] = model
-        observations[host] = model.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        // Views reading a model's own state observe it directly. The library
+        // re-renders the list and root only for list-visible changes.
+        observations[host] = model.$listRevision.dropFirst().sink { [weak self] _ in self?.objectWillChange.send() }
         return model
     }
 

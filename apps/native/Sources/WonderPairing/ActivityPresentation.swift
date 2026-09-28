@@ -482,7 +482,7 @@ public struct ContextCompactionPresentation: Equatable, Sendable {
 
 extension ReadRow {
     /// Only confirmed tool results become status lines; failures retain their details.
-    public var profileStatus: String? {
+    func makeProfileStatus() -> String? {
         if let groupStatus { return groupStatus }
         guard !isUser, let item, item.type == "dynamicToolCall", item.state == "completed",
               let payload = item.payload, payload["tool"]?.string == "wonder_update_profile",
@@ -494,7 +494,6 @@ extension ReadRow {
         return result["statusLine"]?.string ?? "Bot updated"
     }
 
-    public var activitySummary: ActivityPresentation? { presentation(includeDetails: false) }
     public var activity: ActivityPresentation? { presentation(includeDetails: true) }
     public var isContextCompaction: Bool { !isUser && item?.type == "contextCompaction" }
     public var contextCompactionPresentation: ContextCompactionPresentation? {
@@ -502,7 +501,7 @@ extension ReadRow {
         return .forState(item.state)
     }
 
-    private func presentation(includeDetails: Bool) -> ActivityPresentation? {
+    func presentation(includeDetails: Bool) -> ActivityPresentation? {
         guard profileStatus == nil, !isUser, let item, !["userMessage", "agentMessage", "approval"].contains(item.type) else { return nil }
         let payload = item.payload ?? [:]
         var details: [ActivityDetail] = []
@@ -740,7 +739,7 @@ extension ThreadValue {
 }
 
 extension ReadRow {
-    public var toolFiles: [ConversationFile] {
+    func makeToolFiles() -> [ConversationFile] {
         guard let payload = item?.payload else { return [] }
         return ["result", "contentItems", "output"].flatMap { payload[$0]?.toolFiles ?? [] }
     }
