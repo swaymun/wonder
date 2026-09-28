@@ -4,11 +4,11 @@ Wonder runs on your Mac and connects to its native iPhone or iPad app over
 Tailscale. There is no Wonder account. Allow about one setup session with both
 devices nearby; the Mac must confirm the phone’s first connection.
 
-The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.80-beta.1/Wonder-1.0.80.dmg)
+The [signed Mac beta installer](https://github.com/swaymun/wonder/releases/download/mac-v1.0.92-beta.1/Wonder-1.0.92.dmg)
 is available. Its SHA-256 checksum is
-`d19ab4e1ca7fba04d7c74d7db5fd6ebfbdba3a120ce8a7e86dcc87dc219d0a5c`.
-The current iOS build is approved for external testing; public TestFlight
-enrollment remains closed until the remaining device checks pass.
+`eb15190f49901b4cdc81693dcf417f224c8680b69b7e261b859308b61c6869b3`.
+Release iOS build 1.0 (60) is processed and available for internal testing.
+External beta submission and public TestFlight enrollment remain closed.
 Developers can also use the [source-build instructions](DEVELOPMENT.md).
 
 ## Requirements
@@ -17,7 +17,7 @@ Developers can also use the [source-build instructions](DEVELOPMENT.md).
 | --- | --- |
 | Mac | Apple Silicon; macOS 14 or later is the deployment target. |
 | iPhone or iPad | iOS/iPadOS 17 or later is the deployment target. |
-| ChatGPT Desktop | The current Mac 1.0.80 download supports `0.155.0-alpha.9`, `0.155.0-alpha.9.2`, `0.155.0-alpha.16.3`, and `0.155.0-alpha.16.4` with matching schemas. The next Mac build will check changed schemas locally for additive protocol compatibility. Breaking protocol changes still require a Wonder update. |
+| ChatGPT Desktop | Mac 1.0.92 passed verification against the official ChatGPT Desktop 26.924.22138 (11645) installer. Wonder validates the installed runtime and checks changed schemas locally for additive protocol compatibility. Breaking protocol changes still require a Wonder update. |
 | Model access | Sign in to your model provider using the supported runtime. Its access limits and billing still apply. |
 | Tailscale | Install on both devices, join the same tailnet, and allow access between them. MagicDNS and tailnet HTTPS must be enabled. |
 
@@ -37,10 +37,10 @@ If Wonder reports an incompatible runtime, stop at that message and check the
 current Wonder release requirements. Reinstalling Wonder or resetting its data
 will not fix a version mismatch. Do not bypass the compatibility check.
 
-### Claude in source builds
+### Claude
 
-Claude support is newer than the Mac 1.0.80 download. In a current source build,
-open Wonder’s Mac Settings and choose **Sign in to Claude**, then complete the
+Mac 1.0.92 includes Claude subscription agents.
+Open Wonder’s Mac Settings and choose **Sign in to Claude**, then complete the
 official subscription login. Wonder includes the Agent SDK and its Node runtime;
 no separate Node installation, Chrome extension, or API key is required.
 

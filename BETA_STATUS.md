@@ -15,11 +15,11 @@ Keep the Mac awake and online while using it remotely.
 | Component | Status |
 | --- | --- |
 | iPhone and iPad | Release 1.0 (60) includes cached startup, read-receipt retries, and stable conversation opening/scrolling. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation of this build through TestFlight remains unverified. |
-| Mac companion | [Version 1.0.80](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.80-beta.1) remains the public download. The 1.0.92 candidate is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and verification against the official ChatGPT 26.924.22138 (11645) runtime. Its DMG and signed update feed are prepared but not published. |
-| Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The performance-overhaul update is prepared for publication. Third-party components retain their own licenses. |
+| Mac companion | [Version 1.0.92](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.92-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and verification against the official ChatGPT 26.924.22138 (11645) runtime. |
+| Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The performance-overhaul update is published on `main`. Third-party components retain their own licenses. |
 
 The 1.0.92 update preserves the installed Mac's pairing and history. A signed
-1.0.78→1.0.79 automatic upgrade previously completed on this Mac; the new candidate
+1.0.78→1.0.79 automatic upgrade previously completed on this Mac; version 1.0.92
 was installed through the signed local installer. Fresh-Mac setup remains unverified.
 
 The [landing page, setup guide and privacy information](https://wonder-launch-preview.saimun-h-shahee.chatgpt.site) are public.
@@ -56,7 +56,7 @@ outside the beta scope.
 - Initial setup requires both devices, Tailscale and access to the supported model provider.
 - Model requests are sent to your provider. Wonder does not include a model subscription or credits.
 - Remote access depends on the Mac being reachable. Tailscale may relay encrypted traffic when a direct connection is unavailable.
-- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. One signed automatic upgrade passed on this Mac; use the [signed Mac DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.80-beta.1) if an update does not complete.
+- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. One signed automatic upgrade passed on this Mac; use the [signed Mac DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.92-beta.1) if an update does not complete.
 - Teaching a task and replaying taught tasks are unavailable in this beta.
 - Notifications require permission and network access. Disabling notifications does not stop work on the Mac.
 - Supported OS versions and verification evidence are different: simulator checks do not establish physical-device behavior on every supported model.
