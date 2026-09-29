@@ -14,6 +14,8 @@ async function fixture(t, { authenticated = true, messages = [] } = {}) {
   const sessions = await new Sessions(join(root, "sessions")).initialize();
   const frames = [], inputs = [], capturedOptions = [];
   const runtime = { sdk: {
+    tool: (name, _description, _schema, handler) => ({ name, handler }),
+    createSdkMcpServer: ({ tools }) => ({ tools }),
     query: ({ prompt, options }) => {
       capturedOptions.push(options);
       const query = (async function* () {
@@ -44,6 +46,31 @@ async function fixture(t, { authenticated = true, messages = [] } = {}) {
   const finish = async () => { await new Promise(resolve => setImmediate(resolve)); await bridge.active.get(thread.id)?.finished; };
   return { root, sessions, bridge, thread, frames, inputs, capturedOptions, finish };
 }
+
+test("approved Wonder tools tolerate SDK property reordering but reject changed arguments and replay", async t => {
+  const done = Promise.withResolvers();
+  const messages = (async function* () { await done.promise; yield { type: "result", subtype: "success" }; })();
+  const f = await fixture(t, { messages });
+  f.sessions.get(f.thread.id).options.dynamicTools = [{ name: "wonder_ask_question", description: "Optional question",
+    inputSchema: { type: "object", properties: { title: { type: "string" }, options: { type: "array", items: { type: "string" } } }, required: ["title", "options"] } }];
+  await f.bridge.request("turn/start", { threadId: f.thread.id, input: [{ type: "text", text: "Ask one question" }] });
+  while (!f.capturedOptions.length) await new Promise(resolve => setImmediate(resolve));
+  const opts = f.capturedOptions[0], handler = opts.mcpServers.wonder.tools[0].handler;
+  const input = { options: ["A", "B"], title: "Choose a fixture" };
+  const context = { toolUseID: "owned-question", mcpServer: { name: "wonder", source: "sdk" } };
+  assert.equal((await opts.canUseTool("mcp__wonder__wonder_ask_question", input, { ...context, mcpServer: { name: "wonder", source: "user" } })).behavior, "deny");
+  assert.equal((await opts.canUseTool("mcp__wonder__wonder_ask_question", input, context)).behavior, "allow");
+  await assert.rejects(handler({ title: input.title, options: ["B", "A"] }), /correlated/);
+  const executed = handler({ title: input.title, options: input.options });
+  await new Promise(resolve => setImmediate(resolve));
+  const call = f.frames.find(frame => frame.method === "item/tool/call");
+  assert.equal(call.params.callId, context.toolUseID);
+  assert.deepEqual(call.params.arguments, { title: input.title, options: input.options });
+  await f.bridge.receive({ id: call.id, result: { success: true, contentItems: [{ type: "inputText", text: '{"posted":true}' }] } });
+  assert.equal((await executed).isError, false);
+  await assert.rejects(handler(input), /correlated/);
+  done.resolve(); await f.finish();
+});
 
 // Resuming a stored session must not resurrect the retired custom computer
 // tool. Native computer access must come from the host-registered adapter.

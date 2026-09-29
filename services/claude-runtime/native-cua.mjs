@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { toolCallKey } from './permissions.mjs';
 
 async function connectNativeCua({ server, environment, sessionId, threadId, turnId,
   signal, requestElicitation }) {
@@ -78,7 +79,7 @@ export async function createNativeCua({ sdk, ...options }) {
     const proxy = sdk.createSdkMcpServer({ name: 'cua_repl', version: '1.0.0', tools:
       native.tools.map(t => sdk.tool(t.name, t.description, z.fromJSONSchema(t.inputSchema).shape,
         async (input, extra) => {
-          const key = JSON.stringify([t.name, input]), calls = authorized.get(key);
+          const key = toolCallKey(t.name, input), calls = authorized.get(key);
           const callId = calls?.shift();
           if (!calls?.length) authorized.delete(key);
           if (!callId) throw new Error('The native computer call has no verified SDK authorization.');
@@ -92,7 +93,7 @@ export async function createNativeCua({ sdk, ...options }) {
         const nativeName = name.startsWith('mcp__cua_repl__') ? name.slice('mcp__cua_repl__'.length) : '';
         if (!nativeNames.has(nativeName) || context.mcpServer?.source !== 'sdk'
           || context.mcpServer?.name !== 'cua_repl' || !context.toolUseID || signal.aborted) return false;
-        const key = JSON.stringify([nativeName, input]), calls = authorized.get(key) ?? [];
+        const key = toolCallKey(nativeName, input), calls = authorized.get(key) ?? [];
         if (!calls.includes(context.toolUseID)) calls.push(context.toolUseID);
         authorized.set(key, calls);
         return true;

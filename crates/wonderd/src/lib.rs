@@ -5868,6 +5868,23 @@ async fn create_channel(
         if uuid::Uuid::parse_str(&id).is_err() {
             return (StatusCode::BAD_REQUEST, "Invalid Group creation request.").into_response();
         }
+        match state.store.group_was_deleted(&id).await {
+            Ok(true) => {
+                return (
+                    StatusCode::GONE,
+                    "This Group Chat was deleted. Start a new draft.",
+                )
+                    .into_response()
+            }
+            Ok(false) => {}
+            Err(_) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Could not check the Group creation request.",
+                )
+                    .into_response()
+            }
+        }
         let hash = hex::encode(Sha256::digest(
             serde_json::to_vec(&request).unwrap_or_default(),
         ));
@@ -6551,6 +6568,11 @@ async fn orchestrate_channel_message(
                     Some(_) => Some("failed"),
                 };
                 let failed = outcome != Some("completed");
+                if group_collaboration::initialization_parent(&channel_id, &parent_message) {
+                    // Purpose setup is represented by its optional question,
+                    // regardless of extra prose emitted by either runtime.
+                    continue;
+                }
                 let worker_turn = state
                     .store
                     .message_by_id(&message_id)
@@ -10027,7 +10049,8 @@ async fn dispatch_to_codex_inner(
                     "serviceTier": resolved.service_tier,
                 });
         if bot.agent_family == AgentFamily::Claude {
-            turn_params["wonderInternal"] = serde_json::json!(state.store.bot_initialization_messages(&message.conversation_id).await.map_err(|e| e.to_string())?.iter().any(|m| m.id == message.id));
+            turn_params["wonderInternal"] = serde_json::json!(state.store.bot_initialization_messages(&message.conversation_id).await.map_err(|e| e.to_string())?.iter().any(|m| m.id == message.id)
+                || group_collaboration::internal_message(&state, &message, &bot.id).await?);
         }
         let response = app_server.request("turn/start", turn_params).await.map_err(|e| e.to_string())?;
         if let Some(error) = response.error {

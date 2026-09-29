@@ -1073,6 +1073,58 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(bodies.first, bodies.last, "An ambiguous reply must not silently become Skip")
     }
 
+    @MainActor func testConversationalBotRetryKeepsPayloadAndRevokedCreationDoesNotSubmit() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { MessageRecoveryURLProtocol.releaseHeld(); try? FileManager.default.removeItem(at: root) }
+        MessageRecoveryURLProtocol.reset()
+        let model = recoveryModel(root: root)
+        model.managementDrafts?.remove("bot.conversational-new")
+        defer { model.managementDrafts?.remove("bot.conversational-new") }
+        let defaults = NewBotDefaults.load()
+        let options = try JSONSerialization.data(withJSONObject: [
+            "firstMessageModelSelection": true,
+            "models": [["id": defaults.model.isEmpty ? "fixture-model" : defaults.model, "displayName": "Fixture", "hidden": false,
+                "reasoningEfforts": defaults.reasoningEffort.isEmpty ? [] : [["id": defaults.reasoningEffort, "label": "Fixture"]],
+                "serviceTiers": [["id": defaults.serviceTier ?? "default", "label": "Fixture"]]]],
+            "approvalModes": [["id": defaults.approvalMode.rawValue, "allowed": true]], "allowedApprovalPolicies": []
+        ])
+        for _ in 0..<2 { MessageRecoveryURLProtocol.enqueue(path: "/api/v1/bot-options", body: options) }
+        MessageRecoveryURLProtocol.fail(path: "/api/v1/bots/new", error: .timedOut)
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/bots/new", body: try JSONEncoder().encode(managedBot("created", avatar: "ocean")))
+        do { _ = try await model.createConversationalBot(); XCTFail("Ambiguous creation must retain its request") }
+        catch { XCTAssertNotNil(model.managementDrafts?.load("bot.conversational-new")) }
+        _ = try await model.createConversationalBot()
+        let bodies = MessageRecoveryURLProtocol.bodies(path: "/api/v1/bots/new")
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: bodies[0]) as? NSDictionary,
+                       try JSONSerialization.jsonObject(with: bodies[1]) as? NSDictionary)
+        XCTAssertNil(model.managementDrafts?.load("bot.conversational-new"))
+
+        MessageRecoveryURLProtocol.reset()
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/bot-options", body: options)
+        MessageRecoveryURLProtocol.hold(path: "/api/v1/bot-options")
+        let pending = Task { try await model.createConversationalBot() }
+        for _ in 0..<100 {
+            if !MessageRecoveryURLProtocol.bodies(path: "/api/v1/bot-options", includingEmpty: true).isEmpty { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: "/api/v1/bot-options", includingEmpty: true).count, 1)
+        let reserved = try XCTUnwrap(model.managementDrafts?.load("bot.conversational-new"))
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/bot-options", body: options)
+        let second = Task { try await model.createConversationalBot() }
+        for _ in 0..<100 {
+            if MessageRecoveryURLProtocol.bodies(path: "/api/v1/bot-options", includingEmpty: true).count == 2 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(model.managementDrafts?.load("bot.conversational-new")?.requestId, reserved.requestId,
+                       "Overlapping entry paths must share the durable creation identity before waiting for options")
+        model.accessEnded = true
+        MessageRecoveryURLProtocol.releaseHeld()
+        do { _ = try await pending.value; XCTFail("Revoked creation must be cancelled") } catch {}
+        do { _ = try await second.value; XCTFail("Revoked overlapping creation must be cancelled") } catch {}
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/bots/new").isEmpty)
+    }
+
     @MainActor private func recoveryModel(root: URL) -> ConnectionModel {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MessageRecoveryURLProtocol.self]

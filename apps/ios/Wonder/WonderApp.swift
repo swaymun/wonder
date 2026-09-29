@@ -288,8 +288,14 @@ struct UnifiedChatsView: View {
                 creationError = nil
                 startBotCreation(hostID: failure.hostID)
             }
+            Button("Start a new draft") {
+                guard let failure = creationError, let model = model(forHostID: failure.hostID) else { return }
+                model.managementDrafts?.remove("bot.conversational-new")
+                creationError = nil
+                startBotCreation(hostID: failure.hostID)
+            }
             Button("Cancel", role: .cancel) { creationError = nil }
-        } message: { Text(creationError?.message ?? "") }
+        } message: { Text((creationError?.message ?? "") + "\n\nThe previous request may have created a Bot. Check Chats before starting a new draft.") }
         .sheet(item: $presentedModal) { modal in
             if let model = model(forHostID: modal.hostID) {
                 switch modal {

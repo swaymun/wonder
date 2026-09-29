@@ -4,10 +4,11 @@ import WonderPairing
 private struct GroupEmptyReply: Decodable {}
 
 private struct SuggestedBot: Codable, Identifiable {
+    let id = UUID()
     var name: String
     var purpose: String
     var instructions: String
-    var id: String { name }
+    private enum CodingKeys: String, CodingKey { case name, purpose, instructions }
 }
 private struct TeamProposal: Codable {
     var name: String
@@ -26,6 +27,7 @@ struct GroupCreationView: View {
     @State private var failure: String?
     @State private var scope: String?
     @State private var request = ManagementDraft()
+    @State private var resetRequested = false
     private var bots: [ManagedBot] { model.managedBots.filter { !$0.isArchived } }
     var body: some View {
         NavigationStack {
@@ -37,13 +39,13 @@ struct GroupCreationView: View {
                     }
                     if !proposal.newBots.isEmpty {
                         Section("New Bots") {
-                            ForEach(Array(proposal.newBots.enumerated()), id: \.offset) { index, bot in
+                            ForEach(proposal.newBots) { bot in
                                 NavigationLink {
                                     Form {
-                                        TextField("Name", text: proposed(index, \.name))
-                                        TextField("Purpose", text: proposed(index, \.purpose), axis: .vertical)
-                                        TextField("Instructions", text: proposed(index, \.instructions), axis: .vertical)
-                                        Button("Remove Bot", role: .destructive) { self.proposal?.newBots.remove(at: index) }
+                                        TextField("Name", text: proposed(bot.id, \.name))
+                                        TextField("Purpose", text: proposed(bot.id, \.purpose), axis: .vertical)
+                                        TextField("Instructions", text: proposed(bot.id, \.instructions), axis: .vertical)
+                                        Button("Remove Bot", role: .destructive) { self.proposal?.newBots.removeAll { $0.id == bot.id } }
                                     }.navigationTitle(bot.name)
                                 } label: { Label(bot.name, systemImage: "plus.circle") }
                             }
@@ -77,6 +79,24 @@ struct GroupCreationView: View {
                     Button(request.values["payload"] == nil ? "Create" : "Retry") { Task { await create() } }
                         .disabled(busy || model.previewMode || model.accessEnded || (selected.isEmpty && (proposal?.newBots.isEmpty ?? true)))
                 }
+                if request.values["payload"] != nil, failure != nil {
+                    ToolbarItem(placement: .bottomBar) {
+                        Button("Start a new draft") { resetRequested = true }
+                            .accessibilityIdentifier("group-new-draft-action")
+                            .disabled(busy)
+                    }
+                }
+            }
+            .confirmationDialog("Start a new group draft?", isPresented: $resetRequested, titleVisibility: .visible) {
+                Button("Start a new draft") {
+                    guard scope == model.assignmentScope else { return }
+                    model.managementDrafts?.remove("group.new")
+                    request = ManagementDraft()
+                    failure = nil
+                }
+                .accessibilityIdentifier("group-start-new-draft")
+            } message: {
+                Text("The previous request may have created a group. Check Chats before starting again.")
             }
             .task {
                 scope = model.assignmentScope
@@ -88,47 +108,51 @@ struct GroupCreationView: View {
             }
         }
     }
-    private func proposed(_ index: Int, _ key: WritableKeyPath<SuggestedBot, String>) -> Binding<String> {
-        Binding(get: { guard let proposal, proposal.newBots.indices.contains(index) else { return "" }; return proposal.newBots[index][keyPath:key] },
-                set: { value in guard proposal?.newBots.indices.contains(index) == true else { return }; proposal?.newBots[index][keyPath:key] = value })
+    private func proposed(_ id: UUID, _ key: WritableKeyPath<SuggestedBot, String>) -> Binding<String> {
+        Binding(get: { self.proposal?.newBots.first { $0.id == id }?[keyPath: key] ?? "" },
+                set: { value in guard let index = self.proposal?.newBots.firstIndex(where: { $0.id == id }) else { return }; self.proposal?.newBots[index][keyPath: key] = value })
     }
     private func settings(_ purpose: ModelDefaultPurpose, options: BotOptions) throws -> [String: String] {
         try purpose.load().creationValues(options: options)
     }
     private func suggest() async {
-        guard let saved = model.connection else { return }
+        guard !busy, let saved = model.connection, scope == model.assignmentScope, !model.accessEnded else { return }
         busy = true; defer { busy = false }
         do {
             let options: BotOptions = try await model.manage("/api/v1/bot-options")
+            guard scope == model.assignmentScope, !Task.isCancelled, !model.accessEnded else { return }
             guard options.groupCollaboration == true else { failure = "Update Wonder on this computer to create conversational groups."; return }
             let payload: [String: Any] = ["description": description, "settings": try settings(.groupCreation, options: options)]
             let result: TeamProposal = try await model.api.request("/api/v1/group-chats/propose", origin: saved.origin, body: JSONSerialization.data(withJSONObject: payload), credential: saved.credential)
-            guard scope == model.assignmentScope else { return }
+            guard scope == model.assignmentScope, !Task.isCancelled, !model.accessEnded else { return }
             proposal = result; selected = Set(result.memberBotIds); failure = nil
         } catch { failure = managementError(error) }
     }
     private func create() async {
-        guard let saved = model.connection, scope == model.assignmentScope else { return }
+        guard !busy, let saved = model.connection, scope == model.assignmentScope, !model.accessEnded else { return }
         busy = true; defer { busy = false }
         do {
             let data: Data
             if let frozen = request.values["payload"] { data = Data(frozen.utf8) }
             else {
                 let options: BotOptions = try await model.manage("/api/v1/bot-options")
-            guard options.groupCollaboration == true else { failure = "Update Wonder on this computer to create conversational groups."; return }
+                guard scope == model.assignmentScope, !Task.isCancelled, !model.accessEnded else { return }
+                guard options.groupCollaboration == true else { failure = "Update Wonder on this computer to create conversational groups."; return }
                 let team = TeamProposal(name: proposal?.name ?? "New Group Chat", purpose: proposal?.purpose ?? "", memberBotIds: selected.sorted(), newBots: proposal?.newBots ?? [])
                 var payload = try JSONSerialization.jsonObject(with: JSONEncoder().encode(team)) as! [String: Any]
                 payload["clientRequestId"] = request.requestId
-                payload["routing"] = try settings(.groupParticipation, options: options)
-                payload["newBotDefaults"] = try settings(.newBots, options: options)
+                let routing = try settings(.groupParticipation, options: options)
+                payload["routing"] = routing
+                payload["newBotDefaults"] = team.newBots.isEmpty ? routing : try settings(.newBots, options: options)
                 data = try JSONSerialization.data(withJSONObject: payload, options: .sortedKeys)
                 request.values["payload"] = String(decoding: data, as: UTF8.self)
                 try model.managementDrafts?.save(request, key: "group.new")
             }
             let group: GroupRead = try await model.api.request("/api/v1/group-chats/new", origin: saved.origin, body: data, credential: saved.credential)
-            guard scope == model.assignmentScope else { return }
+            guard scope == model.assignmentScope, !model.accessEnded else { return }
             model.managementDrafts?.remove("group.new")
             await model.refreshChatList()
+            guard scope == model.assignmentScope, !model.accessEnded else { return }
             model.selectedChat = model.chats.first { $0.id == group.conversationId }
             dismiss()
         } catch { failure = managementError(error) }

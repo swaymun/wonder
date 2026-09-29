@@ -21,8 +21,32 @@ pub(super) fn verify(stable: &[u8], experimental: &[u8]) -> Result<(), String> {
     ] {
         let reference: Value = serde_json::from_slice(reference)
             .map_err(|error| format!("invalid embedded {name} schema: {error}"))?;
-        let candidate: Value = serde_json::from_slice(candidate)
+        let mut candidate: Value = serde_json::from_slice(candidate)
             .map_err(|error| format!("invalid generated {name} schema: {error}"))?;
+        // 0.159 adds item-anchor cursors while retaining the same opaque string
+        // and null inputs Wonder sends. Accept only that verified widening.
+        let cursor = &candidate["definitions"]["ThreadItemsListParams"]["properties"]["cursor"];
+        let definition = &candidate["definitions"]["ThreadItemsListCursor"];
+        if [cursor, definition].iter().all(|value| {
+            value.as_object().is_some_and(|properties| {
+                properties.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "anyOf" | "description" | "title" | "$comment" | "examples"
+                    )
+                })
+            })
+        }) && cursor.get("anyOf")
+            == Some(&serde_json::json!([
+                {"$ref":"#/definitions/ThreadItemsListCursor"}, {"type":"null"}
+            ]))
+            && definition["anyOf"]
+                .as_array()
+                .is_some_and(|variants| variants.contains(&serde_json::json!({"type":"string"})))
+        {
+            candidate["definitions"]["ThreadItemsListParams"]["properties"]["cursor"] =
+                reference["definitions"]["ThreadItemsListParams"]["properties"]["cursor"].clone();
+        }
         preserve(&reference, &candidate, name)?;
     }
     Ok(())
@@ -50,6 +74,19 @@ fn preserve(reference: &Value, candidate: &Value, path: &str) -> Result<(), Stri
                 }
                 let current = new.get(key).ok_or_else(|| format!("{next} missing"))?;
                 if key == "required" || key == "enum" {
+                    // These response labels are presented generically. Added
+                    // labels cannot grant authority; permission enums stay exact.
+                    let extensible = key == "enum"
+                        && (path.ends_with(".definitions.PlanType")
+                            || path.ends_with(".definitions.CodexErrorInfo.oneOf"));
+                    if extensible
+                        && value
+                            .as_array()
+                            .zip(current.as_array())
+                            .is_some_and(|(old, new)| old.iter().all(|v| new.contains(v)))
+                    {
+                        continue;
+                    }
                     if !same_set(value, current) {
                         return Err(format!("{next} changed"));
                     }
@@ -190,6 +227,60 @@ mod tests {
             .unwrap()
             .push(added);
         assert!(check(&stable, &experimental).is_ok());
+    }
+
+    #[test]
+    fn additive_error_plan_and_string_cursor_shapes_preserve_existing_inputs() {
+        let (mut stable, mut experimental) = baseline();
+        for schema in [&mut stable, &mut experimental] {
+            schema["definitions"]["CodexErrorInfo"]["oneOf"][0]["enum"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("flexUnavailable"));
+            schema["definitions"]["PlanType"]["enum"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("promax"));
+            schema["definitions"]["ThreadItemsListParams"]["properties"]["cursor"] =
+                json!({"anyOf":[{"$ref":"#/definitions/ThreadItemsListCursor"},{"type":"null"}]});
+            schema["definitions"]["ThreadItemsListCursor"] =
+                json!({"anyOf":[{"type":"string"},{"type":"object"}]});
+        }
+        assert!(check(&stable, &experimental).is_ok());
+        experimental["definitions"]["ThreadItemsListParams"]["properties"]["cursor"]["maxLength"] =
+            json!(1);
+        assert!(
+            check(&stable, &experimental).is_err(),
+            "New cursor constraints must not be hidden"
+        );
+        experimental["definitions"]["ThreadItemsListParams"]["properties"]["cursor"]
+            .as_object_mut()
+            .unwrap()
+            .remove("maxLength");
+        experimental["definitions"]["ThreadItemsListCursor"]["maxLength"] = json!(1);
+        assert!(
+            check(&stable, &experimental).is_err(),
+            "Referenced constraints must remain visible"
+        );
+        experimental["definitions"]["ThreadItemsListCursor"]
+            .as_object_mut()
+            .unwrap()
+            .remove("maxLength");
+        experimental["definitions"]["ThreadItemsListCursor"]["anyOf"][0] =
+            json!({"type":"integer"});
+        assert!(
+            check(&stable, &experimental).is_err(),
+            "Opaque strings must remain accepted"
+        );
+        let (mut stable, experimental) = baseline();
+        stable["definitions"]["PlanType"]["enum"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        assert!(
+            check(&stable, &experimental).is_err(),
+            "Existing response labels must remain supported"
+        );
     }
 
     #[test]

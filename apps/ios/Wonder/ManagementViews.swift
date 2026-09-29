@@ -1523,21 +1523,27 @@ extension ConnectionModel {
     /// A lost response retries the same creation rather than making a second Bot.
     @MainActor func createConversationalBot() async throws -> String? {
         let key = "bot.conversational-new"
-        var draft = managementDrafts?.load(key) ?? ManagementDraft()
+        let scope = assignmentScope
+        let drafts = managementDrafts
+        var draft = drafts?.load(key) ?? ManagementDraft()
+        try drafts?.save(draft, key: key)
         let options: BotOptions = try await manage("/api/v1/bot-options")
+        guard scope == assignmentScope, !Task.isCancelled, !accessEnded else { throw CancellationError() }
         guard options.firstMessageModelSelection == true else {
             throw NSError(domain: "Wonder", code: 0, userInfo: [NSLocalizedDescriptionKey: "Update Wonder on your Mac before creating a new Bot."])
         }
         if draft.values["_defaultsResolved"] == nil {
             try draft.prepareNewBot(defaults: NewBotDefaults.load(), options: options)
         }
-        try managementDrafts?.save(draft, key: key)
+        try drafts?.save(draft, key: key)
         var values = draft.values.filter { !$0.key.hasPrefix("_") }
         values["clientRequestId"] = draft.requestId
         let saved: ManagedBot = try await manage("/api/v1/bots/new", method: "POST", values: values)
-        managementDrafts?.remove(key)
+        guard scope == assignmentScope, !accessEnded else { throw CancellationError() }
+        drafts?.remove(key)
         applyConfirmedManagedBot(saved)
         await loadChats(force: true)
+        guard scope == assignmentScope, !accessEnded else { throw CancellationError() }
         if let id = saved.conversationId { selectedChat = chats.first { $0.id == id } }
         return saved.conversationId
     }

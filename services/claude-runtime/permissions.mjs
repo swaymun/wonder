@@ -4,6 +4,12 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import shellQuote from "shell-quote";
 
 let sandboxReady;
+// SDK schema parsing can reorder object properties. Correlation follows JSON
+// values while preserving array order and every argument's value.
+export function toolCallKey(name, input) {
+  return JSON.stringify([name, input], (_key, value) => value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
+}
 const commandSandbox = { filesystem: { denyRead: [], allowRead: [], allowWrite: ["/"], denyWrite: [] },
   network: { allowedDomains: [], deniedDomains: [], allowLocalBinding: false, allowAllUnixSockets: false }, allowAppleEvents: false };
 export async function closeCommandSandbox() {

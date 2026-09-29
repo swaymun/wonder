@@ -84,6 +84,29 @@ async fn bot_http_creation_is_idempotent_and_uuid_prefix_collision_cannot_delete
 }
 
 #[tokio::test]
+async fn legacy_group_creation_retries_cannot_revive_deleted_chats() {
+    let (_dir, state) = crate::ingestion::tests::fixture().await;
+    for path in ["/api/v1/channels", "/api/v1/group-chats"] {
+        let id = uuid::Uuid::new_v4().to_string();
+        let body = json!({"clientRequestId":id,"name":"Release fixture","coordinatorBotId":"bot","memberBotIds":[]});
+        let (status, first) = call(&state, "POST", path, body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED, "{first}");
+        let (status, second) = call(&state, "POST", path, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_eq!(first["conversationId"], second["conversationId"]);
+        assert!(state.store.delete_channel(&id).await.unwrap());
+        let (status, result) = call(&state, "POST", path, body).await;
+        assert_eq!(
+            status,
+            StatusCode::GONE,
+            "Deleted chats must stay deleted: {result}"
+        );
+        assert!(state.store.channel(&id).await.unwrap().is_none());
+    }
+    state.app_server.lock().await.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn bot_avatar_contract_supports_old_new_and_omitted_updates() {
     let (_dir, state) = crate::ingestion::tests::fixture().await;
     let new_id = "12345678-1234-4234-8234-123456789101";

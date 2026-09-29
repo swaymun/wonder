@@ -224,7 +224,8 @@ struct DiagnosticLaunchView: View {
 /// responses without introducing successful-send branches into Release.
 enum DiagnosticSubagentFixture {
     // Synthetic release artwork uses the real native views and transport fixture.
-    // This entire file is excluded from Release; no personal history is loaded.
+    // This entire file is excluded from Release. Private offline history replay
+    // requires an explicitly supplied fixture and launch argument.
     static var marketingFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-marketing") }
     static var botName: String { marketingFixture ? "Weekend plans" : "Fixture Bot" }
     static var marketingApprovalFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-marketing-approval") }
@@ -240,7 +241,8 @@ enum DiagnosticSubagentFixture {
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
     static var readStatusFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-read-status") }
     static var avatarSettingsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-avatar-settings") }
-    static var hostID: String { avatarSettingsFixture ? "diagnostic-avatar-settings-host" : "diagnostic-host" }
+    static var groupCreationFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-group-creation") }
+    static var hostID: String { groupCreationFixture ? "diagnostic-group-creation-host" : avatarSettingsFixture ? "diagnostic-avatar-settings-host" : "diagnostic-host" }
     static var avatarDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.avatar-settings")! }
     static let parentID = "fixture-parent-conversation"
     static let childID = "fixture-child-conversation"
@@ -265,6 +267,20 @@ enum DiagnosticSubagentFixture {
     }
 
     @MainActor static func model() -> ConnectionModel {
+        if groupCreationFixture {
+            let store = ManagementDraftStore(host: hostID)
+            store.remove("group.new")
+            if ProcessInfo.processInfo.arguments.contains("-diagnostics-group-frozen") {
+                var draft = ManagementDraft()
+                let payload: [String: Any] = ["clientRequestId": draft.requestId, "name": "Synthetic group", "purpose": "Supplied facts only",
+                    "memberBotIds": ["fixture-bot"], "newBots": [
+                        ["name": "Duplicate", "purpose": "First purpose", "instructions": "First instructions"],
+                        ["name": "Duplicate", "purpose": "Second purpose", "instructions": "Second instructions"]],
+                    "routing": ["model": "fixture-model", "reasoningEffort": ""], "newBotDefaults": ["model": "fixture-model", "reasoningEffort": ""]]
+                draft.values["payload"] = String(decoding: try! JSONSerialization.data(withJSONObject: payload, options: .sortedKeys), as: UTF8.self)
+                try! store.save(draft, key: "group.new")
+            }
+        }
         if approvalSettingsFixture && ProcessInfo.processInfo.arguments.contains("-diagnostics-approval-reset") {
             approvalDefaults.removePersistentDomain(forName: "wonder.diagnostics.approval-settings")
         }
@@ -283,7 +299,7 @@ enum DiagnosticSubagentFixture {
             cameraFixtureStoreRoot: root,
             saved: savedConnection(),
             chat: nil,
-            api: PairingAPI(configuration: configuration), replayEnabled: !readStatusFixture && !avatarSettingsFixture && !chatLayoutFixture && !approvalSettingsFixture)
+            api: PairingAPI(configuration: configuration), replayEnabled: !readStatusFixture && !avatarSettingsFixture && !chatLayoutFixture && !approvalSettingsFixture && !groupCreationFixture)
         if chatLayoutFixture {
             model.snapshots[parentID] = try! JSONDecoder().decode(ConversationSnapshot.self, from: JSONSerialization.data(withJSONObject: chatLayoutSnapshot()))
             let entries = ChatFeedEntry.grouping(model.feedRows(for: parentChat()))
@@ -297,7 +313,20 @@ enum DiagnosticSubagentFixture {
         }
         return model
     }
+    // JSONSerialization creates an immutable JSON tree, read only by this
+    // offline fixture. Cache it once so repeated history requests do no I/O.
+    nonisolated(unsafe) private static let historyReplaySnapshot: [String: Any]? = {
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("history-replay.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        try? FileManager.default.removeItem(at: url)
+        return value
+    }()
     static func chatLayoutSnapshot() -> [String: Any] {
+        if ProcessInfo.processInfo.arguments.contains("-diagnostics-history-replay") {
+            precondition(historyReplaySnapshot != nil, "Supply a valid offline history-replay.json fixture before launching")
+            return historyReplaySnapshot!
+        }
         let text = "The update is ready.\n\n- The action, filename, and counts stay together.\n- The extra metadata has been removed.\n- A completed change uses the same compact spacing.\n\nThe new build includes these changes.\n\nThe layout should already be in place when this conversation opens."
         let turns: [[String: Any]] = (1...12).map { index -> [String: Any] in
             let work: [String: Any] = ["id": "layout-work-\(index)", "type": "commandExecution", "state": "completed", "createdAt": String(index * 1000 + 100), "payload": ["command": "fixture check", "exitCode": 0]]
@@ -361,6 +390,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var goalStatus = DiagnosticSubagentFixture.goalFixtureStatus
         var goalTokenBudget: Int? = 1_000
         var goalTimeBudgetSeconds: Int? = 600
+        var createdGroup: [String: Any]?
     }
     static let state = State()
 
@@ -412,6 +442,47 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
     override func stopLoading() {}
 
     private func respond(method: String, path: String, body: Data?) {
+        if DiagnosticSubagentFixture.groupCreationFixture {
+            if path == "/api/v1/bot-options" {
+                let models = ModelDefaultPurpose.allCases.map { purpose -> [String: Any] in
+                    let defaults = purpose.load()
+                    return ["id": defaults.model.isEmpty ? "fixture-model" : defaults.model, "displayName": "Fixture", "hidden": false,
+                        "reasoningEfforts": defaults.reasoningEffort.isEmpty ? [] : [["id": defaults.reasoningEffort, "label": "Fixture"]],
+                        "serviceTiers": [["id": defaults.serviceTier ?? "default", "label": "Fixture"]]]
+                }
+                finish(status: 200, body: json(["models": models, "groupCollaboration": true,
+                    "approvalModes": BotApprovalMode.allCases.map { ["id": $0.rawValue, "allowed": true] as [String: Any] }, "allowedApprovalPolicies": []])); return
+            }
+            if method == "POST", path == "/api/v1/group-chats/new" {
+                let requests = Self.state.lock.withLock { Self.state.requests.filter { $0.method == "POST" && $0.path == path }.compactMap(\.body) }
+                let frozen = ProcessInfo.processInfo.arguments.contains("-diagnostics-group-frozen")
+                if frozen && requests.count <= 2 {
+                    finish(status: requests.first == requests.last ? 503 : 409, body: Data("{}".utf8)); return
+                }
+                guard let payload = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any],
+                      let newBots = payload["newBots"] as? [[String: String]], let members = payload["memberBotIds"] as? [String], members == ["fixture-bot"] else {
+                    finish(status: 400, body: Data("{}".utf8)); return
+                }
+                if frozen {
+                    let first = (try? JSONSerialization.jsonObject(with: requests[0])) as? [String: Any]
+                    guard requests[0] == requests[1], payload["clientRequestId"] as? String != first?["clientRequestId"] as? String,
+                          newBots.count == 1, newBots[0]["name"] == "Surviving Bot", newBots[0]["purpose"] == "Second purpose" else {
+                        finish(status: 400, body: Data("{}".utf8)); return
+                    }
+                } else {
+                    guard newBots.isEmpty, (payload["routing"] as? NSDictionary) == (payload["newBotDefaults"] as? NSDictionary) else {
+                        finish(status: 400, body: Data("{}".utf8)); return
+                    }
+                }
+                let group: [String: Any] = ["id": payload["clientRequestId"]!, "conversationId": "fixture-created-group", "name": "Verified group", "isArchived": false,
+                    "members": [["botId": "fixture-bot", "botName": "Fixture Bot", "role": "coordinator", "position": 0]], "messages": []]
+                Self.state.lock.withLock { Self.state.createdGroup = group }
+                finish(status: 200, body: json(group)); return
+            }
+            if path == "/api/v1/group-chats" {
+                finish(status: 200, body: json(Self.state.lock.withLock { Self.state.createdGroup.map { [$0] } ?? [] })); return
+            }
+        }
         if path == "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/goal" {
             let state = Self.state
             switch method {
@@ -531,7 +602,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/subagents": finish(status: 200, body: json([
             "available": true,
             "detail": NSNull(),
-            "subagents": [childSummary(), unavailableChildSummary()]
+            "subagents": ProcessInfo.processInfo.arguments.contains("-diagnostics-history-replay") ? [] : [childSummary(), unavailableChildSummary()]
         ]))
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.childID)/subagents": finish(status: 200, body: json([
             "available": true,

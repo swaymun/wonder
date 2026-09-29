@@ -562,7 +562,10 @@ extension ReadRow {
             if payload["server"]?.string == "cua_repl" || payload["tool"]?.string == "wonder_computer_use" {
                 title = "Computer Use"; symbol = "desktopcomputer"
             } else {
-                title = (payload["tool"]?.string ?? "Tool call").replacingOccurrences(of: "_", with: " ").capitalized
+                let tool = payload["tool"]?.string ?? "Tool call"
+                let parts = tool.components(separatedBy: "__")
+                let name = parts.count >= 3 && parts[0] == "mcp" ? parts.dropFirst(2).joined(separator: "__") : tool
+                title = name.replacingOccurrences(of: "_", with: " ").capitalized
                 symbol = "wrench.and.screwdriver"
             }
             add("Input", value("arguments")); add("Result", (payload["result"] ?? payload["contentItems"])?.toolOutputText)

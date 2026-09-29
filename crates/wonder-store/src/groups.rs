@@ -6,6 +6,13 @@ pub struct GroupRun {
     pub channel: StoredChannel,
 }
 impl Store {
+    pub async fn group_was_deleted(&self, id: &str) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM group_deletions WHERE group_id=?)")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+    }
+
     pub async fn group_id_for_conversation(
         &self,
         conversation: &str,
@@ -113,6 +120,10 @@ impl Store {
             .await?;
         // Repository worktrees are retained; deleting a chat only removes its metadata.
         sqlx::query("DELETE FROM project_assignments WHERE group_id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO group_deletions(group_id) VALUES(?)")
             .bind(id)
             .execute(&mut *tx)
             .await?;

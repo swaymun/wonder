@@ -6,7 +6,9 @@ final class ActivityPresentationTests: XCTestCase {
     // tools and the original action's failure details stay distinct.
     func testComputerActivityUsesNeutralLabelAndPreservesFailure() throws {
         for (server, tool, title) in [("cua_repl", "js", "Computer Use"),
-                                      ("other", "js", "Js")] {
+                                      ("other", "js", "Js"),
+                                      ("Claude", "mcp__Claude_Browser__browser_click", "Browser Click"),
+                                      ("Claude", "mcp__claude_ai_Figma__get_design_context", "Get Design Context")] {
             let activity = try XCTUnwrap(row(server, type: "mcpToolCall", state: "failed", payload: [
                 "server": .string(server), "tool": .string(tool), "success": .bool(false),
                 "arguments": .object(["text": .string("cmd+t")]),

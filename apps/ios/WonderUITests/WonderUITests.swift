@@ -2,6 +2,46 @@ import XCTest
 import UIKit
 
 @MainActor final class WonderUITests: XCTestCase {
+    // This optional private replay uses the production conversation controls.
+    // Supply the projected snapshot in the app's Documents directory; never
+    // check real session contents into source or initiate model work here.
+    func testExistingClaudeSessionReplay() throws {
+        guard ProcessInfo.processInfo.environment["WONDER_HISTORY_REPLAY"] == "1" else {
+            throw XCTSkip("Explicit private offline history fixture required")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved", "-diagnostics-history-replay"]
+        app.launch()
+        let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+        XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 10))
+        let scroll = anyElement(app, identifier: "conversation-scroll")
+        XCTAssertTrue(scroll.exists)
+        let groups = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "activity-group:"))
+        let header = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
+        let draft = app.textViews["message-draft"]
+        var selected: XCUIElement?
+        for _ in 0..<20 {
+            selected = groups.allElementsBoundByIndex.first { $0.frame.minY >= header.frame.maxY && $0.frame.maxY <= draft.frame.minY && $0.isHittable }
+            if selected != nil { break }
+            scroll.swipeDown()
+        }
+        let work = try XCTUnwrap(selected, "The existing transcript must expose a fully visible activity control")
+        let id = work.identifier
+        XCTAssertEqual(work.value as? String, "Collapsed")
+        for _ in 0..<12 {
+            let control = app.buttons[id]
+            control.tap(); XCTAssertEqual(control.value as? String, "Expanded")
+            control.tap(); XCTAssertEqual(control.value as? String, "Collapsed")
+        }
+        retainMenuScreenshot(app, name: "Private Claude session replay")
+        for _ in 0..<5 { scroll.swipeDown(); scroll.swipeUp() }
+        XCTAssertTrue(draft.exists)
+        XCTAssertFalse(app.buttons["subagent-status-pill"].exists, "An offline transcript must not inherit unrelated synthetic helpers")
+        app.terminate()
+    }
+
     func testNativeMarketingConversationCapture() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
@@ -2963,6 +3003,58 @@ import UIKit
         XCTAssertTrue(app.buttons["Claude Haiku 4.5"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["GPT-6 Astra"].exists)
         retainMenuScreenshot(app, name: "New Bot family selection")
+    }
+
+    func testGroupCreationUsesExistingMembersAndRecoversFrozenSuggestedEdits() throws {
+        continueAfterFailure = false
+        for frozen in [false, true] {
+            let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+            app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-group-creation"] + (frozen ? ["-diagnostics-group-frozen"] : [])
+            app.launch()
+            defer { app.terminate() }
+            let menu = app.buttons["New chat"]
+            XCTAssertTrue(menu.waitForExistence(timeout: 10))
+            menu.tap()
+            app.buttons["New Group Chat"].tap()
+            if frozen {
+                let retry = app.buttons["Retry"]
+                XCTAssertTrue(retry.waitForExistence(timeout: 5))
+                retry.tap()
+                let reset = app.buttons["group-new-draft-action"]
+                XCTAssertTrue(reset.waitForExistence(timeout: 5))
+                retry.tap()
+                XCTAssertTrue(reset.waitForExistence(timeout: 5))
+                reset.tap()
+                let confirm = app.buttons.matching(identifier: "group-start-new-draft").firstMatch
+                XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+                confirm.tap()
+                XCTAssertFalse(retry.exists)
+                let duplicates = app.buttons.matching(NSPredicate(format: "label == %@", "Duplicate"))
+                XCTAssertEqual(duplicates.count, 2)
+                duplicates.firstMatch.tap()
+                app.buttons["Remove Bot"].tap()
+                if app.buttons["Remove Bot"].exists { app.navigationBars.buttons.firstMatch.tap() }
+                XCTAssertEqual(duplicates.count, 1)
+                duplicates.firstMatch.tap()
+                let name = app.textFields["Name"]
+                XCTAssertTrue(name.waitForExistence(timeout: 5))
+                name.tap()
+                name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Duplicate".count) + "Surviving Bot")
+                app.navigationBars.buttons.firstMatch.tap()
+                XCTAssertTrue(app.buttons["Surviving Bot"].waitForExistence(timeout: 5))
+            } else {
+                let member = app.switches.matching(NSPredicate(format: "label == ''")).firstMatch
+                XCTAssertTrue(member.waitForExistence(timeout: 5))
+                member.tap()
+                XCTAssertEqual(member.value as? String, "1")
+            }
+            retainMenuScreenshot(app, name: frozen ? "Recovered suggested group edits" : "Existing members group creation")
+            app.buttons["Create"].tap()
+            XCTAssertTrue(app.staticTexts["Verified group"].firstMatch.waitForExistence(timeout: 10),
+                          "The host must accept the edited payload and the group must appear in Chats")
+            XCTAssertFalse(app.buttons["Retry"].exists)
+            app.terminate()
+        }
     }
 
     func testBotSettingsUsesCompactAvatarSection() throws {

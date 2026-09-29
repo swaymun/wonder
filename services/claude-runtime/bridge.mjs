@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BRIDGE_PROTOCOL, HAIKU_MODEL, TurnProjection, questionRequest, questionAnswer } from "./projection.mjs";
 import { baseOptions, inspectSdk, isSubscription } from "./sdk-runtime.mjs";
-import { ToolPolicy, closeCommandSandbox } from "./permissions.mjs";
+import { ToolPolicy, closeCommandSandbox, toolCallKey } from "./permissions.mjs";
 import { createNativeCua } from "./native-cua.mjs";
 
 const BUILTINS = ["Read", "Write", "Edit", "NotebookEdit", "Bash", "WebFetch", "WebSearch",
@@ -223,7 +223,7 @@ export class ClaudeBridge {
     }
     if (name.startsWith("mcp__wonder__") && policy.tools.has(name.slice(13))) {
       if (context.mcpServer?.source !== "sdk" || context.mcpServer?.name !== "wonder") return deny("The tool's Wonder origin could not be verified.");
-      const key = JSON.stringify([name.slice(13), input]);
+      const key = toolCallKey(name.slice(13), input);
       const calls = run.authorizedTools.get(key) ?? [];
       if (!calls.includes(context.toolUseID)) calls.push(context.toolUseID);
       run.authorizedTools.set(key, calls);
@@ -260,7 +260,7 @@ export class ClaudeBridge {
         .filter(spec => spec.name !== "wonder_computer_use")
         .map(spec => sdk.tool(spec.name, spec.description,
         z.fromJSONSchema(spec.inputSchema).shape, async (input) => {
-          const callId = run.authorizedTools.get(JSON.stringify([spec.name, input]))?.shift();
+          const callId = run.authorizedTools.get(toolCallKey(spec.name, input))?.shift();
           if (!callId) throw new Error("The Wonder tool call could not be correlated with its permission check.");
           if (!run.toolResults.has(callId)) run.toolResults.set(callId, this.serverCall("item/tool/call", { threadId: session.id, turnId: run.turn.id,
             callId, tool: spec.name, arguments: input, agentFamily: "claude" }, run.abort.signal));
