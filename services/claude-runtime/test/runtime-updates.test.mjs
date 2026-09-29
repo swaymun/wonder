@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile, mkdir, readdir, writeFile, realpath } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compatibleVersion, RuntimeUpdates } from "../runtime-updates.mjs";
-import { isSubscription, subscriptionEnvironment, projectUsage, baseOptions, loadSdk, inspectSdk } from "../sdk-runtime.mjs";
+import { isSubscription, subscriptionEnvironment, projectUsage, additionalUsageAvailable, baseOptions, loadSdk, inspectSdk } from "../sdk-runtime.mjs";
 
 // Contract: new SDK bytes never replace a running turn; a bad candidate and a
 // restart must preserve a usable runtime. Exercise the manager's persisted state.
@@ -65,6 +65,17 @@ test("experimental usage is optional and percentages are never fractions", () =>
   assert.equal(projectUsage({ rate_limits_available: true, rate_limits: { future: { utilization: 10 } } }), null);
   const result = projectUsage({ rate_limits_available: true, rate_limits: { five_hour: { utilization: 10 }, seven_day: { utilization: 20 } } });
   assert.deepEqual(result.map(w => [w.id, w.remainingPercent]), [["five_hour", 90], ["seven_day", 80]]);
+});
+
+test("overage availability remains unknown unless reported and usable", () => {
+  const usage = extra_usage => ({ rate_limits_available: true, rate_limits: { extra_usage } });
+  assert.equal(additionalUsageAvailable({}), null);
+  assert.equal(additionalUsageAvailable(usage({ is_enabled: false, credits_ever_enabled: true })), false);
+  assert.equal(additionalUsageAvailable(usage({ is_enabled: true, utilization: 99 })), true);
+  assert.equal(additionalUsageAvailable(usage({ is_enabled: true, utilization: 100 })), false);
+  assert.equal(additionalUsageAvailable(usage({ is_enabled: true, monthly_limit: null })), true);
+  assert.equal(additionalUsageAvailable(usage({ is_enabled: true, monthly_limit: 100, used_credits: 100 })), false);
+  assert.equal(additionalUsageAvailable(usage({ is_enabled: true })), null);
 });
 
 test("control discovery waits for pending connections before closing the SDK", async () => {

@@ -88,6 +88,24 @@ struct SubagentDock: View {
     }
 }
 
+/// Opens the conversation's computer view from the composer's status row.
+struct ComputerDock: View {
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        Button { isPresented = true } label: {
+            Label("Computer", systemImage: "desktopcomputer")
+                .labelStyle(.iconOnly)
+                .lineLimit(1)
+                .modifier(ComposerStatusPill())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("computer-status-pill")
+        .accessibilityLabel("View computer")
+        .accessibilityHint("Show your Mac's screen")
+    }
+}
+
 /// A compact status control. The sheet owns only presentation and draft state;
 /// the connection model remains the source of truth for Goal mutations.
 struct GoalDock: View {

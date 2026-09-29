@@ -346,6 +346,7 @@ import UIKit
             ("file", "accept", "/Users/example/Movies"),
             ("permissions", "allowTurn", "/Users/example/Movies"),
             ("form", "accept", "Choose export settings."),
+            ("native", "accept", "App: Calculator"),
             ("url", "accept", "Connect the export service."),
             ("unknown", "decline", "This action cannot be run safely.")
         ]
@@ -360,6 +361,11 @@ import UIKit
                 XCTAssertFalse(app.staticTexts["This request needs Wonder on your Mac. It cannot be approved here yet."].exists)
                 XCTAssertFalse(action.isEnabled, "Offline previews cannot send approvals")
                 if kind == "url" { XCTAssertTrue(app.links["approval-service-link"].exists || app.buttons["approval-service-link"].exists) }
+                if kind == "native" {
+                    XCTAssertEqual(action.label, "Allow once")
+                    XCTAssertTrue(app.staticTexts["Risk level: Low"].exists)
+                    XCTAssertFalse(app.staticTexts["Allow for this session"].exists)
+                }
                 retainMenuScreenshot(app, name: "Phone approval " + kind + " " + size)
                 app.terminate()
             }
@@ -1036,10 +1042,7 @@ import UIKit
             XCTAssertTrue(app.buttons["subagent-status-pill"].waitForExistence(timeout: 15))
             retainMenuScreenshot(app, name: "Live Claude reply and helper")
         }
-        let details = app.buttons["Conversation details"]
-        XCTAssertTrue(details.waitForExistence(timeout: 15))
-        details.tap()
-        let viewComputer = app.buttons["View computer"]
+        let viewComputer = app.buttons["computer-status-pill"]
         XCTAssertTrue(viewComputer.waitForExistence(timeout: 15))
         viewComputer.tap()
         let openedAt = Date()
@@ -1123,10 +1126,7 @@ import UIKit
             throw XCTSkip("Requires an unlocked physical device paired with the updated Wonder host.")
         }
         row.tap()
-        let details = app.buttons["Conversation details"]
-        XCTAssertTrue(details.waitForExistence(timeout: 15))
-        details.tap()
-        let viewComputer = app.buttons["View computer"]
+        let viewComputer = app.buttons["computer-status-pill"]
         XCTAssertTrue(viewComputer.waitForExistence(timeout: 15))
         viewComputer.tap()
 
@@ -1236,10 +1236,7 @@ import UIKit
             throw XCTSkip("Requires the explicitly selected QA chat and a paired, unlocked physical device.")
         }
         row.tap()
-        let details = app.buttons["Conversation details"]
-        XCTAssertTrue(details.waitForExistence(timeout: 15))
-        details.tap()
-        let viewComputer = app.buttons["View computer"]
+        let viewComputer = app.buttons["computer-status-pill"]
         XCTAssertTrue(viewComputer.waitForExistence(timeout: 15))
         viewComputer.tap()
 
@@ -1487,10 +1484,7 @@ import UIKit
             throw XCTSkip("Requires the explicitly selected QA chat and a paired, unlocked physical device.")
         }
         row.tap()
-        let details = app.buttons["Conversation details"]
-        XCTAssertTrue(details.waitForExistence(timeout: 15))
-        details.tap()
-        let viewComputer = app.buttons["View computer"]
+        let viewComputer = app.buttons["computer-status-pill"]
         XCTAssertTrue(viewComputer.waitForExistence(timeout: 15))
         viewComputer.tap()
 
@@ -1562,10 +1556,7 @@ import UIKit
             throw XCTSkip("Requires the explicitly selected QA chat and a paired, unlocked physical device.")
         }
         row.tap()
-        let details = app.buttons["Conversation details"]
-        XCTAssertTrue(details.waitForExistence(timeout: 15))
-        details.tap()
-        let viewComputer = app.buttons["View computer"]
+        let viewComputer = app.buttons["computer-status-pill"]
         XCTAssertTrue(viewComputer.waitForExistence(timeout: 15))
         viewComputer.tap()
 
@@ -2138,12 +2129,10 @@ import UIKit
         app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-preview-malformed-image"]
         app.launch()
 
-        XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 10))
-        app.buttons["Conversation details"].tap()
-        XCTAssertTrue(app.buttons["View computer"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["Teach a task"].exists,
-                       "Teaching is not available in the beta conversation menu.")
-        app.buttons["View computer"].tap()
+        let computerPill = app.buttons["computer-status-pill"]
+        XCTAssertTrue(computerPill.waitForExistence(timeout: 10))
+        XCTAssertEqual(computerPill.label, "View computer")
+        computerPill.tap()
         let computerMenu = app.buttons["computer-session-more"]
         XCTAssertTrue(computerMenu.waitForExistence(timeout: 5))
         computerMenu.tap()
@@ -2159,8 +2148,15 @@ import UIKit
         XCTAssertTrue(computerClose.waitForExistence(timeout: 5))
         computerClose.tap()
         XCTAssertTrue(waitUntilGone(computerClose, timeout: 10), "Computer view did not close")
+        XCTAssertTrue(computerPill.waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 10))
+        app.buttons["Conversation details"].tap()
         XCTAssertTrue(app.buttons["Files"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@",
+                                                        "View computer", "computer-status-pill")).count, 0,
+                       "View computer moved to the conversation's status pill.")
+        XCTAssertFalse(app.buttons["Teach a task"].exists,
+                       "Teaching is not available in the beta conversation menu.")
         app.buttons["Files"].tap()
 
         let imageFile = app.buttons["Saturday.png"]
@@ -3389,6 +3385,34 @@ import UIKit
         }
     }
 
+    func testComposerBlocksExhaustedUsageWithoutPhantomFolderError() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+            "-diagnostics-folder-poll-offline", "-diagnostics-usage-fixture", "-diagnostics-usage-exhausted"]
+        app.launch()
+        let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+        let draft = app.textViews["message-draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 10)); draft.tap(); draft.typeText("Keep this draft")
+        let limit = app.staticTexts["composer-usage-limit"]
+        XCTAssertTrue(limit.waitForExistence(timeout: 10))
+        XCTAssertLessThanOrEqual(limit.frame.maxY, draft.frame.minY, "The usage notice stays inside the composer above the editor")
+        XCTAssertGreaterThanOrEqual(limit.frame.minX, draft.frame.minX)
+        XCTAssertFalse(app.buttons["send-message"].isEnabled)
+        let pill = app.buttons["computer-status-pill"]
+        XCTAssertEqual(pill.label, "View computer")
+        XCTAssertFalse(pill.staticTexts["Computer"].exists)
+        XCTAssertGreaterThanOrEqual(pill.frame.height, 44)
+        let phantomError = app.staticTexts["Folder request unavailable"]
+        let absent = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in phantomError.exists }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [absent], timeout: 7), .timedOut,
+                       "Repeated failed empty polls must not show a folder request error")
+        XCTAssertEqual(draft.value as? String, "Keep this draft")
+        XCTAssertFalse(app.buttons["send-message"].isEnabled)
+        retainMenuScreenshot(app, name: "Icon-only computer and exhausted usage")
+    }
+
     func testConnectedAppsKeepNamesAndIconsAcrossFamilies() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
@@ -3399,14 +3423,23 @@ import UIKit
             app.launch()
             let claude = app.segmentedControls.buttons["Claude"]
             let codex = app.segmentedControls.buttons["Codex"]
-            XCTAssertTrue(claude.waitForExistence(timeout: 10))
+            let familyPickerReady = claude.waitForExistence(timeout: 15)
+            if !familyPickerReady {
+                retainMenuScreenshot(app, name: "Missing connection family picker \(style)")
+                let hierarchy = XCTAttachment(string: app.debugDescription)
+                hierarchy.lifetime = .keepAlways; add(hierarchy)
+            }
+            XCTAssertTrue(familyPickerReady)
             XCTAssertTrue(app.staticTexts["Gmail"].waitForExistence(timeout: 10))
-            for _ in 0..<5 {
+            retainMenuScreenshot(app, name: "Codex connection icons \(style)")
+            for _ in 0..<8 {
                 claude.tap()
+                XCTAssertTrue(claude.isSelected, "The provider selection must change before loading its connections")
                 XCTAssertTrue(app.staticTexts["Claude Docs"].waitForExistence(timeout: 5))
                 XCTAssertTrue(app.staticTexts["Gmail"].exists)
                 XCTAssertFalse(app.staticTexts["claude.ai Gmail"].exists)
                 codex.tap()
+                XCTAssertTrue(codex.isSelected)
                 XCTAssertTrue(app.staticTexts["Gmail"].waitForExistence(timeout: 5))
                 XCTAssertFalse(app.staticTexts["Claude Docs"].exists)
             }
@@ -3418,11 +3451,6 @@ import UIKit
                                            "Accessibility text should stack the status below the name")
             }
             retainMenuScreenshot(app, name: "Connected apps \(style) \(size)")
-            let custom = app.staticTexts["Custom app"]
-            for _ in 0..<4 where !custom.isHittable { app.swipeUp() }
-            XCTAssertTrue(custom.isHittable)
-            XCTAssertTrue(app.staticTexts["Not connected"].exists)
-            retainMenuScreenshot(app, name: "Connected apps fallback \(style)")
             app.terminate()
         }
     }

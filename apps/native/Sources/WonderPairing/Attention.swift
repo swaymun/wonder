@@ -48,6 +48,7 @@ public struct AttentionParams: Codable, Sendable {
     public let mode: String?
     public let url: String?
     public let requestedSchema: TeachingJSONValue?
+    public let elicitationContext: TeachingJSONValue?
 }
 
 public struct PhoneApprovalChoice: Identifiable, Equatable, Sendable {
@@ -107,7 +108,7 @@ extension AttentionRequest {
             if elicitationURL != nil {
                 choices.append(PhoneApprovalChoice("accept", "I’ve completed this", "Confirm after finishing the request in your browser."))
             } else if parsedForm != nil {
-                choices.append(PhoneApprovalChoice("accept", "Submit"))
+                choices.append(PhoneApprovalChoice("accept", isNativeComputerApproval ? "Allow once" : "Submit"))
             }
             return choices + [PhoneApprovalChoice("decline", "Decline"), PhoneApprovalChoice("cancel", "Cancel request")]
         case "item/tool/call":
@@ -155,6 +156,13 @@ extension AttentionRequest {
 
     public var permissionDetails: [String] {
         var details: [String] = []
+        if isNativeComputerApproval, let context = params.elicitationContext?.approvalDictionary {
+            if let subtitle = context["subtitle"]?.approvalString { details.append(subtitle) }
+            details += context["details"]?.approvalStrings ?? []
+            if let risk = context["riskLevel"]?.approvalString {
+                details.append("Risk level: \(risk.capitalized)")
+            }
+        }
         if let root = params.grantRoot { details.append("Requested write access for this session: \(root)") }
         for profile in [params.permissions, params.additionalPermissions].compactMap({ $0 }) {
             if let parsed = permissionDescriptions(profile) { details += parsed }
@@ -165,6 +173,11 @@ extension AttentionRequest {
             details.append("Connect to \(host)" + (network["protocol"]?.approvalString.map { " using \($0)." } ?? "."))
         }
         return details
+    }
+
+    private var isNativeComputerApproval: Bool {
+        method == "mcpServer/elicitation/request"
+            && params.elicitationContext?.approvalDictionary?["isComputerUse"] == .bool(true)
     }
 
     private var parsedPermissions: TeachingJSONValue? {

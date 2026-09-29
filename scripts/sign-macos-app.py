@@ -53,7 +53,7 @@ def sign(app, sha, name):
     for relative, identifier in {
         'MacOS/WonderMacBridge': 'com.saimun.wonder.menu',
         'MacOS/WonderHost': 'com.saimun.wonder.desktop',
-        'Resources/WonderComputerUse.app/Contents/MacOS/WonderComputerUse': 'com.saimun.wonder.computer-use',
+        'Helpers/WonderComputerUse': 'com.saimun.wonder.computer-use',
         'Resources/wonderd': 'com.saimun.wonder.daemon',
         'Resources/wonder-tunnel': 'com.saimun.wonder.tunnel',
     }.items():
@@ -61,7 +61,6 @@ def sign(app, sha, name):
         if not path.is_file():
             raise SystemExit(f'Missing required executable: {relative}')
         codesign(path, identifier)
-    helper_app = app / 'Contents/Resources/WonderComputerUse.app'
     # Node and the SDK's native executable retain their vendor JIT entitlements.
     # Inspect Mach-O magic, not filename extensions (the SDK binary is `claude`).
     magic = {b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe',
@@ -72,9 +71,6 @@ def sign(app, sha, name):
                 with path.open('rb') as binary:
                     if binary.read(4) in magic:
                         codesign(path, preserve=True)
-    if not helper_app.is_dir():
-        raise SystemExit('Missing required app bundle: Resources/WonderComputerUse.app')
-    codesign(helper_app, 'com.saimun.wonder.computer-use', preserve=True)
     codesign(app)
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
     print(f'Signed and verified {app} with {name}')

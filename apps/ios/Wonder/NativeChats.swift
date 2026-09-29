@@ -668,6 +668,25 @@ private struct ConversationColumn: ViewModifier {
     }
 }
 
+private struct ComposerUsageMonitor: ViewModifier {
+    @ObservedObject var model: ConnectionModel
+    let chat: ChatSummary
+    let readOnly: Bool
+    @Environment(\.scenePhase) private var phase
+    private var scope: String {
+        [model.assignmentScope, chat.id, model.usageModel(chat), String(phase == .active)].joined(separator: ":")
+    }
+    func body(content: Content) -> some View {
+        content.task(id: scope) {
+            guard !readOnly, phase == .active else { return }
+            while !Task.isCancelled {
+                await model.refreshComposerUsage(chat)
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+            }
+        }
+    }
+}
+
 struct ConversationView: View {
     @State private var activityDisclosure = ActivityDisclosurePolicy.State()
     @State private var expandedDetails: Set<String> = []
@@ -679,6 +698,7 @@ struct ConversationView: View {
     @State private var selectedSubagent: SubagentSummary?
     @State private var showingSubagents = false
     @State private var showingGoal = false
+    @State private var showingComputer = false
     @State private var restoreSubagentRoster = false
     @State private var editingGroup = false
     @State private var importing = false
@@ -707,7 +727,7 @@ struct ConversationView: View {
         model.cameraContextID.uuidString + ":" + chat.id
     }
     private var conversationCovered: Bool {
-        showingDetails || showingApps || workspaceRequest != nil || editingGroup || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents || showingGoal
+        showingDetails || showingApps || workspaceRequest != nil || editingGroup || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents || showingGoal || showingComputer
     }
     private var avatarMotionState: ScienceAvatarMotionState {
         guard let turnID = model.activeTurn(chat.id),
@@ -998,7 +1018,7 @@ struct ConversationView: View {
                             // and child conversations use their own verified
                             // workspace boundaries and must not surface a
                             // coordinator's direct-Bot request card.
-                            if let botID = chat.botId, !model.isSubagent(chat) {
+                            if let botID = chat.botId, !chat.isArchived, !model.isSubagent(chat), model.groups[chat.id] == nil {
                                 FolderRequestsView(model: model, botID: botID)
                                     .modifier(ConversationColumn())
                             }
@@ -1094,6 +1114,9 @@ struct ConversationView: View {
             } }
         }
         .sheet(isPresented: $showingDetails) { ConversationDetails(model: model, chat: chat) }
+        .fullScreenCover(isPresented: $showingComputer) {
+            NavigationStack { ComputerSessionView(model: model, chat: chat) }
+        }
 
         .sheet(isPresented: $showingApps) { NavigationStack { ConnectedAppsView(model: model, conversationId: chat.id).toolbar { Button("Done") { showingApps = false } } } }
         .modifier(PhotoAttachmentPicker(model: model, chat: chat, isPresented: $selectingPhoto, scope: importScope))
@@ -1203,6 +1226,7 @@ struct ConversationView: View {
                 try? await Task.sleep(for: .seconds(5))
             }
         }
+        .modifier(ComposerUsageMonitor(model: model, chat: chat, readOnly: readOnly))
         .task(id: attachmentMetadataRequest) {
             let request = attachmentMetadataRequest
             guard !request.ids.isEmpty else { return }
@@ -1233,8 +1257,8 @@ struct ConversationView: View {
                     else if model.uploading.contains(chat.id) { ProgressView("Uploading attachments…") }
                     else if model.preparingSends.contains(chat.id) { ProgressView("Preparing message…") }
                     VStack(spacing: 4) {
-                    if model.goals[chat.id] != nil || !(model.subagents[chat.id] ?? []).isEmpty {
                         HStack(alignment: .bottom, spacing: 4) {
+                            ComputerDock(isPresented: $showingComputer)
                             Spacer(minLength: 0)
                             if let goal = model.goals[chat.id], chat.botId != nil,
                                model.groups[chat.id] == nil, !model.isSubagent(chat) {
@@ -1262,7 +1286,6 @@ struct ConversationView: View {
                             }
                         }
                         .frame(maxWidth: .infinity)
-                    }
                     DictationComposerSurface(controller: model.dictation, conversationID: chat.id) {
                     VStack(spacing: 0) {
                     if !attachments.isEmpty {
@@ -1276,6 +1299,12 @@ struct ConversationView: View {
                             openPhoto: { composerPhoto = $0 },
                             remove: { model.removeStaged($0, chat: chat.id) }
                         )
+                    }
+                    if let message = model.usageLimitMessage(chat) {
+                        Text(message).font(.footnote).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12).padding(.top, 8)
+                            .accessibilityIdentifier("composer-usage-limit")
                     }
                     messageEditor.padding(.horizontal, 8)
                     HStack(alignment: .center, spacing: 4) {
@@ -1770,9 +1799,52 @@ struct BoundedComposerEditor: UIViewRepresentable {
 
 /// Keep Paste in the system edit menu, including for an image-only clipboard.
 /// Inspect type metadata while building the menu; read contents only on Paste.
-final class ComposerTextView: UITextView {
-    var canPasteImages = false
-    var pasteImages: (([NSItemProvider]) -> Void)?
+/// The keyboard's paste suggestion (iOS 27) and drops paste item providers
+/// instead of calling paste(_:), so images are routed from that path too.
+final class ComposerTextView: UITextView, UITextPasteDelegate {
+    // UIKit's usingTextLayoutManager factory bypasses Swift property
+    // initializers, so stored state here must be valid when zero-filled.
+    var canPasteImages = false { didSet { if canPasteImages != oldValue { updatePasteConfiguration() } } }
+    var pasteImages: (([NSItemProvider]) -> Void)? { didSet { if (pasteImages == nil) != (oldValue == nil) { updatePasteConfiguration() } } }
+    private var capturedTextPasteConfiguration = false
+    private var textPasteConfiguration: UIPasteConfiguration?
+    private var pendingImageProviders: [NSItemProvider]?
+    private var acceptsImagePaste: Bool { isEditable && canPasteImages && pasteImages != nil }
+    private static let imageTypes = [UTType.image, .png, .jpeg, .heic, .tiff, .gif].map(\.identifier)
+
+    private static func isImage(_ provider: NSItemProvider) -> Bool {
+        provider.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+    }
+
+    private func updatePasteConfiguration() {
+        if !capturedTextPasteConfiguration {
+            capturedTextPasteConfiguration = true
+            textPasteConfiguration = pasteConfiguration
+        }
+        let base = textPasteConfiguration?.acceptableTypeIdentifiers ?? []
+        pasteConfiguration = acceptsImagePaste
+            ? UIPasteConfiguration(acceptableTypeIdentifiers: base + Self.imageTypes.filter { !base.contains($0) })
+            : textPasteConfiguration
+        if pasteDelegate == nil { pasteDelegate = self }
+    }
+
+    /// Item-provider pastes run through UIKit's text paste pipeline. Accepting
+    /// image types above lets them reach it; each image then becomes a staged
+    /// attachment rather than being dropped by this plain-text editor.
+    func textPasteConfigurationSupporting(_ textPasteConfigurationSupporting: any UITextPasteConfigurationSupporting,
+                                          transform item: any UITextPasteItem) {
+        guard acceptsImagePaste, Self.isImage(item.itemProvider) else { item.setDefaultResult(); return }
+        item.setNoResult()
+        // Items in one paste are transformed together; stage them as one batch.
+        if pendingImageProviders == nil {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let providers = self.pendingImageProviders else { return }
+                self.pendingImageProviders = nil
+                if self.acceptsImagePaste { self.pasteImages?(providers) }
+            }
+        }
+        pendingImageProviders = (pendingImageProviders ?? []) + [item.itemProvider]
+    }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         if action == #selector(paste(_:)), UIPasteboard.general.hasImages {

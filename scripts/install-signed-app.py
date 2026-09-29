@@ -15,13 +15,14 @@ COMPONENTS = [
     '',
     'Contents/MacOS/WonderHost',
     'Contents/MacOS/WonderMacBridge',
-    'Contents/Resources/WonderComputerUse.app',
-    'Contents/Resources/WonderComputerUse.app/Contents/MacOS/WonderComputerUse',
+    'Contents/Helpers/WonderComputerUse',
     'Contents/Resources/wonderd',
     'Contents/Resources/wonder-tunnel',
 ]
-LEGACY_COMPUTER_USE = 'Contents/Resources/WonderComputerUse'
-NESTED_COMPUTER_USE = 'Contents/Resources/WonderComputerUse.app'
+COMPUTER_USE = 'Contents/Helpers/WonderComputerUse'
+# Earlier layouts of the same helper, newest first.
+PREVIOUS_COMPUTER_USE = ['Contents/Resources/WonderComputerUse.app/Contents/MacOS/WonderComputerUse',
+                         'Contents/Resources/WonderComputerUse']
 
 
 def output(*args):
@@ -56,16 +57,10 @@ def verify_update(previous, candidate):
     # refuse updates that change the identity privacy grants are attached to.
     for relative in COMPONENTS:
         old = previous / relative
-        # The helper moved from a flat executable to a signed LSUIElement app.
-        # Compare both nested helper code objects against the old executable's
-        # designated requirement so the existing TCC identity can migrate.
-        if relative == NESTED_COMPUTER_USE or relative.startswith(NESTED_COMPUTER_USE + '/'):
-            # Only fall back when this component is absent from the previous
-            # bundle. A later nested-to-nested update must compare like-for-like.
-            if not old.exists():
-                legacy = previous / LEGACY_COMPUTER_USE
-                if legacy.exists():
-                    old = legacy
+        # The helper keeps its signing identifier across layout moves; compare
+        # against whichever earlier path the previous bundle used.
+        if relative == COMPUTER_USE and not old.exists():
+            old = next((previous / path for path in PREVIOUS_COMPUTER_USE if (previous / path).exists()), old)
         # Preserve the existing helper's signing identity during the GPUI migration.
         if relative == 'Contents/MacOS/WonderMacBridge' and not old.exists():
             old = previous / 'Contents/MacOS/WonderMenuUI'

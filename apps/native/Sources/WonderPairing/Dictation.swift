@@ -44,7 +44,7 @@ public struct DictationFailure: Error, Decodable, Sendable {
 }
 
 /// Metadata never changes on an upload retry, even if the daemon reports a
-/// different decoded duration. Audio expires 120 seconds after capture stops.
+/// different decoded duration. Audio expires 10 minutes after capture stops.
 public struct DictationIntent: Codable, Sendable {
     public let requestID: String
     public let hostID: String
@@ -64,8 +64,18 @@ public struct DictationIntent: Codable, Sendable {
         requestID = UUID().uuidString.lowercased(); self.hostID = hostID; self.deviceID = deviceID
         self.conversationID = conversationID; self.conversationTitle = conversationTitle; self.modelID = modelID; language = "auto"
     }
+    /// AAC can include a partial final packet. Accept at most 250 ms of padding
+    /// and keep the upload metadata within the negotiated recording limit.
+    public static func captureDuration(milliseconds: UInt64, maximumMs: UInt64) throws -> UInt64 {
+        let limit = min(maximumMs, 600_000)
+        guard milliseconds >= 250 else { throw DictationFailure(errorCategory: "too_short") }
+        guard limit >= 250, milliseconds <= limit + 250 else {
+            throw DictationFailure(errorCategory: "unsupported_recording_format")
+        }
+        return min(milliseconds, limit)
+    }
     public mutating func finishCapture(durationMs: UInt64, now: Date = Date()) {
-        self.durationMs = min(durationMs, 300_000); audioExpiresAt = now.addingTimeInterval(120); phase = "ready"
+        self.durationMs = min(durationMs, 600_000); audioExpiresAt = now.addingTimeInterval(600); phase = "ready"
     }
     /// Cancellation must release microphone/transport even when the disk is full.
     /// The caller publishes this cancelled value before attempting its durable write.

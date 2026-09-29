@@ -21,7 +21,7 @@ class WorkerTests(unittest.TestCase):
     def request(self, audio, duration):
         return {"transcriptionId": "fixture", "audioFormat": "pcm_s16le", "sampleRateHz": 16000, "channels": 1, "durationMs": duration, "audioBase64": base64.b64encode(audio).decode()}
 
-    def test_exact_five_minutes_and_false_duration(self):
+    def test_exact_ten_minutes_and_false_duration(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "runtime"
             binary.write_text("#!/bin/sh\nprintf '%s\\n' '{\"text\":\"Test\",\"words\":[]}'\n")
@@ -29,9 +29,9 @@ class WorkerTests(unittest.TestCase):
             model = Path(directory) / "model"
             model.write_bytes(b"fixture")
             with patch.dict(os.environ, {"WONDER_NEMO_SPEECH_BIN": str(binary), "WONDER_ASR_MODEL": str(model)}):
-                self.assertEqual(worker.transcribe(self.request(bytes(9_600_000), 300_000))["transcriptText"], "Test")
-                self.assertEqual(worker.transcribe(self.request(bytes(9_600_002), 300_000))["errorCategory"], "decoder")
-                self.assertEqual(worker.transcribe(self.request(bytes(32_000), 300_000))["errorCategory"], "decoder")
+                self.assertEqual(worker.transcribe(self.request(bytes(19_200_000), 600_000))["transcriptText"], "Test")
+                self.assertEqual(worker.transcribe(self.request(bytes(19_200_002), 600_000))["errorCategory"], "decoder")
+                self.assertEqual(worker.transcribe(self.request(bytes(32_000), 600_000))["errorCategory"], "decoder")
 
     def test_worker_stops_its_runtime_when_daemon_parent_exits(self):
         with tempfile.TemporaryDirectory() as directory:

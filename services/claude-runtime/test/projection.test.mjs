@@ -27,14 +27,19 @@ test("stream deltas and repeated final reconcile one stable item", () => {
   assert.equal(events.filter(e => e.method === "turn/completed").length, 1);
 });
 test("tool failure remains failed within a successful conversation turn", () => {
+  for (const [name, expectedType, expectedTool, expectedServer] of [
+    ["mcp__wonder__wonder_update_profile", "dynamicToolCall", "wonder_update_profile", undefined],
+    ["mcp__cua_repl__js", "mcpToolCall", "js", "cua_repl"],
+  ]) {
   const { projection: p, events } = fixture();
-  p.accept({ type: "assistant", message: { content: [{ type: "tool_use", id: "tool", name: "mcp__wonder__wonder_update_profile", input: { name: "Helper" } }] } });
+  p.accept({ type: "assistant", message: { content: [{ type: "tool_use", id: "tool", name, input: { name: "Helper" } }] } });
   p.accept({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tool", is_error: true, content: "Save rejected" }] } });
   p.accept({ type: "result", subtype: "success" });
   const item = events.find(e => e.method === "item/completed").params.item;
-  assert.equal(item.type, "dynamicToolCall"); assert.equal(item.tool, "wonder_update_profile");
+  assert.equal(item.type, expectedType); assert.equal(item.tool, expectedTool); assert.equal(item.server, expectedServer);
   assert.equal(item.status, "failed"); assert.equal(item.success, false); assert.equal(item.error.message, "Save rejected");
   assert.equal(events.at(-1).params.turn.status, "completed");
+  }
 });
 test("internal initialization and synthetic user output never create chat text", () => {
   const { projection: p, events, children } = fixture({ internal: true });

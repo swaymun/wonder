@@ -229,7 +229,11 @@ async fn create_inner(
                         )
                         .await
                         .is_err())
-                    || state.store.finish_bot_creation(id, conversational).await.is_err()
+                    || state
+                        .store
+                        .finish_bot_creation(id, conversational)
+                        .await
+                        .is_err()
                 {
                     return problem(
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -272,7 +276,11 @@ async fn create_inner(
         .save_bot_presentation(id, Some(&shape), Some(&palette), color.as_deref(), None)
         .await
         .is_err()
-        || state.store.finish_bot_creation(id, conversational).await.is_err()
+        || state
+            .store
+            .finish_bot_creation(id, conversational)
+            .await
+            .is_err()
     {
         return problem(
             StatusCode::SERVICE_UNAVAILABLE,

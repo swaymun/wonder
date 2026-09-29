@@ -136,7 +136,7 @@ impl Store {
         now: u64,
     ) -> Result<bool, sqlx::Error> {
         Ok(sqlx::query("UPDATE transcriptions SET state=?, transcript_text=?,word_timestamps_json=?,confidence=?,error_category=?,duration_ms=?,retry_expires_at_ms=?,audio_bytes=CASE WHEN ? IS NULL THEN NULL ELSE audio_bytes END,updated_at=? WHERE id=? AND state='processing'")
-            .bind(if error.is_some(){"failed"}else{"completed"}).bind(text).bind(words).bind(confidence).bind(error).bind(duration as i64).bind(error.map(|_|now.saturating_add(120_000) as i64)).bind(error).bind(now.to_string()).bind(id).execute(&self.pool).await?.rows_affected()==1)
+            .bind(if error.is_some(){"failed"}else{"completed"}).bind(text).bind(words).bind(confidence).bind(error).bind(duration as i64).bind(error.map(|_|now.saturating_add(600_000) as i64)).bind(error).bind(now.to_string()).bind(id).execute(&self.pool).await?.rows_affected()==1)
     }
     pub async fn cancel_asr_job(
         &self,
@@ -156,7 +156,7 @@ impl Store {
     }
     /// Never automatically replay an interrupted runtime submission.
     pub async fn recover_asr_jobs(&self, now: u64) -> Result<u64, sqlx::Error> {
-        let count=sqlx::query("UPDATE transcriptions SET state='failed',error_category='interrupted',retry_expires_at_ms=CASE WHEN audio_bytes IS NULL THEN NULL ELSE ? END,updated_at=? WHERE state IN ('queued','processing')").bind(now.saturating_add(120_000) as i64).bind(now.to_string()).execute(&self.pool).await?.rows_affected();
+        let count=sqlx::query("UPDATE transcriptions SET state='failed',error_category='interrupted',retry_expires_at_ms=CASE WHEN audio_bytes IS NULL THEN NULL ELSE ? END,updated_at=? WHERE state IN ('queued','processing')").bind(now.saturating_add(600_000) as i64).bind(now.to_string()).execute(&self.pool).await?.rows_affected();
         self.expire_asr_audio(now).await?;
         Ok(count)
     }
@@ -310,7 +310,7 @@ mod tests {
             .finish_asr_job("two", None, None, None, Some("timeout"), 300000, 40)
             .await
             .unwrap());
-        store.expire_asr_audio(120040).await.unwrap();
-        assert!(!store.retry_asr_job("two", "b", 120041).await.unwrap());
+        store.expire_asr_audio(600040).await.unwrap();
+        assert!(!store.retry_asr_job("two", "b", 600041).await.unwrap());
     }
 }

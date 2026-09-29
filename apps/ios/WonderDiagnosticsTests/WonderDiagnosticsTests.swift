@@ -95,7 +95,7 @@ final class WonderDiagnosticsTests: XCTestCase {
     // Asset packaging owns this contract: known connectors must render a real
     // bundled image in both appearances, even with no network or runtime logo URL.
     @MainActor func testConnectedAppAssetsAreAvailableOffline() throws {
-        for name in ["Gmail", "Google Calendar", "Google Drive", "Claude Docs"] {
+        for name in ["Gmail", "Google Calendar", "Google Drive", "Claude Docs", "GitHub", "OpenAI Platform", "Sites", "Linear", "Flashloop", "Adobe Acrobat", "claude.ai Gmail", "Claude.ai: Google Drive"] {
             let data = try JSONSerialization.data(withJSONObject: ["id": name, "name": name, "status": "available"])
             let app = try JSONDecoder().decode(ConnectedApp.self, from: data)
             let asset = try XCTUnwrap(app.bundledIcon)
@@ -441,6 +441,48 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(result.map(\.id), ["ada", "lin"])
         XCTAssertEqual(result.first?.avatarPalette, "ocean")
         XCTAssertEqual(result.last?.avatarPalette, "rose")
+    }
+
+    func testUsageGatePreservesModelScopeResetUnknownAndOverage() throws {
+        let now = Date(timeIntervalSince1970: 2_000)
+        func entry(_ json: String, age: TimeInterval = 0) throws -> CodexUsageCacheEntry {
+            CodexUsageCacheEntry(response: try JSONDecoder().decode(CodexUsageResponse.self, from: Data(json.utf8)), fetchedAt: now.addingTimeInterval(-age))
+        }
+        let json = #"{"agentFamily":"claude","checkedAtMs":2000000,"windows":[{"id":"seven_day_opus","label":"Weekly","usedPercent":100,"remainingPercent":0,"resetsAt":3000}]}"#
+        let cached = try entry(json)
+        XCTAssertNotNil(cached.exhaustedWindow(model: "claude:claude-opus-5-5", now: now))
+        XCTAssertNil(cached.exhaustedWindow(model: "claude:claude-sonnet-5-5", now: now))
+        XCTAssertNil(cached.exhaustedWindow(model: "claude:haiku", now: now))
+        XCTAssertNil(cached.exhaustedWindow(model: "claude:opus", now: Date(timeIntervalSince1970: 3000)))
+        XCTAssertNil(try entry(json, age: 300).exhaustedWindow(model: "claude:opus", now: now))
+        XCTAssertNil(try entry(json.replacingOccurrences(of: #""usedPercent":100,"remainingPercent":0"#, with: #""usedPercent":99.9,"remainingPercent":0.1"#)).exhaustedWindow(model: "claude:opus", now: now))
+        XCTAssertNil(try entry(json.replacingOccurrences(of: #""checkedAtMs":2000000"#, with: #""checkedAtMs":2000000,"additionalUsageAvailable":true"#)).exhaustedWindow(model: "claude:opus", now: now))
+        XCTAssertNil(try entry(#"{"checkedAtMs":2000000,"windows":[]}"#).exhaustedWindow(model: "", now: now))
+    }
+
+    @MainActor func testExhaustedUsagePreflightPreservesDraftAndNeverSends() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (model, chat) = try recoveryGroup(root: root)
+        model.editDraft("Keep this message", chat: chat.id)
+        let family = AgentFamily(model: model.usageModel(chat))
+        let usage = try JSONSerialization.data(withJSONObject: ["agentFamily": family.rawValue, "checkedAtMs": 1,
+            "windows": [["id": "primary", "label": "5 hours", "usedPercent": 100, "remainingPercent": 0]], "additionalUsageAvailable": false])
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/account/usage", body: usage)
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/bot-options", body: try recoveryOptions())
+        XCTAssertTrue(model.canSend(chat), "Missing usage is unknown, not exhausted")
+        await model.send(chat)
+        XCTAssertFalse(model.canSend(chat))
+        XCTAssertNotNil(model.usageLimitMessage(chat))
+        XCTAssertEqual(model.composers[chat.id]?.draft, "Keep this message")
+        XCTAssertNil(model.composers[chat.id]?.pending)
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/group-chats/group/messages").isEmpty)
+        let other = CodexUsageCacheEntry(response: try JSONDecoder().decode(CodexUsageResponse.self, from: usage), fetchedAt: Date())
+        model.codexUsageCache = [:]; model.claudeUsageCache = [:]
+        if family == .codex { model.claudeUsageCache[model.assignmentScope] = other }
+        else { model.codexUsageCache[model.assignmentScope] = other }
+        XCTAssertTrue(model.canSend(chat), "Another provider's limit must not block this model")
     }
 
     func testCodexUsageResponseDecodesTheHostContract() throws {
@@ -1389,6 +1431,19 @@ final class WonderDiagnosticsTests: XCTestCase {
         view.paste(nil)
         let textPasted = expectation(for: NSPredicate { _, _ in view.text == "Keep ordinary text" }, evaluatedWith: nil)
         await fulfillment(of: [textPasted], timeout: 3)
+
+        // The iOS 27 keyboard paste suggestion delivers item providers instead of paste(_:).
+        view.canPasteImages = true
+        let image = NSItemProvider(item: try XCTUnwrap(UIImage(data: Self.cameraImageData())?.pngData()) as NSData,
+                                   typeIdentifier: UTType.png.identifier)
+        let supporting: UIPasteConfigurationSupporting = view
+        XCTAssertEqual(supporting.canPaste?([image]), true)
+        supporting.paste?(itemProviders: [image])
+        let providerPasted = expectation(for: NSPredicate { _, _ in received == 2 }, evaluatedWith: nil)
+        await fulfillment(of: [providerPasted], timeout: 3)
+        XCTAssertEqual(view.text, "Keep ordinary text")
+        view.canPasteImages = false
+        XCTAssertEqual(supporting.canPaste?([image]), false)
     }
 
     @MainActor private static func cameraImageData() -> Data {

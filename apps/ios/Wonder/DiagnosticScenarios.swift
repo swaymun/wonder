@@ -375,10 +375,10 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         let path = url.path
         if path == "/api/v1/connected-apps" {
             let family = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "agentFamily" }?.value ?? "codex"
-            let names = family == "claude" ? ["Claude Docs", "Gmail", "Google Calendar", "Google Drive", "Custom app"] : ["Gmail", "Google Drive"]
+            let names = family == "claude" ? ["Claude.ai: Claude Docs", "claude.ai Gmail", "Claude.ai Google Calendar", "claude.ai Google Drive"] : ["Gmail", "Google Drive", "GitHub", "OpenAI Platform", "Linear", "Sites", "Flashloop", "Adobe Acrobat"]
             finish(status: 200, body: json([
                 "hostInstallationId": DiagnosticSubagentFixture.hostID, "agentFamily": family,
-                "apps": names.map { ["id": "\(family):\($0)", "name": $0, "status": $0 == "Custom app" ? "not_connected" : "available"] }
+                "apps": names.map { ["id": "\(family):\($0)", "name": $0, "status": "available"] }
             ])); return
         }
         let body: Data?
@@ -494,7 +494,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         }
         switch path {
         case "/api/v1/bots/fixture-bot/file-access/requests" where DiagnosticSubagentFixture.chatLayoutFixture || DiagnosticSubagentFixture.marketingFixture:
-            finish(status: 200, body: Data("[]".utf8))
+            finish(status: ProcessInfo.processInfo.arguments.contains("-diagnostics-folder-poll-offline") ? 503 : 200, body: Data("[]".utf8))
         case "/api/v1/devices": finish(status: 200, body: json([["id": "diagnostic-device", "revokedAt": NSNull()]]))
         case "/api/v1/host/status": finish(status: 200, body: json(["hostInstallationId": DiagnosticSubagentFixture.hostID, "hostName": "Synthetic fixture"]))
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/composer-options" where DiagnosticSubagentFixture.approvalSettingsFixture:

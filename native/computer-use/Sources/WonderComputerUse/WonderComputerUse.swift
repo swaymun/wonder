@@ -82,18 +82,8 @@ struct WonderComputerUse {
                 let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
                 _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
             }
-            let result: [String: Any] = ["screenRecording": CGPreflightScreenCaptureAccess(),
-                                         "accessibility": AXIsProcessTrusted()]
-            if let index = CommandLine.arguments.firstIndex(of: "--permissions-output"),
-               CommandLine.arguments.indices.contains(index + 1) {
-                let url = URL(fileURLWithPath: CommandLine.arguments[index + 1])
-                guard let data = try? JSONSerialization.data(withJSONObject: result),
-                      (try? data.write(to: url, options: .atomic)) != nil else {
-                    exit(EXIT_FAILURE)
-                }
-            } else {
-                write(result)
-            }
+            write(["screenRecording": CGPreflightScreenCaptureAccess(),
+                   "accessibility": AXIsProcessTrusted()])
             exit(EXIT_SUCCESS)
         }
         let dryRun = CommandLine.arguments.contains("--dry-run")

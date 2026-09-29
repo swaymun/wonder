@@ -35,6 +35,26 @@ app has a different designated requirement from a Developer ID app; a test of a
 development-to-development upgrade does not prove permission retention across
 that signing transition. Do not edit TCC databases to claim a pass.
 
+## Keeping Mac privacy grants across updates
+
+macOS keeps Screen Recording and Accessibility for Wonder while each update
+satisfies the requirement recorded when they were granted: bundle ID
+`com.saimun.wonder`, signed by Developer ID team `8KKNVD7758`. Claude.app and
+ChatGPT.app rely on the same kind of requirement. To avoid asking users again:
+
+- Ship only Developer ID builds with that bundle ID and team. `package-macos-dmg.sh`
+  rejects any other designated requirement; Sparkle also refuses a mismatched update.
+- Keep helpers as plain executables in `Contents/Helpers` that Wonder starts as
+  children. Never give a helper its own bundle ID or launch it through
+  LaunchServices; that creates a second privacy identity.
+- Update agent runtimes (the Claude Agent SDK in `~/.wonder/claude-runtime`, the
+  ChatGPT runtime) outside the bundle. They run as Wonder's children and use its grants.
+- Do not install Apple Development or ad-hoc builds over a Developer ID install;
+  `install-signed-app.py` refuses a changed requirement for this reason.
+
+macOS may still ask users to reconfirm Screen Recording periodically. That prompt
+is independent of updates.
+
 ## iPhone/iPad artifact
 
 Run relevant native/model/UI/device checks, then serialize uploads using:

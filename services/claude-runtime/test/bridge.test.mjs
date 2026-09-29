@@ -45,6 +45,30 @@ async function fixture(t, { authenticated = true, messages = [] } = {}) {
   return { root, sessions, bridge, thread, frames, inputs, capturedOptions, finish };
 }
 
+// Resuming a stored session must not resurrect the retired custom computer
+// tool. Native computer access must come from the host-registered adapter.
+test("resumed sessions cannot expose or invoke the retired computer tool", async t => {
+  const f = await fixture(t, { messages: [{ type: "result", subtype: "success" }] });
+  f.sessions.get(f.thread.id).options.dynamicTools = [{ name: "wonder_computer_use" }];
+  await f.bridge.request("turn/start", { threadId: f.thread.id, input: [{ type: "text", text: "Continue" }] });
+  await f.finish();
+  assert.equal(f.sessions.get(f.thread.id).turns[0].status, "completed");
+  assert.deepEqual(f.capturedOptions[0].mcpServers, {});
+  const result = await f.capturedOptions[0].canUseTool("mcp__wonder__wonder_computer_use", { action: "key" },
+    { toolUseID: "legacy", mcpServer: { name: "wonder", source: "sdk" } });
+  assert.equal(result.behavior, "deny");
+  assert.match(result.message, /retired/);
+  for (const approvalMode of ["ask", "full_access"]) {
+    const options = f.sessions.get(f.thread.id).options;
+    options.wonderPolicy.approvalMode = approvalMode;
+    await f.bridge.request("turn/start", { threadId: f.thread.id, input: [{ type: "text", text: "Continue" }] });
+    await f.finish();
+    const result = await f.capturedOptions.at(-1).canUseTool("mcp__cua_repl__js", { code: "await cua.getState();" },
+      { toolUseID: "unregistered", mcpServer: { name: "cua_repl", source: "sdk" } });
+    assert.equal(result.behavior, "deny");
+  }
+});
+
 // Catalog labels must describe actual execution without changing saved model or
 // MCP identities. Older SDKs and unfamiliar future IDs keep their runtime label.
 test("model labels use resolved versions while preserving selections and pinned Haiku", async t => {
@@ -79,7 +103,7 @@ test("connector labels strip the Claude account prefix without changing MCP iden
   const f = await fixture(t);
   const servers = [
     { name: "claude.ai Gmail", source: "claudeai", status: "connected" },
-    { name: "claude.ai Google Calendar", source: "claudeai", status: "disabled" },
+    { name: "Claude.ai: Google Calendar", source: "claudeai", status: "disabled" },
     { name: "claude.ai in a custom name", source: "user", status: "connected" },
     { name: "Custom claude.ai Gmail", source: "claudeai", status: "failed" },
     { name: "wonder", source: "sdk", status: "connected" },

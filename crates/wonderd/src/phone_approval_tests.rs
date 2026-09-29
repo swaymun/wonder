@@ -210,6 +210,25 @@ fn phone_summary_preserves_consent_constraints_without_runtime_secrets() {
     )
     .get("requestedSchema")
     .is_none());
+
+    let native = json!({"serverName":"cua_repl", "mode":"form", "requestedSchema":{"type":"object","properties":{}},
+        "_meta":{"codex_approval_kind":"mcp_tool_call", "riskLevel":"low", "subtitle":"Read the selected app.",
+            "persist":["session","always"], "tool_params_display":[{"display_name":"App","value":"Calculator"}],
+            "tool_params":{"secret":"omit"}, "x-codex-turn-metadata":{"session_id":"private"}}});
+    let summary = redact_approval_params("mcpServer/elicitation/request", &native);
+    assert_eq!(
+        summary["elicitationContext"],
+        json!({"isComputerUse":true, "riskLevel":"low",
+        "subtitle":"Read the selected app.", "details":["App: Calculator"]})
+    );
+    assert!(summary.get("_meta").is_none());
+    assert!(!summary.to_string().contains("private"));
+    assert!(!summary.to_string().contains("secret"));
+    permission_modes::tests::assert_http_contract(
+        "approvalSummary",
+        &json!({"approvalId":"native",
+        "method":"mcpServer/elicitation/request", "params":summary, "actionNonce":"nonce", "resolutionIdempotencyKey":null}),
+    );
 }
 
 #[tokio::test]

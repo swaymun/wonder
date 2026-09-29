@@ -21,7 +21,7 @@ import WonderPairing
     private var timer: Task<Void, Never>?
     private var interruptions: Task<Void, Never>?
     private var scope: String?
-    private var maximum: TimeInterval = 300
+    private var maximum: TimeInterval = 600
     private var captureGeneration = 0
     private var audioURL: URL? {
         guard let connection = model?.connection else { return nil }
@@ -142,19 +142,19 @@ import WonderPairing
             capture.isMeteringEnabled = true
             guard capture.prepareToRecord() else { throw DictationFailure(errorCategory: "no_audio") }
             try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
-            maximum = Double(min(catalog.maxRecordingDurationMs, 300_000)) / 1000
+            maximum = Double(min(catalog.maxRecordingDurationMs, 600_000)) / 1000
             guard maximum >= 0.25, capture.record(forDuration: maximum) else { throw DictationFailure(errorCategory: "no_audio") }
             recorder = capture; elapsed = 0; audioLevels = []; startTimer(); observeInterruptions()
         } catch {
             stopCapture()
             intent?.phase = "failed"; intent?.cancelled = true; persist(); removeAudio()
-            failure = "Recording could not start. " + ((error as? DictationFailure)?.message ?? error.localizedDescription)
+            failure = "Recording could not start. Check microphone access in Settings and try again."
         }
     }
     #if DEBUG && targetEnvironment(simulator)
     var fixtureMode: Bool { ProcessInfo.processInfo.arguments.contains("-dictation-fixtures") }
     func transcribeFixture(seconds: Int, chat: ChatSummary) async {
-        guard fixtureMode, [180, 300].contains(seconds), let model, !model.previewMode,
+        guard fixtureMode, [180, 300, 600].contains(seconds), let model, !model.previewMode,
             !busy, intent == nil, !model.accessEnded else { return }
         restore(); guard intent == nil else { return }
         busy = true; failure = nil
@@ -175,7 +175,7 @@ import WonderPairing
                 .appendingPathComponent("DictationFixtures/english-\(seconds)s.m4a")
             let audio = try AVAudioFile(forReading: source)
             let milliseconds = UInt64(Double(audio.length) / audio.processingFormat.sampleRate * 1000)
-            guard milliseconds >= 250, milliseconds <= 300_000 else { throw DictationFailure(errorCategory: "unsupported_recording_format") }
+            let duration = try DictationIntent.captureDuration(milliseconds: milliseconds, maximumMs: catalog.maxRecordingDurationMs)
             var directory = destination.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             var values = URLResourceValues(); values.isExcludedFromBackup = true; try directory.setResourceValues(values)
@@ -183,7 +183,7 @@ import WonderPairing
             try FileManager.default.copyItem(at: source, to: destination)
             var pending = DictationIntent(hostID: saved.credential.hostInstallationId, deviceID: saved.credential.deviceId,
                 conversationID: chat.id, conversationTitle: chat.title, modelID: modelID)
-            pending.finishCapture(durationMs: milliseconds)
+            pending.finishCapture(durationMs: duration)
             try model.persistDictationIntent(pending); intent = pending; busy = false; startTimer(); upload()
         } catch { busy = false; failure = readable(error); removeAudio() }
     }
@@ -195,13 +195,21 @@ import WonderPairing
         do {
             let audio = try AVAudioFile(forReading: url)
             let milliseconds = UInt64(max(0, Double(audio.length) / audio.processingFormat.sampleRate * 1000))
-            guard milliseconds >= 250 else { throw DictationFailure(errorCategory: "too_short") }
-            guard milliseconds <= 300_000 else { throw DictationFailure(errorCategory: "unsupported_recording_format") }
-            pending.finishCapture(durationMs: milliseconds); intent = pending
-            try model?.persistDictationIntent(pending)
-            if submit { upload() }
-            else { failure = "Recording interrupted. Retry to transcribe it, or cancel." }
-        } catch { intent?.phase = "failed"; intent?.cancelled = true; failure = readable(error); persist(); removeAudio() }
+            let duration = try DictationIntent.captureDuration(milliseconds: milliseconds, maximumMs: UInt64(maximum * 1000))
+            pending.finishCapture(durationMs: duration); intent = pending
+        } catch {
+            intent?.phase = "failed"; intent?.cancelled = true; failure = readable(error); persist(); removeAudio()
+            return
+        }
+        do { try model?.persistDictationIntent(pending) }
+        catch {
+            // Keep a valid clip recoverable in this session if its metadata cannot
+            // be saved. Retry must save the intent before beginning an upload.
+            failure = "This recording could not be saved. Free some space, then retry."
+            return
+        }
+        if submit { upload() }
+        else { failure = "Recording interrupted. Retry to transcribe it, or cancel." }
     }
     nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
         Task { @MainActor [weak self] in
@@ -246,12 +254,14 @@ import WonderPairing
     private func upload() {
         guard !busy, let pending = intent, !pending.cancelled, pending.canRetryAudio(), let url = audioURL,
             let model, let saved = matchingConnection(pending) else { return }
+        do { try model.persistDictationIntent(pending) }
+        catch { failure = "This recording could not be saved. Free some space, then retry."; return }
         busy = true; intent?.phase = "uploading"; failure = nil; persist()
         work = Task { [weak self] in
             guard let self else { return }
             defer { if self.intent?.requestID == pending.requestID { self.busy = false } }
             do {
-                let bytes = try Data(contentsOf: url)
+                let bytes = try await DictationAudioReader.shared.read(url)
                 let job: TranscriptionJob = try await model.api.asrRequest("/api/v1/asr/transcriptions", connection: saved, method: "POST", recording: bytes, intent: pending)
                 guard self.matches(pending), !Task.isCancelled else { return }
                 try self.receive(job, pending: pending)
@@ -300,7 +310,6 @@ import WonderPairing
         intent = current; try model?.persistDictationIntent(current)
         switch job.state {
         case "completed":
-            removeAudio()
             guard let model else { return }
             try model.insertDictation(job: job, intent: current)
             clear()
@@ -385,6 +394,11 @@ import WonderPairing
         if case SendFailure.tooLarge = error { return "The transcript does not fit in this draft. Shorten the draft, then retry." }
         return "Your Mac is unavailable. Retry while the recording is still available."
     }
+}
+
+private actor DictationAudioReader {
+    static let shared = DictationAudioReader()
+    func read(_ url: URL) throws -> Data { try Data(contentsOf: url) }
 }
 
 /// The draft editor remains mounted while its own recording takes over the composer.
@@ -504,6 +518,7 @@ struct DictationControls: View {
                 HStack {
                     Button("Test 3-minute audio") { Task { await controller.transcribeFixture(seconds: 180, chat: chat) } }
                     Button("Test 5-minute audio") { Task { await controller.transcribeFixture(seconds: 300, chat: chat) } }
+                    Button("Test 10-minute audio") { Task { await controller.transcribeFixture(seconds: 600, chat: chat) } }
                 }.font(.caption).disabled(controller.busy)
             }
             #endif

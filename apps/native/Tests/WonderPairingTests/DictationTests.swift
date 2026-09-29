@@ -28,14 +28,14 @@ final class DictationTests: XCTestCase {
         XCTAssertEqual(restored.requestID, intent.requestID)
         XCTAssertEqual(restored.durationMs, 300_000)
         XCTAssertEqual(restored.audioExpiresAt, intent.audioExpiresAt)
-        XCTAssertTrue(restored.canRetryAudio(now: now.addingTimeInterval(119)))
-        XCTAssertFalse(restored.canRetryAudio(now: now.addingTimeInterval(120)))
+        XCTAssertTrue(restored.canRetryAudio(now: now.addingTimeInterval(599)))
+        XCTAssertFalse(restored.canRetryAudio(now: now.addingTimeInterval(600)))
         restored.jobID = "known"; restored.phase = "processing"
         restored.pauseInterruptedUpload()
         XCTAssertEqual(restored.phase, "processing")
     }
-    func testThreeAndFiveMinuteRecordingsKeepBoundedRetryAndOriginalMetadata() throws {
-        for duration: UInt64 in [180_000, 300_000] {
+    func testThreeFiveAndTenMinuteRecordingsKeepBoundedRetryAndOriginalMetadata() throws {
+        for duration: UInt64 in [180_000, 300_000, 600_000] {
             var intent = DictationIntent(hostID: "mac", deviceID: "phone", conversationID: "first", conversationTitle: "Ada", modelID: "parakeet")
             let now = Date(timeIntervalSince1970: 100)
             intent.finishCapture(durationMs: duration, now: now)
@@ -43,9 +43,17 @@ final class DictationTests: XCTestCase {
             XCTAssertEqual(restored.requestID, intent.requestID)
             XCTAssertEqual(restored.durationMs, duration)
             XCTAssertEqual(restored.conversationID, "first")
-            XCTAssertTrue(restored.canRetryAudio(now: now.addingTimeInterval(119)))
-            XCTAssertFalse(restored.canRetryAudio(now: now.addingTimeInterval(120)))
+            XCTAssertTrue(restored.canRetryAudio(now: now.addingTimeInterval(599)))
+            XCTAssertFalse(restored.canRetryAudio(now: now.addingTimeInterval(600)))
         }
+    }
+    func testCaptureAllowsOnlyBoundedEncoderPaddingAtNegotiatedLimit() throws {
+        XCTAssertEqual(try DictationIntent.captureDuration(milliseconds: 600_023, maximumMs: 600_000), 600_000)
+        XCTAssertEqual(try DictationIntent.captureDuration(milliseconds: 300_023, maximumMs: 300_000), 300_000)
+        XCTAssertEqual(try DictationIntent.captureDuration(milliseconds: 1234, maximumMs: 600_000), 1234)
+        XCTAssertThrowsError(try DictationIntent.captureDuration(milliseconds: 600_251, maximumMs: 600_000))
+        XCTAssertThrowsError(try DictationIntent.captureDuration(milliseconds: 600_000, maximumMs: 300_000))
+        XCTAssertThrowsError(try DictationIntent.captureDuration(milliseconds: 249, maximumMs: 600_000))
     }
     func testAppendPreservesInterveningTypingAndIsExactlyOnceAfterRestart() throws {
         var intent = ComposerIntent(); intent.draft = "Typed while transcribing."

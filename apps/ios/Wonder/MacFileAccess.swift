@@ -316,6 +316,10 @@ struct FolderRequestsView: View {
     @State private var requests: [BotFolderRequest] = []
     @State private var busy: String?
     @State private var failure: String?
+    @State private var stale = false
+    @State private var loadedScope: String?
+    @Environment(\.scenePhase) private var scenePhase
+    private var scope: String { model.assignmentScope + ":" + botID }
     private var endpoint: String { "/api/v1/bots/" + ConnectionModel.escape(botID) + "/file-access/requests" }
     private var visibleRequests: [BotFolderRequest] {
         Array(requests.lazy.filter { $0.state == "pending" }.prefix(4))
@@ -327,13 +331,15 @@ struct FolderRequestsView: View {
                     request: request,
                     status: status(for: request),
                     busy: busy == request.id,
-                    disabled: busy != nil || model.accessEnded,
+                    disabled: busy != nil || stale || loadedScope != scope || model.accessEnded,
                     resolve: { accepted in Task { await resolve(request, accepted: accepted) } })
             }
             if let failure { FailureDetails("Folder request unavailable", message: failure) }
-        }.task(id: botID) {
-            guard !model.previewMode else { return }
-            while !Task.isCancelled {
+        }
+        .onChange(of: scope) { _, _ in requests = []; failure = nil; stale = false; busy = nil; loadedScope = nil }
+        .task(id: scope + ":" + String(scenePhase == .active)) {
+            guard !model.previewMode, !model.accessEnded, scenePhase == .active else { return }
+            while !Task.isCancelled, !model.accessEnded {
                 await refresh()
                 do { try await Task.sleep(for: .seconds(3)) } catch { return }
             }
@@ -345,34 +351,35 @@ struct FolderRequestsView: View {
             : "Approve this folder to grant access."
     }
     private func refresh() async {
+        let expected = scope
         do {
-            requests = try await model.manage(endpoint)
-            failure = nil
+            let updated: [BotFolderRequest] = try await model.manage(endpoint)
+            guard !Task.isCancelled, expected == scope, !model.accessEnded else { return }
+            requests = updated; loadedScope = expected; stale = false; failure = nil
         } catch {
-            if requests.isEmpty { failure = refreshFailure(error) }
-            return
+            guard !Task.isCancelled, !(error is CancellationError), expected == scope else { return }
+            stale = true
+            // Empty polling must not manufacture a folder request or an error
+            // banner. Retain known requests, but require a fresh read to decide.
+            if !visibleRequests.isEmpty { failure = "Can’t reach Wonder on your Mac. Reconnecting…" }
         }
-    }
-    private func refreshFailure(_ error: Error) -> String {
-        if model.accessEnded { return "Reconnect this device to review or apply the saved folder request." }
-        if case PairingFailure.response(let status) = error {
-            switch status {
-            case 404: return "This Bot is unavailable or archived. Reopen it on an updated Mac host to recover the request."
-            case 409: return "This Bot is busy. The request is retained; stop current work and refresh to retry."
-            default: break
-            }
-        }
-        return "The Mac could not refresh this request. The pending decision is retained; reconnect and try again."
     }
     private func resolve(_ request: BotFolderRequest, accepted: Bool) async {
+        guard !stale, busy == nil, loadedScope == scope, !model.accessEnded else { return }
+        let expected = scope
         busy = request.id; failure = nil
-        defer { busy = nil }
+        defer { if expected == scope { busy = nil } }
         do {
             struct Decision: Encodable { let accepted: Bool }
             struct Empty: Decodable, Sendable {}
             let _: Empty = try await model.manage(endpoint + "/" + ConnectionModel.escape(request.id), method: "POST", body: JSONEncoder().encode(Decision(accepted: accepted)))
+            guard !Task.isCancelled, expected == scope else { return }
             await refresh()
-        } catch { failure = refreshFailure(error) }
+        } catch {
+            guard !Task.isCancelled, expected == scope else { return }
+            stale = true
+            failure = "Wonder couldn’t confirm your choice. Reconnecting to check the request…"
+        }
     }
 }
 

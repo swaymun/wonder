@@ -55,6 +55,18 @@ export function projectUsage(result) {
   return windows.length ? windows : null;
 }
 
+// Usage above the subscription limit is usable only when the account reports
+// enabled overage with remaining capacity. Unknown values stay unknown.
+export function additionalUsageAvailable(result) {
+  const extra = result?.rate_limits?.extra_usage;
+  if (result?.rate_limits_available !== true || !extra || typeof extra.is_enabled !== "boolean") return null;
+  if (!extra.is_enabled) return false;
+  if (typeof extra.utilization === "number" && Number.isFinite(extra.utilization)) return extra.utilization < 100;
+  if (extra.monthly_limit === null) return true;
+  if (typeof extra.monthly_limit === "number" && typeof extra.used_credits === "number") return extra.used_credits < extra.monthly_limit;
+  return null;
+}
+
 // These control requests initialize the runtime but never submit a user prompt.
 // Keep experimental account data behind this adapter, not in the native protocol.
 export async function inspectSdk(runtime, { cwd, includeUsage = false, connectors = false } = {}) {
@@ -76,9 +88,9 @@ export async function inspectSdk(runtime, { cwd, includeUsage = false, connector
       throw new Error("Claude runtime returned an incompatible model catalog");
     const connected = isSubscription(account);
     const usageMethod = query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
-    let windows = null;
+    let windows = null, additionalUsage = null;
     if (includeUsage && connected && typeof usageMethod === "function") {
-      try { windows = projectUsage(await usageMethod.call(query, { skipBehaviors: true })); } catch { /* Usage is optional; never fake a zero. */ }
+      try { const usage = await usageMethod.call(query, { skipBehaviors: true }); windows = projectUsage(usage); additionalUsage = additionalUsageAvailable(usage); } catch { /* Usage is optional; never fake a zero. */ }
     }
     let servers = connectors && connected ? await query.mcpServerStatus() : [];
     // MCP startup is asynchronous, including the account's server list fetch.
@@ -92,7 +104,7 @@ export async function inspectSdk(runtime, { cwd, includeUsage = false, connector
     return { version: runtime.version, connected, subscription: connected ? account.subscriptionType : null,
       models: models.map(m => ({ id: m.value, resolvedModel: m.resolvedModel, name: m.displayName, description: m.description,
         efforts: m.supportsEffort ? (m.supportedEffortLevels ?? []).filter(e => ["low", "medium", "high", "xhigh", "max"].includes(e)) : [] })),
-      usageSupported: typeof usageMethod === "function", windows,
+      usageSupported: typeof usageMethod === "function", windows, additionalUsageAvailable: additionalUsage,
       servers: servers.map(s => ({ name: s.name, status: s.status, source: s.source })) };
   } finally {
     clearTimeout(timer); done.resolve(); query.close(); abortController.abort();

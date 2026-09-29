@@ -4,7 +4,7 @@ use tokio::sync::{watch, Mutex, OnceCell, OwnedSemaphorePermit};
 use wonder_asr::*;
 use wonder_store::{AsrJob, NewAsrJob};
 
-const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+const WORKER_TIMEOUT: Duration = Duration::from_secs(120);
 const DECODER_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_WORKER_OUTPUT: usize = 256 * 1024;
 const MODEL_URL: &str = "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/parakeet-tdt-0.6b-v3.q8_0.gguf";
@@ -935,7 +935,18 @@ async fn normalize_audio(
         ])
         .arg(&input.path)
         .args(["-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1"]);
-    let pcm = bounded_process(command, Vec::new(), MAX_PCM_BYTES, DECODER_TIMEOUT, cancel).await?;
+    // AAC may decode a partial final packet past the requested stop time. Bound
+    // that allowance to 250 ms; longer recordings still fail instead of truncating.
+    let padding_bytes = PCM_SAMPLE_RATE_HZ as usize * PCM_BYTES_PER_SAMPLE as usize / 4;
+    let mut pcm = bounded_process(
+        command,
+        Vec::new(),
+        MAX_PCM_BYTES + padding_bytes,
+        DECODER_TIMEOUT,
+        cancel,
+    )
+    .await?;
+    pcm.truncate(MAX_PCM_BYTES);
     if pcm.is_empty() {
         return Err(AsrErrorCategory::NoAudio);
     }

@@ -19,11 +19,11 @@ fn executable(path: &FsPath, text: &str) {
 async fn asr_bounded_io_exact_limit_and_process_tree_cancel() {
     let (_sender, receiver) = watch::channel(false);
     let mut cmd = Command::new("python3");
-    cmd.args(["-c","import sys; sys.stdout.buffer.write(b'x'*9600000); sys.stdout.buffer.flush(); sys.stdin.buffer.read()"]);
+    cmd.args(["-c","import sys; sys.stdout.buffer.write(b'x'*19200000); sys.stdout.buffer.flush(); sys.stdin.buffer.read()"]);
     assert_eq!(
         bounded_process(
             cmd,
-            vec![1; 9600000],
+            vec![1; 19200000],
             MAX_PCM_BYTES,
             Duration::from_secs(10),
             receiver.clone()
@@ -34,7 +34,7 @@ async fn asr_bounded_io_exact_limit_and_process_tree_cancel() {
         MAX_PCM_BYTES
     );
     let mut cmd = Command::new("python3");
-    cmd.args(["-c", "import sys; sys.stdout.buffer.write(b'x'*9600001)"]);
+    cmd.args(["-c", "import sys; sys.stdout.buffer.write(b'x'*19200001)"]);
     assert_eq!(
         bounded_process(
             cmd,
@@ -524,7 +524,7 @@ async fn asr_real_ffmpeg_decodes_native_m4a_without_faststart() {
             "-i",
             "sine=frequency=440:sample_rate=44100",
             "-t",
-            "180",
+            "600.02",
             "-ac",
             "1",
             "-c:a",
@@ -577,7 +577,25 @@ async fn asr_real_ffmpeg_decodes_native_m4a_without_faststart() {
     let pcm = normalize_audio(&service, "audio/mp4", audio, receiver.clone())
         .await
         .unwrap();
-    assert!((180000..180100).contains(&normalized_duration_ms(&pcm)));
+    assert_eq!(normalized_duration_ms(&pcm), 600_000);
+    let overlong = root.path().join("overlong.m4a");
+    assert!(Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&native)
+        .args(["-af", "apad=pad_dur=1", "-c:a", "aac"])
+        .arg(&overlong)
+        .status()
+        .await
+        .unwrap()
+        .success());
+    assert!(normalize_audio(
+        &service,
+        "audio/mp4",
+        std::fs::read(overlong).unwrap(),
+        receiver.clone()
+    )
+    .await
+    .is_err());
     assert!(pcm.iter().any(|v| *v != 0));
     assert_eq!(
         std::fs::read_dir(service.root.join("jobs"))

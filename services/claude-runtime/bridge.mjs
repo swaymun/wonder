@@ -4,6 +4,7 @@ import { z } from "zod";
 import { BRIDGE_PROTOCOL, HAIKU_MODEL, TurnProjection, questionRequest, questionAnswer } from "./projection.mjs";
 import { baseOptions, inspectSdk, isSubscription } from "./sdk-runtime.mjs";
 import { ToolPolicy, closeCommandSandbox } from "./permissions.mjs";
+import { createNativeCua } from "./native-cua.mjs";
 
 const BUILTINS = ["Read", "Write", "Edit", "NotebookEdit", "Bash", "WebFetch", "WebSearch",
   "AskUserQuestion", "Agent", "ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop"];
@@ -129,7 +130,7 @@ export class ClaudeBridge {
     if (method === "account/rateLimits/read") {
       const catalog = await this.catalog(true);
       if (!catalog.windows) throw new Error("Claude usage is temporarily unavailable. Refresh to try again.");
-      return { agentFamily: "claude", windows: catalog.windows };
+      return { agentFamily: "claude", windows: catalog.windows, additionalUsageAvailable: catalog.additionalUsageAvailable ?? null };
     }
     if (["app/installed", "app/read", "mcpServerStatus/list"].includes(method)) {
       const session = params.threadId ? this.sessions.get(params.threadId) : null;
@@ -138,7 +139,7 @@ export class ClaudeBridge {
       const visible = servers.filter(s => s.source !== "sdk" && s.name !== "wonder");
       if (method === "mcpServerStatus/list") return { data: visible, nextCursor: null };
       return { apps: visible.map(s => ({ id: `claude:${s.name}`, runtimeName: s.name,
-        name: s.source === "claudeai" ? s.name.replace(/^claude\.ai\s+/, "") : s.name,
+        name: s.source === "claudeai" ? s.name.replace(/^claude\.ai(?:\s*[:/·-]\s*|\s+)/i, "") : s.name,
         installUrl: "https://claude.ai/settings/connectors", enabled: s.status !== "disabled", callable: s.status === "connected", isEnabled: s.status !== "disabled", isAccessible: s.status === "connected" })), nextCursor: null };
     }
     if (method === "thread/start") {
@@ -208,6 +209,12 @@ export class ClaudeBridge {
   async permission(session, run, policy, name, input, context) {
     const base = { threadId: session.id, turnId: run.turn.id, itemId: context.toolUseID, agentFamily: "claude" };
     const deny = message => ({ behavior: "deny", message });
+    if (name === "mcp__wonder__wonder_computer_use") return deny("The old computer tool is retired. Use native cua_repl when available.");
+    if (name.startsWith("mcp__cua_repl__")) {
+      return run.nativeCua?.authorize(name, input, context)
+        ? { behavior: "allow", updatedInput: input }
+        : deny("Native computer use is unavailable for this turn.");
+    }
     if (await policy.decision(name, input) === "deny") return deny("This action is outside this Bot's allowed access.");
     if (name === "AskUserQuestion") {
       const request = questionRequest(input, context.requestId ?? context.toolUseID);
@@ -249,7 +256,9 @@ export class ClaudeBridge {
       projection.start(); await flush();
       lease = await this.updates.acquire();
       const { sdk } = lease.runtime;
-      const tools = (options.wonderPlanning ? [] : options.dynamicTools ?? []).map(spec => sdk.tool(spec.name, spec.description,
+      const tools = (options.wonderPlanning ? [] : options.dynamicTools ?? [])
+        .filter(spec => spec.name !== "wonder_computer_use")
+        .map(spec => sdk.tool(spec.name, spec.description,
         z.fromJSONSchema(spec.inputSchema).shape, async (input) => {
           const callId = run.authorizedTools.get(JSON.stringify([spec.name, input]))?.shift();
           if (!callId) throw new Error("The Wonder tool call could not be correlated with its permission check.");
@@ -265,10 +274,26 @@ export class ClaudeBridge {
         }));
       const model = selectedModel(options.model);
       const base = baseOptions(lease.runtime, { connectors: options.wonderConnectors === true && !options.wonderPlanning && !policy.internal });
+      const computer = options.config?.["mcp_servers.cua_repl"];
+      let computerUnavailable = false;
+      if (computer?.enabled === true && !options.wonderPlanning && !policy.internal) {
+        try {
+          run.nativeCua = await createNativeCua({ sdk, server: computer, environment: base.env,
+            sessionId: session.sdkSessionId, threadId: session.id, turnId: run.turn.id, signal: run.abort.signal,
+            requestElicitation: (params, signal) => this.serverCall("mcpServer/elicitation/request", params, signal) });
+        } catch (error) {
+          run.abort.signal.throwIfAborted();
+          computerUnavailable = true;
+        }
+      }
       const sdkOptions = { ...base, cwd: options.cwd, model, abortController: run.abort,
-        systemPrompt: [options.developerInstructions ?? "You are a helpful Wonder Bot.", ...Object.values(options.additionalContext ?? {}).filter(v => v?.kind === "application" && typeof v.value === "string").map(v => v.value)].join("\n\n"),
+        systemPrompt: [options.developerInstructions ?? "You are a helpful Wonder Bot.",
+          ...(run.nativeCua ? ["This response has a fresh cua_repl runtime. Follow its first-call instructions and initialize an app or browser before using it. JavaScript variables from earlier responses are not available."] : []),
+          ...(computerUnavailable ? ["Native computer use could not connect for this turn. If asked to control the computer, report that it is unavailable; do not substitute another implementation."] : []),
+          ...Object.values(options.additionalContext ?? {}).filter(v => v?.kind === "application" && typeof v.value === "string").map(v => v.value)].join("\n\n"),
         tools: policy.internal || options.wonderPlanning ? [] : BUILTINS,
-        mcpServers: tools.length ? { wonder: sdk.createSdkMcpServer({ name: "wonder", version: "1.0.0", tools }) } : {},
+        mcpServers: { ...(tools.length ? { wonder: sdk.createSdkMcpServer({ name: "wonder", version: "1.0.0", tools }) } : {}),
+          ...(run.nativeCua ? { cua_repl: run.nativeCua.server } : {}) },
         canUseTool: (name, input, context) => this.permission(session, run, policy, name, input, context),
         hooks: { PreToolUse: [{ hooks: [(input) => policy.beforeTool(input)] }],
           PostToolUse: [{ hooks: [async () => run.initialized ? { continue: false, stopReason: "The optional question was posted. Initialization is complete." } : {}] }] },
@@ -314,6 +339,8 @@ export class ClaudeBridge {
       projection.finish(run.initialized ? "completed" : run.stopped ? "interrupted" : "failed", run.initialized ? undefined : error.message);
     } finally {
       submit.resolve(); done.resolve(); query?.close(); run.abort.abort();
+      try { await run.nativeCua?.close(); }
+      catch { process.stderr.write("Native computer-use cleanup could not be confirmed.\n"); }
       // Finish descendants first so each owner's durable snapshot includes its
       // children's final state, including when the whole query is interrupted.
       for (const child of [...run.children.values()].reverse()) {

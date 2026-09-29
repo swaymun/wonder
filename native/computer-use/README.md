@@ -1,12 +1,12 @@
 # Native computer-use boundary
 
-`WonderComputerUse` is a separately packaged, permission-gated unlocked
-Computer Use service. In the signed Mac app it is shipped as the
-`Resources/WonderComputerUse.app` LSUIElement bundle, with the executable at
-`Contents/MacOS/WonderComputerUse`. The helper keeps the stable
-`com.saimun.wonder.computer-use` bundle/code identifier so its local consent
-window is addressable by native UI automation and its existing TCC identity is
-preserved across signed updates. It communicates over JSONL on standard
+`WonderComputerUse` is a separately built, permission-gated unlocked Computer
+Use service. In the signed Mac app it ships as the plain executable
+`Contents/Helpers/WonderComputerUse`, with no bundle or Info.plist of its own.
+`wonderd` and Wonder's Settings start it directly, so macOS attributes Screen
+Recording and Accessibility to Wonder itself: there is one app and one privacy
+identity. The executable keeps the stable `com.saimun.wonder.computer-use`
+signing identifier for update checks. It communicates over JSONL on standard
 input/output so `wonderd` can supervise it without exposing a network listener.
 
 Supported actions are deliberately narrow: `status`, `screenshot`, `click`,
@@ -82,13 +82,11 @@ control from paired devices** in local Wonder Settings. Stopping the lease,
 disabling the preference, losing the capture binding, backgrounding the
 session, or expiry releases held input and hides the local control surface.
 
-The package script builds the nested helper bundle, adds the outer-app-relative
-`@loader_path/../../../../Frameworks` rpath to the helper, signs the helper
-executable and app inside-out, and rejects the old flat helper path in finished
-artifacts. The launcher still falls back to the legacy flat path only when an
-older installed bundle is run. Runtime execution and Accessibility/Screen
-Recording approval remain explicit acceptance gates; ordinary builds do not
-invoke an action.
+The package script copies the helper into `Contents/Helpers`, adds the
+`@loader_path/../Frameworks` rpath for WebRTC, signs it before the app, and
+rejects a nested helper app or the older `Resources` layout in finished
+artifacts. Runtime execution and Accessibility/Screen Recording approval remain
+explicit acceptance gates; ordinary builds do not invoke an action.
 
 Run the focused native checks with:
 
@@ -98,7 +96,7 @@ python3 -m py_compile scripts/install-signed-app.py scripts/test-signed-update.p
 ```
 
 For two signed staged bundles, `scripts/test-signed-update.py` verifies changed
-app code, bidirectional designated-requirement compatibility, migration from a
-legacy flat helper, and rejection of a tampered nested helper. The helper code
-may remain unchanged between app updates; its stable identity and nested code
-signatures are still checked. No installation is required by that test.
+app code, helper signing-identity compatibility (including an update from the
+earlier nested-app layout), and rejection of a tampered helper. The helper code
+may remain unchanged between app updates; its stable identity and signature are
+still checked. No installation is required by that test.

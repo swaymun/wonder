@@ -31,19 +31,19 @@ required_files=(
   "$CONTENTS_PATH/MacOS/WonderHost"
   "$CONTENTS_PATH/MacOS/WonderMacBridge"
   "$CONTENTS_PATH/Resources/wonderd"
-  "$CONTENTS_PATH/Resources/WonderComputerUse.app/Contents/Info.plist"
-  "$CONTENTS_PATH/Resources/WonderComputerUse.app/Contents/MacOS/WonderComputerUse"
+  "$CONTENTS_PATH/Helpers/WonderComputerUse"
   "$CONTENTS_PATH/Resources/wonder-tunnel"
   "$CONTENTS_PATH/MacOS/WonderMenu"
 )
 
 test ! -e "$CONTENTS_PATH/MacOS/WonderMenuUI" || { echo "obsolete SwiftUI helper is present" >&2; exit 1; }
-test ! -e "$CONTENTS_PATH/Resources/WonderComputerUse" || { echo "legacy flat computer helper is present" >&2; exit 1; }
+test ! -e "$CONTENTS_PATH/Resources/WonderComputerUse" || { echo "legacy Resources computer helper is present" >&2; exit 1; }
+test ! -e "$CONTENTS_PATH/Resources/WonderComputerUse.app" || { echo "computer helper must not be a separate app identity" >&2; exit 1; }
 [[ "$(otool -L "$CONTENTS_PATH/MacOS/WonderMacBridge")" != *"/SwiftUI.framework/"* ]] || { echo "Mac bridge must not link SwiftUI" >&2; exit 1; }
-COMPUTER_USE_BIN="$CONTENTS_PATH/Resources/WonderComputerUse.app/Contents/MacOS/WonderComputerUse"
-COMPUTER_USE_PLIST="$CONTENTS_PATH/Resources/WonderComputerUse.app/Contents/Info.plist"
+COMPUTER_USE_BIN="$CONTENTS_PATH/Helpers/WonderComputerUse"
 [[ "$(otool -L "$COMPUTER_USE_BIN")" == *"@rpath/WebRTC.framework/WebRTC"* ]] || { echo "computer helper must link the bundled WebRTC framework" >&2; exit 1; }
-[[ "$(otool -l "$COMPUTER_USE_BIN")" == *"@loader_path/../../../../Frameworks"* ]] || { echo "computer helper is missing its outer-app WebRTC rpath" >&2; exit 1; }
+[[ "$(otool -l "$COMPUTER_USE_BIN")" == *"@loader_path/../Frameworks"* ]] || { echo "computer helper is missing its app WebRTC rpath" >&2; exit 1; }
+[[ "$(codesign -dvv "$COMPUTER_USE_BIN" 2>&1)" == *"Info.plist=not bound"* ]] || { echo "computer helper must not carry its own bundle identity" >&2; exit 1; }
 
 test ! -e "$CONTENTS_PATH/Resources/pwa" || { echo "obsolete PWA bundle is present" >&2; exit 1; }
 
@@ -79,7 +79,6 @@ done
 
 codesign --verify --strict "$CONTENTS_PATH/Frameworks/WebRTC.framework"
 codesign --verify --deep --strict "$CONTENTS_PATH/Frameworks/Sparkle.framework"
-codesign --verify --strict "$CONTENTS_PATH/Resources/WonderComputerUse.app"
 codesign --verify --strict "$COMPUTER_USE_BIN"
 [[ "$(shasum -a 256 "$CONTENTS_PATH/Resources/WebRTC-LICENSE.md" | awk '{print $1}')" == "843529896bae499c92af3ecade86855128f930334ba97530695ccecef56e966d" ]] || { echo "WebRTC license evidence mismatch" >&2; exit 1; }
 
@@ -100,12 +99,7 @@ assert info.get('SUSendProfileInfo') is False
 assert 'SUEnableAutomaticChecks' not in info, 'Preserve the user consent and opt-out flow'
 VERIFY_UPDATER
 
-helper_value() {
-  /usr/libexec/PlistBuddy -c "Print :$1" "$COMPUTER_USE_PLIST" 2>/dev/null || true
-}
-[[ "$(helper_value CFBundleIdentifier)" == "com.saimun.wonder.computer-use" ]] || { echo "unexpected computer helper bundle identifier" >&2; exit 1; }
-[[ "$(helper_value CFBundleExecutable)" == "WonderComputerUse" ]] || { echo "unexpected computer helper executable" >&2; exit 1; }
-[[ "$(helper_value LSUIElement)" == "true" ]] || { echo "computer helper must be an LSUIElement app" >&2; exit 1; }
+[[ "$(codesign -dvv "$COMPUTER_USE_BIN" 2>&1)" == *"Identifier=com.saimun.wonder.computer-use"* ]] || { echo "unexpected computer helper signing identifier" >&2; exit 1; }
 
 verify_plist_value() {
   local key="$1"

@@ -36,6 +36,15 @@ weekly usage. This is newer than the Mac beta download linked above.
 
 **Remote screen access:** view your Mac and, with permission, control it from Wonder. Screen/control recovery qualification remains part of the beta checks.
 
+Source builds route Codex and Claude Bots through the installed native `cua_repl` tools,
+including the provider's app approvals. Claude's SDK adapter forwards native tool
+calls with session metadata, routes approvals to Wonder, and releases the native
+session on completion or cancellation. This uses the installed Codex Computer Use
+engine; it does not attach to Claude Desktop. The phone's screen viewer still uses
+Wonder's bundled capture helper. Native tools require the corresponding Codex
+installation and permissions. Wonder does not substitute its old
+`wonder_computer_use` tool when native tools are unavailable.
+
 Screenshots use demo content in Wonder’s native views. They contain no personal
 conversations. [Screenshot provenance](assets/screenshots/README.md).
 

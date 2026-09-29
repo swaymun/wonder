@@ -68,9 +68,13 @@ def reviewed_binary(name):
             or name in {
                 'apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/claude-docs.png',
                 'apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/claude-docs-dark.png',
+                'apps/ios/Wonder/Assets.xcassets/ConnectorGitHub.imageset/icon-dark.png',
+                'apps/ios/Wonder/Assets.xcassets/ConnectorGitHub.imageset/icon.png',
                 'apps/ios/Wonder/Assets.xcassets/ConnectorGmail.imageset/gmail.png',
                 'apps/ios/Wonder/Assets.xcassets/ConnectorGoogleCalendar.imageset/calendar.png',
                 'apps/ios/Wonder/Assets.xcassets/ConnectorGoogleDrive.imageset/drive.png',
+                'apps/ios/Wonder/Assets.xcassets/ConnectorLinear.imageset/icon.png',
+                'apps/ios/Wonder/Assets.xcassets/ConnectorOpenAIPlatform.imageset/icon.png',
             }
             or name == 'apps/menubar/Resources/WonderMenuIcon.pdf'
             or name == 'research/assets/wonder-brand/wonder-sun-logo-source.png'

@@ -819,12 +819,23 @@ struct ConnectedApp: Decodable, Identifiable, Sendable {
     let status: String
     let logoUrl: String?
     let logoUrlDark: String?
+    var displayName: String {
+        // Older Claude hosts included the account namespace in connector names.
+        let normalized = name.replacingOccurrences(of: #"(?i)^claude\.ai(?:\s*[:/·-]\s*|\s+)"#, with: "", options: .regularExpression)
+        return normalized.isEmpty ? name : normalized
+    }
     var bundledIcon: String? {
-        switch name {
-        case "Gmail": "ConnectorGmail"
-        case "Google Calendar": "ConnectorGoogleCalendar"
-        case "Google Drive": "ConnectorGoogleDrive"
-        case "Claude Docs": "ConnectorClaudeDocs"
+        switch displayName.lowercased() {
+        case "gmail": "ConnectorGmail"
+        case "google calendar": "ConnectorGoogleCalendar"
+        case "google drive": "ConnectorGoogleDrive"
+        case "claude docs": "ConnectorClaudeDocs"
+        case "github": "ConnectorGitHub"
+        case "openai platform": "ConnectorOpenAIPlatform"
+        case "linear": "ConnectorLinear"
+        case "sites": "ConnectorSites"
+        case "flashloop": "ConnectorFlashloop"
+        case "adobe acrobat": "ConnectorAdobeAcrobat"
         default: nil
         }
     }
@@ -885,16 +896,16 @@ struct ConnectedAppsView: View {
                             } else {
                                 AsyncImage(url: URL(string: (colorScheme == .dark ? app.logoUrlDark ?? app.logoUrl : app.logoUrl) ?? "")) { image in
                                     image.resizable().scaledToFit()
-                                } placeholder: { Image(systemName: "app").foregroundStyle(.secondary) }
+                                } placeholder: { Image(systemName: "puzzlepiece.extension.fill").resizable().scaledToFit().foregroundStyle(.secondary) }
                             }
                         }
                         .frame(width: 32, height: 32).accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 4) {
                             if dynamicTypeSize.isAccessibilitySize {
-                                Text(app.name).font(.headline)
+                                Text(app.displayName).font(.headline)
                                 Text(failure == nil ? app.label : "Not verified").font(.subheadline).foregroundStyle(.secondary)
                             } else {
-                                HStack { Text(app.name).font(.headline); Spacer(); Text(failure == nil ? app.label : "Not verified").font(.subheadline).foregroundStyle(.secondary) }
+                                HStack { Text(app.displayName).font(.headline); Spacer(); Text(failure == nil ? app.label : "Not verified").font(.subheadline).foregroundStyle(.secondary) }
                             }
                             if let description = app.description { Text(description).font(.subheadline).foregroundStyle(.secondary).lineLimit(2) }
                         }
@@ -904,7 +915,6 @@ struct ConnectedAppsView: View {
                 else if cursor != nil { Button("Load more") { Task { await load(more: true) } } }
                 else if apps.isEmpty && failure == nil { Text("No apps were found for this scope.").foregroundStyle(.secondary) }
             } footer: {
-                Text("Based on \((reportedFamily ?? selectedFamily).title) connections.")
                 if (reportedFamily ?? selectedFamily) == .claude {
                     Link("Manage Claude connections", destination: URL(string: "https://claude.ai/settings/connectors")!)
                 }

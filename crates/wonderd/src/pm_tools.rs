@@ -961,7 +961,8 @@ mod tests {
         state.app_server.lock().await.shutdown().await.unwrap();
     }
     #[tokio::test]
-    async fn tool_migration_preserves_computer_registration_and_never_runs_computer_approvals() {
+    async fn native_computer_enablement_preserves_threads_and_project_tools_reject_computer_calls()
+    {
         let (_dir, mut state, parent, _head) = fixture().await;
         state
             .store
@@ -996,7 +997,7 @@ mod tests {
         state.computer_use_enabled = true;
         state.computer_use_bin = Some(PathBuf::from("/unused-test-helper"));
         assert!(
-            conversation_needs_tool_migration(&state, "dev-chat", Some("thread"))
+            !conversation_needs_tool_migration(&state, "dev-chat", Some("thread"))
                 .await
                 .unwrap()
         );
@@ -1018,7 +1019,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap(),
-            version(true, true)
+            format!("{}+{}", computer_runtime::VERSION, version(false, true))
         );
         assert!(
             !conversation_needs_tool_migration(&state, "dev-chat", Some("thread"))

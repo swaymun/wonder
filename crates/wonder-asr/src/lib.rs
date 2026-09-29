@@ -11,12 +11,12 @@ pub const MODEL_ARTIFACT: &str = "parakeet-tdt-0.6b-v3.q8_0.gguf";
 pub const MODEL_REVISION: &str = "541d1f99c6b0c3cd0b11a95167540bb8edefd82b";
 pub const MODEL_SHA256: &str = "e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e";
 pub const MODEL_BYTES: u64 = 713_975_456;
-pub const MAX_PCM_BYTES: usize = 9_600_000;
+pub const MAX_PCM_BYTES: usize = 19_200_000;
 pub const TARGET_MODEL: &str = "nvidia/parakeet-tdt-0.6b-v3";
-pub const MAX_RECORDING_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_RECORDING_DURATION_MS: u64 = 300_000;
+pub const MAX_RECORDING_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_RECORDING_DURATION_MS: u64 = 600_000;
 pub const MIN_RECORDING_DURATION_MS: u64 = 250;
-pub const RETRY_RETENTION_MS: u64 = 120_000;
+pub const RETRY_RETENTION_MS: u64 = 600_000;
 pub const PCM_SAMPLE_RATE_HZ: u32 = 16_000;
 pub const PCM_CHANNELS: u8 = 1;
 pub const PCM_BYTES_PER_SAMPLE: u8 = 2;
@@ -135,7 +135,7 @@ mod tests {
         let cases = [
             ("audio/webm", 0, 1_000, AsrErrorCategory::NoAudio),
             ("audio/webm", 10, 100, AsrErrorCategory::TooShort),
-            ("audio/webm", 10, 300_001, AsrErrorCategory::Timeout),
+            ("audio/webm", 10, 600_001, AsrErrorCategory::Timeout),
             (
                 "audio/flac",
                 10,
@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn five_minute_pcm_and_encoded_boundaries_are_exact() {
+    fn ten_minute_pcm_and_encoded_boundaries_are_exact() {
         assert_eq!(
             MAX_PCM_BYTES,
             (MAX_RECORDING_DURATION_MS
@@ -177,18 +177,18 @@ mod tests {
                 * PCM_BYTES_PER_SAMPLE as u64
                 / 1000) as usize
         );
-        assert_eq!((MAX_PCM_BYTES.div_ceil(3)) * 4, 12_800_000);
+        assert_eq!((MAX_PCM_BYTES.div_ceil(3)) * 4, 25_600_000);
         assert!(validate_upload(AudioUploadMetadata {
             mime_type: "audio/wav",
             byte_length: MAX_PCM_BYTES + 44,
-            duration_ms: 300_000
+            duration_ms: 600_000
         })
         .is_ok());
         assert_eq!(
             validate_upload(AudioUploadMetadata {
                 mime_type: "audio/wav",
                 byte_length: MAX_RECORDING_BYTES + 1,
-                duration_ms: 300_000
+                duration_ms: 600_000
             }),
             Err(AsrErrorCategory::Upload)
         );

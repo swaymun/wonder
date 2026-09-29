@@ -100,6 +100,25 @@ final class AttentionTests: XCTestCase {
         XCTAssertTrue(request.canSubmit(choice: decline, answers: [:]))
         XCTAssertNil(try response(request, decline)["content"])
     }
+    // Consent is the contract: native details survive decoding and an empty
+    // form approves one call without creating a remembered permission.
+    func testNativeComputerApprovalPreservesDetailsWithoutPersistence() throws {
+        let request = try phoneRequest("mcpServer/elicitation/request", [
+            "mode":"form", "message":"Allow Computer Use to use Calculator?",
+            "requestedSchema":["type":"object", "properties":[:]],
+            "elicitationContext":["isComputerUse":true, "riskLevel":"low",
+                "subtitle":"Read the selected app.", "details":["App: Calculator"]]
+        ])
+        let saved = try JSONDecoder().decode(AttentionRequest.self, from: JSONEncoder().encode(request))
+        XCTAssertEqual(saved.permissionDetails, ["Read the selected app.", "App: Calculator", "Risk level: Low"])
+        XCTAssertEqual(saved.phoneChoices.map(\.title), ["Allow once", "Decline", "Cancel request"])
+        let accept = try XCTUnwrap(saved.phoneChoices.first)
+        let wire = try response(saved, accept)
+        XCTAssertEqual(wire["action"] as? String, "accept")
+        XCTAssertEqual(wire["content"] as? NSDictionary, [:])
+        XCTAssertNil(wire["_meta"])
+        XCTAssertTrue(saved.canSubmit(choice: accept, answers: [:]))
+    }
     func testMCPDefaultsTitledLegacyEnumsAndUnsupportedConstraintsAreHonest() throws {
         let request = try phoneRequest("mcpServer/elicitation/request", ["mode":"openai/form", "requestedSchema":[
             "type":"object", "properties":["theme":["type":"string", "enum":["dark","light"], "enumNames":["Dark theme","Light theme"], "default":"dark"]]

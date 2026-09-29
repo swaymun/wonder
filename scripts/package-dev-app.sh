@@ -28,7 +28,7 @@ COMPUTER_USE_BUILD_PATH="$(swift build -c release --package-path native/computer
 scripts/build-tunnel.sh "$ROOT_DIR/dist/wonder-tunnel"
 
 rm -rf "$APP_PATH"
-mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
+mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Helpers" "$APP_PATH/Contents/Resources"
 cp apps/menubar/Resources/Info.plist "$APP_PATH/Contents/Info.plist"
 if [[ -n "${WONDER_BUILD_VERSION:-}" ]]; then
   [[ "$WONDER_BUILD_VERSION" =~ ^[0-9]+([.][0-9]+)*$ ]] || { echo 'Build version must be numeric and monotonic' >&2; exit 1; }
@@ -54,10 +54,10 @@ cp "$MENUBAR_BUILD_PATH/WonderMenu" "$APP_PATH/Contents/MacOS/WonderMacBridge"
 xcrun swiftc -O -target "$(uname -m)-apple-macosx14.0" apps/menubar/Launcher/main.swift -o "$APP_PATH/Contents/MacOS/WonderMenu"
 cp apps/menubar/WonderMenu.launcher "$APP_PATH/Contents/Resources/WonderService.sh"
 cp target/release/wonderd "$APP_PATH/Contents/Resources/wonderd"
-COMPUTER_USE_APP="$APP_PATH/Contents/Resources/WonderComputerUse.app"
-mkdir -p "$COMPUTER_USE_APP/Contents/MacOS"
-cp native/computer-use/Resources/WonderComputerUse-Info.plist "$COMPUTER_USE_APP/Contents/Info.plist"
-cp "$COMPUTER_USE_BUILD_PATH/WonderComputerUse" "$COMPUTER_USE_APP/Contents/MacOS/WonderComputerUse"
+# Like other macOS helpers, computer use is a plain executable without its own
+# bundle identity, so Screen Recording and Accessibility are granted to Wonder.
+COMPUTER_USE_BIN="$APP_PATH/Contents/Helpers/WonderComputerUse"
+cp "$COMPUTER_USE_BUILD_PATH/WonderComputerUse" "$COMPUTER_USE_BIN"
 cp "$ROOT_DIR/dist/wonder-tunnel" "$APP_PATH/Contents/Resources/wonder-tunnel"
 cp "$ICON_SOURCE" "$APP_PATH/Contents/Resources/WonderSunLogo.png"
 cp apps/menubar/Resources/WonderMenuIcon.pdf "$APP_PATH/Contents/Resources/WonderMenuIcon.pdf"
@@ -69,8 +69,8 @@ cp vendor/nemo-speech/ASR-LICENSES.md "$APP_PATH/Contents/Resources/ASR-LICENSES
 cp LICENSE THIRD_PARTY_NOTICES.md "$APP_PATH/Contents/Resources/"
 mkdir -p "$APP_PATH/Contents/Resources/Licenses"
 cp licenses/RUST-NOTICES.txt licenses/rust-dependencies.json licenses/Rust-COPYRIGHT.html.gz licenses/Go-LICENSE.txt licenses/Sparkle-LICENSE.txt "$APP_PATH/Contents/Resources/Licenses/"
-install_name_tool -add_rpath '@loader_path/../../../../Frameworks' "$COMPUTER_USE_APP/Contents/MacOS/WonderComputerUse"
-chmod +x "$APP_PATH/Contents/MacOS/WonderMenu" "$APP_PATH/Contents/MacOS/WonderMacBridge" "$APP_PATH/Contents/Resources/wonderd" "$APP_PATH/Contents/Resources/wonder-tunnel" "$COMPUTER_USE_APP/Contents/MacOS/WonderComputerUse" "$APP_PATH/Contents/Resources/nemo-speech-worker.py" "$APP_PATH/Contents/Resources/install-parakeet-model.sh"
+install_name_tool -add_rpath '@loader_path/../Frameworks' "$COMPUTER_USE_BIN"
+chmod +x "$APP_PATH/Contents/MacOS/WonderMenu" "$APP_PATH/Contents/MacOS/WonderMacBridge" "$APP_PATH/Contents/Resources/wonderd" "$APP_PATH/Contents/Resources/wonder-tunnel" "$COMPUTER_USE_BIN" "$APP_PATH/Contents/Resources/nemo-speech-worker.py" "$APP_PATH/Contents/Resources/install-parakeet-model.sh"
 
 python3 scripts/sign-macos-app.py "$APP_PATH"
 scripts/verify-package-artifacts.sh "$APP_PATH"

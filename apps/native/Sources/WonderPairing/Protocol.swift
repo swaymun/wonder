@@ -228,13 +228,13 @@ public final class PairingAPI: Sendable {
     /// The same ephemeral, redirect-rejecting transport carries device-scoped ASR jobs.
     public func asrRequest<T: Decodable & Sendable>(_ path: String, connection: SavedConnection, method: String = "GET", recording: Data? = nil, intent: DictationIntent? = nil) async throws -> T {
         guard path.hasPrefix("/api/v1/asr/"), let url = URL(string: try PairingLink.origin(connection.origin) + path) else { throw PairingFailure.invalidLink }
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: recording == nil ? 30 : 90)
         request.httpMethod = method; request.httpBody = recording; request.httpShouldHandleCookies = false
         request.setValue(connection.origin, forHTTPHeaderField: "Origin")
         request.setValue("__Host-wonder_session=\(connection.credential.sessionToken)", forHTTPHeaderField: "Cookie")
         request.setValue(connection.credential.csrfToken, forHTTPHeaderField: "x-wonder-csrf")
         if let recording, let intent {
-            guard recording.count <= 16 * 1024 * 1024, intent.deviceID == connection.credential.deviceId,
+            guard recording.count <= 32 * 1024 * 1024, intent.deviceID == connection.credential.deviceId,
                 intent.hostID == connection.credential.hostInstallationId else { throw PairingFailure.wrongHost }
             request.setValue("audio/mp4", forHTTPHeaderField: "Content-Type")
             request.setValue(intent.requestID, forHTTPHeaderField: "X-Wonder-Request-ID")
@@ -242,13 +242,35 @@ public final class PairingAPI: Sendable {
             request.setValue(intent.modelID, forHTTPHeaderField: "X-Wonder-Model-ID")
             request.setValue(intent.language, forHTTPHeaderField: "X-Wonder-Language")
         }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw PairingFailure.response(0) }
-        guard (200..<300).contains(http.statusCode) else {
-            if let failure = try? JSONDecoder().decode(DictationFailure.self, from: data) { throw failure }
-            throw PairingFailure.response(http.statusCode)
+        // A lost response must reuse the same request ID, body and metadata. The
+        // host deduplicates uploads; reads and cancellation are also idempotent.
+        let canRetry = method == "GET" || method == "DELETE" || (recording != nil && intent != nil)
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw PairingFailure.response(0) }
+                guard (200..<300).contains(http.statusCode) else {
+                    if let failure = try? JSONDecoder().decode(DictationFailure.self, from: data) { throw failure }
+                    throw PairingFailure.response(http.statusCode)
+                }
+                return try JSONDecoder().decode(T.self, from: data.isEmpty ? Data("{}".utf8) : data)
+            } catch {
+                guard canRetry, attempt < 2, Self.transientDictationFailure(error) else { throw error }
+                attempt += 1
+                try await Task.sleep(for: .milliseconds(500 * attempt))
+            }
         }
-        return try JSONDecoder().decode(T.self, from: data.isEmpty ? Data("{}".utf8) : data)
+    }
+    private static func transientDictationFailure(_ error: Error) -> Bool {
+        if let error = error as? URLError {
+            return [.timedOut, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost,
+                    .dnsLookupFailed, .notConnectedToInternet].contains(error.code)
+        }
+        if case PairingFailure.response(let status) = error { return (500...599).contains(status) || status == 429 }
+        if let error = error as? DictationFailure { return ["busy", "rate_limited"].contains(error.errorCategory) }
+        return false
     }
 
 }

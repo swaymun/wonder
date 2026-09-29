@@ -16,7 +16,7 @@ from pathlib import Path
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
-MAX_AUDIO_BYTES = 9_600_000
+MAX_AUDIO_BYTES = 19_200_000
 DEFAULT_ROOT = Path(os.environ.get("WONDER_DATA_DIR", Path.home() / "Library" / "Application Support" / "Wonder")) / "NeMoSpeech"
 
 
@@ -76,7 +76,7 @@ def transcribe(request: dict) -> dict:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=55,
+                timeout=115,
             )
         except subprocess.TimeoutExpired:
             return error_response(transcription_id, "timeout")

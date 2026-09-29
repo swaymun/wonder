@@ -151,9 +151,10 @@ export class TurnProjection {
       return;
     }
     const wonder = block.name?.startsWith("mcp__wonder__") ? block.name.slice("mcp__wonder__".length) : null;
+    const native = block.name?.startsWith("mcp__cua_repl__") ? block.name.slice("mcp__cua_repl__".length) : null;
     this.startItem(wonder
       ? { type: "dynamicToolCall", id: block.id, tool: wonder, arguments: block.input, status: "inProgress" }
-      : { type: "mcpToolCall", id: block.id, server: "Claude", tool: block.name, arguments: block.input, status: "inProgress" });
+      : { type: "mcpToolCall", id: block.id, server: native ? "cua_repl" : "Claude", tool: native ?? block.name, arguments: block.input, status: "inProgress" });
   }
   toolResult(block, result) {
     if (this.agentTools.has(block.tool_use_id)) {

@@ -1,6 +1,6 @@
 use super::*;
 use std::collections::{BTreeMap, VecDeque};
-use std::path::{Path as FsPath, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -11,8 +11,6 @@ struct LaunchedHelper {
     child: tokio::process::Child,
     stdin: HelperInput,
     stdout: HelperOutput,
-    // The FIFO paths must remain available until LaunchServices exits.
-    _ipc_directory: Option<tempfile::TempDir>,
 }
 
 const UNAVAILABLE_REASON: &str = "Live computer viewing is unavailable on this Mac. Update Wonder when a configured media provider is available.";
@@ -2993,90 +2991,12 @@ impl Default for ComputerSessionSupervisor {
     }
 }
 
-fn bundled_computer_app(binary: &FsPath) -> Option<&FsPath> {
-    let app = binary.parent()?.parent()?.parent()?;
-    (binary.file_name()? == "WonderComputerUse"
-        && app.file_name()? == "WonderComputerUse.app"
-        && app.is_dir())
-    .then_some(app)
-}
-
-#[cfg(unix)]
-fn make_private_fifo(path: &FsPath) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(unix))]
-fn make_private_fifo(_path: &FsPath) -> std::io::Result<()> {
-    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-}
-
+/// The helper is a plain executable inside Wonder.app, spawned as the daemon's
+/// child so macOS attributes Screen Recording and Accessibility to Wonder.
 async fn launch_helper(
     binary: PathBuf,
     handshake: &str,
 ) -> Result<LaunchedHelper, SupervisorStartError> {
-    if let Some(app) = bundled_computer_app(&binary) {
-        // A helper spawned by the daemon can inherit the daemon's TCC identity.
-        // LaunchServices starts the signed app with its own durable permission
-        // grants. Private FIFOs retain the existing bounded line protocol.
-        let directory = tempfile::Builder::new()
-            .prefix("wonder-computer-")
-            .tempdir()
-            .map_err(|_| SupervisorStartError::Spawn)?;
-        let input = directory.path().join("input");
-        let output = directory.path().join("output");
-        make_private_fifo(&input).map_err(|_| SupervisorStartError::Spawn)?;
-        make_private_fifo(&output).map_err(|_| SupervisorStartError::Spawn)?;
-        let mut command = Command::new("/usr/bin/open");
-        command
-            .args(["-g", "-W", "-n", "-a"])
-            .arg(app)
-            .arg("-i")
-            .arg(&input)
-            .arg("-o")
-            .arg(&output)
-            .arg("--env")
-            .arg(format!("WONDER_COMPUTER_USE_HANDSHAKE={handshake}"))
-            .arg("--args")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|_| SupervisorStartError::Spawn)?;
-        let open_fifo = |path: &FsPath| {
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)
-        };
-        let stdin = match open_fifo(&input) {
-            Ok(file) => file,
-            Err(_) => {
-                let _ = child.kill().await;
-                return Err(SupervisorStartError::Spawn);
-            }
-        };
-        let stdout = match open_fifo(&output) {
-            Ok(file) => file,
-            Err(_) => {
-                let _ = child.kill().await;
-                return Err(SupervisorStartError::Spawn);
-            }
-        };
-        return Ok(LaunchedHelper {
-            child,
-            stdin: Box::new(tokio::fs::File::from_std(stdin)),
-            stdout: Box::new(tokio::fs::File::from_std(stdout)),
-            _ipc_directory: Some(directory),
-        });
-    }
-
     let mut command = Command::new(binary);
     command
         .env("WONDER_COMPUTER_USE_HANDSHAKE", handshake)
@@ -3099,7 +3019,6 @@ async fn launch_helper(
         child,
         stdin: Box::new(stdin),
         stdout: Box::new(stdout),
-        _ipc_directory: None,
     })
 }
 
@@ -3503,7 +3422,6 @@ async fn supervise_helper(
         mut child,
         mut stdin,
         stdout,
-        _ipc_directory,
     } = helper;
     let common = serde_json::json!({
         "sessionID": session.id,

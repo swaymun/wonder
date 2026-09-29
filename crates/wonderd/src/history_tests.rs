@@ -726,7 +726,14 @@ async fn compact_history_view_omits_unrendered_screenshot_data_only_when_request
         .unwrap();
     let wonder_store::MessageInsert::Inserted(message) = state
         .store
-        .insert_message("owner", "shot-client", "look", "hash", "bot", "1700000000000")
+        .insert_message(
+            "owner",
+            "shot-client",
+            "look",
+            "hash",
+            "bot",
+            "1700000000000",
+        )
         .await
         .unwrap()
     else {
@@ -751,15 +758,26 @@ async fn compact_history_view_omits_unrendered_screenshot_data_only_when_request
         message_id: Some(message.id.clone()),
         item_id: Some("screenshot-call".into()),
         approval_id: None,
-        event: WonderEvent::ComputerUseScreenshot { image_url: image_url.clone() },
+        event: WonderEvent::ComputerUseScreenshot {
+            image_url: image_url.clone(),
+        },
     };
     state.store.commit_event(&mut event).await.unwrap();
     async fn page(state: &AppState, compact: bool) -> (usize, serde_json::Value) {
         let mut headers = HeaderMap::new();
         if compact {
-            headers.insert(history::COMPACT_VIEW_HEADER, HeaderValue::from_static("compact"));
+            headers.insert(
+                history::COMPACT_VIEW_HEADER,
+                HeaderValue::from_static("compact"),
+            );
         }
-        let response = conversation_snapshot(State(state.clone()), Path("bot".into()), Query(Default::default()), headers).await;
+        let response = conversation_snapshot(
+            State(state.clone()),
+            Path("bot".into()),
+            Query(Default::default()),
+            headers,
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 10_000_000).await.unwrap();
         (body.len(), serde_json::from_slice(&body).unwrap())
@@ -767,7 +785,10 @@ async fn compact_history_view_omits_unrendered_screenshot_data_only_when_request
     let (full_bytes, full) = page(&state, false).await;
     let (compact_bytes, compact) = page(&state, true).await;
     let screenshot = |page: &serde_json::Value| -> serde_json::Value {
-        page["thread"]["turns"].as_array().unwrap().iter()
+        page["thread"]["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
             .flat_map(|turn| turn["items"].as_array().unwrap().iter())
             .find(|item| item["type"] == "imageView")
             .cloned()
@@ -782,9 +803,14 @@ async fn compact_history_view_omits_unrendered_screenshot_data_only_when_request
     assert_eq!(item["state"], "completed");
     assert_eq!(compact["events"], serde_json::json!([]));
     assert_eq!(compact["lastSequence"], full["lastSequence"]);
-    assert!(compact_bytes < 10_000 && full_bytes > 400_000, "{compact_bytes} vs {full_bytes}");
+    assert!(
+        compact_bytes < 10_000 && full_bytes > 400_000,
+        "{compact_bytes} vs {full_bytes}"
+    );
     let mut replay = event.clone();
     history::compact_event(&mut replay);
     assert_eq!(replay.sequence, event.sequence);
-    assert!(matches!(replay.event, WonderEvent::ComputerUseScreenshot { ref image_url } if image_url.is_empty()));
+    assert!(
+        matches!(replay.event, WonderEvent::ComputerUseScreenshot { ref image_url } if image_url.is_empty())
+    );
 }

@@ -2,6 +2,23 @@ import XCTest
 @testable import WonderPairing
 
 final class ActivityPresentationTests: XCTestCase {
+    // Computer actions have one product label across drivers. Unrelated MCP
+    // tools and the original action's failure details stay distinct.
+    func testComputerActivityUsesNeutralLabelAndPreservesFailure() throws {
+        for (server, tool, title) in [("cua_repl", "js", "Computer Use"),
+                                      ("other", "js", "Js")] {
+            let activity = try XCTUnwrap(row(server, type: "mcpToolCall", state: "failed", payload: [
+                "server": .string(server), "tool": .string(tool), "success": .bool(false),
+                "arguments": .object(["text": .string("cmd+t")]),
+                "error": .object(["message": .string("App access declined")])
+            ]).activity)
+            XCTAssertEqual(activity.title, title)
+            XCTAssertTrue(activity.failed)
+            XCTAssertTrue(activity.details.contains { $0.text.contains("App access declined") })
+        }
+        XCTAssertEqual(row("legacy", type: "dynamicToolCall", payload: ["tool": .string("wonder_computer_use")]).activity?.title, "Computer Use")
+    }
+
     func testProfileSaveIsAStandaloneStatusAndFailuresStayVisible() {
         let result = ThreadValue.array([.object(["type": .string("inputText"), "text": .string(#"{"saved":true,"name":"iOS Scout","statusLine":"Renamed to iOS Scout"}"#)])])
         let saved = row("rename", type: "dynamicToolCall", payload: ["tool": .string("wonder_update_profile"), "success": .bool(true), "contentItems": result])

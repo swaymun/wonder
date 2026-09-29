@@ -116,11 +116,9 @@ if [[ -z "${WONDER_ASR_BIN:-}" && -x "$RESOURCES/nemo-speech-worker.py" ]]; then
   export WONDER_NEMO_SPEECH_BIN="${WONDER_NEMO_SPEECH_BIN:-$WONDER_DATA_DIR/NeMoSpeech/bin/nemo-speech}"
 fi
 
-if [[ -z "${WONDER_COMPUTER_USE_BIN:-}" && -x "$RESOURCES/WonderComputerUse.app/Contents/MacOS/WonderComputerUse" ]]; then
-  export WONDER_COMPUTER_USE_BIN="$RESOURCES/WonderComputerUse.app/Contents/MacOS/WonderComputerUse"
-elif [[ -z "${WONDER_COMPUTER_USE_BIN:-}" && -x "$RESOURCES/WonderComputerUse" ]]; then
-  # Compatibility for a pre-bundle installation until the next signed update.
-  export WONDER_COMPUTER_USE_BIN="$RESOURCES/WonderComputerUse"
+# A plain helper executable, not a nested app: its privacy access is Wonder's.
+if [[ -z "${WONDER_COMPUTER_USE_BIN:-}" && -x "$APP_ROOT/Helpers/WonderComputerUse" ]]; then
+  export WONDER_COMPUTER_USE_BIN="$APP_ROOT/Helpers/WonderComputerUse"
 fi
 
 

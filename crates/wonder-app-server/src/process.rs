@@ -112,11 +112,8 @@ impl LaunchConfig {
                 serde_json::to_string(home).expect("UTF-8 runtime home")
             ));
         }
-        // Wonder owns its Computer Use boundary. Do not let a Bot silently
-        // fall through to the host desktop's node_repl/CUA MCP, which has a
-        // different permission model and can expose the wrong UI to the
-        // model. Wonder's native helper is registered as a dynamic tool and
-        // is resolved through the paired owner's approval flow instead.
+        // Desktop control is enabled per conversation using the installed
+        // native provider manifest. Bootstrap/planning sessions have none.
         for override_value in [
             "features.default_mode_request_user_input=true",
             // Use the code-mode helper beside the verified ChatGPT runtime.

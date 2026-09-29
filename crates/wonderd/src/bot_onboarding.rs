@@ -371,37 +371,99 @@ mod tests {
         // Exercise the request handler without a live provider dispatcher: the
         // separate ingestion owner tests provider readiness and routing.
         async fn send(state: &AppState, conversation: &str, request: Value) -> (StatusCode, Value) {
-            let response = send_message_inner(State(state.clone()), Path(conversation.into()), None, Json(serde_json::from_value(request).unwrap()), None).await;
+            let response = send_message_inner(
+                State(state.clone()),
+                Path(conversation.into()),
+                None,
+                Json(serde_json::from_value(request).unwrap()),
+                None,
+            )
+            .await;
             let status = response.status();
-            let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
-            (status, serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({"error":String::from_utf8_lossy(&bytes)})))
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes)
+                    .unwrap_or_else(|_| json!({"error":String::from_utf8_lossy(&bytes)})),
+            )
         }
         let (_dir, state) = fixture().await;
         state.store.ensure_local_desktop("now").await.unwrap();
-        let mut model = state.runtime_catalog.read().await.models.iter().find(|m| m.id == "fake").unwrap().clone();
+        let mut model = state
+            .runtime_catalog
+            .read()
+            .await
+            .models
+            .iter()
+            .find(|m| m.id == "fake")
+            .unwrap()
+            .clone();
         model.id = "claude:claude-haiku-4-5".into();
         model.agent_family = AgentFamily::Claude;
         state.runtime_catalog.write().await.models.push(model);
         let id = uuid::Uuid::new_v4().to_string();
-        let (status, bot) = call(&state, "POST", "/api/v1/bots/new", json!({"clientRequestId":id,"model":"fake","approvalMode":"approve-for-me"})).await;
+        let (status, bot) = call(
+            &state,
+            "POST",
+            "/api/v1/bots/new",
+            json!({"clientRequestId":id,"model":"fake","approvalMode":"approve-for-me"}),
+        )
+        .await;
         assert!(status.is_success(), "{bot}");
         let conversation = bot["conversationId"].as_str().unwrap();
-        assert!(automation_target_available(&state, &id, "bot", &id, "continuation", Some(conversation)).await.is_err());
+        assert!(automation_target_available(
+            &state,
+            &id,
+            "bot",
+            &id,
+            "continuation",
+            Some(conversation)
+        )
+        .await
+        .is_err());
         let path = format!("/api/v1/bots/{id}");
         let options_path = format!("/api/v1/conversations/{conversation}/composer-options");
         let (_, options) = call(&state, "GET", &options_path, json!({})).await;
-        assert!(options["models"].as_array().unwrap().iter().any(|m| m["id"] == "fake"));
-        assert!(options["models"].as_array().unwrap().iter().any(|m| m["id"] == "claude:claude-haiku-4-5"));
+        assert!(options["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == "fake"));
+        assert!(options["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == "claude:claude-haiku-4-5"));
         let (status, selected) = call(&state, "PATCH", &path, json!({"model":"claude:claude-haiku-4-5","reasoningEffort":"","serviceTier":"","modelSelectionRevision":0})).await;
         assert!(status.is_success(), "{selected}");
         assert_eq!(selected["agentFamily"], "claude");
         assert_eq!(selected["approvalMode"], "ask-for-approval");
         assert_eq!(selected["modelSelectionRevision"], 1);
         assert_http_contract("botSummary", &selected);
-        assert_eq!(call(&state, "PATCH", &path, json!({"model":"fake","modelSelectionRevision":0})).await.0, StatusCode::CONFLICT);
+        assert_eq!(
+            call(
+                &state,
+                "PATCH",
+                &path,
+                json!({"model":"fake","modelSelectionRevision":0})
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
         let mut request = json!({"deviceId":"wonder-desktop","clientMessageId":uuid::Uuid::new_v4().to_string(),"body":"First task","modelSelectionRevision":0});
-        assert_eq!(send(&state, conversation, request.clone()).await.0, StatusCode::PRECONDITION_FAILED);
-        assert!(state.store.messages_for_conversation(conversation).await.unwrap().is_empty());
+        assert_eq!(
+            send(&state, conversation, request.clone()).await.0,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert!(state
+            .store
+            .messages_for_conversation(conversation)
+            .await
+            .unwrap()
+            .is_empty());
         request["modelSelectionRevision"] = json!(1);
         assert_http_contract("sendMessageRequest", &request);
         let (status, receipt) = send(&state, conversation, request.clone()).await;
@@ -410,13 +472,38 @@ mod tests {
         assert!(status.is_success(), "{retry}");
         assert_eq!(receipt["wonderMessageId"], retry["wonderMessageId"]);
         request["modelSelectionRevision"] = json!(2);
-        assert_eq!(send(&state, conversation, request).await.0, StatusCode::CONFLICT);
-        assert_eq!(call(&state, "PATCH", &path, json!({"model":"fake","modelSelectionRevision":1})).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            send(&state, conversation, request).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            call(
+                &state,
+                "PATCH",
+                &path,
+                json!({"model":"fake","modelSelectionRevision":1})
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
         let (_, locked) = call(&state, "GET", &path, json!({})).await;
         assert!(locked["modelSelectionRevision"].is_null());
         let (_, options) = call(&state, "GET", &options_path, json!({})).await;
-        assert!(options["models"].as_array().unwrap().iter().all(|m| m["id"].as_str().unwrap().starts_with("claude:")));
-        assert_eq!(state.store.messages_for_conversation(conversation).await.unwrap().len(), 1);
+        assert!(options["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["id"].as_str().unwrap().starts_with("claude:")));
+        assert_eq!(
+            state
+                .store
+                .messages_for_conversation(conversation)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         state.app_server.lock().await.shutdown().await.unwrap();
     }
 
@@ -565,9 +652,24 @@ mod tests {
         .await;
         assert!(snapshot["initialization"].is_null());
         assert_eq!(bot["modelSelectionRevision"], 0);
-        assert!(state.store.messages_for_conversation(conversation).await.unwrap().is_empty());
-        assert!(state.store.runtime_binding(conversation).await.unwrap().is_none());
-        assert!(state.store.async_questions(conversation, now_ms() as i64).await.unwrap().is_empty());
+        assert!(state
+            .store
+            .messages_for_conversation(conversation)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .store
+            .runtime_binding(conversation)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(state
+            .store
+            .async_questions(conversation, now_ms() as i64)
+            .await
+            .unwrap()
+            .is_empty());
         state
             .store
             .save_bot_presentation(&id, Some("atom"), Some("rose"), None, None)
@@ -590,7 +692,12 @@ mod tests {
         assert_eq!(retried["avatarShape"], "atom");
         assert_eq!(retried["avatarPalette"], "rose");
         assert_eq!(retried["modelSelectionRevision"], 1);
-        assert!(state.store.messages_for_conversation(conversation).await.unwrap().is_empty());
+        assert!(state
+            .store
+            .messages_for_conversation(conversation)
+            .await
+            .unwrap()
+            .is_empty());
         state.app_server.lock().await.shutdown().await.unwrap();
     }
 
@@ -1063,7 +1170,10 @@ mod tests {
             .bot_workspace_followup_messages(stored.conversation_id.as_deref().unwrap())
             .await
             .unwrap();
-        assert!(followups.is_empty(), "Folder setup must not start a hidden first turn");
+        assert!(
+            followups.is_empty(),
+            "Folder setup must not start a hidden first turn"
+        );
         let again = bot_management::resolve_files(
             State(state.clone()),
             Extension(OwnerAuthority),

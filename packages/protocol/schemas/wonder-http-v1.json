@@ -378,6 +378,15 @@
             "networkApprovalContext": { "type": "object", "properties": { "host": { "type": "string" }, "protocol": { "type": "string" } } },
             "grantRoot": { "type": "string" },
             "requestedSchema": { "type": "object", "description": "The complete service form schema, never a projection that drops constraints. Limited to 64 KiB by the host." },
+            "elicitationContext": {
+              "type": "object", "additionalProperties": false,
+              "properties": {
+                "isComputerUse": { "type": "boolean" },
+                "subtitle": { "type": "string" },
+                "riskLevel": { "type": "string" },
+                "details": { "type": "array", "items": { "type": "string" }, "maxItems": 32 }
+              }
+            },
             "mode": { "type": "string" },
             "message": { "type": "string" },
             "url": { "type": "string" }
@@ -440,6 +449,7 @@
       "properties": {
         "agentFamily": { "$ref": "#/$defs/agentFamily" },
         "checkedAtMs": { "type": "integer", "minimum": 0 },
+        "additionalUsageAvailable": { "type": ["boolean", "null"] },
         "windows": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/accountUsageWindow" } }
       },
       "additionalProperties": false
@@ -993,7 +1003,7 @@
         "id": { "type": "string", "minLength": 1 },
         "state": { "$ref": "#/$defs/transcriptionState" },
         "sourceDeviceId": { "type": "string", "minLength": 1 },
-        "durationMs": { "type": "integer", "minimum": 0, "maximum": 300000 },
+        "durationMs": { "type": "integer", "minimum": 0, "maximum": 600000 },
         "modelId": { "type": "string" },
         "language": { "const": "auto" },
         "processingSource": { "const": "paired_mac" },

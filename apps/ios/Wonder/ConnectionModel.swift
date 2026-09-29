@@ -21,11 +21,26 @@ struct CodexUsageResponse: Decodable, Sendable {
     var agentFamily: String? = nil
     let checkedAtMs: UInt64
     let windows: [CodexUsageWindow]
+    var additionalUsageAvailable: Bool? = nil
 }
 
 struct CodexUsageCacheEntry: Sendable {
     let response: CodexUsageResponse
     let fetchedAt: Date
+
+    func exhaustedWindow(model: String, now: Date = Date()) -> CodexUsageWindow? {
+        guard now.timeIntervalSince(fetchedAt) < 300, response.additionalUsageAvailable != true else { return nil }
+        let name = model.lowercased()
+        return response.windows.first { window in
+            guard window.usedPercent >= 100, window.remainingPercent <= 0 else { return false }
+            if let reset = window.resetsAt, Double(reset) <= now.timeIntervalSince1970 { return false }
+            switch window.id {
+            case "seven_day_sonnet": return name.contains("sonnet")
+            case "seven_day_opus": return name.contains("opus")
+            default: return true
+            }
+        }
+    }
 }
 
 struct ConversationGoal: Decodable, Equatable, Sendable {
@@ -494,6 +509,7 @@ struct ManagedBotListMutationState {
                     "file": #"{"approvalId":"fixture-file","conversationId":"preview","method":"item/fileChange/requestApproval","actionNonce":"fixture","params":{"threadId":"fixture-thread","turnId":"fixture-turn","grantRoot":"/Users/example/Movies","reason":"Save the upscaled copy."}}"#,
                     "permissions": #"{"approvalId":"fixture-permissions","conversationId":"preview","method":"item/permissions/requestApproval","actionNonce":"fixture","params":{"threadId":"fixture-thread","turnId":"fixture-turn","permissions":{"fileSystem":{"read":["/Users/example/Movies"]},"network":{"enabled":true}}}}"#,
                     "form": #"{"approvalId":"fixture-form","conversationId":"preview","method":"mcpServer/elicitation/request","actionNonce":"fixture","params":{"threadId":"fixture-thread","turnId":"fixture-turn","mode":"form","serverName":"Example","message":"Choose export settings.","requestedSchema":{"type":"object","properties":{"quality":{"type":"string","title":"Quality","enum":["Standard","High"]},"copies":{"type":"integer","title":"Copies","minimum":1,"maximum":5},"watermark":{"type":"boolean","title":"Watermark"}},"required":["quality","copies"]}}}"#,
+                    "native": #"{"approvalId":"fixture-native","conversationId":"preview","method":"mcpServer/elicitation/request","actionNonce":"fixture","params":{"threadId":"fixture-thread","turnId":"fixture-turn","mode":"form","message":"Allow Computer Use to use Calculator?","requestedSchema":{"type":"object","properties":{}},"elicitationContext":{"isComputerUse":true,"riskLevel":"low","details":["App: Calculator"]}}}"#,
                     "url": #"{"approvalId":"fixture-url","conversationId":"preview","method":"mcpServer/elicitation/request","actionNonce":"fixture","params":{"threadId":"fixture-thread","turnId":"fixture-turn","mode":"url","message":"Connect the export service.","url":"https://example.com/authorize"}}"#,
                     "unknown": #"{"approvalId":"fixture-unknown","conversationId":"preview","method":"item/tool/call","actionNonce":"fixture","params":{"threadId":"fixture-thread","turnId":"fixture-turn","tool":"unknown_tool","arguments":{"secret":"not exposed"}}}"#,
                 ]
@@ -645,21 +661,22 @@ struct ManagedBotListMutationState {
     func loadCodexUsage(force: Bool = false) async throws {
         try await loadUsage(family: .codex, force: force)
     }
-    func loadUsage(family: AgentFamily, force: Bool = false) async throws {
+    func loadUsage(family: AgentFamily, force: Bool = false, maxAge: TimeInterval = 300) async throws {
         guard let saved = connection, !accessEnded else { return }
         let scope = assignmentScope
         let origin = saved.origin
-        if !force, let cached = (family == .claude ? claudeUsageCache : codexUsageCache)[scope], Date().timeIntervalSince(cached.fetchedAt) < 300 {
+        if !force, let cached = (family == .claude ? claudeUsageCache : codexUsageCache)[scope], Date().timeIntervalSince(cached.fetchedAt) < maxAge {
             return
         }
 
         #if WONDER_DIAGNOSTICS
         if ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-fixture") {
+            let exhausted = ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-exhausted")
             let fixture = CodexUsageResponse(
                 agentFamily: family.rawValue,
                 checkedAtMs: 1_700_000_000_000,
                 windows: [
-                    CodexUsageWindow(id: family == .claude ? "five_hour" : "five-hours", label: "5 hours", usedPercent: family == .claude ? 14 : 27, remainingPercent: family == .claude ? 86 : 73, windowDurationMins: 300, resetsAt: 1_700_018_000_000),
+                    CodexUsageWindow(id: family == .claude ? "five_hour" : "five-hours", label: "5 hours", usedPercent: exhausted ? 100 : (family == .claude ? 14 : 27), remainingPercent: exhausted ? 0 : (family == .claude ? 86 : 73), windowDurationMins: 300, resetsAt: 1_700_018_000_000),
                     CodexUsageWindow(id: family == .claude ? "seven_day" : "weekly", label: "Weekly", usedPercent: family == .claude ? 8 : 41, remainingPercent: family == .claude ? 92 : 59, windowDurationMins: 10_080, resetsAt: 1_700_604_800_000)
                 ]
             )
@@ -1264,7 +1281,7 @@ struct ManagedBotListMutationState {
     }
     func canGuide(_ chat: ChatSummary) -> Bool {
         agentFamily(chat) == .codex && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id) && chat.botId != nil && activeTurn(chat.id) != nil && connection != nil && !accessEnded
-            && !isSubagent(chat)
+            && !isSubagent(chat) && usageLimitMessage(chat) == nil
             && !sending.contains(chat.id)
             && composers[chat.id]?.pending == nil && composerErrors[chat.id] == nil
             && !(composers[chat.id]?.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
@@ -1274,11 +1291,15 @@ struct ManagedBotListMutationState {
     func guide(_ chat: ChatSummary) async {
         guard canGuide(chat), let saved = connection, let turn = activeTurn(chat.id) else { return }
         let scope = assignmentScope
+        preparingSends.insert(chat.id)
+        defer { if scope == assignmentScope { preparingSends.remove(chat.id) } }
         do {
+            await refreshComposerUsage(chat)
+            guard usageLimitMessage(chat) == nil else { return }
             var next = composers[chat.id] ?? ComposerIntent()
             try await uploadStaged(chat)
             guard scope == assignmentScope, connection?.origin == saved.origin, !accessEnded,
-                  !Task.isCancelled, activeTurn(chat.id) == turn,
+                  !Task.isCancelled, activeTurn(chat.id) == turn, composers[chat.id]?.pending == nil,
                   !savingComposerSettings.contains(chat.id), !approvalSettingsBlockSending(chat.id) else { return }
             next = composers[chat.id] ?? next
             try next.begin(device: saved.credential.deviceId, expectedTurnId: turn)
@@ -1306,10 +1327,40 @@ struct ManagedBotListMutationState {
         }
     }
 
+    func usageModel(_ chat: ChatSummary) -> String {
+        if groups[chat.id]?.collaboration != nil { return ModelDefaultPurpose.groupParticipation.load().model }
+        return managedBots.first(where: { $0.id == chat.botId })?.model ?? (agentFamily(chat) == .claude ? "claude:haiku" : "")
+    }
+
+    func usageLimitMessage(_ chat: ChatSummary, model: String? = nil) -> String? {
+        let selected = model ?? usageModel(chat)
+        let family = AgentFamily(model: selected)
+        guard let cached = (family == .claude ? claudeUsageCache : codexUsageCache)[assignmentScope],
+            let exhausted = cached.exhaustedWindow(model: selected) else { return nil }
+        let provider = exhausted.id == "seven_day_sonnet" ? "Claude Sonnet" : exhausted.id == "seven_day_opus" ? "Claude Opus" : family.title
+        return "\(provider) usage limit reached. Try another model or wait for usage to reset."
+    }
+
+    func refreshComposerUsage(_ chat: ChatSummary) async {
+        guard !previewMode, !isSubagent(chat), !chat.isArchived else { return }
+        let selected = usageModel(chat), family = AgentFamily(model: selected)
+        try? await loadUsage(family: family, maxAge: 60)
+        // Drop expired gates even if the refresh is offline. A stale observation
+        // cannot permanently disable Send after the provider's reset time.
+        let cache = family == .claude ? claudeUsageCache : codexUsageCache
+        if let entry = cache[assignmentScope], entry.response.windows.contains(where: { $0.usedPercent >= 100 }),
+            Date().timeIntervalSince(entry.fetchedAt) >= 300 || !entry.response.windows.contains(where: {
+                $0.usedPercent >= 100 && ($0.resetsAt == nil || Double($0.resetsAt!) > Date().timeIntervalSince1970)
+            }) {
+            if family == .claude { claudeUsageCache[assignmentScope] = nil }
+            else { codexUsageCache[assignmentScope] = nil }
+        }
+    }
+
     func canSend(_ chat: ChatSummary) -> Bool {
         let draft = composers[chat.id]?.draft ?? ""
         return !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && (chat.botId != nil || groups[chat.id] != nil) && connection != nil && !accessEnded
-            && !isSubagent(chat)
+            && !isSubagent(chat) && usageLimitMessage(chat) == nil
             // Both direct and Group sends have durable host-side acceptance.
             // Replay invalidation does not revoke permission to submit intent.
             && (snapshots[chat.id] != nil || groups[chat.id] != nil)
@@ -1349,6 +1400,9 @@ struct ManagedBotListMutationState {
             controlErrors[chat.id] = managementError(error)
             return
         }
+        let selectedModel = routing?.model ?? usageModel(chat)
+        try? await loadUsage(family: AgentFamily(model: selectedModel), maxAge: 60)
+        guard usageLimitMessage(chat, model: selectedModel) == nil, routing != nil || selectedModel == usageModel(chat) else { return }
         guard scope == assignmentScope, connection?.origin == saved.origin, !accessEnded,
               !Task.isCancelled, !savingComposerSettings.contains(chat.id),
               !approvalSettingsBlockSending(chat.id) else { return }

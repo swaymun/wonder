@@ -2045,7 +2045,18 @@ impl Store {
         now: &str,
         durable_dispatch: bool,
     ) -> Result<MessageInsert, sqlx::Error> {
-        self.insert_dispatch_message_with_model_selection(device_id, client_message_id, body, body_sha256, conversation_id, attachment_ids, now, durable_dispatch, None).await
+        self.insert_dispatch_message_with_model_selection(
+            device_id,
+            client_message_id,
+            body,
+            body_sha256,
+            conversation_id,
+            attachment_ids,
+            now,
+            durable_dispatch,
+            None,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2162,8 +2173,13 @@ impl Store {
             return Ok(MessageInsert::Existing(existing));
         }
 
-        let expected_revision = draft.as_ref().filter(|(_, _, first)| first.is_none()).map(|(_, revision, _)| *revision);
-        if expected_revision != model_selection_revision || (expected_revision.is_some() && (!durable_dispatch || guide_turn.is_some())) {
+        let expected_revision = draft
+            .as_ref()
+            .filter(|(_, _, first)| first.is_none())
+            .map(|(_, revision, _)| *revision);
+        if expected_revision != model_selection_revision
+            || (expected_revision.is_some() && (!durable_dispatch || guide_turn.is_some()))
+        {
             return Err(sqlx::Error::Protocol("model_selection_changed".into()));
         }
         let mut requested_attachments = attachment_ids.to_vec();
@@ -2194,7 +2210,10 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         if let Some((bot, _, None)) = &draft {
             sqlx::query("UPDATE bot_model_drafts SET first_message_id=? WHERE bot_id=?")
-                .bind(&id).bind(bot).execute(&mut *transaction).await?;
+                .bind(&id)
+                .bind(bot)
+                .execute(&mut *transaction)
+                .await?;
         }
         let queue_position = if durable_dispatch {
             Some(

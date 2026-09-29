@@ -104,14 +104,20 @@ impl Store {
         .await?
         .is_some_and(|saved| saved == hash))
     }
-    pub async fn finish_bot_creation(&self, id: &str, conversational: bool) -> Result<(), sqlx::Error> {
+    pub async fn finish_bot_creation(
+        &self,
+        id: &str,
+        conversational: bool,
+    ) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if conversational {
             sqlx::query("INSERT OR IGNORE INTO bot_model_drafts(bot_id) SELECT bot_id FROM bot_creation_requests WHERE bot_id=? AND completed=0 AND NOT EXISTS(SELECT 1 FROM conversation_metadata c JOIN messages m ON m.conversation_id=c.id WHERE c.bot_id=?) AND NOT EXISTS(SELECT 1 FROM conversation_metadata c JOIN runtime_bindings r ON r.conversation_id=c.id WHERE c.bot_id=?)")
                 .bind(id).bind(id).bind(id).execute(&mut *tx).await?;
         }
         sqlx::query("UPDATE bot_creation_requests SET completed=1 WHERE bot_id=?")
-            .bind(id).execute(&mut *tx).await?;
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await
     }
     pub async fn update_managed_bot(
@@ -120,9 +126,15 @@ impl Store {
         clear_overrides: [bool; 3],
     ) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let revision: Option<i64> = sqlx::query_scalar("SELECT revision FROM bot_model_drafts WHERE bot_id=? AND first_message_id IS NULL")
-            .bind(&bot.id).fetch_optional(&mut *tx).await?;
-        if revision != bot.model_selection_revision { return Err(sqlx::Error::Protocol("model_selection_changed".into())); }
+        let revision: Option<i64> = sqlx::query_scalar(
+            "SELECT revision FROM bot_model_drafts WHERE bot_id=? AND first_message_id IS NULL",
+        )
+        .bind(&bot.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if revision != bot.model_selection_revision {
+            return Err(sqlx::Error::Protocol("model_selection_changed".into()));
+        }
         sqlx::query("UPDATE bots SET name=?,role=?,system_prompt=?,model=?,reasoning_effort=?,service_tier=?,avatar_color=?,avatar_shape=?,avatar_palette=?,avatar_legacy_color=?,working_directory=?,permission_mode=?,approval_mode=?,agent_family=? WHERE id=?")
             .bind(&bot.name).bind(&bot.role).bind(&bot.system_prompt).bind(&bot.model).bind(&bot.reasoning_effort).bind(&bot.service_tier).bind(&bot.avatar_color).bind(&bot.avatar_shape).bind(&bot.avatar_palette).bind(&bot.avatar_legacy_color).bind(&bot.working_directory).bind(&bot.permission_mode).bind(&bot.approval_mode).bind(bot.agent_family.as_str()).bind(&bot.id).execute(&mut *tx).await?;
         sqlx::query("UPDATE bot_model_drafts SET revision=revision+1 WHERE bot_id=? AND first_message_id IS NULL")
@@ -316,7 +328,9 @@ impl Store {
         access: &BotFileAccess,
         followup: Option<&str>,
     ) -> Result<bool, sqlx::Error> {
-        if followup.is_some() { self.ensure_local_desktop("folder-approval").await?; }
+        if followup.is_some() {
+            self.ensure_local_desktop("folder-approval").await?;
+        }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let unstarted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bot_model_drafts WHERE bot_id=? AND first_message_id IS NULL)")
             .bind(&request.bot_id).fetch_one(&mut *tx).await?;
@@ -409,45 +423,216 @@ mod tests {
     #[tokio::test]
     async fn first_message_locks_family_and_retry_identity_atomically() {
         let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}?mode=rwc", dir.path().join("draft.db").display());
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("draft.db").display()
+        );
         let store = Store::connect(&url).await.unwrap();
         store.ensure_local_desktop("now").await.unwrap();
         assert!(store.reserve_bot_creation("draft", "hash").await.unwrap());
-        store.upsert_bot("draft", "Luna", "purpose", "instructions", "/tmp", ":workspace", Some("gpt-test"), None, "1").await.unwrap();
-        store.ensure_bot_workspace("draft", "Luna", "1").await.unwrap();
+        store
+            .upsert_bot(
+                "draft",
+                "Luna",
+                "purpose",
+                "instructions",
+                "/tmp",
+                ":workspace",
+                Some("gpt-test"),
+                None,
+                "1",
+            )
+            .await
+            .unwrap();
+        store
+            .ensure_bot_workspace("draft", "Luna", "1")
+            .await
+            .unwrap();
         store.finish_bot_creation("draft", true).await.unwrap();
-        store.create_channel("group", "group-chat", "Group", None, "draft", &[("draft", "coordinator")], "1").await.unwrap();
-        store.bind_runtime("group-chat", AgentFamily::Codex, "group-thread", None, "1").await.unwrap();
-        store.insert_dispatch_message("wonder-desktop", "group-first", "Group task", "group-body", "group-chat", &[], "1", false).await.unwrap();
+        store
+            .create_channel(
+                "group",
+                "group-chat",
+                "Group",
+                None,
+                "draft",
+                &[("draft", "coordinator")],
+                "1",
+            )
+            .await
+            .unwrap();
+        store
+            .bind_runtime("group-chat", AgentFamily::Codex, "group-thread", None, "1")
+            .await
+            .unwrap();
+        store
+            .insert_dispatch_message(
+                "wonder-desktop",
+                "group-first",
+                "Group task",
+                "group-body",
+                "group-chat",
+                &[],
+                "1",
+                false,
+            )
+            .await
+            .unwrap();
         let mut bot = store.bot("draft").await.unwrap().unwrap();
         assert_eq!(bot.model_selection_revision, Some(0));
         bot.agent_family = AgentFamily::Claude;
         bot.model = Some("claude:claude-haiku-4-5".into());
         store.update_managed_bot(&bot, [true; 3]).await.unwrap();
-        assert!(store.update_managed_bot(&bot, [true; 3]).await.is_err(), "A stale settings save must fail");
-        assert_eq!(store.runtime_binding("group-chat").await.unwrap().unwrap().family, AgentFamily::Codex, "The Group keeps its independently selected family");
+        assert!(
+            store.update_managed_bot(&bot, [true; 3]).await.is_err(),
+            "A stale settings save must fail"
+        );
+        assert_eq!(
+            store
+                .runtime_binding("group-chat")
+                .await
+                .unwrap()
+                .unwrap()
+                .family,
+            AgentFamily::Codex,
+            "The Group keeps its independently selected family"
+        );
         let stale = store.bot("draft").await.unwrap().unwrap();
         assert_eq!(stale.model_selection_revision, Some(1));
         for revision in [None, Some(0)] {
-            assert!(store.insert_dispatch_message_with_model_selection("wonder-desktop", "first", "Hello", "body", "bot:draft", &[], "2", true, revision).await.is_err());
+            assert!(store
+                .insert_dispatch_message_with_model_selection(
+                    "wonder-desktop",
+                    "first",
+                    "Hello",
+                    "body",
+                    "bot:draft",
+                    &[],
+                    "2",
+                    true,
+                    revision
+                )
+                .await
+                .is_err());
         }
-        assert!(store.messages_for_conversation("bot:draft").await.unwrap().is_empty());
-        let MessageInsert::Inserted(first) = store.insert_dispatch_message_with_model_selection("wonder-desktop", "first", "Hello", "body", "bot:draft", &[], "2", true, Some(1)).await.unwrap() else { panic!("First request was not inserted") };
-        assert!(store.bot("draft").await.unwrap().unwrap().model_selection_revision.is_none());
-        assert!(store.update_managed_bot(&stale, [true; 3]).await.is_err(), "A save racing after acceptance must fail");
+        assert!(store
+            .messages_for_conversation("bot:draft")
+            .await
+            .unwrap()
+            .is_empty());
+        let MessageInsert::Inserted(first) = store
+            .insert_dispatch_message_with_model_selection(
+                "wonder-desktop",
+                "first",
+                "Hello",
+                "body",
+                "bot:draft",
+                &[],
+                "2",
+                true,
+                Some(1),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("First request was not inserted")
+        };
+        assert!(store
+            .bot("draft")
+            .await
+            .unwrap()
+            .unwrap()
+            .model_selection_revision
+            .is_none());
+        assert!(
+            store.update_managed_bot(&stale, [true; 3]).await.is_err(),
+            "A save racing after acceptance must fail"
+        );
         let mut locked = store.bot("draft").await.unwrap().unwrap();
         locked.agent_family = AgentFamily::Codex;
         locked.model = Some("gpt-test".into());
-        assert!(store.update_managed_bot(&locked, [true; 3]).await.is_err(), "SQL boundary must enforce the family");
+        assert!(
+            store.update_managed_bot(&locked, [true; 3]).await.is_err(),
+            "SQL boundary must enforce the family"
+        );
         drop(store);
         let store = Store::connect(&url).await.unwrap();
         store.finish_bot_creation("draft", true).await.unwrap();
-        assert!(store.bot("draft").await.unwrap().unwrap().model_selection_revision.is_none());
-        assert!(matches!(store.insert_dispatch_message_with_model_selection("wonder-desktop", "first", "Hello", "body", "bot:draft", &[], "3", true, Some(1)).await.unwrap(), MessageInsert::Existing(_)));
-        assert!(matches!(store.insert_dispatch_message_with_model_selection("wonder-desktop", "first", "Hello", "body", "bot:draft", &[], "3", true, Some(2)).await.unwrap(), MessageInsert::Conflict));
-        assert!(store.insert_dispatch_message_with_model_selection("wonder-desktop", "second", "Other", "other", "bot:draft", &[], "3", true, Some(1)).await.is_err());
-        assert!(matches!(store.insert_dispatch_message("wonder-desktop", "second", "Other", "other", "bot:draft", &[], "3", true).await.unwrap(), MessageInsert::Inserted(_)));
-        let (accepted, frozen) = store.message_execution_bot(&first.id, locked).await.unwrap();
+        assert!(store
+            .bot("draft")
+            .await
+            .unwrap()
+            .unwrap()
+            .model_selection_revision
+            .is_none());
+        assert!(matches!(
+            store
+                .insert_dispatch_message_with_model_selection(
+                    "wonder-desktop",
+                    "first",
+                    "Hello",
+                    "body",
+                    "bot:draft",
+                    &[],
+                    "3",
+                    true,
+                    Some(1)
+                )
+                .await
+                .unwrap(),
+            MessageInsert::Existing(_)
+        ));
+        assert!(matches!(
+            store
+                .insert_dispatch_message_with_model_selection(
+                    "wonder-desktop",
+                    "first",
+                    "Hello",
+                    "body",
+                    "bot:draft",
+                    &[],
+                    "3",
+                    true,
+                    Some(2)
+                )
+                .await
+                .unwrap(),
+            MessageInsert::Conflict
+        ));
+        assert!(store
+            .insert_dispatch_message_with_model_selection(
+                "wonder-desktop",
+                "second",
+                "Other",
+                "other",
+                "bot:draft",
+                &[],
+                "3",
+                true,
+                Some(1)
+            )
+            .await
+            .is_err());
+        assert!(matches!(
+            store
+                .insert_dispatch_message(
+                    "wonder-desktop",
+                    "second",
+                    "Other",
+                    "other",
+                    "bot:draft",
+                    &[],
+                    "3",
+                    true
+                )
+                .await
+                .unwrap(),
+            MessageInsert::Inserted(_)
+        ));
+        let (accepted, frozen) = store
+            .message_execution_bot(&first.id, locked)
+            .await
+            .unwrap();
         assert!(frozen);
         assert_eq!(accepted.model.as_deref(), Some("claude:claude-haiku-4-5"));
     }

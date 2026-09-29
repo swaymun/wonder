@@ -55,10 +55,32 @@ pub(super) async fn read(
         Json(json!({
             "agentFamily": query.agent_family,
             "checkedAtMs": now_ms(),
+            "additionalUsageAvailable": additional_usage_available(&runtime, query.agent_family),
             "windows": windows,
         })),
     )
         .into_response()
+}
+
+fn additional_usage_available(runtime: &Value, family: AgentFamily) -> Option<bool> {
+    if family == AgentFamily::Claude {
+        return runtime
+            .get("additionalUsageAvailable")
+            .and_then(Value::as_bool);
+    }
+    let preferred = runtime
+        .pointer("/rateLimitsByLimitId/codex")
+        .filter(|source| !project_source(source).is_empty());
+    let source = preferred.or_else(|| runtime.get("rateLimits"))?;
+    let credits = source.get("credits")?;
+    match (
+        credits["hasCredits"].as_bool(),
+        credits["unlimited"].as_bool(),
+    ) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
+    }
 }
 
 fn unavailable(family: AgentFamily) -> Response {
@@ -203,6 +225,34 @@ mod tests {
         crate::tests::validate_http_contract(
             "accountUsage",
             &json!({"agentFamily":"claude", "checkedAtMs":1, "windows": windows}),
+        );
+    }
+
+    #[test]
+    fn overage_is_provider_scoped_and_unknown_is_not_available() {
+        assert_eq!(
+            additional_usage_available(&json!({}), AgentFamily::Codex),
+            None
+        );
+        assert_eq!(
+            additional_usage_available(
+                &json!({"additionalUsageAvailable":false}),
+                AgentFamily::Claude
+            ),
+            Some(false)
+        );
+        let credits = |has: bool| json!({"rateLimits":{"primary":{"usedPercent":100},"credits":{"hasCredits":has,"unlimited":false}}});
+        assert_eq!(
+            additional_usage_available(&credits(true), AgentFamily::Codex),
+            Some(true)
+        );
+        assert_eq!(
+            additional_usage_available(&credits(false), AgentFamily::Codex),
+            Some(false)
+        );
+        crate::tests::validate_http_contract(
+            "accountUsage",
+            &json!({"agentFamily":"codex","checkedAtMs":1,"windows":project(credits(true)),"additionalUsageAvailable":true}),
         );
     }
 

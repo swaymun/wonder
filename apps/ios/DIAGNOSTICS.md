@@ -121,7 +121,7 @@ The optional `WonderUITests/WonderUITests/testLiveImagePreview` case expects a d
 
 `testConnectedAppsKeepNamesAndIconsAcrossFamilies` uses the existing synthetic
 transport via `-diagnostics-connected-apps`. It checks repeated provider switches,
-the custom-app fallback, light mode and dark mode with large Dynamic Type on
+normalized names, light mode and dark mode with large Dynamic Type on
 iPhone and iPad. `testConnectedAppAssetsAreAvailableOffline` verifies the bundled
 icons load in both appearances. Neither test contacts connectors or starts model
 work. Bridge tests separately own prefix removal and resolved model labels while

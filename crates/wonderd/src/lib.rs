@@ -23,6 +23,7 @@ use sync::stream_events;
 
 mod account_usage;
 pub mod claude;
+mod computer_runtime;
 pub mod computer_sessions;
 mod computer_tools;
 mod connected_apps;
@@ -2282,6 +2283,9 @@ async fn process_app_server_notification(
     if method == "turn/completed" && computer_tools::retire_completed(state).await.is_err() {
         return false;
     }
+    if method == "turn/completed" {
+        computer_runtime::turn_ended(state, &params);
+    }
     // Preserve the complete App Server item in the event stream as a
     // loss-minimized projection. Older clients still see a normal activity
     // event; newer clients consume its thread_item_upsert category.
@@ -4068,7 +4072,10 @@ async fn automation_target_available(
         ));
     }
     if scope_type == "bot" && bot.model_selection_revision.is_some() {
-        return Err((StatusCode::CONFLICT, "Send this Bot its first message before enabling automations."));
+        return Err((
+            StatusCode::CONFLICT,
+            "Send this Bot its first message before enabling automations.",
+        ));
     }
     if scope_type == "group_chat" {
         let group = state
@@ -4681,9 +4688,15 @@ async fn bot_update_endpoint(
     let Ok(Some(mut current)) = state.store.bot(&bot_id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if request.model.is_some() && current.model_selection_revision.is_some()
-        && request.model_selection_revision != current.model_selection_revision {
-        return (StatusCode::CONFLICT, "Model settings changed. Reload before choosing a model.").into_response();
+    if request.model.is_some()
+        && current.model_selection_revision.is_some()
+        && request.model_selection_revision != current.model_selection_revision
+    {
+        return (
+            StatusCode::CONFLICT,
+            "Model settings changed. Reload before choosing a model.",
+        )
+            .into_response();
     }
     let mut family_changed = false;
     // Appearance changes are safe during work. Existing clients also echo
@@ -4734,12 +4747,18 @@ async fn bot_update_endpoint(
             && AgentFamily::for_model(Some(value.trim())) != current.agent_family
         {
             if current.model_selection_revision.is_none() {
-                return (StatusCode::BAD_REQUEST, "Choose a model from this Bot’s agent family.").into_response();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "Choose a model from this Bot’s agent family.",
+                )
+                    .into_response();
             }
             current.agent_family = AgentFamily::for_model(Some(value.trim()));
             family_changed = true;
             // Claude has no automatic approval reviewer. Switching never broadens access.
-            if current.agent_family == AgentFamily::Claude && current.approval_mode.as_deref() == Some("approve-for-me") {
+            if current.agent_family == AgentFamily::Claude
+                && current.approval_mode.as_deref() == Some("approve-for-me")
+            {
                 current.approval_mode = Some("ask-for-approval".into());
             }
         }
@@ -4793,7 +4812,8 @@ async fn bot_update_endpoint(
             return (StatusCode::BAD_REQUEST, message).into_response();
         }
     }
-    if (current.permission_mode.is_some() || request.approval_mode.is_some()) && (permissions_changed || family_changed)
+    if (current.permission_mode.is_some() || request.approval_mode.is_some())
+        && (permissions_changed || family_changed)
     {
         let access = match state.store.bot_file_access(&bot_id).await {
             Ok(access) => access,
@@ -4807,9 +4827,18 @@ async fn bot_update_endpoint(
             return (StatusCode::BAD_REQUEST, error).into_response();
         }
     }
-    if let Err(error) = state.store.update_managed_bot(&current, clear_overrides).await {
-        if matches!(&error, sqlx::Error::Protocol(message) if message == "model_selection_changed") {
-            return (StatusCode::CONFLICT, "The first message already selected this Bot’s model. Reload settings.").into_response();
+    if let Err(error) = state
+        .store
+        .update_managed_bot(&current, clear_overrides)
+        .await
+    {
+        if matches!(&error, sqlx::Error::Protocol(message) if message == "model_selection_changed")
+        {
+            return (
+                StatusCode::CONFLICT,
+                "The first message already selected this Bot’s model. Reload settings.",
+            )
+                .into_response();
         }
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -7175,7 +7204,9 @@ async fn conversation_composer_options(
             .models
             .iter()
             .filter(|model| {
-                !model.hidden && (bot.model_selection_revision.is_some() || AgentFamily::for_model(Some(&model.id)) == bot.agent_family)
+                !model.hidden
+                    && (bot.model_selection_revision.is_some()
+                        || AgentFamily::for_model(Some(&model.id)) == bot.agent_family)
             })
             .cloned()
             .collect(),
@@ -8516,31 +8547,6 @@ async fn create_bot(
     .into_response()
 }
 
-pub fn computer_use_tool_spec() -> serde_json::Value {
-    serde_json::json!({
-        "type": "function",
-        "name": "wonder_computer_use",
-        "description": "Request one narrow, unlocked Mac computer-use action. Full Access turns execute directly; other turns pause for owner approval of the exact action in Wonder. Use screenshot to inspect the screen before click, type, key, or focusApp. macOS Screen Recording and Accessibility permissions are still required.",
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["status", "screenshot", "click", "type", "key", "focusApp"]
-                },
-                "x": { "type": "number", "description": "Visible-screen x coordinate for click." },
-                "y": { "type": "number", "description": "Visible-screen y coordinate for click." },
-                "text": { "type": "string", "description": "Text to type, limited by Wonder." },
-                "keyCode": { "type": "integer", "minimum": 0, "maximum": 65535 },
-                "modifiers": { "type": "integer", "minimum": 0 },
-                "bundleId": { "type": "string", "description": "Running application bundle identifier to focus." }
-            },
-            "required": ["action"]
-        }
-    })
-}
-
 async fn start_bot_thread(
     state: &AppState,
     app_server: &mut AppServerClient,
@@ -8563,9 +8569,7 @@ async fn start_bot_thread(
         "config": if bot.agent_family == AgentFamily::Codex { teaching::runtime_config(state, &app_server.rpc(), bot.execution_directory()).await? } else { serde_json::json!({}) },
     });
     claude::configure_thread(state, bot, &mut params).await?;
-    let computer = state.computer_use_enabled
-        && state.computer_use_bin.is_some()
-        && group_collaboration::allows_computer(state, conversation_id, &bot.id).await?;
+    computer_runtime::configure(state, conversation_id, bot, &mut params).await?;
     let pm = pm_tools::enabled(state, conversation_id, &bot.id).await?;
     let mut tools = if pm { pm_tools::specs() } else { Vec::new() };
     if onboarding {
@@ -8582,12 +8586,7 @@ async fn start_bot_thread(
     {
         tools.extend(group_collaboration::specs());
     }
-    if computer {
-        tools.push(computer_use_tool_spec());
-    }
-    if !tools.is_empty() {
-        params["dynamicTools"] = serde_json::json!(tools);
-    }
+    params["dynamicTools"] = serde_json::json!(tools);
     let response = app_server
         .request("thread/start", params)
         .await
@@ -8622,8 +8621,9 @@ async fn start_bot_thread(
         .mark_conversation_dynamic_tools(
             conversation_id,
             &format!(
-                "{}{}",
-                pm_tools::version(computer, pm),
+                "{}+{}{}",
+                computer_runtime::VERSION,
+                pm_tools::version(false, pm),
                 if onboarding {
                     "+wonder-bot-profile-v5"
                 } else {
@@ -8644,7 +8644,6 @@ async fn conversation_needs_tool_migration(
     if existing_thread_id.is_none() {
         return Ok(false);
     }
-    let computer = state.computer_use_enabled && state.computer_use_bin.is_some();
     let pm = if let Some(bot) = bot_for_conversation(state, conversation_id)
         .await
         .map_err(|error| error.to_string())?
@@ -8666,14 +8665,18 @@ async fn conversation_needs_tool_migration(
         .conversation_dynamic_tools_version(conversation_id)
         .await
         .map_err(|error| error.to_string())?;
-    if !computer && !pm && !onboarding && saved.is_none() {
+    if !pm && !onboarding && saved.is_none() {
         return Ok(false);
     }
+    // Native tool availability is refreshed on resume. Do not discard a
+    // provider conversation merely to retire its legacy computer tool.
+    let saved = saved.map(|version| computer_runtime::registration_version(&version));
     Ok(saved.as_deref()
         != Some(
             format!(
-                "{}{}",
-                pm_tools::version(computer, pm),
+                "{}+{}{}",
+                computer_runtime::VERSION,
+                pm_tools::version(false, pm),
                 if onboarding {
                     "+wonder-bot-profile-v5"
                 } else {
@@ -8957,7 +8960,11 @@ async fn send_message_inner(
     {
         Ok(insert) => insert,
         Err(sqlx::Error::Protocol(message)) if message == "model_selection_changed" => {
-            return (StatusCode::PRECONDITION_FAILED, "Model settings changed. Your message was not sent. Reload and send again.").into_response();
+            return (
+                StatusCode::PRECONDITION_FAILED,
+                "Model settings changed. Your message was not sent. Reload and send again.",
+            )
+                .into_response();
         }
         Err(error) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
@@ -9936,10 +9943,8 @@ async fn dispatch_to_codex_inner(
         )
         .await?
         {
-            // Codex 0.152 registers dynamic tools only on thread/start. An
-            // older persisted Bot thread therefore gets one fresh thread on
-            // its first post-upgrade turn; Wonder's own transcript remains
-            // intact and the new thread is durable from this point forward.
+            // Changes to Wonder's other dynamic tools still require a new
+            // thread on runtimes whose resume schema has no dynamicTools.
             start_bot_thread(
                 &state,
                 &mut app_server,
@@ -9966,6 +9971,7 @@ async fn dispatch_to_codex_inner(
                 "config": if bot.agent_family == AgentFamily::Codex { teaching::runtime_config(&state, &app_server.rpc(), bot.execution_directory()).await? } else { serde_json::json!({}) },
             });
             claude::configure_thread(&state, &bot, &mut resume_params).await?;
+            computer_runtime::configure(&state, &message.conversation_id, &bot, &mut resume_params).await?;
             let response = app_server
                 .request("thread/resume", resume_params)
                 .await
@@ -9997,6 +10003,7 @@ async fn dispatch_to_codex_inner(
             "permissionProfile":resolved.permission_profile,"fileAccess":file_access,
             "workingDirectory":bot.execution_directory(),"runtimeWorkspaceRoots":permission_modes::runtime_roots(&state, &bot).await?,
             "computerToolConfigured":state.computer_use_bin.is_some(),
+            "nativeComputerUse":true,
             "inputSha256":hex::encode(Sha256::digest(serde_json::to_vec(&input).map_err(|e|e.to_string())?)),
             "unrecorded":["runtime default model resolution","runtime and workspace instructions","connected app account and tool snapshot"]
         }).to_string();
@@ -11515,6 +11522,34 @@ fn redact_approval_params(method: &str, params: &serde_json::Value) -> serde_jso
     }
     if let Some(mode) = params.get("mode").filter(|value| value.is_string()) {
         summary.insert("mode".into(), mode.clone());
+    }
+    if method == "mcpServer/elicitation/request"
+        && params["serverName"] == "cua_repl"
+        && params["_meta"]["codex_approval_kind"] == "mcp_tool_call"
+    {
+        // Preserve consent details without publishing provider correlation IDs,
+        // raw tool arguments, or grant-persistence options the phone cannot set.
+        let meta = &params["_meta"];
+        let mut context = serde_json::Map::new();
+        context.insert("isComputerUse".into(), true.into());
+        for key in ["subtitle", "riskLevel"] {
+            if let Some(value) = meta[key].as_str().filter(|v| v.len() <= 4096) {
+                context.insert(key.into(), value.into());
+            }
+        }
+        if let Some(fields) = meta["tool_params_display"].as_array() {
+            let details: Vec<String> = fields
+                .iter()
+                .take(32)
+                .filter_map(|field| {
+                    let label = field["display_name"].as_str()?;
+                    let value = field["value"].as_str()?;
+                    (label.len() <= 256 && value.len() <= 4096).then(|| format!("{label}: {value}"))
+                })
+                .collect();
+            context.insert("details".into(), serde_json::json!(details));
+        }
+        summary.insert("elicitationContext".into(), context.into());
     }
     summary.insert(
         "requestType".into(),

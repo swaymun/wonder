@@ -154,6 +154,17 @@ pub(super) async fn scope(state: &AppState, params: &Value) -> Result<bool, Stri
         .await
         .map_err(|e| e.to_string())?
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    if context
+        .as_ref()
+        .and_then(|c| c.get("nativeComputerUse"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err(
+            "This legacy computer tool is retired. Use your native computer-use tools instead."
+                .into(),
+        );
+    }
     Ok(context
         .as_ref()
         .and_then(|c| c.get("permissionProfile"))
@@ -400,6 +411,12 @@ mod tests {
     use tower::ServiceExt;
 
     async fn fixture(full: bool) -> (tempfile::TempDir, AppState, Value, String) {
+        fixture_with_native(full, false).await
+    }
+    async fn fixture_with_native(
+        full: bool,
+        native: bool,
+    ) -> (tempfile::TempDir, AppState, Value, String) {
         let (dir, mut state) = ingestion::tests::fixture().await;
         let helper = dir.path().join("computer.py");
         fs::write(&helper, r#"#!/usr/bin/env python3
@@ -460,7 +477,7 @@ for line in sys.stdin:
             .claim_message_for_dispatch(&message.id)
             .await
             .unwrap());
-        state.store.begin_dispatch_submission_with_context(&message.id, "thread", Some(&json!({"permissionProfile":if full {":danger-full-access"} else {":workspace"}}).to_string())).await.unwrap();
+        state.store.begin_dispatch_submission_with_context(&message.id, "thread", Some(&json!({"permissionProfile":if full {":danger-full-access"} else {":workspace"}, "nativeComputerUse":native}).to_string())).await.unwrap();
         state
             .store
             .update_message_delivery(
@@ -592,6 +609,25 @@ for line in sys.stdin:
             json!({"action":"screenshot"})
         );
     }
+    // Execution is the trust boundary: old persisted tool metadata must never
+    // let a newly accepted native turn execute the retired helper.
+    #[tokio::test]
+    async fn native_turn_rejects_legacy_tool_even_with_full_access() {
+        let (dir, state, params, _) = fixture_with_native(true, true).await;
+        assert!(scope(&state, &params)
+            .await
+            .unwrap_err()
+            .contains("retired"));
+        assert_eq!(route(&state, &params).await, Some(true));
+        let runtime = params["_wonderRuntimeId"].as_str().unwrap();
+        let saved = settled(&state, &format!("{runtime}:2")).await;
+        let result: Value =
+            serde_json::from_str(saved.resolution_json.as_deref().unwrap()).unwrap();
+        assert_eq!(result["success"], false);
+        assert!(!dir.path().join("executions").exists());
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn stable_call_retries_with_new_transport_ids_never_repeat_input() {
         let (dir, state, mut params, _) = fixture(true).await;

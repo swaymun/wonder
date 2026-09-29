@@ -53,9 +53,11 @@ pub const ALLOWED_SERVER_REQUESTS: [&str; 6] = [
 ];
 
 pub fn is_allowed_method(method: &str) -> bool {
-    RequiredMethod::ALL
-        .iter()
-        .any(|candidate| candidate.as_str() == method)
+    // Optional native-MCP lifecycle cleanup; not a required runtime feature.
+    method == "mcpServer/tool/call"
+        || RequiredMethod::ALL
+            .iter()
+            .any(|candidate| candidate.as_str() == method)
 }
 
 pub fn is_allowed_server_request(method: &str) -> bool {
@@ -197,6 +199,7 @@ pub fn initialize_request(wonder_version: &str) -> InitializeRequest {
                 },
                 "capabilities": {
                     "experimentalApi": true,
+                    "mcpServerOpenaiFormElicitation": true,
                     "requestAttestation": false,
                     "optOutNotificationMethods": []
                 }

@@ -1175,8 +1175,14 @@ fn is_inline_image(value: &serde_json::Value) -> bool {
 }
 
 pub(super) fn compact_thread(thread: &mut ConversationThreadProjection) {
-    for item in thread.turns.iter_mut().flat_map(|turn| turn.items.iter_mut()) {
-        if item.item_type == "imageView" && item.payload.get("imageUrl").is_some_and(is_inline_image) {
+    for item in thread
+        .turns
+        .iter_mut()
+        .flat_map(|turn| turn.items.iter_mut())
+    {
+        if item.item_type == "imageView"
+            && item.payload.get("imageUrl").is_some_and(is_inline_image)
+        {
             if let Some(payload) = item.payload.as_object_mut() {
                 payload.remove("imageUrl");
             }

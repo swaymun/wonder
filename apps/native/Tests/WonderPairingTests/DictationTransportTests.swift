@@ -6,6 +6,9 @@ private final class DictationProtocol: URLProtocol, @unchecked Sendable {
         let lock = NSLock()
         var uploads: [(String, String, Data)] = []
         var accepted: Set<String> = []
+        var readStatus = 200
+        var readAttempts = 0
+        var recoverRead = false
     }
     static let state = State()
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "dictation.invalid" }
@@ -24,6 +27,16 @@ private final class DictationProtocol: URLProtocol, @unchecked Sendable {
             XCTAssertTrue(request.url!.path.contains("/by-request/"))
             XCTAssertEqual(request.value(forHTTPHeaderField: "Cookie"), "__Host-wonder_session=synthetic")
             client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: "HTTP/1.1", headerFields: [:])!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        if request.httpMethod == "GET" {
+            let status = Self.state.lock.withLock {
+                Self.state.readAttempts += 1
+                return Self.state.recoverRead && Self.state.readAttempts > 1 ? 200 : Self.state.readStatus
+            }
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: [:])!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(#"{"ready":true}"#.utf8))
             client?.urlProtocolDidFinishLoading(self)
             return
         }
@@ -47,6 +60,27 @@ private final class DictationProtocol: URLProtocol, @unchecked Sendable {
 }
 
 final class DictationTransportTests: XCTestCase {
+    func testStatusReadsRecoverTransientFailureButNeverRetryRevokedAccess() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [DictationProtocol.self]
+        let api = PairingAPI(configuration: config)
+        let connection = SavedConnection(origin: "https://dictation.invalid", credential: Credential(sessionToken: "synthetic", deviceId: "phone", csrfToken: "synthetic-csrf", hostInstallationId: "mac", expiresAtMs: nil))
+        struct Result: Decodable, Sendable { let ready: Bool }
+        DictationProtocol.state.lock.withLock { DictationProtocol.state.readStatus = 503; DictationProtocol.state.readAttempts = 0; DictationProtocol.state.recoverRead = true }
+        let result: Result = try await api.asrRequest("/api/v1/asr/models", connection: connection)
+        XCTAssertTrue(result.ready)
+        XCTAssertEqual(DictationProtocol.state.lock.withLock { DictationProtocol.state.readAttempts }, 2)
+        for (status, attempts) in [(401, 1), (403, 1), (503, 3)] {
+            DictationProtocol.state.lock.withLock { DictationProtocol.state.readStatus = status; DictationProtocol.state.readAttempts = 0; DictationProtocol.state.recoverRead = false }
+            do {
+                let _: Result = try await api.asrRequest("/api/v1/asr/models", connection: connection)
+                XCTFail("Failure should remain visible")
+            } catch {
+                guard case PairingFailure.response(let actual) = error else { XCTFail("Unexpected error: \(error)"); continue }
+                XCTAssertEqual(actual, status)
+            }
+            XCTAssertEqual(DictationProtocol.state.lock.withLock { DictationProtocol.state.readAttempts }, attempts)
+        }
+    }
     func testCancellationCanAcknowledgeStableRequestBeforeJobIDIsKnown() async throws {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [DictationProtocol.self]
         let api = PairingAPI(configuration: config)
@@ -68,10 +102,8 @@ final class DictationTransportTests: XCTestCase {
         var pending = DictationIntent(hostID: "mac", deviceID: "phone", conversationID: "original", conversationTitle: "Ada", modelID: "parakeet")
         pending.finishCapture(durationMs: 300_000)
         let audio = Data("synthetic-mp4-transport-bytes".utf8)
-        do {
-            let _: TranscriptionJob = try await api.asrRequest("/api/v1/asr/transcriptions", connection: connection, method: "POST", recording: audio, intent: pending)
-            XCTFail("First response should be lost")
-        } catch { XCTAssertEqual((error as? URLError)?.code, .networkConnectionLost) }
+        let automatic: TranscriptionJob = try await api.asrRequest("/api/v1/asr/transcriptions", connection: connection, method: "POST", recording: audio, intent: pending)
+        XCTAssertEqual(automatic.state, "completed")
         let restarted = try JSONDecoder().decode(DictationIntent.self, from: JSONEncoder().encode(pending))
         let result: TranscriptionJob = try await api.asrRequest("/api/v1/asr/transcriptions", connection: connection, method: "POST", recording: audio, intent: restarted)
         XCTAssertTrue(restarted.accepts(result))
@@ -87,7 +119,7 @@ final class DictationTransportTests: XCTestCase {
         XCTAssertNil(drafts["original"]?.pending)
         let records = DictationProtocol.state.lock.withLock { (DictationProtocol.state.uploads, DictationProtocol.state.accepted.count) }
         XCTAssertEqual(records.1, 1)
-        XCTAssertEqual(records.0.count, 2)
+        XCTAssertEqual(records.0.count, 3)
         XCTAssertEqual(records.0[0].0, records.0[1].0)
         XCTAssertEqual(records.0[0].1, records.0[1].1)
         XCTAssertEqual(records.0[0].2, records.0[1].2)

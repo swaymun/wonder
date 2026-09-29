@@ -559,8 +559,12 @@ extension ReadRow {
             add("Details", value("result") ?? "A subagent collaboration update.")
             add("Input", value("arguments"))
         case "mcpToolCall", "dynamicToolCall":
-            title = (payload["tool"]?.string ?? "Tool call").replacingOccurrences(of: "_", with: " ").capitalized
-            symbol = "wrench.and.screwdriver"
+            if payload["server"]?.string == "cua_repl" || payload["tool"]?.string == "wonder_computer_use" {
+                title = "Computer Use"; symbol = "desktopcomputer"
+            } else {
+                title = (payload["tool"]?.string ?? "Tool call").replacingOccurrences(of: "_", with: " ").capitalized
+                symbol = "wrench.and.screwdriver"
+            }
             add("Input", value("arguments")); add("Result", (payload["result"] ?? payload["contentItems"])?.toolOutputText)
         case "imageView":
             title = "Image"; symbol = "photo"

@@ -16,3 +16,16 @@ static asset host. See the
 [Workspace brand resources](https://knowledge.workspace.google.com/admin/getting-started/brand-your-internal-communications-with-google-workspace).
 Claude artwork is the icon served by its [official documentation](https://code.claude.com/docs/en/overview).
 Product names and artwork remain the property of their respective owners.
+
+Added September 29, 2026, without changing artwork bytes:
+
+- GitHub light/dark: installed official GitHub plugin 0.1.12 assets `github.png` and `github-dark.png`.
+- OpenAI Platform: installed official OpenAI Developers plugin 1.3.6, `openai-platform.png`.
+- Linear: installed official Linear plugin 5.0.1, `logo.png`.
+- Sites: installed official Sites plugin 0.1.75, `icon.svg`.
+- Flashloop: https://www.flashloop.ai/favicons/light/icon.svg and https://www.flashloop.ai/favicons/dark/icon.svg
+- Adobe Acrobat: https://www.adobe.com/federal/assets/svgs/acrobat-pro-40.svg
+
+Unknown connections use a system puzzle-piece icon when their remote artwork is
+missing or unavailable. Connection names omit the leading Claude.ai namespace;
+runtime identifiers and permission targets are preserved.

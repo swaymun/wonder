@@ -110,7 +110,6 @@ struct ConversationDetails: View {
     @State private var failure: String?
     @State private var files = false
     @State private var members = false
-    @State private var computer = false
     var body: some View {
         NavigationStack {
             List {
@@ -123,7 +122,6 @@ struct ConversationDetails: View {
                 }
                 Section {
                     if let group = model.groups[chat.id] { NavigationLink { AssignmentListView(model: model, group: group) } label: { Label("Assignments", systemImage: "checklist") } }
-                    Button("View computer", systemImage: "desktopcomputer") { computer = true }
                     Button("Files", systemImage: "doc") { files = true }
                     NavigationLink { AutomationListView(model: model, chat: chat) } label: { Label("Automations", systemImage: "clock") }
                 }
@@ -134,9 +132,6 @@ struct ConversationDetails: View {
             .task { await load() }
             .sheet(isPresented: $files) { WorkspaceBrowser(model: model, chat: chat, attachmentIDs: nil) }
             .sheet(isPresented: $members) { GroupEditor(model: model, group: model.groups[chat.id]) }
-            .fullScreenCover(isPresented: $computer) {
-                NavigationStack { ComputerSessionView(model: model, chat: chat) }
-            }
         }
     }
     private func load() async {
