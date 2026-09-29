@@ -1139,7 +1139,9 @@ for line in sys.stdin:
     elif m=='thread/start':
         assert p['wonderPolicy']['mode']=='workspace'
         assert p['model']=='claude:haiku'
-        assert 'config' not in p
+        # Only the shared native computer configuration survives provider routing.
+        assert set(p['config']) == {'mcp_servers.cua_repl'}
+        assert p['config']['mcp_servers.cua_repl']['enabled'] is False
         result={'thread':{'id':'claude-owned','sessionId':'sdk-owned'}}
     elif m=='turn/start':
         assert p['threadId']=='claude-owned'
