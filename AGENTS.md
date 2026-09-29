@@ -256,6 +256,37 @@ another Wonder checkout for profiling.
   shipped iOS app do not require a new binary. Concurrent tasks should serialize
   uploads and recheck the latest build number before starting.
 
+## Commit, push, and public source completion
+
+- Commit and push verified, coherent changes as work progresses. Before ending
+  a thread, commit and push all completed changes owned by that thread to the
+  internal repository's authorized delivery branch. This is standing user
+  authorization; do not wait for another request or confirmation unless the
+  user explicitly asks to defer committing or pushing.
+- When those changes affect the reviewed public source inventory, synchronize
+  the public repository and commit and push its changes as part of the same
+  completion workflow. A thread that has produced a TestFlight build must push
+  its accepted source internally and synchronize the corresponding public
+  source before reporting completion. Do not leave public synchronization for
+  the user to request separately.
+- Use the existing public checkout and the reviewed export workflow in
+  `RELEASING.md`, with `scripts/public-source-files.txt` as the exact inventory.
+  Review newly included files, run the source audit, and verify selected bytes
+  and executable modes match. Create a separate public source commit; never
+  push internal Git history, private research, real sessions, captures,
+  credentials, or build artifacts to the public repository.
+- Inspect status, branch, remotes, and staged paths before committing. Stage
+  only the thread's intended changes, preserving unrelated and concurrent work.
+  Do not reset, stash, or force-push to make synchronization easier. If there
+  are no new changes, verify the existing push rather than making an empty commit.
+- Verify both remote branch heads after pushing and report their commit IDs,
+  relevant checks, and any excluded work. Resolve failures where possible; if
+  a push or safe public export remains blocked, report the concrete blocker
+  instead of claiming completion.
+- Source synchronization or documentation-only changes do not require another
+  TestFlight or DMG build. Preserve the user's build limits and reuse the
+  existing verified release evidence when shipped code has not changed.
+
 ## Build and installation cleanup
 
 - Cleanup is part of finishing every build/test task and TestFlight upload.
