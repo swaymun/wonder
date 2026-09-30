@@ -1,9 +1,9 @@
 # Wonder beta status
 
-The signed Mac beta is available. Release iOS build 1.0 (69) is uploaded,
+The signed Mac beta is available. Release iOS build 1.0 (70) is uploaded,
 processed, and available for internal testing. Apple reports it as ready for
 external beta submission; external review and public enrollment have not been
-opened for this build. Production tester groups and notifications were not changed.
+opened for this build. Existing production tester-group settings were preserved.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -14,8 +14,8 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (69) is the Projects-only shell: pinned threads, provider icons, model/Plan settings, read-state and model-list fixes, and no Bot or Group management screens. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation of this build through TestFlight remains unverified. |
-| Wonder Testing | The separate blue app, Release 1.0 (5), shows smaller 7-point green/red dots at the right edge of the composer computer picker. It is `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Its private internal testing group has one invited tester and access to build 5. It keeps its own pairing, drafts, and Keychain access. Installation through TestFlight remains unverified. |
+| iPhone and iPad | Production Release 1.0 (70) is the Projects-only shell: pinned threads, provider icons, model/Plan settings, read-state and model-list fixes, and no Bot or Group management screens. The composer computer picker shows 7-point green/red dots directly after Mac names and scrolls when space is limited. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation of this build through TestFlight remains unverified. |
+| Wonder Testing | The separate blue app, Release 1.0 (6), has the same updated composer computer picker. It is `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Its private internal testing group has one invited tester and access to build 6. It keeps its own pairing, drafts, and Keychain access. Installation through TestFlight remains unverified. |
 | Mac companion | [Version 1.0.99](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.99-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and packaged verification against the installed Codex 0.159.0 runtime. |
 | Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The Projects-first shell and compact connection-menu update are published on `main`. Third-party components retain their own licenses. |
 
@@ -27,15 +27,17 @@ The [landing page, setup guide and privacy information](https://wonder-launch-pr
 
 ## Qualification still in progress
 
-Testing build 5 passed optimized iPhone and iPad Simulator UI checks. Each check
-switched between Macs ten times in both directions, verified draft restoration,
-and opened and canceled Add computer. Screenshots confirm the smaller trailing
-dots with and without the keyboard. Its signed Release export passed identity,
-entitlement, Keychain-isolation and Diagnostics-exclusion checks. A physical-device
-build passed, but the UI runner could not initialize because authentication was
-canceled; no physical interaction acceptance was recorded. Actual TestFlight
-installation of this candidate remains unverified. Production promotion awaits
-owner approval.
+Testing build 6 and production build 70 share the updated picker. Optimized
+iPhone and iPad Simulator UI checks each switched between Macs ten times in both
+directions, verified draft restoration, and opened and canceled Add computer.
+They also verified the selected computer remains fully visible above the keyboard
+and Add computer can scroll fully into view. Screenshots confirm the 7-point
+dots directly after Mac names. Both signed Release exports passed identity,
+entitlement, Keychain-isolation and Diagnostics-exclusion checks. An earlier
+physical-device build passed, but its UI runner could not initialize because
+authentication was canceled; this revision's physical interaction and actual
+TestFlight installation remain unverified. The owner authorized uploads to both
+app identities.
 
 The current shell passed 30 iPhone and 15 iPad Simulator navigation cycles,
 including saved drafts, Settings navigation and pin toggle/reopen/restoration.
