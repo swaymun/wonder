@@ -16,11 +16,16 @@ Keep the Mac awake and online while using it remotely.
 | --- | --- |
 | iPhone and iPad | Production Release 1.0 (71) fixes stale Queued labels, saved native question-and-answer forms, desktop project association on reopen, and trackpad input in the black screen area. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation through TestFlight remains unverified. |
 | Wonder Testing | The separate blue app, Release 1.0 (7), contains the same fixes. It is `VALID` and `READY_FOR_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Internal distribution of this build and installation through TestFlight remain unverified. Existing tester-group settings were preserved. Pairing, drafts and Keychain access remain separate from production. |
-| Mac companion | [Version 1.0.100](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.100-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and packaged verification against the installed Codex 0.159.0 runtime. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and packaged verification against the installed Codex 0.159.0 runtime. Project-only Macs leave private Bot storage absent. |
 | Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The current chat, project-association and trackpad fixes are published on `main`. Third-party components retain their own licenses. |
 
-The 1.0.100 update preserves the installed Mac's pairing and history. A signed
-1.0.78→1.0.79 automatic upgrade previously completed on this Mac; version 1.0.100
+The 1.0.101 update preserves the installed Mac's project chats and pairing. It
+loads shared model options through the normal project runtime and starts the
+private Bot runtime only when a Bot exists. The daemon and transport suites
+passed 324 tests, with three existing tests ignored; strict Clippy and isolated
+missing/mismatched-runtime restart checks passed. Opening an existing project
+chat passed without creating private Bot folders or starting model work. A signed
+1.0.78→1.0.79 automatic upgrade previously completed on this Mac; version 1.0.101
 was installed through the signed local installer. Fresh-Mac setup remains unverified.
 
 The [landing page, setup guide and privacy information](https://wonder-launch-preview.saimun-h-shahee.chatgpt.site) are public.
@@ -118,7 +123,7 @@ outside the beta scope.
 - Initial setup requires both devices, Tailscale and access to the supported model provider.
 - Model requests are sent to your provider. Wonder does not include a model subscription or credits.
 - Remote access depends on the Mac being reachable. Tailscale may relay encrypted traffic when a direct connection is unavailable.
-- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. One signed automatic upgrade passed on this Mac; use the [signed Mac DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.100-beta.1) if an update does not complete.
+- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. One signed automatic upgrade passed on this Mac; use the [signed Mac DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) if an update does not complete.
 - Teaching a task and replaying taught tasks are unavailable in this beta.
 - Notifications require permission and network access. Disabling notifications does not stop work on the Mac.
 - Supported OS versions and verification evidence are different: simulator checks do not establish physical-device behavior on every supported model.
