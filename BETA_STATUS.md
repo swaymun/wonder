@@ -15,9 +15,9 @@ Keep the Mac awake and online while using it remotely.
 | Component | Status |
 | --- | --- |
 | iPhone and iPad | Production Release 1.0 (69) is the Projects-only shell: pinned threads, provider icons, model/Plan settings, read-state and model-list fixes, and no Bot or Group management screens. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation of this build through TestFlight remains unverified. |
-| Wonder Testing | The separate blue app, Release 1.0 (3), is `VALID` and `READY_FOR_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. It keeps its own pairing, drafts, and Keychain access. Tester-group distribution was not changed. |
+| Wonder Testing | The separate blue app, Release 1.0 (4), replaces connection status text in the composer computer menu with green/red dots. It is `VALID` and `READY_FOR_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. It keeps its own pairing, drafts, and Keychain access. Tester-group distribution was not changed. |
 | Mac companion | [Version 1.0.99](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.99-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and packaged verification against the installed Codex 0.159.0 runtime. |
-| Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The Projects-first shell update is published on `main`. Third-party components retain their own licenses. |
+| Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The Projects-first shell and compact connection-menu update are published on `main`. Third-party components retain their own licenses. |
 
 The 1.0.99 update preserves the installed Mac's pairing and history. A signed
 1.0.78→1.0.79 automatic upgrade previously completed on this Mac; version 1.0.99
@@ -26,6 +26,13 @@ was installed through the signed local installer. Fresh-Mac setup remains unveri
 The [landing page, setup guide and privacy information](https://wonder-launch-preview.saimun-h-shahee.chatgpt.site) are public.
 
 ## Qualification still in progress
+
+Testing build 4 passed its optimized Simulator build and two existing checks for
+connection-scoped drafts and shared connection ownership. Its signed Release
+export passed identity, entitlement, Keychain-isolation and Diagnostics-exclusion
+checks. Visual and physical acceptance of the connection-menu dots, and actual
+TestFlight installation of this candidate, remain unverified. Production
+promotion awaits owner approval.
 
 The current shell passed 30 iPhone and 15 iPad Simulator navigation cycles,
 including saved drafts, Settings navigation and pin toggle/reopen/restoration.
