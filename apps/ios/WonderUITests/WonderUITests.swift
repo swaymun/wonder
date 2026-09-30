@@ -203,6 +203,66 @@ import UIKit
         app.terminate()
     }
 
+    // Contract: long-press read actions update the sidebar without opening the
+    // chat, and seeing the latest Project reply clears the same unread dot.
+    // Uses the existing synthetic transport and real product controls.
+    func testProjectThreadReadMenuAndVisibleAcknowledgement() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+            "-diagnostics-chat-layout-unsaved", "-diagnostics-project-read",
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityM"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let row = app.buttons["pinned-thread:claude:read-fixture"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        XCTAssertTrue((row.value as? String)?.contains("Unread") == true)
+        for cycle in 0..<12 {
+            for unread in [false, true] {
+                row.press(forDuration: 1)
+                let action = app.buttons[unread ? "Mark as Unread" : "Mark as Read"]
+                XCTAssertTrue(action.waitForExistence(timeout: 5))
+                XCTAssertFalse(app.buttons[unread ? "Mark as Read" : "Mark as Unread"].exists)
+                if cycle == 0 { retainMenuScreenshot(app, name: unread ? "Read thread menu" : "Unread thread menu") }
+                action.tap()
+                let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    row.exists && ((row.value as? String)?.contains("Unread") == true) == unread
+                }, object: nil)
+                XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 8), .completed)
+                XCTAssertFalse(app.buttons["Conversation details"].exists, "Marking status must not navigate into the chat")
+            }
+        }
+        row.tap()
+        XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 15))
+        let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Reply 12.")).firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 10))
+        if app.buttons["scroll-to-bottom"].exists { app.buttons["scroll-to-bottom"].tap() }
+        retainMenuScreenshot(app, name: "Latest Project reply before read acknowledgement")
+        XCTAssertLessThanOrEqual(reply.frame.maxY, conversationLayoutBottom(app, draft: app.textViews["message-draft"]) + 1,
+                                 "Only a fully seen latest reply counts as read")
+        // Let the stationary viewport's acknowledgement run before covering it.
+        let pause = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in false }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [pause], timeout: 2), .timedOut)
+        openSidebarIfNeeded(app)
+        let read = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            row.exists && (row.value as? String)?.contains("Unread") != true
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [read], timeout: 10), .completed,
+                       "A Project chat must acknowledge its visible reply despite being absent from the Bot inbox")
+        row.press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Mark as Unread"].waitForExistence(timeout: 5))
+        retainMenuScreenshot(app, name: "Read menu after viewing Project reply")
+        app.buttons["Mark as Unread"].tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in false }, object: nil)], timeout: 2), .timedOut)
+        XCTAssertTrue((row.value as? String)?.contains("Unread") == true,
+                      "Mark as Unread stays set even if the iPad conversation is still visible")
+        row.press(forDuration: 1)
+        XCTAssertTrue(app.buttons["Mark as Read"].waitForExistence(timeout: 5))
+        retainMenuScreenshot(app, name: "Manually unread open thread")
+        app.buttons["Mark as Read"].tap()
+        app.terminate()
+    }
+
     func testActivityDisclosureKeepsVisibleReadingAnchorAtLargeText() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

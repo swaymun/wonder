@@ -202,6 +202,7 @@ private struct ConversationPresentationReady: UIViewControllerRepresentable {
 
 private struct ConversationScroller<Content: View>: View {
     @ObservedObject var model: ConnectionModel
+    @ObservedObject var projects: ProjectLibrary
     let chat: ChatSummary
     let entries: [ChatFeedEntry]
     let nodeIDs: [String]
@@ -227,7 +228,8 @@ private struct ConversationScroller<Content: View>: View {
         guard restored, phase == .active, !model.previewMode, !model.accessEnded,
               !isCovered,
               model.macConnected == true, !model.cachedConversationIds.contains(chat.id),
-              model.chats.first(where: { $0.id == chat.id })?.hasUnread == true,
+              model.hasUnread(chat.id),
+              !projects.manuallyUnread.contains(chat.id),
               let receipt = visibleLatestReceipt,
               receipt == model.readReceipt(for: chat.id) else { return nil }
         return receipt
@@ -712,7 +714,7 @@ struct ConversationView: View {
         #endif
         Group {
             if model.snapshots[chat.id] != nil || model.groups[chat.id] != nil {
-                ConversationScroller(model: model, chat: chat, entries: entries, nodeIDs: nodes.map(\.id),
+                ConversationScroller(model: model, projects: model.projects, chat: chat, entries: entries, nodeIDs: nodes.map(\.id),
                     isCovered: conversationCovered,
                     requestedScrollID: $requestedScrollID) {
                         Group {

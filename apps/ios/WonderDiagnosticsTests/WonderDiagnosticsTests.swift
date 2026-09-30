@@ -1209,14 +1209,16 @@ final class WonderDiagnosticsTests: XCTestCase {
     }
 
     // Contract: a confirmed read clears the thread's unread dot everywhere it
-    // shows and after relaunch. Regression: the Mac confirms project reads with
-    // an empty reply, which the Bot summary decoder rejected, so the dot stayed.
+    // shows and after relaunch. Regression: Project chats are absent from the
+    // Bot inbox, so its unread check prevented the actual acknowledgement path.
     @MainActor func testProjectReadClearsUnreadAcrossSidebarAndRelaunch() async throws {
         MessageRecoveryURLProtocol.reset()
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let model = recoveryModel(root: root)
         model.projects.forgetCache()
         defer { model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        model.setForeground(true)
+        await model.loadChats()
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
         await model.projects.refresh()
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects/project/threads", body: projectPage(pinned: false, unread: true))
@@ -1226,14 +1228,82 @@ final class WonderDiagnosticsTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", body: projectDetail(pinned: false, unread: true))
-        try await model.projects.loadDetail("project-chat")
-        XCTAssertTrue(model.projects.hasUnread("project-chat"))
-        model.projects.markRead("project-chat")
+        let detail = try await model.projects.loadDetail("project-chat")
+        let chat = model.projectChat(detail)
+        XCTAssertFalse(model.chats.contains { $0.id == chat.id })
+        XCTAssertTrue(model.hasUnread(chat.id))
+        let path = "/api/v1/conversations/project-chat"
+        MessageRecoveryURLProtocol.enqueue(path: path, method: "GET", body: Data(#"{"conversationId":"project-chat","hostEpoch":"epoch","lastSequence":1,"messages":[],"assistantMessages":[],"thread":{"hydrated":true}}"#.utf8))
+        await model.open(chat, readOnly: true)
+        let visible = try XCTUnwrap(model.readReceipt(for: chat.id))
+        MessageRecoveryURLProtocol.enqueue(path: path, method: "PATCH", status: 503)
+        await model.acknowledgeVisibleRead(visible)
+        XCTAssertTrue(model.hasUnread(chat.id), "A failed read must keep its dot until a retry succeeds")
+        MessageRecoveryURLProtocol.enqueue(path: path, method: "PATCH", status: 204, body: Data())
+        await model.acknowledgeVisibleRead(visible)
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path).count, 2)
         XCTAssertFalse(model.projects.hasUnread("project-chat"))
         XCTAssertEqual(model.projects.threads["project"]?.threads.first?.hasUnread, false)
         XCTAssertEqual(model.projects.details["project-chat"]?.hasUnread, false)
         let restarted = recoveryModel(root: root)
         XCTAssertFalse(restarted.projects.hasUnread("project-chat"))
+
+        // Explicit sidebar actions persist without opening a conversation.
+        XCTAssertNil(restarted.visibleChat)
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", method: "PATCH", body: projectDetail(pinned: false, unread: true))
+        try await restarted.projects.updateConversation(chat.id, fields: ["hasUnread": true])
+        XCTAssertTrue(restarted.hasUnread(chat.id))
+        XCTAssertEqual(restarted.projects.threads["project"]?.threads.first?.hasUnread, true)
+        XCTAssertTrue(recoveryModel(root: root).projects.hasUnread(chat.id))
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", method: "PATCH", body: projectDetail(pinned: false, unread: false))
+        try await restarted.projects.updateConversation(chat.id, fields: ["hasUnread": false])
+        XCTAssertFalse(recoveryModel(root: root).projects.hasUnread(chat.id))
+        XCTAssertNil(restarted.visibleChat)
+
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", method: "PATCH", body: projectDetail(pinned: false, unread: true))
+        try await model.projects.updateConversation(chat.id, fields: ["hasUnread": true])
+        await model.acknowledgeVisibleRead(visible)
+        XCTAssertTrue(model.hasUnread(chat.id), "An explicit unread action on the visible thread must survive automatic reading")
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path).count, 2)
+        model.projects.noteOpened(chat.id)
+        MessageRecoveryURLProtocol.enqueue(path: path, method: "PATCH", status: 204, body: Data())
+        await model.acknowledgeVisibleRead(visible)
+        XCTAssertFalse(model.hasUnread(chat.id), "Opening the thread again resumes automatic reading")
+        model.setForeground(false)
+    }
+
+    // Contract: a catalog request started before a read change cannot put back
+    // the old dot. The real request/cache boundary owns this refresh race.
+    @MainActor func testProjectReadSurvivesOlderSidebarRefresh() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        model.projects.forgetCache()
+        defer { MessageRecoveryURLProtocol.releaseHeld(); model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
+        await model.projects.refresh()
+        let path = "/api/v1/projects/project/threads"
+        MessageRecoveryURLProtocol.enqueue(path: path, body: projectPage(pinned: false, unread: true))
+        model.projects.loadThreads("project")
+        for _ in 0..<100 {
+            if model.projects.threads["project"]?.hasLoaded == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", body: projectDetail(pinned: false, unread: true))
+        try await model.projects.loadDetail("project-chat")
+        MessageRecoveryURLProtocol.enqueue(path: path, body: projectPage(pinned: false, unread: true))
+        MessageRecoveryURLProtocol.hold(path: path)
+        model.projects.loadThreads("project")
+        try await waitForRecoveryRequests(path: path, count: 2)
+        model.projects.markRead("project-chat")
+        MessageRecoveryURLProtocol.releaseHeld()
+        for _ in 0..<100 {
+            if model.projects.threads["project"]?.isLoading == false { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.hasUnread("project-chat"))
+        XCTAssertEqual(model.projects.threads["project"]?.threads.first?.hasUnread, false)
+        XCTAssertFalse(recoveryModel(root: root).projects.hasUnread("project-chat"))
     }
 
     // Contract: a project request stops appearing in Queue when the Mac starts

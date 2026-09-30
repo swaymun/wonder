@@ -199,6 +199,18 @@ No real chats, messages, or model work are involved.
 `ReadAcknowledgementTests` preserves viewport, newer-unseen-message and host
 safeguards.
 
+`testProjectThreadReadMenuAndVisibleAcknowledgement` uses
+`-diagnostics-subagent-fixture -diagnostics-chat-layout
+-diagnostics-chat-layout-unsaved -diagnostics-project-read` to exercise twelve
+read/unread menu cycles without opening the thread, then automatic reading of
+its latest visible reply. It also checks that explicitly marking an open iPad
+thread unread stays set. The fixture renews only a synthetic connection with an
+in-memory signing identity; it never changes real pairing or starts model work.
+Run on iPhone and iPad, including large text. The two Project-read diagnostics
+tests own request failures/retries, persistence across relaunch and stale-refresh
+fencing. Synthetic physical-device interaction and live paired-host acceptance
+are separate evidence.
+
 ## Composer image paste regression
 
 `WonderUITests/WonderUITests/testComposerImagePasteFromLongPressMenuPreservesDraftAndReloads`

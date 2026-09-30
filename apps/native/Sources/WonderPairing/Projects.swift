@@ -596,10 +596,10 @@ extension ProjectThreadSummary {
         ProjectThreadSummary(reference: reference, conversationId: conversationId, title: title, family: family,
                              updatedAt: updatedAt, isPinned: value, hasUnread: hasUnread, isWorking: isWorking)
     }
-    /// The same thread after the owner has read it.
-    public func settingRead() -> ProjectThreadSummary {
+    /// The same thread with a confirmed read status.
+    public func settingUnread(_ value: Bool) -> ProjectThreadSummary {
         ProjectThreadSummary(reference: reference, conversationId: conversationId, title: title, family: family,
-                             updatedAt: updatedAt, isPinned: isPinned, hasUnread: false, isWorking: isWorking)
+                             updatedAt: updatedAt, isPinned: isPinned, hasUnread: value, isWorking: isWorking)
     }
 }
 

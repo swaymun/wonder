@@ -18,6 +18,9 @@ import WonderPairing
     @Published private(set) var pinned: [PinnedProjectThread] = []
     /// Conversations the Mac reported gone while a saved copy was still open.
     @Published private(set) var unavailable: Set<String> = []
+    /// An explicit unread action stays unread until the owner opens the thread
+    /// again, even when its conversation is still visible beside an iPad sidebar.
+    @Published private(set) var manuallyUnread: Set<String> = []
     @Published var failure: String?
     /// Model catalog for project composer settings, per connection scope.
     @Published var options: BotOptions?
@@ -34,6 +37,9 @@ import WonderPairing
     private var pendingPins: [String: Bool] = [:]
     private var detailRevisions: [String: Int] = [:]
     private var updatingDetails: Set<String> = []
+    /// Fences older catalog/detail reads and automatic acknowledgements against
+    /// an explicit read-status change, independently of pin changes.
+    private var readRevisions: [String: Int] = [:]
     /// In-memory detail cache bound; open, recent, pinned and first-page threads always stay.
     private static let detailLimit = 120
 
@@ -59,8 +65,8 @@ import WonderPairing
             threadTasks = [:]
             projects = []; families = []; loadingProjects = false; failure = nil
             threads = [:]; details = [:]; supportsProjects = nil; options = nil
-            supportsModes = false; pinned = []; unavailable = []; recentlyOpened = RecentlyOpenedConversations()
-            pendingPins = [:]; detailRevisions = [:]; updatingDetails = []
+            supportsModes = false; pinned = []; unavailable = []; manuallyUnread = []; recentlyOpened = RecentlyOpenedConversations()
+            pendingPins = [:]; detailRevisions = [:]; updatingDetails = []; readRevisions = [:]
             restoreCache()
         }
         return current
@@ -94,6 +100,7 @@ import WonderPairing
         loadingProjects = true
         defer { if scope == self.scope { loadingProjects = false } }
         let pinRevisionAtStart = pinRevision
+        let readsAtStart = readRevisions
         do {
             let response: ProjectsResponse = try await model.manage("/api/v1/projects")
             guard isCurrent(scope) else { return }
@@ -104,7 +111,9 @@ import WonderPairing
             supportsModes = (response.modesVersion ?? 0) >= 1
             // A pin changed while this request was in flight; the next refresh reports it.
             if pinRevision == pinRevisionAtStart, pendingPins.isEmpty, updatingDetails.isEmpty {
-                pinned = response.pinned ?? []
+                pinned = (response.pinned ?? []).map {
+                    PinnedProjectThread(projectId: $0.projectId, thread: reconcilingRead($0.thread, startedAt: readsAtStart))
+                }
             }
             failure = nil
             for project in projects where threads[project.id] != nil {
@@ -135,6 +144,7 @@ import WonderPairing
         threads[projectID] = state
         let cursor = more ? state.nextCursor : nil
         let pinRevisionAtStart = pinRevision
+        let readsAtStart = readRevisions
         threadTasks[key] = Task { [weak self] in
             defer { if self?.scope == scope { self?.threadTasks[key] = nil } }
             var path = "/api/v1/projects/\(ConnectionModel.escape(projectID))/threads?limit=\(more ? 10 : SidebarProjection.initialThreads)"
@@ -143,7 +153,7 @@ import WonderPairing
                 let page: ProjectThreadsPage = try await model.manage(path)
                 guard let self, self.isCurrent(scope), !Task.isCancelled else { return }
                 var next = self.threads[projectID] ?? ProjectThreadsState()
-                next.apply(self.reconcilingPins(page, startedAt: pinRevisionAtStart), replacing: !more)
+                next.apply(self.reconcilingReads(self.reconcilingPins(page, startedAt: pinRevisionAtStart), startedAt: readsAtStart), replacing: !more)
                 next.isLoading = false
                 self.threads[projectID] = next
                 if !more { self.saveCache() }
@@ -156,10 +166,11 @@ import WonderPairing
                 // request's handle and allow overlapping pagination.
                 do {
                     let revision = self.pinRevision
+                    let reads = self.readRevisions
                     let page: ProjectThreadsPage = try await model.manage("/api/v1/projects/\(ConnectionModel.escape(projectID))/threads?limit=\(SidebarProjection.initialThreads)")
                     guard self.isCurrent(scope) else { return }
                     var next = self.threads[projectID] ?? ProjectThreadsState()
-                    next.apply(self.reconcilingPins(page, startedAt: revision), replacing: true); next.isLoading = false
+                    next.apply(self.reconcilingReads(self.reconcilingPins(page, startedAt: revision), startedAt: reads), replacing: true); next.isLoading = false
                     self.threads[projectID] = next
                     self.saveCache()
                 } catch {
@@ -266,19 +277,26 @@ import WonderPairing
         guard let model, let scope = fenced() else { throw PairingFailure.response(401) }
         guard updatingDetails.insert(conversationID).inserted else { throw PairingFailure.response(409) }
         let changesPin = fields["isPinned"] != nil
+        let changesRead = fields["hasUnread"] != nil
         detailRevisions[conversationID, default: 0] += 1
         if changesPin { pinRevision += 1 }
+        if changesRead { readRevisions[conversationID, default: 0] += 1 }
         defer {
             if self.scope == scope, model.assignmentScope == scope {
                 updatingDetails.remove(conversationID)
                 detailRevisions[conversationID, default: 0] += 1
                 if changesPin { pinRevision += 1 }
+                if changesRead { readRevisions[conversationID, default: 0] += 1 }
             }
         }
         let detail: ProjectConversationDetail = try await model.manage(
             "/api/v1/project-conversations/\(ConnectionModel.escape(conversationID))", method: "PATCH",
             body: JSONSerialization.data(withJSONObject: fields))
         guard isCurrent(scope) else { throw CancellationError() }
+        if let unread = fields["hasUnread"] as? Bool {
+            if unread { manuallyUnread.insert(conversationID) }
+            else { manuallyUnread.remove(conversationID) }
+        }
         details[conversationID] = detail
         model.registerProjectConversation(detail)
         for (project, var state) in threads {
@@ -323,6 +341,7 @@ import WonderPairing
     /// Remembers that a thread was opened. The most recent ones keep their saved
     /// history and detail on this phone.
     func noteOpened(_ conversationID: String) {
+        if manuallyUnread.contains(conversationID) { manuallyUnread.remove(conversationID) }
         guard recentlyOpened.ids.first != conversationID else { return }
         recentlyOpened.note(conversationID)
         if model?.previewMode == false, let recentKey, let data = try? JSONEncoder().encode(recentlyOpened) {
@@ -386,14 +405,28 @@ import WonderPairing
             || threads.values.contains { $0.threads.contains { $0.conversationId == conversationID && $0.hasUnread } }
     }
 
+    func readRevision(_ conversationID: String) -> Int { readRevisions[conversationID, default: 0] }
+
+    private func reconcilingRead(_ row: ProjectThreadSummary, startedAt revisions: [String: Int]) -> ProjectThreadSummary {
+        guard let id = row.conversationId, readRevision(id) != revisions[id, default: 0] else { return row }
+        return row.settingUnread(hasUnread(id))
+    }
+
+    private func reconcilingReads(_ page: ProjectThreadsPage, startedAt revisions: [String: Int]) -> ProjectThreadsPage {
+        ProjectThreadsPage(threads: page.threads.map { reconcilingRead($0, startedAt: revisions) },
+                          nextCursor: page.nextCursor, partial: page.partial)
+    }
+
     /// Applies a read acknowledgement the Mac has confirmed.
     func markRead(_ conversationID: String) {
+        readRevisions[conversationID, default: 0] += 1
+        detailRevisions[conversationID, default: 0] += 1
         for (project, var state) in threads where state.threads.contains(where: { $0.conversationId == conversationID && $0.hasUnread }) {
-            state.threads = state.threads.map { $0.conversationId == conversationID ? $0.settingRead() : $0 }
+            state.threads = state.threads.map { $0.conversationId == conversationID ? $0.settingUnread(false) : $0 }
             threads[project] = state
         }
         if pinned.contains(where: { $0.thread.conversationId == conversationID && $0.thread.hasUnread }) {
-            pinned = pinned.map { $0.thread.conversationId == conversationID ? PinnedProjectThread(projectId: $0.projectId, thread: $0.thread.settingRead()) : $0 }
+            pinned = pinned.map { $0.thread.conversationId == conversationID ? PinnedProjectThread(projectId: $0.projectId, thread: $0.thread.settingUnread(false)) : $0 }
         }
         if let detail = details[conversationID], detail.hasUnread,
            var fields = (try? JSONEncoder().encode(detail)).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) {

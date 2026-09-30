@@ -239,6 +239,7 @@ enum DiagnosticSubagentFixture {
     }
     static var approvalDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.approval-settings")! }
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
+    static var projectReadFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
     static let hostID = "diagnostic-host"
     static let parentID = "fixture-parent-conversation"
     static let childID = "fixture-child-conversation"
@@ -274,7 +275,8 @@ enum DiagnosticSubagentFixture {
             cameraFixtureStoreRoot: root,
             saved: savedConnection(),
             chat: nil,
-            api: PairingAPI(configuration: configuration), replayEnabled: !chatLayoutFixture && !approvalSettingsFixture)
+            api: PairingAPI(configuration: configuration), replayEnabled: !chatLayoutFixture && !approvalSettingsFixture,
+            signingIdentity: projectReadFixture ? syntheticSigningIdentity() : PhoneIdentity.signing)
         if chatLayoutFixture {
             model.snapshots[parentID] = try! JSONDecoder().decode(ConversationSnapshot.self, from: JSONSerialization.data(withJSONObject: chatLayoutSnapshot()))
             let entries = ChatFeedEntry.grouping(model.feedRows(for: parentChat()))
@@ -287,6 +289,13 @@ enum DiagnosticSubagentFixture {
             }
         }
         return model
+    }
+    private static func syntheticSigningIdentity() -> SigningIdentity {
+        let key = P256.Signing.PrivateKey()
+        return SigningIdentity(read: { key.rawRepresentation }, save: { _ in },
+            restore: { _ in EnrollmentSigningIdentity(publicKey: key.publicKey, representation: key.rawRepresentation,
+                                                      sign: { try key.signature(for: $0) }) },
+            create: { throw SigningIdentityFailure.missing })
     }
     // JSONSerialization creates an immutable JSON tree, read only by this
     // offline fixture. Cache it once so repeated history requests do no I/O.
@@ -358,6 +367,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var delayNextChildSend = false
         var childRevision = 2
         var childStatus = "completed"
+        var projectUnread = true
         var goalPresent = DiagnosticSubagentFixture.goalFixture
         var goalObjective = "Prepare a reliable beta launch with the Scout helper."
         var goalStatus = DiagnosticSubagentFixture.goalFixtureStatus
@@ -414,6 +424,42 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
     override func stopLoading() {}
 
     private func respond(method: String, path: String, body: Data?) {
+        if DiagnosticSubagentFixture.projectReadFixture {
+            let conversation = DiagnosticSubagentFixture.parentID
+            switch path {
+            case "/api/v1/pairing/session/refresh-challenge":
+                let now = UInt64(Date().timeIntervalSince1970 * 1000)
+                finish(status: 200, body: json(["challengeId": "read-fixture", "deviceId": "diagnostic-device",
+                    "nonce": "synthetic", "origin": "https://synthetic.invalid", "hostInstallationId": DiagnosticSubagentFixture.hostID,
+                    "offerId": "", "issuedAtMs": now, "expiresAtMs": now + 60_000])); return
+            case "/api/v1/pairing/session":
+                finish(status: 200, body: try! JSONEncoder().encode(DiagnosticSubagentFixture.savedConnection().credential)); return
+            case "/api/v1/projects":
+                finish(status: 200, body: json([
+                    "projects": [["id": "read-project", "name": "Read status", "isIncluded": true, "isPinned": false,
+                                  "rootsRevision": 1, "folders": [], "createdAt": "fixture"]],
+                    "families": [["family": "claude", "available": true]], "modesVersion": 1,
+                    "pinned": [["projectId": "read-project", "thread": projectReadThread()]]
+                ])); return
+            case "/api/v1/projects/read-project/threads":
+                finish(status: 200, body: json(["threads": [projectReadThread()], "nextCursor": NSNull(), "partial": []])); return
+            case "/api/v1/project-conversations/\(conversation)":
+                if method == "PATCH", let fields = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any],
+                   let unread = fields["hasUnread"] as? Bool { Self.state.lock.withLock { Self.state.projectUnread = unread } }
+                finish(status: 200, body: json([
+                    "conversationId": conversation, "projectId": "read-project", "projectName": "Read status",
+                    "title": "Read status fixture", "family": "claude", "model": "claude:sonnet", "effort": "high",
+                    "accessMode": "read_only", "workingFolder": "/fixture", "workingFolderName": "fixture",
+                    "isPinned": true, "hasUnread": Self.state.lock.withLock { Self.state.projectUnread },
+                    "hasNativeSession": false, "folderInProject": true, "claudeApproval": "ask", "planMode": false
+                ])); return
+            case "/api/v1/conversations": finish(status: 200, body: Data("[]".utf8)); return
+            case "/api/v1/conversations/\(conversation)" where method == "PATCH":
+                Self.state.lock.withLock { Self.state.projectUnread = false }
+                finish(status: 204, body: Data()); return
+            default: break
+            }
+        }
         if path == "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/goal" {
             let state = Self.state
             switch method {
@@ -514,6 +560,11 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
 
     private func json(_ value: Any) -> Data {
         (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
+    }
+    private func projectReadThread() -> [String: Any] {
+        ["reference": "claude:read-fixture", "conversationId": DiagnosticSubagentFixture.parentID,
+         "title": "Read status fixture", "family": "claude", "updatedAt": 1, "isPinned": true,
+         "hasUnread": Self.state.lock.withLock { Self.state.projectUnread }, "isWorking": false]
     }
     private func goalValue() -> Any {
         let state = Self.state

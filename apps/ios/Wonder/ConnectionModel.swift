@@ -657,9 +657,10 @@ struct ManagedBotListMutationState {
     #if WONDER_DIAGNOSTICS
     /// Creates an offline diagnostics model with the same durable composer
     /// boundary used by a paired connection. No network API is invoked.
-    init(cameraFixtureStoreRoot root: URL, saved: SavedConnection, chat: ChatSummary? = nil, initialIntent: ComposerIntent = ComposerIntent(), api: PairingAPI? = nil, replayEnabled: Bool = true) {
-        signingIdentity = PhoneIdentity.signing
-        persistConnection = nil
+    init(cameraFixtureStoreRoot root: URL, saved: SavedConnection, chat: ChatSummary? = nil, initialIntent: ComposerIntent = ComposerIntent(), api: PairingAPI? = nil, replayEnabled: Bool = true, signingIdentity: SigningIdentity = PhoneIdentity.signing) {
+        self.signingIdentity = signingIdentity
+        // Synthetic connection checks must never replace the app's pairing.
+        persistConnection = { _ in }
         diagnosticReplayEnabled = replayEnabled
         #if WONDER_DIAGNOSTICS
         self.api = api ?? Self.diagnosticAPI()
@@ -2342,6 +2343,10 @@ struct ManagedBotListMutationState {
         if let group = groups[conversation] { return VisibleReadReceipt(group: group) }
         return snapshots[conversation].map(VisibleReadReceipt.init(snapshot:))
     }
+    func hasUnread(_ conversation: String) -> Bool {
+        if projectConversationIDs.contains(conversation) { return projects.hasUnread(conversation) }
+        return chats.first { $0.id == conversation }?.hasUnread == true
+    }
     func acknowledgeVisibleRead(_ visible: VisibleReadReceipt) async {
         guard !previewMode, foreground, !accessEnded, macConnected == true,
             visibleChat?.id == visible.conversationId,
@@ -2353,12 +2358,15 @@ struct ManagedBotListMutationState {
         if projectConversationIDs.contains(visible.conversationId) {
             // Project threads keep read state in project metadata; the Mac
             // confirms with an empty reply rather than a Bot summary.
-            guard projects.hasUnread(visible.conversationId) else { return }
+            guard projects.hasUnread(visible.conversationId), !projects.manuallyUnread.contains(visible.conversationId) else { return }
+            let readRevision = projects.readRevision(visible.conversationId)
             struct Empty: Decodable, Sendable {}
             do {
                 let _: Empty = try await api.request("/api/v1/conversations/" + Self.escape(visible.conversationId),
                     origin: saved.origin, body: visible.requestBody(), credential: saved.credential, method: "PATCH")
-                guard !Task.isCancelled, run == generation, visibleChat?.id == visible.conversationId,
+                guard !Task.isCancelled, foreground, run == generation, visibleChat?.id == visible.conversationId,
+                    readReceipt(for: visible.conversationId) == visible, !projection.dirty.contains(visible.conversationId),
+                    projects.readRevision(visible.conversationId) == readRevision,
                     connection?.credential.hostInstallationId == saved.credential.hostInstallationId,
                     connection?.credential.deviceId == saved.credential.deviceId, !accessEnded else { return }
                 projects.markRead(visible.conversationId)

@@ -104,7 +104,7 @@ struct ChatShell: View {
         #if WONDER_DIAGNOSTICS
         .task {
             // The layout fixture opens its synthetic conversation as a notification would.
-            if DiagnosticSubagentFixture.chatLayoutFixture {
+            if DiagnosticSubagentFixture.chatLayoutFixture && !DiagnosticSubagentFixture.projectReadFixture {
                 shell.open(host: DiagnosticSubagentFixture.hostID, conversation: DiagnosticSubagentFixture.parentID)
             }
         }
@@ -821,6 +821,9 @@ struct SidebarView: View {
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityIdentifier(prefix + thread.reference)
         .contextMenu {
+            Button(thread.hasUnread ? "Mark as Read" : "Mark as Unread", systemImage: thread.hasUnread ? "envelope.open" : "envelope.badge") {
+                setUnread(host, projectID, thread, !thread.hasUnread)
+            }.disabled(busyThread != nil)
             Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
                 setPinned(host, projectID, thread, !thread.isPinned)
             }
@@ -833,6 +836,23 @@ struct SidebarView: View {
     }
 
     // MARK: Actions
+
+    private func setUnread(_ host: String, _ projectID: String, _ thread: ProjectThreadSummary, _ unread: Bool) {
+        guard busyThread == nil, let model = model(host) else { return }
+        busyThread = thread.reference
+        Task {
+            defer { busyThread = nil }
+            do {
+                let conversation: String
+                if let id = thread.conversationId { conversation = id }
+                else { conversation = try await model.projects.attach(projectID, thread: thread) }
+                try await model.projects.updateConversation(conversation, fields: ["hasUnread": unread])
+            } catch is CancellationError {
+            } catch {
+                failure = "The read status couldn’t be saved. Check \(model.macName) and try again."
+            }
+        }
+    }
 
     /// A thread with a conversation opens at once from what is saved; only a
     /// provider-only thread waits for attach.
