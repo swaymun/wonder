@@ -24,6 +24,50 @@ final class MessageProjectionTests: XCTestCase {
         XCTAssertEqual(question.response?.answers, ["Code"])
         XCTAssertFalse(question.canAnswer(now: 1))
     }
+    func testNativeQuestionAndReplyRenderAsOneSavedFormAfterCacheAndPaging() throws {
+        let form = ReadItem(id: "call-question", type: "agentMessage", state: "completed", text: "Which day?", createdAt: "1000",
+            payload: ["delivery": .string("async"), "questions": .array([
+                .object(["title": .string("Which day?"), "options": .array([.string("Saturday"), .string("Sunday")])]),
+                .object(["title": .string("What should we check?"), "options": .null])
+            ])])
+        let body = #"<send_user_message_question_reply>[{"questionItemId":"[\"request_user_input_async\",\"call-question\",0]","question":"Which day?","answer":"Saturday"},{"questionItemId":"[\"request_user_input_async\",\"call-question\",1]","question":"What should we check?","answer":"Navigation"}]</send_user_message_question_reply>"#
+        let reply = ReadItem(id: "reply", type: "userMessage", state: "completed", text: body, createdAt: "2000")
+        let original = snapshot([form, reply], clients: [])
+        let cached = try JSONDecoder().decode(ConversationSnapshot.self, from: JSONEncoder().encode(original))
+        let paged = try snapshot([reply], clients: []).mergingOlder(snapshot([form], clients: []))
+        for value in [original, cached, paged] {
+            let rows = value.rows(author: "Ada")
+            XCTAssertEqual(rows.map(\.id), ["turn/call-question"])
+            let question = try XCTUnwrap(rows.first?.nativeQuestion)
+            XCTAssertEqual(question.questions.first?.options, ["Saturday", "Sunday"])
+            XCTAssertEqual(question.answers, [0: "Saturday", 1: "Navigation"])
+            XCTAssertTrue(question.isAnswered)
+        }
+        let unloaded = try XCTUnwrap(snapshot([reply], clients: []).rows(author: "Ada").first)
+        XCTAssertEqual(unloaded.text, "Which day?\nSaturday\n\nWhat should we check?\nNavigation")
+        XCTAssertTrue(unloaded.isUser)
+    }
+    func testNativeQuestionReplyNeverHidesUnmatchedOrMalformedInputOrAttachments() throws {
+        let form = ReadItem(id: "call-question", type: "agentMessage", state: "completed", text: "", createdAt: "1000",
+            payload: ["delivery": .string("async"), "questions": .array([.object(["title": .string("Which day?")])])])
+        let body = #"<send_user_message_question_reply>[{"questionItemId":"[\"request_user_input_async\",\"call-question\",0]","question":"Different question","answer":"Saturday"}]</send_user_message_question_reply>"#
+        let reply = ReadItem(id: "reply", type: "userMessage", state: "completed", text: body, createdAt: "2000")
+        let rows = snapshot([form, reply], clients: []).rows(author: "Ada")
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertFalse(try XCTUnwrap(rows.first?.nativeQuestion).isAnswered)
+        XCTAssertEqual(rows.last?.text, "Different question\nSaturday")
+        for malformed in ["<send_user_message_question_reply>broken</send_user_message_question_reply>",
+                          body + "\nKeep this additional text.",
+                          body.replacingOccurrences(of: "request_user_input_async", with: "unknown") ] {
+            XCTAssertEqual(ReadRow(id: "user", author: "You", text: malformed, isUser: true, timestamp: "1").text, malformed)
+        }
+        let attached = ReadRow(id: "attached", author: "You", text: body.replacingOccurrences(of: "Different question", with: "Which day?"),
+                               isUser: true, timestamp: "2000", attachmentIds: ["photo"])
+        let withAttachment = ReadRow.reconcilingQuestions([try XCTUnwrap(rows.first), attached])
+        XCTAssertEqual(withAttachment.count, 2)
+        XCTAssertEqual(withAttachment.last?.attachmentIds, ["photo"])
+        XCTAssertTrue(try XCTUnwrap(withAttachment.first?.nativeQuestion).isAnswered)
+    }
     func testRuntimeEchoUsesCanonicalBodyIdentityAndTimestamp() throws {
         let original = snapshot([echo("runtime", client: "client")])
         let cached = try JSONDecoder().decode(ConversationSnapshot.self, from: JSONEncoder().encode(original))

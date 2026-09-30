@@ -1078,6 +1078,25 @@ for line in sys.stdin:
     elif method == 'thread/goal/clear':
         if os.path.exists(root + '/goal.json'): os.remove(root + '/goal.json')
         result = {}
+    elif method == 'project/list' and os.path.exists(root + '/native-thread.json'):
+        projects = json.load(open(root + '/native-projects.json')) if os.path.exists(root + '/native-projects.json') else [{'id':'native-project','roots':[{'path':root + '/project-source'}]}]
+        result = {'data':projects}
+    elif method == 'project/read' and os.path.exists(root + '/native-thread.json'):
+        projects = json.load(open(root + '/native-projects.json')) if os.path.exists(root + '/native-projects.json') else [{'id':'native-project','roots':[{'path':root + '/project-source'}]}]
+        project = next((p for p in projects if p['id'] == r['params']['projectId']), None)
+        result = {'project':project}
+    elif method == 'project/create' and os.path.exists(root + '/native-thread.json'):
+        result = {'project':{'id':'created-native-project','roots':r['params']['roots']}}
+    elif method == 'thread/metadata/update' and os.path.exists(root + '/native-thread.json'):
+        if os.path.exists(root + '/native-metadata-error.json'):
+            print(json.dumps({'id':r['id'],'error':json.load(open(root + '/native-metadata-error.json'))}),flush=True)
+            continue
+        thread = json.load(open(root + '/native-thread.json'))
+        thread['projectId'] = r['params']['projectId']
+        with open(root + '/native-thread.json','w') as saved: json.dump(thread,saved)
+        result = {'thread':thread}
+    elif method == 'thread/read' and os.path.exists(root + '/native-thread.json'):
+        result = {'thread':json.load(open(root + '/native-thread.json'))}
     elif method == 'thread/start': result = {'thread':{'id':'thread'}}
     elif method == 'turn/start':
         with open(root + '/accepted-client', 'w') as saved: saved.write(r['params']['clientUserMessageId'])

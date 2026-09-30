@@ -841,6 +841,25 @@ struct SidebarView: View {
         if let conversation = thread.conversationId {
             model.projects.noteOpened(conversation)
             shell.open(host: host, conversation: conversation)
+            // Saved history opens immediately, including offline. A native
+            // Codex thread can still need its desktop project repaired.
+            if thread.family == .codex, !thread.reference.hasPrefix("wonder:"), model.macConnected == true {
+                let scope = model.assignmentScope
+                let repairFailure = "Your chat opened, but its project on your Mac couldn’t be updated. Try opening it again."
+                Task {
+                    do {
+                        _ = try await model.projects.attach(projectID, thread: thread)
+                        if scope == model.assignmentScope, model.controlErrors[conversation] == repairFailure {
+                            model.controlErrors[conversation] = nil
+                        }
+                    }
+                    catch is CancellationError {}
+                    catch {
+                        guard scope == model.assignmentScope, !model.accessEnded else { return }
+                        model.controlErrors[conversation] = repairFailure
+                    }
+                }
+            }
             return
         }
         guard busyThread == nil else { return }

@@ -523,6 +523,10 @@ struct ConversationView: View {
                                              implement: implementPlan)
                                         .frame(maxWidth: 640, alignment: .leading)
                                 } else if let row = entry.rows.first, readOnly || !(model.asyncQuestions[chat.id] ?? []).contains(where: { $0.rowId == row.id }) {
+                                if let question = row.nativeQuestion {
+                                    NativeQuestionHistoryRow(question: question, rowID: row.id, author: row.author)
+                                        .frame(maxWidth: 640, alignment: .leading)
+                                } else {
                                 let pending = model.composers[chat.id]?.pending
                                 let speakerBot = row.authorId.flatMap { id in model.managedBots.first { $0.id == id } }
                                 let messageAttachments = messageAttachments(for: row, metadata: attachmentMetadata)
@@ -546,6 +550,7 @@ struct ConversationView: View {
                                     },
                                     openDocument: { workspaceRequest = WorkspaceBrowserRequest(attachmentIDs: row.attachmentIds) },
                                     avatarColor: speakerBot?.avatarColor, avatarShape: speakerBot?.avatarShape, avatarPalette: speakerBot?.avatarPalette)
+                                }
                                 }
     }
     private func toggleActivity(entry: ChatFeedEntry, isExpanded: Bool) {
@@ -3448,6 +3453,45 @@ struct QueueEditor: View {
     private func save() {
         busy = true; failure = nil
         Task { defer { busy = false }; do { try await model.changeQueue(chat, item: original, body: text); dismiss() } catch { failure = "The message changed or started. Your edit was not confirmed."; try? await model.loadQueue(chat) } }
+    }
+}
+
+struct NativeQuestionHistoryRow: View {
+    let question: NativeQuestionPresentation
+    let rowID: String
+    let author: String
+    @State private var expanded: Bool
+    init(question: NativeQuestionPresentation, rowID: String, author: String) {
+        self.question = question; self.rowID = rowID; self.author = author
+        _expanded = State(initialValue: !question.isAnswered)
+    }
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ForEach(question.questions.indices, id: \.self) { index in
+                let prompt = question.questions[index]
+                let answer = question.answers[index]
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(prompt.title).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+                    let options = prompt.options ?? []
+                    ForEach(options.indices, id: \.self) { optionIndex in
+                        let option = options[optionIndex]
+                        Label(option, systemImage: answer == option ? "checkmark.circle.fill" : "circle")
+                            .font(.subheadline)
+                            .foregroundStyle(answer == option ? .primary : .secondary)
+                            .accessibilityLabel(answer == option ? "Your answer: " + option + ", selected" : option)
+                    }
+                    if let answer, !(prompt.options ?? []).contains(answer) {
+                        Text(answer).font(.subheadline).textSelection(.enabled).accessibilityLabel("Your answer: " + answer)
+                    }
+                }.padding(.vertical, 8)
+            }
+        } label: {
+            let title = question.isAnswered ? "Answered question" : "Question"
+            Text(title).accessibilityLabel(author + ": " + title)
+        }
+        .font(.footnote).padding(.horizontal, 12).padding(.vertical, 8)
+        .accessibilityIdentifier("native-question-" + rowID)
+        .accessibilityValue(expanded ? "Expanded" : "Collapsed")
     }
 }
 

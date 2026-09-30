@@ -218,12 +218,15 @@ import WonderPairing
 
     /// Opening a catalog thread attaches it; this starts no model work.
     func attach(_ projectID: String, thread: ProjectThreadSummary) async throws -> String {
-        if let id = thread.conversationId { return id }
+        // Reattach native Codex threads so a missing desktop project assignment
+        // is repaired on open. Drafts have no native metadata to synchronize.
+        if let id = thread.conversationId, thread.family != .codex || thread.reference.hasPrefix("wonder:") { return id }
         guard let model, let scope = fenced() else { throw PairingFailure.response(401) }
         let attached: ProjectThreadSummary = try await model.manage(
             "/api/v1/projects/\(ConnectionModel.escape(projectID))/threads/attach", method: "POST",
             body: JSONSerialization.data(withJSONObject: ["reference": thread.reference]))
         guard isCurrent(scope), let id = attached.conversationId else { throw CancellationError() }
+        if let existing = thread.conversationId, existing != id { throw ReadFailure.wrongConversation }
         if var state = threads[projectID], let index = state.threads.firstIndex(where: { $0.reference == thread.reference }) {
             state.threads[index] = attached
             threads[projectID] = state

@@ -695,6 +695,46 @@ public struct AsyncQuestionPrompt: Codable, Sendable {
     public let title: String
     public let options: [String]?
 }
+
+/// Provider history carries the form and its reply as separate items. These
+/// saved forms are read-only; pending actions still belong to the host API.
+public struct NativeQuestionPresentation: Sendable {
+    public let questions: [AsyncQuestionPrompt]
+    public internal(set) var answers: [Int: String] = [:]
+    public var isAnswered: Bool { questions.indices.allSatisfy { answers[$0] != nil } }
+
+    static func prepare(_ item: ReadItem) -> Self? {
+        guard item.type == "agentMessage", item.payload?["delivery"]?.string == "async",
+              let values = item.payload?["questions"]?.array, !values.isEmpty, values.count <= 20,
+              let data = try? JSONEncoder().encode(values),
+              let questions = try? JSONDecoder().decode([AsyncQuestionPrompt].self, from: data),
+              questions.allSatisfy({ !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return nil }
+        return Self(questions: questions)
+    }
+}
+
+struct NativeQuestionReply: Decodable, Sendable {
+    let questionItemId: String
+    let question: String
+    let answer: String
+    var target: (itemID: String, index: Int)? {
+        guard let data = questionItemId.data(using: .utf8),
+              let values = try? JSONDecoder().decode([ThreadValue].self, from: data), values.count == 3,
+              values[0].string == "request_user_input_async", let itemID = values[1].string, !itemID.isEmpty,
+              let index = values[2].number, index >= 0, index < 20, index.rounded() == index else { return nil }
+        return (itemID, Int(index))
+    }
+    static func parse(_ text: String) -> [Self]? {
+        let start = "<send_user_message_question_reply>"
+        let end = "</send_user_message_question_reply>"
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix(start), trimmed.hasSuffix(end), trimmed.utf8.count <= 262_144,
+              let data = String(trimmed.dropFirst(start.count).dropLast(end.count)).data(using: .utf8),
+              let replies = try? JSONDecoder().decode([Self].self, from: data),
+              !replies.isEmpty, replies.count <= 20, replies.allSatisfy({ $0.target != nil && !$0.question.isEmpty }) else { return nil }
+        return replies
+    }
+}
 public struct AsyncAnswerIntent: Codable, Sendable {
     public let answers: [String]
     public let skip: Bool

@@ -206,7 +206,8 @@ public struct ConversationSnapshot: Codable, Sendable {
                 }
             }
             var seen = Set<String>()
-            return (merged + missingUsers).filter { !(!$0.isUser && ($0.item == nil || $0.item?.type == "agentMessage") && $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && seen.insert($0.id).inserted }.sorted { $0.time < $1.time }
+            let visible = (merged + missingUsers).filter { !(!$0.isUser && $0.nativeQuestion == nil && ($0.item == nil || $0.item?.type == "agentMessage") && $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && seen.insert($0.id).inserted }.sorted { $0.time < $1.time }
+            return ReadRow.reconcilingQuestions(visible)
         }
         return (messages.filter { !$0.wasCancelledBeforeDispatch }.map { ReadRow(id: "user-" + ($0.clientMessageId ?? $0.messageId), author: "You", text: $0.body, isUser: true, timestamp: $0.createdAt, attachmentIds: $0.attachmentIds) }
          + assistantMessages.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.map { ReadRow(id: $0.rowId, author: author, text: $0.text, isUser: false, timestamp: $0.createdAt) })
@@ -550,6 +551,8 @@ public struct ReadRow: Identifiable, Sendable {
     public private(set) var profileStatus: String?
     public private(set) var activitySummary: ActivityPresentation?
     public private(set) var toolFiles: [ConversationFile] = []
+    public private(set) var nativeQuestion: NativeQuestionPresentation?
+    private let nativeQuestionReplies: [NativeQuestionReply]?
     /// Commentary is visible Bot speech, never private reasoning or a tool result.
     public var isCommentary: Bool { !isUser && item?.type == "agentMessage" && item?.payload?["phase"]?.string == "commentary" }
     public init(id: String, author: String, text: String, isUser: Bool, timestamp: String, authorId: String? = nil,
@@ -559,11 +562,39 @@ public struct ReadRow: Identifiable, Sendable {
         self.turnId = turnId; self.item = item
         self.commandSummary = item.flatMap(CommandSummary.prepare)
         self.fileChangeSummary = item.flatMap(FileChangeSummary.prepare)
-        self.id = id; self.author = author; self.authorId = authorId; self.text = text; self.isUser = isUser; self.timestamp = timestamp
+        nativeQuestion = item.flatMap(NativeQuestionPresentation.prepare)
+        nativeQuestionReplies = isUser ? NativeQuestionReply.parse(text) : nil
+        self.id = id; self.author = author; self.authorId = authorId
+        self.text = nativeQuestionReplies?.map { $0.question + "\n" + $0.answer }.joined(separator: "\n\n") ?? text
+        self.isUser = isUser; self.timestamp = timestamp
         time = Double(timestamp).map { $0 / 1000 } ?? ReadTimestamp.seconds(timestamp) ?? 0
         profileStatus = makeProfileStatus()
         activitySummary = presentation(includeDetails: false)
         toolFiles = makeToolFiles()
+    }
+
+    static func reconcilingQuestions(_ rows: [Self]) -> [Self] {
+        var rows = rows
+        let questions = Dictionary(rows.indices.compactMap { index -> (String, Int)? in
+            guard rows[index].nativeQuestion != nil, let id = rows[index].item?.id else { return nil }
+            return (id, index)
+        }, uniquingKeysWith: { first, _ in first })
+        var answeredReplyIDs = Set<String>()
+        for row in rows {
+            guard let replies = row.nativeQuestionReplies else { continue }
+            var matched = 0
+            for reply in replies {
+                guard let target = reply.target, let index = questions[target.itemID],
+                      let form = rows[index].nativeQuestion, form.questions.indices.contains(target.index),
+                      form.questions[target.index].title == reply.question else { continue }
+                rows[index].nativeQuestion?.answers[target.index] = reply.answer
+                matched += 1
+            }
+            // A paged answer stays readable until all its questions are loaded.
+            // Attachments remain visible even when the form owns the reply text.
+            if matched == replies.count, row.attachmentIds.isEmpty { answeredReplyIDs.insert(row.id) }
+        }
+        return rows.filter { !answeredReplyIDs.contains($0.id) }
     }
 }
 

@@ -1236,6 +1236,91 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertFalse(restarted.projects.hasUnread("project-chat"))
     }
 
+    // Contract: a project request stops appearing in Queue when the Mac starts
+    // it, while genuinely waiting requests remain editable. Regression: project
+    // chats have no botId, so foreground/replay refreshes never reloaded Queue.
+    @MainActor func testProjectQueueRefreshRetiresStartedMessagesAndKeepsWaitingMessages() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        model.projects.forgetCache()
+        defer { model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        let detail = try JSONDecoder().decode(ProjectConversationDetail.self, from: projectDetail(pinned: false))
+        model.registerProjectConversation(detail)
+        let chat = model.projectChat(detail)
+        XCTAssertNil(chat.botId)
+        let path = "/api/v1/conversations/" + chat.id
+        let queue: [[String: Any]] = ["first", "waiting"].map { id in
+            ["id": id, "clientMessageId": id + "-client", "body": id + " request", "revision": 1, "attachmentIds": []]
+        }
+        func snapshot(started: Bool, finished: Bool = false) throws -> Data {
+            let messages: [[String: Any]] = ["first", "waiting"].enumerated().map { index, id in
+                var message: [String: Any] = ["messageId": id, "clientMessageId": id + "-client", "body": id + " request",
+                    "state": finished ? "completed" : started && index == 0 ? "streaming" : "accepted_by_wonder",
+                    "createdAt": "\(1000 + index)", "attachmentIds": []]
+                if finished || started && index == 0 { message["codexTurnId"] = id + "-turn" }
+                return message
+            }
+            let turns: [[String: Any]] = (finished ? ["first", "waiting"] : started ? ["first"] : []).map { id in
+                ["id": id + "-turn", "status": finished ? "completed" : "inProgress", "items": [
+                    ["id": id + "-item", "type": "userMessage", "state": "completed", "text": id + " request",
+                     "payload": ["clientId": id + "-client"], "createdAt": id == "first" ? "1000" : "1001"]
+                ]]
+            }
+            return try JSONSerialization.data(withJSONObject: ["conversationId": chat.id, "hostEpoch": "epoch", "lastSequence": 1,
+                "messages": messages, "assistantMessages": [], "thread": ["hydrated": true, "turns": turns]])
+        }
+        MessageRecoveryURLProtocol.enqueue(path: path, body: try snapshot(started: false))
+        MessageRecoveryURLProtocol.enqueue(path: path + "/queue", body: try JSONSerialization.data(withJSONObject: queue))
+        await model.open(chat)
+        XCTAssertEqual(model.queues[chat.id]?.map(\.id), ["first", "waiting"])
+        XCTAssertTrue(model.feedRows(for: chat).isEmpty)
+
+        MessageRecoveryURLProtocol.enqueue(path: path, body: try snapshot(started: true))
+        MessageRecoveryURLProtocol.enqueue(path: path + "/queue", body: try JSONSerialization.data(withJSONObject: [queue[1]]))
+        await model.loadChats(force: true)
+        XCTAssertEqual(model.activeTurn(chat.id), "first-turn")
+        XCTAssertEqual(model.queues[chat.id]?.map(\.id), ["waiting"])
+        XCTAssertEqual(model.feedRows(for: chat).map(\.id), ["user-first-client"])
+
+        MessageRecoveryURLProtocol.enqueue(path: path, body: try snapshot(started: true, finished: true))
+        MessageRecoveryURLProtocol.enqueue(path: path + "/queue", body: Data("[]".utf8))
+        await model.loadChats(force: true)
+        XCTAssertNil(model.activeTurn(chat.id))
+        XCTAssertTrue(model.queues[chat.id]?.isEmpty == true)
+        XCTAssertEqual(model.feedRows(for: chat).map(\.id), ["user-first-client", "user-waiting-client"])
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path + "/queue", includingEmpty: true).count, 3)
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: path + "/messages").isEmpty)
+    }
+
+    // Opening an already attached Codex thread must reach the host association
+    // check instead of treating its cached conversation ID as sufficient.
+    @MainActor func testCodexProjectOpenReattachesExistingNativeThread() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let thread = ProjectThreadSummary(reference: "codex:fixture", conversationId: "project-chat", title: "Thread", family: .codex,
+            updatedAt: 1, isPinned: false, hasUnread: false, isWorking: false)
+        let path = "/api/v1/projects/project/threads/attach"
+        MessageRecoveryURLProtocol.enqueue(path: path, body: try JSONEncoder().encode(thread))
+        let id = try await model.projects.attach("project", thread: thread)
+        XCTAssertEqual(id, "project-chat")
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path).count, 1)
+        let request = try XCTUnwrap(MessageRecoveryURLProtocol.bodies(path: path).first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: String])
+        XCTAssertEqual(payload, ["reference": "codex:fixture"])
+        let draft = ProjectThreadSummary(reference: "wonder:draft", conversationId: "draft-chat", title: "Draft", family: .codex,
+            updatedAt: 1, isPinned: false, hasUnread: false, isWorking: false)
+        let draftID = try await model.projects.attach("project", thread: draft)
+        XCTAssertEqual(draftID, "draft-chat")
+        let claude = ProjectThreadSummary(reference: "claude:fixture", conversationId: "claude-chat", title: "Claude", family: .claude,
+            updatedAt: 1, isPinned: false, hasUnread: false, isWorking: false)
+        let claudeID = try await model.projects.attach("project", thread: claude)
+        XCTAssertEqual(claudeID, "claude-chat")
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path).count, 1, "Drafts and attached Claude sessions need no native Codex repair")
+    }
+
     @MainActor private func prepareProject(_ model: ConnectionModel) async throws {
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
         await model.projects.refresh()
@@ -1820,6 +1905,66 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(buffer.popFirst(), [.text("new lease")])
     }
 
+    @MainActor func testComputerViewportHitTestsLetterboxWithinTheWholeAvailableArea() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        let connection = ConnectionModel(saved: nil, persistConnection: { _ in })
+        let model = ComputerSessionModel(model: connection, chat: DiagnosticSubagentFixture.parentChat())
+        let host = UIHostingController(rootView: ComputerViewport(model: model).frame(width: 1, height: 1))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        let width = min(400, window.bounds.width)
+        let wideWidth = min(600, window.bounds.width)
+        let sizes = [CGSize(width: width, height: min(600, window.bounds.height)),
+                     CGSize(width: wideWidth, height: wideWidth / 2.4),
+                     CGSize(width: width, height: min(240, window.bounds.height))]
+        var hitEvidence: [String] = []
+        func inputView(in view: UIView) -> ComputerGestureSurface.InputView? {
+            if let input = view as? ComputerGestureSurface.InputView { return input }
+            return view.subviews.lazy.compactMap { inputView(in: $0) }.first
+        }
+        for size in sizes {
+            host.rootView = ComputerViewport(model: model).frame(width: size.width, height: size.height)
+            host.view.layoutIfNeeded()
+            for _ in 0..<50 {
+                if let input = inputView(in: host.view), input.bounds.size == size { break }
+                try await Task.sleep(for: .milliseconds(10))
+                host.view.layoutIfNeeded()
+            }
+            let input = try XCTUnwrap(inputView(in: host.view))
+            XCTAssertEqual(input.bounds.width, size.width, accuracy: 1)
+            XCTAssertEqual(input.bounds.height, size.height, accuracy: 1)
+            let transform = model.viewportTransform(in: size)
+            let points = transform.content.minY > 0
+                ? [CGPoint(x: size.width / 2, y: transform.content.minY / 2),
+                   CGPoint(x: size.width / 2, y: (transform.content.maxY + size.height) / 2)]
+                : [CGPoint(x: transform.content.minX / 2, y: size.height / 2),
+                   CGPoint(x: (transform.content.maxX + size.width) / 2, y: size.height / 2)]
+            for point in points {
+                XCTAssertNil(transform.point(point), "Direct touch must keep rejecting the letterbox.")
+                let hostedPoint = input.convert(point, to: host.view)
+                let hit = host.view.hitTest(hostedPoint, with: nil)
+                hitEvidence.append("Viewport: \(size), point: \(hostedPoint), host: \(host.view.bounds), hit: \(String(describing: hit.map { type(of: $0) }))")
+                XCTAssertTrue(host.view.bounds.contains(hostedPoint), "The hosted fixture point must be on screen.")
+                XCTAssertTrue(hit === input,
+                              "The black letterbox must deliver gestures to the trackpad surface. \(hitEvidence.last ?? "")")
+            }
+            let moved = transform.moving(CGPoint(x: 0.5, y: 0.5), by: CGSize(width: 40, height: -20))
+            XCTAssertEqual(moved.x, 0.5 + 40 / transform.content.width, accuracy: 0.001)
+            XCTAssertEqual(moved.y, 0.5 - 20 / transform.content.height, accuracy: 0.001)
+        }
+        let evidence = XCTAttachment(string: hitEvidence.joined(separator: "\n"))
+        evidence.name = "Computer letterbox hit-test geometry"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+    }
+
     @MainActor func testComputerViewportPanAndKeyboardResizeUseOneTransform() {
         let large = ComputerViewportTransform(size: CGSize(width: 400, height: 225), aspect: 16 / 9, zoom: 2,
                                              center: CGPoint(x: 0.65, y: 0.4))
@@ -1876,6 +2021,12 @@ final class WonderDiagnosticsTests: XCTestCase {
         first.recenterPointer()
         XCTAssertNil(first.controlLease)
         first.inputMode = .directTouch
+        let size = CGSize(width: 400, height: 600)
+        first.dragBegan(at: CGPoint(x: 200, y: 10), in: size)
+        first.dragMoved(to: CGPoint(x: 300, y: 300), in: size)
+        first.dragEnded(at: CGPoint(x: 300, y: 590), in: size)
+        XCTAssertEqual(first.pointerState.position, CGPoint(x: 0.5, y: 0.5),
+                       "A rejected direct-touch drag must not move the pointer when it ends.")
         let second = ComputerSessionModel(model: connection, chat: chat, inputPreferences: preferences)
         XCTAssertEqual(second.inputMode, .directTouch)
     }

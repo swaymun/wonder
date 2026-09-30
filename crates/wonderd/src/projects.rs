@@ -1263,6 +1263,11 @@ pub(crate) async fn attach(
     };
     match attach_native(&state, &project, family, &native).await {
         Ok(conversation) => {
+            if family == AgentFamily::Codex {
+                if let Err(message) = associate_codex_project(&state, &project, &native).await {
+                    return error(StatusCode::SERVICE_UNAVAILABLE, message);
+                }
+            }
             let summary = attached_summary(
                 &state,
                 &conversation,
@@ -2146,6 +2151,7 @@ async fn dispatch_inner(
             return Err("This conversation belongs to a Bot.".into());
         }
         (AgentFamily::Codex, Some(binding)) => {
+            associate_codex_project(state, &project, &binding.thread_id).await?;
             let (sandbox, approval, _) = codex_policy(&conversation.access_mode, &roots);
             // Read-only check first: a desktop client may be running this thread.
             let turns = result(&rpc, "thread/turns/list", json!({"threadId": binding.thread_id, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"})).await
@@ -2398,18 +2404,25 @@ async fn native_codex_project(
     project: &StoredProject,
 ) -> Option<String> {
     let store = state.projects.codex_store.clone();
-    if let Ok(Some(existing)) = state
+    let existing = state
         .store
         .project_provider_ref(&project.id, AgentFamily::Codex, &store)
         .await
-    {
-        return Some(existing);
-    }
+        .ok()?;
     let wanted: HashSet<String> = project
         .roots
         .iter()
         .map(|r| r.canonical_path.clone())
         .collect();
+    if let Some(id) = existing.as_deref() {
+        if let Ok(read) = result(rpc, "project/read", json!({"projectId": id})).await {
+            if read.pointer("/project/id").and_then(Value::as_str) == Some(id)
+                && native_project_roots_match(&read["project"], &wanted)
+            {
+                return Some(id.to_owned());
+            }
+        }
+    }
     let listed = result(rpc, "project/list", json!({"limit": 100}))
         .await
         .ok()?;
@@ -2419,19 +2432,7 @@ async fn native_codex_project(
         .into_iter()
         .flatten()
         .find_map(|native| {
-            let roots: HashSet<String> = native
-                .get("roots")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|r| r.get("path").and_then(Value::as_str))
-                .map(|p| {
-                    std::fs::canonicalize(p)
-                        .map(|c| c.to_string_lossy().into_owned())
-                        .unwrap_or_else(|_| p.to_owned())
-                })
-                .collect();
-            (roots == wanted)
+            native_project_roots_match(native, &wanted)
                 .then(|| native.get("id").and_then(Value::as_str).map(str::to_owned))
                 .flatten()
         });
@@ -2447,18 +2448,138 @@ async fn native_codex_project(
                     .filter(|r| r.id != primary.id)
                     .map(|r| json!({"path": r.path})),
             );
-            let created = result(rpc, "project/create", json!({"idempotencyKey": format!("wonder-{}", project.id), "name": project.name, "roots": roots})).await.ok()?;
+            // A folder edit needs a new identity even when an older project
+            // creation key still points at the previous folders.
+            let mut identity_roots = wanted.iter().collect::<Vec<_>>();
+            identity_roots.sort();
+            let roots_hash = hex::encode(Sha256::digest(serde_json::to_vec(&identity_roots).ok()?));
+            let created = result(rpc, "project/create", json!({"idempotencyKey": format!("wonder-{}-{roots_hash}", project.id), "name": project.name, "roots": roots})).await.ok()?;
+            if !native_project_roots_match(&created["project"], &wanted) {
+                return None;
+            }
             created
                 .pointer("/project/id")
                 .and_then(Value::as_str)?
                 .to_owned()
         }
     };
-    state
-        .store
-        .set_project_provider_ref(&project.id, AgentFamily::Codex, &store, &id)
+    let winner = match existing {
+        Some(previous) => {
+            state
+                .store
+                .replace_project_provider_ref(
+                    &project.id,
+                    AgentFamily::Codex,
+                    &store,
+                    &previous,
+                    &id,
+                )
+                .await
+        }
+        None => {
+            state
+                .store
+                .set_project_provider_ref(&project.id, AgentFamily::Codex, &store, &id)
+                .await
+        }
+    }
+    .ok()?;
+    if winner == id {
+        return Some(winner);
+    }
+    // Another caller won the first insert or stale-reference replacement.
+    // Never associate a thread using that unchecked destination.
+    let read = result(rpc, "project/read", json!({"projectId": winner}))
         .await
-        .ok()
+        .ok()?;
+    (read.pointer("/project/id").and_then(Value::as_str) == Some(winner.as_str())
+        && native_project_roots_match(&read["project"], &wanted))
+    .then_some(winner)
+}
+
+fn native_project_roots_match(native: &Value, wanted: &HashSet<String>) -> bool {
+    let Some(roots) = native.get("roots").and_then(Value::as_array) else {
+        return false;
+    };
+    let Some(paths) = roots
+        .iter()
+        .map(|root| root.get("path").and_then(Value::as_str))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let canonical: HashSet<String> = paths
+        .into_iter()
+        .map(|path| {
+            std::fs::canonicalize(path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| path.to_owned())
+        })
+        .collect();
+    canonical == *wanted
+}
+
+/// Imported or older native threads can have a cwd without a desktop project.
+/// Repair only unassigned, in-project roots; preserve an owner's existing choice.
+async fn associate_codex_project(
+    state: &AppState,
+    project: &StoredProject,
+    native: &str,
+) -> Result<(), String> {
+    let rpc = codex_rpc(state).await?;
+    let read = result(&rpc, "thread/read", json!({"threadId": native}))
+        .await
+        .map_err(|_| "This Codex thread could not be checked on your Mac.".to_owned())?;
+    let thread = read.get("thread").ok_or("Codex returned no thread.")?;
+    if thread.get("id").and_then(Value::as_str) != Some(native) {
+        return Err("Codex returned a different thread. Nothing was changed.".into());
+    }
+    let cwd = thread
+        .get("cwd")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if project.root_for(cwd).is_none()
+        || thread
+            .get("parentThreadId")
+            .and_then(Value::as_str)
+            .is_some()
+    {
+        return Err("This thread is outside the project's folders.".into());
+    }
+    if thread
+        .get("projectId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+    {
+        return Ok(());
+    }
+    let Some(id) = native_codex_project(state, &rpc, project).await else {
+        // Older runtimes can still continue a thread by cwd alone.
+        return Ok(());
+    };
+    let response = rpc
+        .request(
+            "thread/metadata/update",
+            json!({"threadId": native, "projectId": id}),
+        )
+        .await
+        .map_err(|_| {
+            "This thread's desktop project could not be saved. Try opening it again.".to_owned()
+        })?;
+    if let Some(error) = response.error {
+        return if error.code == -32601 {
+            Ok(())
+        } else {
+            Err("This thread's desktop project could not be saved. Try opening it again.".into())
+        };
+    }
+    let saved = response.result.ok_or("Codex returned no saved project.")?;
+    if saved.pointer("/thread/id").and_then(Value::as_str) != Some(native)
+        || saved.pointer("/thread/projectId").and_then(Value::as_str) != Some(id.as_str())
+    {
+        return Err("This thread's desktop project was not saved. Try opening it again.".into());
+    }
+    Ok(())
 }
 
 /// Resolve an uncertain project send by its client message identity.
@@ -2747,6 +2868,161 @@ mod tests {
         })
         .unwrap();
         crate::tests::validate_http_contract("desktopContinuation", &continuation);
+    }
+
+    // Contract: opening an imported native thread repairs its missing desktop
+    // project without starting a turn, retargeting an assigned thread, or using
+    // a sibling folder. The existing real transport fixture owns this boundary.
+    #[tokio::test]
+    async fn native_project_association_repairs_only_unassigned_member_threads() {
+        let (dir, mut state) = crate::ingestion::tests::fixture().await;
+        let source = dir.path().join("project-source");
+        std::fs::create_dir(&source).unwrap();
+        let roots = validate_folders(&[source.to_string_lossy().into_owned()], &[]).unwrap();
+        state
+            .store
+            .create_project("project", "request", "hash", "Test", &roots, 0, "now")
+            .await
+            .unwrap();
+        let project = state.store.project("project").await.unwrap().unwrap();
+        state.projects = ProjectRuntime::configured(
+            dir.path().join("codex"),
+            "test".into(),
+            &dir.path().join("home"),
+            &dir.path().join("claude"),
+            crate::ingestion::notification_sink(state.store.clone()),
+        );
+        let saved = dir.path().join("native-thread.json");
+        let write = |cwd: &FsPath, project: Value| {
+            std::fs::write(
+                &saved,
+                json!({"id":"native-thread", "cwd":cwd, "projectId":project}).to_string(),
+            )
+            .unwrap();
+        };
+        write(&source, Value::Null);
+        associate_codex_project(&state, &project, "native-thread")
+            .await
+            .unwrap();
+        let assigned: Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        assert_eq!(assigned["projectId"], "native-project");
+        // Reopening is idempotent; an explicit desktop choice wins.
+        associate_codex_project(&state, &project, "native-thread")
+            .await
+            .unwrap();
+        write(&source, json!("owner-project"));
+        associate_codex_project(&state, &project, "native-thread")
+            .await
+            .unwrap();
+        let assigned: Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        assert_eq!(assigned["projectId"], "owner-project");
+
+        // A cached provider reference may now describe another folder set.
+        // Replace it only after finding an exact current-folder match.
+        let listed = dir.path().join("native-projects.json");
+        std::fs::write(
+            &listed,
+            json!([
+                {"id":"native-project","roots":[{"path":dir.path().join("old-source")}]},
+                {"id":"current-native-project","roots":[{"path":source}]}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        write(&source, Value::Null);
+        associate_codex_project(&state, &project, "native-thread")
+            .await
+            .unwrap();
+        let assigned: Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        assert_eq!(assigned["projectId"], "current-native-project");
+        assert_eq!(
+            state
+                .store
+                .project_provider_ref(&project.id, AgentFamily::Codex, &state.projects.codex_store)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("current-native-project")
+        );
+
+        // If no desktop project still owns these roots, creation must not
+        // reuse the old folder set through its original idempotency key.
+        std::fs::write(
+            &listed,
+            json!([
+                {"id":"native-project","roots":[{"path":dir.path().join("old-source")}]}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        write(&source, Value::Null);
+        associate_codex_project(&state, &project, "native-thread")
+            .await
+            .unwrap();
+        let assigned: Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        assert_eq!(assigned["projectId"], "created-native-project");
+        std::fs::write(
+            &listed,
+            json!([
+                {"id":"created-native-project","roots":[{"path":source}]}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        // Only the protocol's optional-method code is a compatibility fallback.
+        // A supported persistence error must fail even with similar wording.
+        let rpc_error = dir.path().join("native-metadata-error.json");
+        std::fs::write(
+            &rpc_error,
+            json!({"code":-32601,"message":"feature unavailable"}).to_string(),
+        )
+        .unwrap();
+        write(&source, Value::Null);
+        associate_codex_project(&state, &project, "native-thread")
+            .await
+            .unwrap();
+        let unassigned: Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        assert!(unassigned["projectId"].is_null());
+        std::fs::write(
+            &rpc_error,
+            json!({"code":-32000,"message":"method not found while saving project metadata"})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(associate_codex_project(&state, &project, "native-thread")
+            .await
+            .is_err());
+        write(&dir.path().join("project-source-sibling"), Value::Null);
+        assert!(associate_codex_project(&state, &project, "native-thread")
+            .await
+            .is_err());
+        let requests: Vec<Value> = std::fs::read_to_string(dir.path().join("requests-jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let updates: Vec<_> = requests
+            .iter()
+            .filter(|r| r["method"] == "thread/metadata/update")
+            .collect();
+        assert_eq!(updates.len(), 5);
+        assert_eq!(
+            updates[0]["params"],
+            json!({"threadId":"native-thread", "projectId":"native-project"})
+        );
+        let created = requests
+            .iter()
+            .find(|r| r["method"] == "project/create")
+            .unwrap();
+        assert_ne!(created["params"]["idempotencyKey"], "wonder-project");
+        assert_eq!(created["params"]["roots"], json!([{"path":source}]));
+        assert!(!requests.iter().any(|r| matches!(
+            r["method"].as_str(),
+            Some("thread/start" | "thread/resume" | "turn/start")
+        )));
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
     }
 
     // First-send preparation owns metadata and request recovery only. Native

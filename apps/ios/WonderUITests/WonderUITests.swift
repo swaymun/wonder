@@ -709,6 +709,12 @@ import UIKit
         assertComputerControlRow(app)
         let preview = app.descendants(matching: .any).matching(identifier: "computer-session-preview").firstMatch
         XCTAssertEqual(preview.frame.width, app.frame.width, accuracy: 1, "Portrait preview must use the phone width.")
+        let status = app.descendants(matching: .any).matching(identifier: "computer-session-status").firstMatch
+        let controls = app.descendants(matching: .any).matching(identifier: "computer-session-controls-row").firstMatch
+        XCTAssertLessThanOrEqual(preview.frame.minY - status.frame.maxY, 24,
+                                 "The trackpad must include the black area below the computer status.")
+        XCTAssertEqual(preview.frame.maxY, controls.frame.minY, accuracy: 1,
+                       "The trackpad must reach the controls, including the lower black area.")
         app.buttons["computer-session-keyboard"].tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         assertComputerControlRow(app)
@@ -1270,6 +1276,32 @@ import UIKit
         XCTAssertTrue(waitUntilGone(trackpad, timeout: 5))
         selectComputerMoreAction(app, identifier: "computer-session-recenter")
         assertComputerMoreMenuExcludesTeaching(app)
+        let trackpadY: CGFloat = 0.12
+        let status = app.descendants(matching: .any).matching(identifier: "computer-session-status").firstMatch
+        let sourceDescription = status.value as? String ?? ""
+        let dimensions = sourceDescription.split(separator: "·").last?.split(separator: "×").compactMap {
+            Double($0.trimmingCharacters(in: .whitespaces))
+        } ?? []
+        // The coordinator supplies the actual source aspect when capture has
+        // a crop; otherwise the existing spoken source dimensions own it.
+        let sourceAspect = ProcessInfo.processInfo.environment["WONDER_COMPUTER_SOURCE_ASPECT_RATIO"].flatMap(Double.init)
+            ?? (dimensions.count == 2 && dimensions[1] > 0 ? dimensions[0] / dimensions[1] : 0)
+        guard sourceAspect.isFinite, sourceAspect > 0 else {
+            app.buttons["computer-session-done"].tap()
+            app.buttons["computer-session-close"].tap()
+            throw XCTSkip("Cannot verify the black trackpad area without the live source dimensions or crop aspect.")
+        }
+        let previewFrame = preview.frame
+        let blackTopInset = (previewFrame.height - min(previewFrame.height, previewFrame.width / CGFloat(sourceAspect))) / 2
+        guard trackpadY * previewFrame.height < blackTopInset else {
+            app.buttons["computer-session-done"].tap()
+            app.buttons["computer-session-close"].tap()
+            throw XCTSkip("The planned trackpad swipe is outside the top black area for the current viewport/source geometry.")
+        }
+        let blackAreaEvidence = XCTAttachment(string: "Source: \(sourceDescription)\nSource aspect: \(sourceAspect)\nViewport: \(previewFrame)\nTop black inset: \(blackTopInset)\nSwipe start: \(CGPoint(x: previewFrame.minX + previewFrame.width * 0.47, y: previewFrame.minY + previewFrame.height * trackpadY))\nSwipe end: \(CGPoint(x: previewFrame.minX + previewFrame.width * 0.53, y: previewFrame.minY + previewFrame.height * trackpadY))\nSwipes stay in the black area; remote pointer outcomes require independent Mac fixture receipts.")
+        blackAreaEvidence.name = "Physical black trackpad geometry"
+        blackAreaEvidence.lifetime = .keepAlways
+        add(blackAreaEvidence)
         let observationStart = Date()
         let preflightSeconds = observationStart.timeIntervalSince(preflightStarted)
         var commandDurations: [Double] = []
@@ -1283,8 +1315,8 @@ import UIKit
             XCTAssertEqual(preview.value as? String, "Live")
             let fromX: CGFloat = iteration.isMultiple(of: 2) ? 0.47 : 0.53
             let toX: CGFloat = iteration.isMultiple(of: 2) ? 0.53 : 0.47
-            let from = preview.coordinate(withNormalizedOffset: CGVector(dx: fromX, dy: 0.5))
-            let to = preview.coordinate(withNormalizedOffset: CGVector(dx: toX, dy: 0.5))
+            let from = preview.coordinate(withNormalizedOffset: CGVector(dx: fromX, dy: trackpadY))
+            let to = preview.coordinate(withNormalizedOffset: CGVector(dx: toX, dy: trackpadY))
             from.press(forDuration: 0.05, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0)
             preview.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             commandDurations.append(Date().timeIntervalSince(cycleStarted))
@@ -3276,6 +3308,36 @@ import UIKit
         XCTAssertEqual(claudeWeek.value as? String, "92% left")
         XCTAssertFalse(app.navigationBars["Claude usage"].exists)
         retainMenuScreenshot(app, name: "Claude usage inline settings")
+    }
+
+    func testNativeQuestionHistoryShowsSelectionsWithoutReplyMetadata() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        for size in ["UICTContentSizeCategoryL", "UICTContentSizeCategoryAccessibilityXXL"] {
+            app.launchArguments = ["-read-preview", "-send-preview", "-native-question-history-preview", "-UIPreferredContentSizeCategoryName", size]
+            app.launch()
+            let form = anyElement(app, identifier: "native-question-native-history-turn/native-history-question")
+            XCTAssertTrue(form.waitForExistence(timeout: 10))
+            XCTAssertEqual(form.value as? String, "Collapsed")
+            XCTAssertTrue(form.label.contains("Ada"), "The saved question must identify its speaker for VoiceOver")
+            for _ in 0..<10 {
+                form.tap()
+                XCTAssertEqual(form.value as? String, "Expanded")
+                XCTAssertTrue(app.staticTexts["Which day works best?"].exists)
+                let freeAnswer = app.staticTexts["Your answer: Navigation"]
+                XCTAssertTrue(freeAnswer.exists)
+                XCTAssertEqual(freeAnswer.label, "Your answer: Navigation")
+                let selectedAnswer = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Your answer: Saturday, selected")).firstMatch
+                XCTAssertTrue(selectedAnswer.exists)
+                XCTAssertEqual(selectedAnswer.label, "Your answer: Saturday, selected")
+                XCTAssertFalse(app.buttons["Reply"].exists, "Imported history must not create an actionable reply")
+                XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "send_user_message_question_reply")).firstMatch.exists)
+                form.tap()
+                XCTAssertEqual(form.value as? String, "Collapsed")
+            }
+            retainMenuScreenshot(app, name: "Native saved question " + size)
+            app.terminate()
+        }
     }
 
     func testQuestionMultipleChoicesSurviveQuestionNavigation() throws {

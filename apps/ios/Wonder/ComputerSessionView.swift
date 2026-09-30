@@ -432,7 +432,8 @@ final class ComputerSessionModel: ObservableObject {
     }
 
     func dragEnded(at location: CGPoint?, in size: CGSize) {
-        if inputMode == .directTouch, let location, let point = viewportTransform(in: size).point(location, clamped: true) {
+        if inputMode == .directTouch, heldPointerButton != nil, let location,
+           let point = viewportTransform(in: size).point(location, clamped: true) {
             pointer = point
             heldPointerPoint = (Double(point.x), Double(point.y))
         }
@@ -1119,6 +1120,7 @@ struct ComputerViewport: View {
     }
 
     var body: some View {
+        // Fit the source inside the viewport; gestures also need its black area.
         GeometryReader { proxy in
             let transform = model.viewportTransform(in: proxy.size)
             let videoFrame = transform.videoFrame(encodedAspect: ComputerSessionModel.encodedAspectRatio(model.session))
@@ -1173,7 +1175,6 @@ struct ComputerViewport: View {
         .accessibilityLabel("Computer screen preview")
         .accessibilityValue(model.receiverState.title)
         .accessibilityIdentifier("computer-session-preview")
-        .aspectRatio(ComputerSessionModel.sourceAspectRatio(model.session), contentMode: .fit)
     }
 }
 

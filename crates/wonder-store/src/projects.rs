@@ -463,6 +463,26 @@ impl Store {
             .ok_or_else(|| invalid("missing provider project"))
     }
 
+    /// Replace only the stale reference this caller checked. A concurrent
+    /// repair keeps its choice; callers must validate the returned winner.
+    pub async fn replace_project_provider_ref(
+        &self,
+        project: &str,
+        family: AgentFamily,
+        store: &str,
+        expected: &str,
+        provider_project_id: &str,
+    ) -> Result<String, sqlx::Error> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("UPDATE project_provider_refs SET provider_project_id=? WHERE project_id=? AND agent_family=? AND provider_store=? AND provider_project_id=?")
+            .bind(provider_project_id).bind(project).bind(family.as_str()).bind(store).bind(expected)
+            .execute(&mut *tx).await?;
+        let winner = sqlx::query_scalar("SELECT provider_project_id FROM project_provider_refs WHERE project_id=? AND agent_family=? AND provider_store=?")
+            .bind(project).bind(family.as_str()).bind(store).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(winner)
+    }
+
     /// Idempotent by creation request and by native identity: rediscovering a
     /// session returns its existing conversation instead of a duplicate.
     pub async fn create_project_conversation(
@@ -815,6 +835,56 @@ mod tests {
             creation_request_id: request,
             now: "now",
         }
+    }
+
+    // Contract: a stale native-project repair compares the value it checked;
+    // neither a duplicate insert nor a late repair can overwrite the winner.
+    #[tokio::test]
+    async fn provider_project_repairs_preserve_the_concurrent_winner() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        project(&store, "project", &["/work/app"]).await;
+        assert_eq!(
+            store
+                .set_project_provider_ref("project", AgentFamily::Codex, "home", "old")
+                .await
+                .unwrap(),
+            "old"
+        );
+        assert_eq!(
+            store
+                .set_project_provider_ref("project", AgentFamily::Codex, "home", "duplicate")
+                .await
+                .unwrap(),
+            "old"
+        );
+        assert_eq!(
+            store
+                .replace_project_provider_ref(
+                    "project",
+                    AgentFamily::Codex,
+                    "home",
+                    "old",
+                    "repaired"
+                )
+                .await
+                .unwrap(),
+            "repaired"
+        );
+        assert_eq!(
+            store
+                .replace_project_provider_ref("project", AgentFamily::Codex, "home", "old", "late")
+                .await
+                .unwrap(),
+            "repaired"
+        );
+        assert_eq!(
+            store
+                .project_provider_ref("project", AgentFamily::Codex, "home")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("repaired")
+        );
     }
 
     // Contract: creation retries converge on one project; a different payload

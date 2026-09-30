@@ -537,6 +537,20 @@ struct ManagedBotListMutationState {
                 }
                 if let data = try? JSONSerialization.data(withJSONObject: fixture), let value = try? JSONDecoder().decode(AsyncQuestion.self,from:data) { asyncQuestions["preview"] = [value] }
             }
+            if arguments.contains("-native-question-history-preview") {
+                let reply = #"<send_user_message_question_reply>[{"questionItemId":"[\"request_user_input_async\",\"native-history-question\",0]","question":"Which day works best?","answer":"Saturday"},{"questionItemId":"[\"request_user_input_async\",\"native-history-question\",1]","question":"What should we check?","answer":"Navigation"}]</send_user_message_question_reply>"#
+                let fixture: [String: Any] = ["conversationId":"preview", "hostEpoch":"preview", "lastSequence":1,
+                    "messages":[], "assistantMessages":[], "thread":["hydrated":true, "turns":[["id":"native-history-turn", "status":"completed", "items":[
+                        ["id":"native-history-question", "type":"agentMessage", "state":"completed", "text":"Which day works best?", "createdAt":"1000", "payload":["delivery":"async", "questions":[["title":"Which day works best?", "options":["Saturday", "Sunday"]], ["title":"What should we check?"]]]],
+                        ["id":"native-history-answer", "type":"userMessage", "state":"completed", "text":reply, "createdAt":"2000"],
+                        ["id":"native-history-final", "type":"agentMessage", "state":"completed", "text":"The saved reply is available.", "createdAt":"3000"]
+                    ]]]]]
+                if let data = try? JSONSerialization.data(withJSONObject: fixture),
+                   let snapshot = try? JSONDecoder().decode(ConversationSnapshot.self, from: data) {
+                    groups.removeValue(forKey: "preview")
+                    snapshots["preview"] = snapshot
+                }
+            }
             if arguments.contains("-computer-approval-preview") {
                 let fixture: [String: Any] = ["approvalId":"fixture-computer", "conversationId":"preview", "method":"item/tool/call", "actionNonce":"fixture", "params":["threadId":"fixture-thread", "turnId":"fixture-turn", "tool":"wonder_computer_use", "arguments":["action":"screenshot"]]]
                 if let data = try? JSONSerialization.data(withJSONObject: fixture), let value = try? JSONDecoder().decode(AttentionRequest.self, from: data) { attention = [value] }
@@ -976,7 +990,8 @@ struct ManagedBotListMutationState {
                 if let parent = selectedChat, parent.botId != nil { await loadSubagents(parent) }
                 await refreshConversation(chat)
                 await loadAsyncQuestions(chat)
-                if chat.botId != nil { try? await loadQueue(chat) }
+                // Project sends use the same queue even though they have no Bot ID.
+                if chat.botId != nil || isProject(chat) { try? await loadQueue(chat) }
                 if composers[chat.id]?.pending != nil, composers[chat.id]?.pending?.receipt == nil {
                     await deliver(chat)
                 }
@@ -2467,7 +2482,7 @@ struct ManagedBotListMutationState {
         if let chat = visibleChat {
             await refreshConversation(chat)
             await loadAsyncQuestions(chat)
-            if chat.botId != nil { try? await loadQueue(chat) }
+            if chat.botId != nil || isProject(chat) { try? await loadQueue(chat) }
         }
     }
 
@@ -2495,7 +2510,7 @@ struct ManagedBotListMutationState {
                 }
                 if let parent = self.selectedChat, parent.botId != nil { await self.loadSubagents(parent) }
                 await self.loadAttention()
-                if let chat = self.visibleChat, chat.botId != nil { try? await self.loadQueue(chat) }
+                if let chat = self.visibleChat, chat.botId != nil || self.isProject(chat) { try? await self.loadQueue(chat) }
                 // Events arriving during the request require another refresh,
                 // including the final token/completion when the stream goes quiet.
                 if before == self.projection.lastSequence { return }
