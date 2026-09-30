@@ -2068,6 +2068,7 @@
     },
     "agentFamily": { "enum": ["codex", "claude"] },
     "projectAccessMode": { "enum": ["read_only", "workspace", "full_access"] },
+    "claudeApproval": { "enum": ["ask", "accept_edits", "auto"] },
     "projectFolder": {
       "type": "object",
       "required": ["id", "path", "name", "isPrimary", "isAvailable"],
@@ -2108,7 +2109,7 @@
     },
     "projectsResponse": {
       "type": "object",
-      "required": ["projects", "families"],
+      "required": ["projects", "families", "modesVersion", "pinned"],
       "properties": {
         "projects": { "type": "array", "items": { "$ref": "#/$defs/projectSummary" } },
         "families": {
@@ -2119,7 +2120,18 @@
             "properties": { "family": { "$ref": "#/$defs/agentFamily" }, "available": { "type": "boolean" } },
             "additionalProperties": false
           }
-        }
+        },
+        "modesVersion": { "const": 1 },
+        "pinned": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/pinnedProjectThread" } }
+      },
+      "additionalProperties": false
+    },
+    "pinnedProjectThread": {
+      "type": "object",
+      "required": ["projectId", "thread"],
+      "properties": {
+        "projectId": { "type": "string", "minLength": 1 },
+        "thread": { "$ref": "#/$defs/projectThreadSummary" }
       },
       "additionalProperties": false
     },
@@ -2221,6 +2233,8 @@
         "model": { "type": "string", "minLength": 1 },
         "effort": { "type": ["string", "null"] },
         "accessMode": { "$ref": "#/$defs/projectAccessMode" },
+        "claudeApproval": { "$ref": "#/$defs/claudeApproval" },
+        "planMode": { "type": "boolean" },
         "folderId": { "type": ["string", "null"] },
         "body": { "type": "string", "maxLength": 65536 },
         "attachmentIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 32, "uniqueItems": true },
@@ -2249,6 +2263,8 @@
         "model",
         "effort",
         "accessMode",
+        "claudeApproval",
+        "planMode",
         "workingFolder",
         "workingFolderName",
         "isPinned",
@@ -2266,6 +2282,8 @@
         "model": { "type": ["string", "null"] },
         "effort": { "type": ["string", "null"] },
         "accessMode": { "$ref": "#/$defs/projectAccessMode" },
+        "claudeApproval": { "$ref": "#/$defs/claudeApproval" },
+        "planMode": { "type": "boolean" },
         "workingFolder": { "type": "string" },
         "workingFolderName": { "type": "string" },
         "isPinned": { "type": "boolean" },
@@ -2283,8 +2301,10 @@
         "isPinned": { "type": "boolean" },
         "hasUnread": { "type": "boolean" },
         "model": { "type": "string", "minLength": 1 },
-        "effort": { "type": "string", "minLength": 1 },
-        "accessMode": { "$ref": "#/$defs/projectAccessMode" }
+        "effort": { "type": ["string", "null"], "minLength": 1 },
+        "accessMode": { "$ref": "#/$defs/projectAccessMode" },
+        "claudeApproval": { "$ref": "#/$defs/claudeApproval" },
+        "planMode": { "type": "boolean" }
       },
       "additionalProperties": false
     },

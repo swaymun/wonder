@@ -309,7 +309,8 @@ export class ClaudeBridge {
         ? { behavior: "allow", updatedInput: input }
         : deny("Native computer use is unavailable for this turn.");
     }
-    if (await policy.decision(name, input) === "deny") return deny("This action is outside this Bot's allowed access.");
+    const decision = await policy.decision(name, input);
+    if (decision === "deny") return deny(policy.denial(name));
     if (name === "AskUserQuestion") {
       const request = questionRequest(input, context.requestId ?? context.toolUseID);
       const answer = await this.serverCall("item/tool/requestUserInput", { ...base, ...request }, context.signal ?? run.abort.signal);
@@ -323,9 +324,10 @@ export class ClaudeBridge {
       run.authorizedTools.set(key, calls);
       return { behavior: "allow", updatedInput: input }; // The daemon owns these tools' approval and scope checks.
     }
-    const decision = await policy.decision(name, input);
+    // Bash is allowed only here, wrapped in the host-owned command sandbox, in
+    // every approval mode; the PreToolUse hook never allows it directly.
     const allow = async () => ({ behavior: "allow", updatedInput: name === "Bash" ? await policy.commandInput(input) : input });
-    if (decision === "allow" || (name.startsWith("mcp__") && policy.approvalMode === "full_access")) return allow();
+    if (decision === "allow" || (name.startsWith("mcp__") && policy.bypassesApproval)) return allow();
     const response = await this.serverCall("item/commandExecution/requestApproval", { ...base,
       command: name === "Bash" ? String(input.command ?? "") : `${name}: ${JSON.stringify(input)}`,
       cwd: policy.cwd, reason: context.title ?? "Allow Claude to perform this action?",
@@ -392,7 +394,7 @@ export class ClaudeBridge {
         canUseTool: (name, input, context) => this.permission(session, run, policy, name, input, context),
         hooks: { PreToolUse: [{ hooks: [(input) => policy.beforeTool(input)] }],
           PostToolUse: [{ hooks: [async () => run.initialized ? { continue: false, stopReason: "The optional question was posted. Initialization is complete." } : {}] }] },
-        permissionMode: "default", sandbox: policy.sandbox(), includePartialMessages: true,
+        permissionMode: policy.planMode ? "plan" : "default", sandbox: policy.sandbox(), includePartialMessages: true,
         // Ordinary tasks run until completion, cancellation, or the subscription limit.
         // A fixed tool-turn cap otherwise abandons valid long-running work.
         persistSession: true, verbatimPrompts: true,
@@ -412,7 +414,9 @@ export class ClaudeBridge {
         // by Wonder's PreToolUse/canUseTool policy and command sandbox.
         Object.assign(sdkOptions, { systemPrompt: { type: "preset", preset: "claude_code" },
           settingSources: ["user", "project", "local"], additionalDirectories: project.additionalDirectories,
-          tools: [...BUILTINS, "Glob", "Grep"], mcpServers: {}, strictMcpConfig: false,
+          // Planning ends by proposing its plan through ExitPlanMode, which the
+          // policy turns into a plan for the owner to review in Wonder.
+          tools: [...BUILTINS, "Glob", "Grep", ...(policy.planMode ? ["ExitPlanMode"] : [])], mcpServers: {}, strictMcpConfig: false,
           settings: { ...sdkOptions.settings, disableClaudeAiConnectors: true } });
         delete sdkOptions.hooks.PostToolUse;
       }

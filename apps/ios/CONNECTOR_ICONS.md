@@ -29,3 +29,13 @@ Added September 29, 2026, without changing artwork bytes:
 Unknown connections use a system puzzle-piece icon when their remote artwork is
 missing or unavailable. Connection names omit the leading Claude.ai namespace;
 runtime identifiers and permission targets are preserved.
+
+## Provider icons
+
+Project threads identify their agent with the provider's desktop app icon, added
+September 30, 2026 and scaled to 96 px for the 32-point slot:
+
+- Codex light/dark: installed ChatGPT for Mac 26.928.20755,
+  `Contents/Resources/icon-codex-light.png` and `icon-codex-dark-color.png`.
+- Claude: installed Claude for Mac 2.16120.0, `Contents/Resources/electron.icns`
+  (128 px representation).

@@ -76,6 +76,9 @@ def reviewed_binary(name):
                 'apps/ios/Wonder/Assets.xcassets/ConnectorGoogleDrive.imageset/drive.png',
                 'apps/ios/Wonder/Assets.xcassets/ConnectorLinear.imageset/icon.png',
                 'apps/ios/Wonder/Assets.xcassets/ConnectorOpenAIPlatform.imageset/icon.png',
+                'apps/ios/Wonder/Assets.xcassets/ProviderClaude.imageset/claude.png',
+                'apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex.png',
+                'apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex-dark.png',
             }
             or name == 'apps/menubar/Resources/WonderMenuIcon.pdf'
             or name == 'research/assets/wonder-brand/wonder-sun-logo-source.png'

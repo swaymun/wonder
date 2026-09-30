@@ -41,6 +41,24 @@ test("tool failure remains failed within a successful conversation turn", () => 
   assert.equal(events.at(-1).params.turn.status, "completed");
   }
 });
+// The proposed plan is shaped like a Codex plan item so the conversation renders
+// both alike; the refused tool call itself never becomes a failed row.
+test("a proposed plan becomes one completed plan item, not a failed tool call", () => {
+  const { projection: p, events } = fixture();
+  const plan = "# Plan\n1. Add the migration\n2. Wire the route";
+  p.accept({ type: "assistant", message: { id: "m", content: [{ type: "tool_use", id: "plan-call", name: "ExitPlanMode", input: { plan } },
+    { type: "tool_use", id: "empty-call", name: "ExitPlanMode", input: { plan: "  " } }] } });
+  p.accept({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "plan-call", is_error: true, content: "The owner reviews the plan in Wonder." },
+    { type: "tool_result", tool_use_id: "empty-call", is_error: true, content: "The owner reviews the plan in Wonder." }] } });
+  p.accept({ type: "result", subtype: "success" });
+  assert.deepEqual(events.filter(e => e.method.startsWith("item/")).map(e => [e.method, e.params.item.type, e.params.item.status]),
+    [["item/started", "plan", "inProgress"], ["item/completed", "plan", "completed"]]);
+  const item = events.find(e => e.method === "item/completed").params.item;
+  assert.deepEqual([item.id, item.text], ["plan-call", plan]);
+  const turn = events.at(-1).params.turn;
+  assert.equal(turn.status, "completed");
+  assert.deepEqual(turn.items.map(i => i.type), ["plan"]);
+});
 test("internal initialization and synthetic user output never create chat text", () => {
   const { projection: p, events, children } = fixture({ internal: true });
   p.accept({ type: "user", message: { content: [{ type: "text", text: "Produce visible output" }] } });

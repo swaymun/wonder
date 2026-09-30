@@ -1,5 +1,10 @@
 use super::*;
 
+/// A computer session's `conversation_id` when the owner views the Mac before
+/// any conversation exists. It is only a binding label: no conversation,
+/// Bot, project or notification is ever looked up by this ID.
+pub const HOST_VIEW_CONVERSATION_ID: &str = "wonder-host-view";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComputerSessionState {
     Preparing,
@@ -604,11 +609,17 @@ impl Store {
         Ok(())
     }
 
+    /// Bot and Group Chat conversations that are not archived, project
+    /// conversations of included projects, and the owner's host-level view.
     pub async fn computer_conversation_allowed(
         &self,
         conversation_id: &str,
     ) -> Result<bool, sqlx::Error> {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_metadata m WHERE m.id=? AND m.is_archived=0 AND ((m.bot_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM channels c WHERE c.conversation_id=m.id) AND NOT EXISTS(SELECT 1 FROM subagent_ownership s WHERE s.conversation_id=m.id)) OR EXISTS(SELECT 1 FROM channels c WHERE c.conversation_id=m.id AND c.is_archived=0)))")
+        if conversation_id == HOST_VIEW_CONVERSATION_ID {
+            return Ok(true);
+        }
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversation_metadata m WHERE m.id=? AND m.is_archived=0 AND ((m.bot_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM channels c WHERE c.conversation_id=m.id) AND NOT EXISTS(SELECT 1 FROM subagent_ownership s WHERE s.conversation_id=m.id)) OR EXISTS(SELECT 1 FROM channels c WHERE c.conversation_id=m.id AND c.is_archived=0))) OR EXISTS(SELECT 1 FROM project_conversations pc JOIN projects p ON p.id=pc.project_id WHERE pc.conversation_id=? AND p.is_included=1)")
+            .bind(conversation_id)
             .bind(conversation_id)
             .fetch_one(&self.pool)
             .await

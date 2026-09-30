@@ -45,6 +45,33 @@ public struct ProjectFamilyAvailability: Codable, Hashable, Sendable {
 public struct ProjectsResponse: Codable, Sendable {
     public let projects: [ProjectSummary]
     public let families: [ProjectFamilyAvailability]
+    /// 1 when the host accepts `claudeApproval` and `planMode`; nil on older hosts.
+    public let modesVersion: Int?
+    /// Pinned threads across included projects, most recent first; nil on older hosts.
+    public let pinned: [PinnedProjectThread]?
+    public init(projects: [ProjectSummary], families: [ProjectFamilyAvailability], modesVersion: Int? = nil, pinned: [PinnedProjectThread]? = nil) {
+        self.projects = projects; self.families = families; self.modesVersion = modesVersion; self.pinned = pinned
+    }
+}
+
+/// A pinned thread and the project it belongs to on the same Mac.
+public struct PinnedProjectThread: Codable, Hashable, Identifiable, Sendable {
+    public let projectId: String
+    public let thread: ProjectThreadSummary
+    public var id: String { thread.reference }
+    public init(projectId: String, thread: ProjectThreadSummary) { self.projectId = projectId; self.thread = thread }
+}
+
+/// How a Claude thread with project access asks before acting. Codex uses
+/// its own approval policy; this applies only when `accessMode` is workspace.
+public enum ClaudeApproval: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// Asks before edits and commands.
+    case ask
+    /// Edits project files without asking; asks before commands.
+    case acceptEdits = "accept_edits"
+    /// Edits and runs sandboxed commands in the project without asking.
+    case auto
+    public var id: String { rawValue }
 }
 
 public struct ProjectPartialFailure: Codable, Hashable, Sendable {
@@ -89,6 +116,9 @@ public struct ProjectThreadsPage: Codable, Sendable {
     public let threads: [ProjectThreadSummary]
     public let nextCursor: String?
     public let partial: [ProjectPartialFailure]
+    public init(threads: [ProjectThreadSummary], nextCursor: String?, partial: [ProjectPartialFailure]) {
+        self.threads = threads; self.nextCursor = nextCursor; self.partial = partial
+    }
 }
 
 /// Provider-honest access choices for a project thread.
@@ -113,6 +143,108 @@ public enum ProjectAccessMode: String, Codable, CaseIterable, Identifiable, Send
     }
 }
 
+/// The three settings that together describe how much a thread may do.
+public struct ProjectAccess: Hashable, Sendable {
+    public var accessMode: ProjectAccessMode
+    public var claudeApproval: ClaudeApproval?
+    public var planMode: Bool
+    public init(accessMode: ProjectAccessMode = .workspace, claudeApproval: ClaudeApproval? = nil, planMode: Bool = false) {
+        self.accessMode = accessMode; self.claudeApproval = claudeApproval; self.planMode = planMode
+    }
+
+    /// The fields a PATCH needs to move from `self` to `next`. Older hosts
+    /// reject unknown fields, and Codex threads reject `claudeApproval`.
+    public func changes(to next: ProjectAccess, family: AgentFamily, supportsModes: Bool) -> [String: Any] {
+        var fields: [String: Any] = [:]
+        if accessMode != next.accessMode { fields["accessMode"] = next.accessMode.rawValue }
+        guard supportsModes else { return fields }
+        if family == .claude, (claudeApproval ?? .ask) != (next.claudeApproval ?? .ask) {
+            fields["claudeApproval"] = (next.claudeApproval ?? .ask).rawValue
+        }
+        if planMode != next.planMode { fields["planMode"] = next.planMode }
+        return fields
+    }
+}
+
+/// One row of a project thread's access menu. Codex offers its three access
+/// levels; Claude offers its permission modes. Hosts without project modes keep
+/// the original three levels.
+public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
+    case readOnly, workspace, manual, acceptEdits, auto, plan, fullAccess
+    public var id: String { rawValue }
+
+    /// Read only stays out of Claude's menu unless the thread already uses it.
+    public static func choices(family: AgentFamily, supportsModes: Bool, current: ProjectAccess) -> [Self] {
+        guard supportsModes, family == .claude else { return [.readOnly, .workspace, .fullAccess] }
+        return (current.accessMode == .readOnly ? [.readOnly] : []) + [.manual, .acceptEdits, .auto, .plan, .fullAccess]
+    }
+
+    public static func selected(for access: ProjectAccess, family: AgentFamily, supportsModes: Bool) -> Self {
+        guard supportsModes, family == .claude else {
+            switch access.accessMode {
+            case .readOnly: return .readOnly
+            case .workspace: return .workspace
+            case .fullAccess: return .fullAccess
+            }
+        }
+        if access.planMode { return .plan }
+        switch access.accessMode {
+        case .readOnly: return .readOnly
+        case .fullAccess: return .fullAccess
+        case .workspace:
+            switch access.claudeApproval ?? .ask {
+            case .ask: return .manual
+            case .acceptEdits: return .acceptEdits
+            case .auto: return .auto
+            }
+        }
+    }
+
+    public func title(for family: AgentFamily, supportsModes: Bool) -> String {
+        switch self {
+        case .readOnly: return "Read only"
+        case .workspace: return supportsModes ? "Auto" : ProjectAccessMode.workspace.title(for: family)
+        case .manual: return "Manual"
+        case .acceptEdits: return "Accept edits"
+        case .auto: return "Auto"
+        case .plan: return "Plan"
+        case .fullAccess: return supportsModes && family == .claude ? "Bypass permissions" : "Full access"
+        }
+    }
+
+    /// A short line that says what the choice allows.
+    public func detail(for family: AgentFamily) -> String {
+        switch self {
+        case .readOnly: return ProjectAccessMode.readOnly.detail(for: family)
+        case .workspace: return ProjectAccessMode.workspace.detail(for: family)
+        case .manual: return "Asks before edits and commands."
+        case .acceptEdits: return "Edits files without asking. Asks before commands."
+        case .auto: return "Edits files and runs commands in the project without asking."
+        case .plan: return "Plans the work without changing files."
+        case .fullAccess: return ProjectAccessMode.fullAccess.detail(for: family)
+        }
+    }
+
+    /// Choices that remove the safety net are drawn in warning color.
+    public var isElevated: Bool { self == .fullAccess }
+
+    public func result(from access: ProjectAccess, family: AgentFamily, supportsModes: Bool) -> ProjectAccess {
+        var next = access
+        switch self {
+        case .readOnly: next.accessMode = .readOnly
+        case .workspace: next.accessMode = .workspace
+        case .manual: next.accessMode = .workspace; next.claudeApproval = ClaudeApproval.ask
+        case .acceptEdits: next.accessMode = .workspace; next.claudeApproval = .acceptEdits
+        case .auto: next.accessMode = .workspace; next.claudeApproval = .auto
+        case .fullAccess: next.accessMode = .fullAccess
+        case .plan: next.planMode = true; return next
+        }
+        // Claude's Plan is one of its permission modes: any other choice leaves it.
+        if supportsModes && family == .claude { next.planMode = false }
+        return next
+    }
+}
+
 public struct ProjectConversationDetail: Codable, Hashable, Sendable {
     public let conversationId: String
     public let projectId: String
@@ -129,6 +261,13 @@ public struct ProjectConversationDetail: Codable, Hashable, Sendable {
     public let hasNativeSession: Bool
     public let folderInProject: Bool
     public let notice: String?
+    /// nil on hosts without project modes; see `ProjectsResponse.modesVersion`.
+    public let claudeApproval: ClaudeApproval?
+    /// Codex collaboration plan mode, or Claude's plan permission mode.
+    public let planMode: Bool?
+    public var access: ProjectAccess {
+        ProjectAccess(accessMode: accessMode, claudeApproval: claudeApproval, planMode: planMode == true)
+    }
 }
 
 public struct CreateProjectThreadResponse: Codable, Sendable {
@@ -173,6 +312,10 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
     public var serviceTier: String?
     public var botApprovalMode: BotApprovalMode?
     public var accessMode: ProjectAccessMode
+    /// Claude only; nil keeps the host default (ask).
+    public var claudeApproval: ClaudeApproval?
+    /// Starts the thread in plan mode; nil or false starts normally.
+    public var planMode: Bool?
     public var folderId: String?
     /// Reserved before dispatch so a lost response retries the same creation.
     public var requestID: String
@@ -205,7 +348,7 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
             folderId = nil
             if case .project = destination {
                 let preferred = project?.lastFamily ?? family ?? .codex
-                if family != preferred { family = preferred; model = nil; effort = nil }
+                if family != preferred { family = preferred; model = nil; effort = nil; claudeApproval = nil }
             }
         }
         self.destination = destination
@@ -215,8 +358,49 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
     public mutating func chooseFamily(_ next: AgentFamily) {
         guard !isSubmitted, family != next else { return }
         family = next; model = nil; effort = nil
-        serviceTier = nil
+        serviceTier = nil; claudeApproval = nil
         if next == .claude, botApprovalMode == .approveForMe { botApprovalMode = .askForApproval }
+    }
+
+    /// Bots and Group Chats are no longer destinations. A draft with no
+    /// destination, a retired one, or a project that is gone belongs in the
+    /// first included project, keeping its words. A frozen project request is
+    /// never moved: it must retry exactly what was committed.
+    @discardableResult
+    public mutating func settle(in projects: [ProjectSummary]) -> Bool {
+        if case .project(let id) = destination, isSubmitted || projects.contains(where: { $0.id == id }) { return false }
+        guard let fallback = projects.first else { return false }
+        if isSubmitted { rejectSubmission() }
+        destination = nil
+        choose(.project(id: fallback.id), project: fallback)
+        return true
+    }
+
+    /// The access settings this draft will create the thread with.
+    public var access: ProjectAccess {
+        get { ProjectAccess(accessMode: accessMode, claudeApproval: claudeApproval, planMode: planMode == true) }
+        set { accessMode = newValue.accessMode; claudeApproval = newValue.claudeApproval; planMode = newValue.planMode ? true : nil }
+    }
+
+    /// Selecting a model starts from its own default reasoning effort.
+    public mutating func chooseModel(_ option: BotOptions.Model) {
+        guard !isSubmitted else { return }
+        model = option.id; effort = ModelDefaults.effort(for: option); serviceTier = nil
+    }
+
+    /// Keeps the draft on a model its provider offers, with an effort that
+    /// model supports. `models` is the visible catalog for `family`; a remembered
+    /// choice wins over the host's default, and an existing valid choice stays.
+    public mutating func ensureModel(among models: [BotOptions.Model], remembered: RememberedModel? = nil) {
+        guard !isSubmitted, !models.isEmpty else { return }
+        if let current = models.first(where: { $0.id == model }) {
+            let valid = ModelDefaults.effort(effort, for: current)
+            if valid != effort { effort = valid }
+        } else if let remembered, let option = models.first(where: { $0.id == remembered.model }) {
+            model = option.id; effort = ModelDefaults.effort(remembered.effort, for: option); serviceTier = nil
+        } else if let option = ModelDefaults.defaultModel(in: models) {
+            chooseModel(option)
+        }
     }
 
     public mutating func freeze() {
@@ -254,6 +438,47 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
     }
 }
 
+/// The model and effort chosen last for a provider, offered to its next thread.
+public struct RememberedModel: Codable, Hashable, Sendable {
+    public let model: String
+    public let effort: String?
+    public init(model: String, effort: String?) { self.model = model; self.effort = effort }
+}
+
+/// Defaults shared by new chats and existing threads so the composer never
+/// shows a model without its reasoning effort.
+public enum ModelDefaults {
+    /// A model's own default when it offers it, else high, medium, or its first.
+    public static func effort(for model: BotOptions.Model) -> String? {
+        let offered = model.reasoningEfforts.map(\.id)
+        guard !offered.isEmpty else { return nil }
+        if let preferred = model.defaultReasoningEffort, offered.contains(preferred) { return preferred }
+        return ["high", "medium"].first(where: offered.contains) ?? offered.first
+    }
+
+    /// `requested` when the model supports it, otherwise the model's default.
+    public static func effort(_ requested: String?, for model: BotOptions.Model) -> String? {
+        if let requested, model.reasoningEfforts.contains(where: { $0.id == requested }) { return requested }
+        return effort(for: model)
+    }
+
+    /// The model the host uses for a provider when a thread has none. Mirrors
+    /// `default_model` in the host: the first visible model, avoiding Haiku.
+    public static func defaultModel(in models: [BotOptions.Model]) -> BotOptions.Model? {
+        models.first { !$0.hidden && $0.id != "claude:haiku" } ?? models.first { !$0.hidden }
+    }
+
+    public static func title(of effort: BotOptions.Choice) -> String {
+        ["xhigh", "extra high"].contains(effort.label.lowercased()) || effort.id == "xhigh" ? "Extra high" : effort.label.capitalized
+    }
+
+    /// "Model · Effort", or just the model when it has no effort choices.
+    public static func summary(model: BotOptions.Model, effort: String?) -> String {
+        guard let choice = model.reasoningEfforts.first(where: { $0.id == effort }) else { return model.displayName }
+        return model.displayName + " · " + title(of: choice)
+    }
+}
+
 public struct NewChatAttachment: Codable, Hashable, Identifiable, Sendable {
     public let id: String
     public let name: String
@@ -268,27 +493,50 @@ public struct NewChatAttachment: Codable, Hashable, Identifiable, Sendable {
 
 // MARK: - Sidebar presentation
 
+/// Why a Mac's rows cannot be trusted right now.
+public enum SidebarHostNotice: Hashable, Sendable {
+    /// The pairing ended; saved projects stay readable.
+    case pairAgain
+    /// The Mac cannot be reached; saved projects stay readable.
+    case offline
+}
+
 public enum SidebarRow: Hashable, Identifiable, Sendable {
-    case host(hostID: String, name: String, isOnline: Bool)
+    case pinnedHeader
+    /// A pinned thread from any Mac; `hostName` is set only when several Macs are paired.
+    case pinned(hostID: String, projectID: String, projectName: String, hostName: String?, thread: ProjectThreadSummary, isSelected: Bool)
+    case host(hostID: String, name: String, isOnline: Bool, isCollapsed: Bool)
+    case hostNotice(hostID: String, name: String, kind: SidebarHostNotice)
     case project(hostID: String, project: ProjectSummary, isExpanded: Bool, isSelected: Bool)
     case thread(hostID: String, projectID: String, thread: ProjectThreadSummary, isSelected: Bool)
     case threadsLoading(hostID: String, projectID: String)
     case threadsNotice(hostID: String, projectID: String, message: String, canRetry: Bool)
     case moreThreads(hostID: String, projectID: String, isLoading: Bool)
     case updateRequired(hostID: String)
-    case emptyProjects(hostID: String)
+    case newProject(hostID: String)
 
     /// Stable across paging, expansion and streaming updates.
     public var id: String {
         switch self {
-        case .host(let host, _, _): return "host:\(host)"
+        case .pinnedHeader: return "pinned-header"
+        case .pinned(let host, _, _, _, let thread, _): return "pinned:\(host):\(thread.reference)"
+        case .host(let host, _, _, _): return "host:\(host)"
+        case .hostNotice(let host, _, _): return "host-notice:\(host)"
         case .project(let host, let project, _, _): return "project:\(host):\(project.id)"
         case .thread(let host, let project, let thread, _): return "thread:\(host):\(project):\(thread.reference)"
         case .threadsLoading(let host, let project): return "loading:\(host):\(project)"
         case .threadsNotice(let host, let project, _, _): return "notice:\(host):\(project)"
         case .moreThreads(let host, let project, _): return "more:\(host):\(project)"
         case .updateRequired(let host): return "update:\(host)"
-        case .emptyProjects(let host): return "empty:\(host)"
+        case .newProject(let host): return "new-project:\(host)"
+        }
+    }
+
+    /// A project or thread the owner can open, as opposed to headers and notices.
+    public var isResult: Bool {
+        switch self {
+        case .pinned, .project, .thread: return true
+        default: return false
         }
     }
 }
@@ -330,42 +578,136 @@ public struct SidebarHostProjects: Sendable {
     public let supportsProjects: Bool?
     public let projects: [ProjectSummary]
     public let threads: [String: ProjectThreadsState]
+    /// Pinned threads the Mac reported; empty for older Macs, whose loaded pages still show pins.
+    public let pinned: [PinnedProjectThread]
+    public let notice: SidebarHostNotice?
     public init(hostID: String, name: String, isOnline: Bool, supportsProjects: Bool?,
-                projects: [ProjectSummary], threads: [String: ProjectThreadsState]) {
+                projects: [ProjectSummary], threads: [String: ProjectThreadsState],
+                pinned: [PinnedProjectThread] = [], notice: SidebarHostNotice? = nil) {
         self.hostID = hostID; self.name = name; self.isOnline = isOnline
         self.supportsProjects = supportsProjects; self.projects = projects; self.threads = threads
+        self.pinned = pinned; self.notice = notice
+    }
+}
+
+extension ProjectThreadSummary {
+    /// The same thread with a different pin state.
+    public func settingPinned(_ value: Bool) -> ProjectThreadSummary {
+        ProjectThreadSummary(reference: reference, conversationId: conversationId, title: title, family: family,
+                             updatedAt: updatedAt, isPinned: value, hasUnread: hasUnread, isWorking: isWorking)
+    }
+}
+
+/// The most recently opened project conversations, newest first. Their saved
+/// history stays on the phone after the conversation list prunes the rest.
+public struct RecentlyOpenedConversations: Codable, Equatable, Sendable {
+    public static let limit = 30
+    public private(set) var ids: [String]
+    public init(ids: [String] = []) { self.ids = Array(ids.prefix(Self.limit)) }
+    public mutating func note(_ id: String) {
+        guard ids.first != id else { return }
+        ids.removeAll { $0 == id }
+        ids.insert(id, at: 0)
+        if ids.count > Self.limit { ids.removeLast(ids.count - Self.limit) }
     }
 }
 
 public enum SidebarProjection {
     public static let initialThreads = 5
 
-    /// One flat array for the whole Projects section. Views render rows; they
-    /// never nest a lazy list per project.
-    public static func projectRows(hosts: [SidebarHostProjects], expanded: Set<String>, selectedConversation: String?,
+    /// The whole sidebar as one flat array: Pinned first, then each Mac's
+    /// projects. Views render rows; they never nest a lazy list per project.
+    public static func rows(hosts: [SidebarHostProjects], expanded: Set<String>, collapsedHosts: Set<String> = [],
+                            selectedHost: String? = nil, selectedConversation: String?, search: String = "") -> [SidebarRow] {
+        pinnedRows(hosts: hosts, selectedHost: selectedHost, selectedConversation: selectedConversation, search: search)
+            + projectRows(hosts: hosts, expanded: expanded, collapsedHosts: collapsedHosts, selectedHost: selectedHost,
+                          selectedConversation: selectedConversation, selectedProject: nil, search: search)
+    }
+
+    /// Pinned threads of one Mac's included projects: what the Mac reported,
+    /// plus pinned threads already loaded (older Macs, or a pin not yet
+    /// reported), most recent activity first.
+    public static func pinnedThreads(_ host: SidebarHostProjects) -> [PinnedProjectThread] {
+        let included = Set(host.projects.filter(\.isIncluded).map(\.id))
+        var references = Set<String>(), conversations = Set<String>()
+        var entries: [PinnedProjectThread] = []
+        func add(_ entry: PinnedProjectThread) {
+            guard included.contains(entry.projectId), references.insert(entry.thread.reference).inserted else { return }
+            if let id = entry.thread.conversationId, !conversations.insert(id).inserted { return }
+            entries.append(entry)
+        }
+        host.pinned.forEach(add)
+        for project in host.projects where included.contains(project.id) {
+            for thread in host.threads[project.id]?.threads ?? [] where thread.isPinned {
+                add(PinnedProjectThread(projectId: project.id, thread: thread))
+            }
+        }
+        return entries.enumerated().sorted { lhs, rhs in
+            if lhs.element.thread.updatedAt != rhs.element.thread.updatedAt { return lhs.element.thread.updatedAt > rhs.element.thread.updatedAt }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    /// The Pinned section across every visible Mac. Empty when nothing is pinned.
+    public static func pinnedRows(hosts: [SidebarHostProjects], selectedHost: String? = nil, selectedConversation: String?,
+                                  search: String = "") -> [SidebarRow] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        var entries: [(host: SidebarHostProjects, entry: PinnedProjectThread, projectName: String)] = []
+        for host in hosts where host.supportsProjects != false {
+            for entry in pinnedThreads(host) {
+                guard let project = host.projects.first(where: { $0.id == entry.projectId }) else { continue }
+                if !query.isEmpty && !matches(entry.thread.title, query) && !matches(project.name, query) { continue }
+                entries.append((host, entry, project.name))
+            }
+        }
+        guard !entries.isEmpty else { return [] }
+        let ordered = entries.enumerated().sorted { lhs, rhs in
+            let left = lhs.element.entry.thread.updatedAt, right = rhs.element.entry.thread.updatedAt
+            return left != right ? left > right : lhs.offset < rhs.offset
+        }.map(\.element)
+        return [.pinnedHeader] + ordered.map { item in
+            .pinned(hostID: item.host.hostID, projectID: item.entry.projectId, projectName: item.projectName,
+                    hostName: hosts.count > 1 ? item.host.name : nil, thread: item.entry.thread,
+                    isSelected: isSelected(item.entry.thread, host: item.host.hostID, selectedHost: selectedHost, conversation: selectedConversation))
+        }
+    }
+
+    private static func isSelected(_ thread: ProjectThreadSummary, host: String, selectedHost: String?, conversation: String?) -> Bool {
+        guard let id = thread.conversationId, id == conversation else { return false }
+        return selectedHost == nil || selectedHost == host
+    }
+
+    /// Each Mac's header and projects. A collapsed Mac keeps only its header and notice;
+    /// a search shows every match regardless.
+    public static func projectRows(hosts: [SidebarHostProjects], expanded: Set<String>, collapsedHosts: Set<String> = [],
+                                   selectedHost: String? = nil, selectedConversation: String?,
                                    selectedProject: String?, search: String = "") -> [SidebarRow] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         var rows: [SidebarRow] = []
         for host in hosts {
-            if hosts.count > 1 { rows.append(.host(hostID: host.hostID, name: host.name, isOnline: host.isOnline)) }
+            let isCollapsed = query.isEmpty && collapsedHosts.contains(host.hostID)
+            rows.append(.host(hostID: host.hostID, name: host.name, isOnline: host.isOnline, isCollapsed: isCollapsed))
+            if let notice = host.notice { rows.append(.hostNotice(hostID: host.hostID, name: host.name, kind: notice)) }
+            if isCollapsed { continue }
             if host.supportsProjects == false { rows.append(.updateRequired(hostID: host.hostID)); continue }
             let visible = sorted(host.projects.filter(\.isIncluded))
-            if visible.isEmpty && query.isEmpty && host.supportsProjects == true { rows.append(.emptyProjects(hostID: host.hostID)) }
+            // Pinned threads live in the Pinned section, not again under their project.
+            let pinnedReferences = Set(pinnedThreads(host).map(\.thread.reference))
             for project in visible {
                 let state = host.threads[project.id] ?? ProjectThreadsState()
                 let key = expansionKey(host: host.hostID, project: project.id)
                 let nameMatches = query.isEmpty || matches(project.name, query)
-                let matchingThreads = nameMatches ? state.threads : state.threads.filter { matches($0.title, query) }
+                let unpinned = state.threads.filter { !pinnedReferences.contains($0.reference) }
+                let matchingThreads = nameMatches ? unpinned : unpinned.filter { matches($0.title, query) }
                 if !query.isEmpty && !nameMatches && matchingThreads.isEmpty { continue }
                 // Search temporarily expands matches without changing saved expansion.
                 let isExpanded = expanded.contains(key) || (!nameMatches && !matchingThreads.isEmpty)
                 rows.append(.project(hostID: host.hostID, project: project, isExpanded: isExpanded,
                                      isSelected: selectedProject == project.id && selectedConversation == nil))
                 guard isExpanded else { continue }
-                let threads = orderedThreads(matchingThreads)
-                for thread in threads {
+                for thread in matchingThreads {
                     rows.append(.thread(hostID: host.hostID, projectID: project.id, thread: thread,
-                                        isSelected: thread.conversationId != nil && thread.conversationId == selectedConversation))
+                                        isSelected: isSelected(thread, host: host.hostID, selectedHost: selectedHost, conversation: selectedConversation)))
                 }
                 if state.isLoading && state.threads.isEmpty {
                     rows.append(.threadsLoading(hostID: host.hostID, projectID: project.id))
@@ -380,6 +722,9 @@ public enum SidebarProjection {
                     rows.append(.moreThreads(hostID: host.hostID, projectID: project.id, isLoading: state.isLoading))
                 }
             }
+            if query.isEmpty, host.supportsProjects == true || !host.projects.isEmpty {
+                rows.append(.newProject(hostID: host.hostID))
+            }
         }
         return rows
     }
@@ -389,14 +734,6 @@ public enum SidebarProjection {
     /// Pinned projects in pin order first, then recently used.
     public static func sorted(_ projects: [ProjectSummary]) -> [ProjectSummary] {
         projects.enumerated().sorted { lhs, rhs in
-            if lhs.element.isPinned != rhs.element.isPinned { return lhs.element.isPinned }
-            return lhs.offset < rhs.offset
-        }.map(\.element)
-    }
-
-    /// Pinned threads lead, the rest keep server recency, with stable ties.
-    public static func orderedThreads(_ threads: [ProjectThreadSummary]) -> [ProjectThreadSummary] {
-        threads.enumerated().sorted { lhs, rhs in
             if lhs.element.isPinned != rhs.element.isPinned { return lhs.element.isPinned }
             return lhs.offset < rhs.offset
         }.map(\.element)

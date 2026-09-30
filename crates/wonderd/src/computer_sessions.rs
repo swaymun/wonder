@@ -13,6 +13,11 @@ struct LaunchedHelper {
     stdout: HelperOutput,
 }
 
+/// Host status feature: sessions may use the reserved host-view conversation ID
+/// (`wonder_store::HOST_VIEW_CONVERSATION_ID`) before any conversation exists.
+/// Session, lease and event code only compares that ID for binding equality;
+/// teaching and agent computer use resolve real conversations, so they reject it.
+pub(crate) const HOST_VIEW_FEATURE: &str = "computer-host-view-v1";
 const UNAVAILABLE_REASON: &str = "Live computer viewing is unavailable on this Mac. Update Wonder when a configured media provider is available.";
 const UNAVAILABLE_ACTION: &str = "update-host";
 const CONTROL_UNAVAILABLE_REASON: &str =

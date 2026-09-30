@@ -1172,6 +1172,20 @@ final class WonderDiagnosticsTests: XCTestCase {
             .appendingPathComponent("NewChatAttachments").appendingPathComponent(file.id)
         defer { try? FileManager.default.removeItem(at: storedFile) }
         bot.attachments = [descriptor]
+        let projectDraft = NewChatDraftStore.selecting(.project(id: "draft-project"), from: bot, host: host)
+        XCTAssertEqual(projectDraft.text, bot.text, "Choosing an empty project keeps the owner's words")
+        XCTAssertEqual(projectDraft.attachments, bot.attachments)
+        XCTAssertEqual(NewChatDraftStore.load(host: host, destination: .newBot), bot,
+                       "Carrying to a project must keep the outgoing draft recoverable")
+        var otherProject = projectDraft
+        otherProject.text = "Independent project draft"
+        let secondProject = NewChatDraftStore.selecting(.project(id: "second-project"), from: otherProject, host: host)
+        XCTAssertEqual(secondProject.text, otherProject.text)
+        var editedSecond = secondProject
+        editedSecond.text = "Second project words"
+        let returnedProject = NewChatDraftStore.selecting(.project(id: "draft-project"), from: editedSecond, host: host)
+        XCTAssertEqual(returnedProject.text, otherProject.text)
+        XCTAssertEqual(NewChatDraftStore.load(host: host, destination: .project(id: "second-project"))?.text, editedSecond.text)
         let group = NewChatDraftStore.selecting(.newGroup, from: bot, host: host)
         XCTAssertTrue(group.text.isEmpty)
         var edited = group; edited.text = "Group purpose"
@@ -1189,6 +1203,12 @@ final class WonderDiagnosticsTests: XCTestCase {
         bot.freeze()
         XCTAssertEqual(NewChatDraftStore.selecting(.newGroup, from: bot, host: host), bot)
         NewChatDraftStore.save(edited, host: otherHost)
+        // Selection now saves the displayed draft immediately. Explicitly
+        // navigate away before delivering a late result to the Bot draft.
+        let active = NewChatDraftStore.selecting(.newGroup, from: recovered, host: host)
+        XCTAssertEqual(active.text, "Group purpose")
+        XCTAssertEqual(NewChatDraftStore.load(host: host)?.requestID, active.requestID)
+        XCTAssertNotEqual(active.requestID, recovered.requestID)
         // A late dictation result belongs to the original destination, is
         // idempotent, and must not overwrite the currently selected draft.
         try NewChatDraftStore.insertDictation("spoken words", requestID: "recording", draftID: recovered.requestID, host: host)
@@ -1203,6 +1223,142 @@ final class WonderDiagnosticsTests: XCTestCase {
         NewChatDraftStore.remove(host: host)
         XCTAssertNil(NewChatDraftStore.load(host: host, destination: .newBot))
         XCTAssertEqual(NewChatDraftStore.load(host: otherHost)?.text, "Group purpose")
+    }
+
+    // Contract: saving a project pin updates the thread, global Pinned list and
+    // offline detail together. Regression: a details-sheet save left the old
+    // cache behind, and its overlapping GET put the unpinned detail back.
+    @MainActor func testProjectPinSaveSurvivesStaleDetailAndRelaunch() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        model.projects.forgetCache()
+        defer { MessageRecoveryURLProtocol.releaseHeld(); model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        try await prepareProject(model)
+        let path = "/api/v1/project-conversations/project-chat"
+        MessageRecoveryURLProtocol.enqueue(path: path, method: "GET", body: projectDetail(pinned: false))
+        MessageRecoveryURLProtocol.hold(path: path, method: "GET")
+        let stale = Task { try await model.projects.loadDetail("project-chat") }
+        for _ in 0..<100 {
+            if MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count >= 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count, 2)
+        MessageRecoveryURLProtocol.enqueue(path: path, method: "PATCH", body: projectDetail(pinned: true))
+        try await model.projects.updateConversation("project-chat", fields: ["isPinned": true])
+        XCTAssertEqual(model.projects.pinned.map(\.thread.conversationId), ["project-chat"])
+        MessageRecoveryURLProtocol.releaseHeld()
+        let refreshed = try await stale.value
+        XCTAssertTrue(refreshed.isPinned)
+        XCTAssertTrue(try XCTUnwrap(model.projects.threads["project"]?.threads.first).isPinned)
+        let restarted = recoveryModel(root: root)
+        XCTAssertEqual(restarted.projects.details["project-chat"]?.isPinned, true)
+        XCTAssertEqual(restarted.projects.pinned.map(\.thread.conversationId), ["project-chat"])
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/conversations/project-chat/messages").isEmpty)
+    }
+
+    // Contract: a pin save joining an older catalog read still obtains a new
+    // catalog; late thread pages cannot undo its pin. The transport controls
+    // the actual production request boundary rather than mocking the library.
+    @MainActor func testProjectPinRefreshAndThreadPageKeepNewerSave() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        model.projects.forgetCache()
+        defer { MessageRecoveryURLProtocol.releaseHeld(); model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        try await prepareProject(model)
+        let pagePath = "/api/v1/projects/project/threads"
+        MessageRecoveryURLProtocol.enqueue(path: pagePath, body: projectPage(pinned: false))
+        MessageRecoveryURLProtocol.hold(path: pagePath)
+        model.projects.loadThreads("project")
+        for _ in 0..<100 {
+            if MessageRecoveryURLProtocol.bodies(path: pagePath, includingEmpty: true).count >= 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", body: projectDetail(pinned: true))
+        try await model.projects.updateConversation("project-chat", fields: ["isPinned": true])
+        MessageRecoveryURLProtocol.releaseHeld()
+        for _ in 0..<100 {
+            if model.projects.threads["project"]?.isLoading == false { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(try XCTUnwrap(model.projects.threads["project"]?.threads.first).isPinned)
+
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: true))
+        MessageRecoveryURLProtocol.hold(path: "/api/v1/projects")
+        let stale = Task { await model.projects.refresh() }
+        for _ in 0..<100 {
+            if MessageRecoveryURLProtocol.bodies(path: "/api/v1/projects", includingEmpty: true).count >= 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", body: projectDetail(pinned: false))
+        try await model.projects.updateConversation("project-chat", fields: ["isPinned": false])
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
+        MessageRecoveryURLProtocol.enqueue(path: pagePath, body: projectPage(pinned: false))
+        MessageRecoveryURLProtocol.enqueue(path: pagePath, body: projectPage(pinned: false))
+        let afterSave = Task { await model.projects.refresh() }
+        await Task.yield()
+        MessageRecoveryURLProtocol.releaseHeld()
+        await stale.value; await afterSave.value
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: "/api/v1/projects", includingEmpty: true).count, 3)
+        XCTAssertTrue(model.projects.pinned.isEmpty)
+        XCTAssertEqual(model.projects.details["project-chat"]?.isPinned, false)
+    }
+
+    // Contract: old hosts expose no plan controls or mode writes; a response
+    // for an ended pairing cannot claim a successful mode save.
+    @MainActor func testProjectPlanSaveRequiresCapabilityAndCurrentPairing() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        model.projects.forgetCache()
+        defer { MessageRecoveryURLProtocol.releaseHeld(); model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        let chat = try Self.cameraChat(id: "project-chat")
+        let oldResult = await setPlanMode(true, model: model, library: model.projects, chat: chat)
+        XCTAssertFalse(oldResult)
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/project-conversations/project-chat").isEmpty)
+        try await prepareProject(model)
+        let path = "/api/v1/project-conversations/project-chat"
+        MessageRecoveryURLProtocol.enqueue(path: path, body: projectDetail(pinned: false, plan: true))
+        let enabled = await setPlanMode(true, model: model, library: model.projects, chat: chat)
+        XCTAssertTrue(enabled)
+        MessageRecoveryURLProtocol.enqueue(path: path, body: projectDetail(pinned: false, plan: false))
+        MessageRecoveryURLProtocol.hold(path: path, method: "PATCH")
+        let save = Task { await setPlanMode(false, model: model, library: model.projects, chat: chat) }
+        for _ in 0..<100 {
+            if MessageRecoveryURLProtocol.bodies(path: path).count >= 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        model.accessEnded = true
+        MessageRecoveryURLProtocol.releaseHeld()
+        let staleResult = await save.value
+        XCTAssertFalse(staleResult)
+        XCTAssertEqual(model.projects.details["project-chat"]?.planMode, true)
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/conversations/project-chat/messages").isEmpty)
+    }
+
+    @MainActor private func prepareProject(_ model: ConnectionModel) async throws {
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
+        await model.projects.refresh()
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects/project/threads", body: projectPage(pinned: false))
+        model.projects.loadThreads("project")
+        for _ in 0..<100 {
+            if model.projects.threads["project"]?.hasLoaded == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.projects.threads["project"]?.hasLoaded, true)
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", body: projectDetail(pinned: false))
+        try await model.projects.loadDetail("project-chat")
+    }
+    private func projectDetail(pinned: Bool, plan: Bool = false) -> Data {
+        Data(#"{"conversationId":"project-chat","projectId":"project","projectName":"Project","title":"Thread","family":"claude","model":"claude:sonnet","effort":"high","accessMode":"workspace","workingFolder":"/fixture","workingFolderName":"fixture","isPinned":\#(pinned),"hasUnread":false,"hasNativeSession":true,"folderInProject":true,"claudeApproval":"ask","planMode":\#(plan)}"#.utf8)
+    }
+    private func projectPage(pinned: Bool) -> Data {
+        Data(#"{"threads":[{"reference":"claude:fixture","conversationId":"project-chat","title":"Thread","family":"claude","updatedAt":1,"isPinned":\#(pinned),"hasUnread":false,"isWorking":false}],"nextCursor":null,"partial":[]}"#.utf8)
+    }
+    private func projectCatalog(pinned: Bool) -> Data {
+        let pins = pinned ? #"[{"projectId":"project","thread":{"reference":"claude:fixture","conversationId":"project-chat","title":"Thread","family":"claude","updatedAt":1,"isPinned":true,"hasUnread":false,"isWorking":false}}]"# : "[]"
+        return Data(#"{"projects":[{"id":"project","name":"Project","isIncluded":true,"isPinned":false,"rootsRevision":1,"folders":[],"createdAt":"fixture"}],"families":[{"family":"claude","available":true}],"modesVersion":1,"pinned":\#(pins)}"#.utf8)
     }
 
     @MainActor private func recoveryModel(root: URL) -> ConnectionModel {
@@ -2641,15 +2797,16 @@ private final class MessageRecoveryURLProtocol: URLProtocol, @unchecked Sendable
         var replies: [String: [Reply]] = [:]
         var requests: [(String, Data?)] = []
         var heldPath: String?
+        var heldMethod: String?
         var held: [() -> Void] = []
     }
     private static let state = State()
     static func reset() {
         releaseHeld()
-        state.lock.withLock { state.replies = [:]; state.requests = []; state.heldPath = nil }
+        state.lock.withLock { state.replies = [:]; state.requests = []; state.heldPath = nil; state.heldMethod = nil }
     }
-    static func enqueue(path: String, status: Int = 200, body: Data = Data("{}".utf8)) {
-        state.lock.withLock { state.replies[path, default: []].append(.response(status, body)) }
+    static func enqueue(path: String, method: String? = nil, status: Int = 200, body: Data = Data("{}".utf8)) {
+        state.lock.withLock { state.replies[method.map { $0 + " " + path } ?? path, default: []].append(.response(status, body)) }
     }
     static func fail(path: String, error: URLError.Code) {
         state.lock.withLock { state.replies[path, default: []].append(.failure(error)) }
@@ -2657,9 +2814,9 @@ private final class MessageRecoveryURLProtocol: URLProtocol, @unchecked Sendable
     static func bodies(path: String, includingEmpty: Bool = false) -> [Data] {
         state.lock.withLock { state.requests.filter { $0.0 == path }.compactMap { $0.1 ?? (includingEmpty ? Data() : nil) } }
     }
-    static func hold(path: String) { state.lock.withLock { state.heldPath = path } }
+    static func hold(path: String, method: String? = nil) { state.lock.withLock { state.heldPath = path; state.heldMethod = method } }
     static func releaseHeld() {
-        let work = state.lock.withLock { let work = state.held; state.held = []; state.heldPath = nil; return work }
+        let work = state.lock.withLock { let work = state.held; state.held = []; state.heldPath = nil; state.heldMethod = nil; return work }
         work.forEach { $0() }
     }
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "camera-unit.invalid" }
@@ -2680,7 +2837,7 @@ private final class MessageRecoveryURLProtocol: URLProtocol, @unchecked Sendable
         } else { body = nil }
         let held = Self.state.lock.withLock {
             Self.state.requests.append((path, body))
-            guard Self.state.heldPath == path else { return false }
+            guard Self.state.heldPath == path, Self.state.heldMethod == nil || Self.state.heldMethod == request.httpMethod else { return false }
             Self.state.held.append { [weak self] in self?.respond(path: path, body: body) }
             return true
         }
@@ -2689,8 +2846,10 @@ private final class MessageRecoveryURLProtocol: URLProtocol, @unchecked Sendable
     override func stopLoading() {}
     private func respond(path: String, body: Data?) {
         let reply: Reply? = Self.state.lock.withLock {
-            guard Self.state.replies[path]?.isEmpty == false else { return nil }
-            return Self.state.replies[path]?.removeFirst()
+            let methodKey = (request.httpMethod ?? "GET") + " " + path
+            let key = Self.state.replies[methodKey]?.isEmpty == false ? methodKey : path
+            guard Self.state.replies[key]?.isEmpty == false else { return nil }
+            return Self.state.replies[key]?.removeFirst()
         }
         if case .failure(let code) = reply { client?.urlProtocol(self, didFailWithError: URLError(code)); return }
         if case .response(let status, let data) = reply { finish(status: status, body: data); return }

@@ -4,7 +4,7 @@ public struct ChatFeedEntry: Identifiable, Sendable {
     public var rows: [ReadRow]
     public var id: String { rows[0].id }
     public var isContextCompaction: Bool { rows.count == 1 && rows[0].isContextCompaction }
-    public var isActivity: Bool { !isContextCompaction && (rows[0].activitySummary != nil || rows[0].isCommentary) }
+    public var isActivity: Bool { !isContextCompaction && !rows[0].isPlan && (rows[0].activitySummary != nil || rows[0].isCommentary) }
 
     public static func visibleRows(_ rows: [ReadRow], queuedClientIDs: Set<String>) -> [ReadRow] {
         let queuedRows = Set(queuedClientIDs.map { "user-" + $0 })
@@ -22,8 +22,8 @@ public struct ChatFeedEntry: Identifiable, Sendable {
                 entries.append(Self(rows: [row]))
                 continue
             }
-            if row.activitySummary != nil || row.isCommentary, let first = entries.last?.rows.first,
-               !entries.last!.isContextCompaction,
+            if row.activitySummary != nil || row.isCommentary, !row.isPlan, let first = entries.last?.rows.first,
+               !entries.last!.isContextCompaction, !first.isPlan,
                first.activitySummary != nil || first.isCommentary,
                row.id != focusedRowID, first.id != focusedRowID,
                let turn = row.turnId, first.turnId == turn,
@@ -72,7 +72,6 @@ public struct ChatFeedEntry: Identifiable, Sendable {
             case "sleep": category = "wait"
             case "imageView", "imageGeneration": category = "image"
             case "enteredReviewMode", "exitedReviewMode": category = "review"
-            case "plan": category = "plan"
             case "hookPrompt": category = "instructions"
             case "error": category = "error"
             case "agentMessage" where row.isCommentary: category = "commentary"
@@ -94,7 +93,6 @@ public struct ChatFeedEntry: Identifiable, Sendable {
             case "wait": return count == 1 ? "Waited" : "Waited \(count) times"
             case "image": return count == 1 ? "1 image action" : "\(count) image actions"
             case "review": return count == 1 ? "Reviewed" : "Reviewed \(count) times"
-            case "plan": return count == 1 ? "Made a plan" : "Made \(count) plans"
             case "instructions": return count == 1 ? "Applied instructions" : "Applied instructions \(count) times"
             case "error": return count == 1 ? "Encountered 1 error" : "Encountered \(count) errors"
             case "commentary": return count == 1 ? "Progress update" : "\(count) progress updates"
@@ -481,6 +479,26 @@ public struct ContextCompactionPresentation: Equatable, Sendable {
 }
 
 extension ReadRow {
+    /// A plan the agent proposed. It is the answer the owner reviews, so the
+    /// timeline shows it as its own card instead of inside the Working group.
+    public var isPlan: Bool { !isUser && item?.type == "plan" }
+
+    /// Markdown body of a plan; hosts put it in the item text.
+    public var planText: String? {
+        guard isPlan else { return nil }
+        let text = item?.text ?? item?.payload?["text"]?.string ?? item?.payload?["plan"]?.string
+        guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    /// The plan an owner can implement: the newest one, once it is complete.
+    /// Earlier plans were superseded, and a streaming plan may still change.
+    public static func implementablePlanID(in rows: [ReadRow]) -> String? {
+        guard let latest = rows.last(where: \.isPlan), latest.planText != nil,
+              !["started", "streaming", "waiting", "unknown"].contains(latest.item?.state ?? "") else { return nil }
+        return latest.id
+    }
+
     /// Only confirmed tool results become status lines; failures retain their details.
     func makeProfileStatus() -> String? {
         if let groupStatus { return groupStatus }

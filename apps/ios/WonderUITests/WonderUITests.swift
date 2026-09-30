@@ -3407,6 +3407,34 @@ import UIKit
         }
     }
 
+    private func leaveSettings(_ app: XCUIApplication) {
+        if app.navigationBars["Diagnostics"].exists { app.navigationBars.buttons["Settings"].tap() }
+        let done = app.buttons["settings-done"]
+        if done.exists { done.tap() }
+        else {
+            let back = app.navigationBars["Settings"].buttons.firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 5), "Pushed Settings must offer a native Back button")
+            back.tap()
+        }
+    }
+
+    private func assertPhoneDrawerClosed(_ app: XCUIApplication, search: XCUIElement) {
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let menu = app.buttons["open-sidebar"]
+            return menu.exists && menu.isHittable && (!search.exists ||
+                (!search.isHittable && search.frame.maxX <= app.frame.minX + 1))
+        }, object: nil)
+        let result = XCTWaiter.wait(for: [closed], timeout: 5)
+        if result != .completed {
+            retainMenuScreenshot(app, name: "Drawer close failure")
+            let bounds = XCTAttachment(string: "Search exists=\(search.exists), hittable=\(search.isHittable), frame=\(search.frame).\n" + app.debugDescription)
+            bounds.name = "Drawer close hit regions"
+            bounds.lifetime = .keepAlways
+            add(bounds)
+        }
+        XCTAssertEqual(result, .completed, "Closing moves the drawer off-screen and makes the main menu usable")
+    }
+
     private func liveChatRowIdentifiers(_ app: XCUIApplication) -> Set<String> {
         Set(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:")).allElementsBoundByIndex.map(\.identifier))
     }
@@ -3480,8 +3508,7 @@ import UIKit
             if !capture.isEnabled { app.switches["Record performance"].tap() }
             if capture.label == "Record two minutes" { capture.tap() }
             XCTAssertEqual(capture.label, "Stop capture")
-            app.navigationBars.buttons["Settings"].tap()
-            app.buttons["settings-done"].tap()
+            leaveSettings(app)
             openSidebarIfNeeded(app)
         }
         let search = app.textFields["sidebar-search"]
@@ -3519,13 +3546,41 @@ import UIKit
         draft.tap(); draft.typeText(addition)
         let text = try XCTUnwrap(draft.value as? String)
         XCTAssertTrue(text.contains(addition))
-        // Switch destinations while retaining this project's independent draft.
+        // The header creates a project for this draft's Mac; cancelling keeps the draft.
+        app.buttons["new-project"].tap()
+        XCTAssertTrue(app.textFields["project-name"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertEqual(draft.value as? String, text)
+        if app.buttons["open-sidebar"].exists {
+            openSidebarIfNeeded(app)
+            // The right-hand scrim is outside the drawer's 85% width.
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.4)).tap()
+            assertPhoneDrawerClosed(app, search: search)
+            retainMenuScreenshot(app, name: "Phone drawer closed after scrim tap")
+            let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.015, dy: 0.35))
+            edge.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.35)))
+            XCTAssertTrue(search.waitForExistence(timeout: 5), "A leading-edge swipe opens the drawer")
+            XCTAssertTrue(search.isHittable, "The reopened drawer keeps its search field accessible")
+            let clearSearch = app.buttons["Clear search"]
+            XCTAssertTrue(clearSearch.exists)
+            XCTAssertLessThan(clearSearch.frame.width, app.frame.width / 2,
+                              "Clear search must retain its own bounds rather than covering the drawer")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.35)).press(forDuration: 0.1,
+                thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.015, dy: 0.35)))
+            assertPhoneDrawerClosed(app, search: search)
+            XCTAssertTrue(draft.exists, "A drawer swipe must not select the thread under the finger")
+            XCTAssertEqual(draft.value as? String, text)
+        }
+        openSidebarIfNeeded(app)
+        app.buttons["sidebar-settings"].tap()
+        XCTAssertTrue(app.buttons["settings-add-computer"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["settings-done"].exists, "Sidebar Settings pushes onto the conversation stack")
+        leaveSettings(app)
+        XCTAssertTrue(draft.waitForExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, text)
+        // Projects are the only destinations: the menu offers a new one and keeps this draft.
         app.buttons["destination-picker"].tap()
-        app.buttons["Add new Bot"].tap()
-        XCTAssertTrue(app.buttons["new-chat-access"].exists)
-        XCTAssertTrue(app.buttons["project-agent-picker"].exists)
-        XCTAssertNotEqual(draft.value as? String, text, "A different destination keeps its own draft")
-        app.buttons["destination-picker"].tap()
+        XCTAssertTrue(app.buttons["New project"].waitForExistence(timeout: 5))
         app.buttons[name].firstMatch.tap()
         XCTAssertEqual(draft.value as? String, text)
         var threadIdentifier: String?
@@ -3548,6 +3603,26 @@ import UIKit
             XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 15))
             XCTAssertNil(app.textViews["message-draft"].label.range(of: #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#, options: .regularExpression), "The composer must use the project title, not its storage identity")
             if cycle == 0 { retainMenuScreenshot(app, name: "Project native conversation") }
+            if cycle == 0, environment["WONDER_PROJECT_EDIT_PIN"] == "1" {
+                app.buttons["Conversation details"].tap()
+                let pin = app.switches["project-thread-pin"]
+                XCTAssertTrue(pin.waitForExistence(timeout: 10))
+                let previous = try XCTUnwrap(pin.value as? String)
+                // SwiftUI exposes the whole Form row as the Switch element;
+                // its center is the label. Tap the native switch on the right.
+                pin.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+                let changed = previous == "1" ? "0" : "1"
+                let persisted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@ AND enabled == true", changed), object: pin)
+                XCTAssertEqual(XCTWaiter.wait(for: [persisted], timeout: 15), .completed)
+                app.buttons["Done"].tap()
+                app.buttons["Conversation details"].tap()
+                XCTAssertTrue(pin.waitForExistence(timeout: 10))
+                XCTAssertEqual(pin.value as? String, changed)
+                pin.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+                let restored = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@ AND enabled == true", previous), object: pin)
+                XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 15), .completed)
+                app.buttons["Done"].tap()
+            }
             app.buttons["new-chat"].tap()
             XCTAssertTrue(draft.waitForExistence(timeout: 10))
             XCTAssertEqual(draft.value as? String, text)
@@ -3619,7 +3694,7 @@ import UIKit
             app.launch()
             XCTAssertTrue(app.buttons["settings-add-computer"].waitForExistence(timeout: 15))
             for _ in 0..<2 {
-                app.buttons["settings-done"].tap()
+                leaveSettings(app)
                 XCUIDevice.shared.press(.home)
                 app.activate()
                 openSidebarIfNeeded(app)

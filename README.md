@@ -34,10 +34,11 @@ Claude subscription. A Bot or Group keeps the agent family selected by its first
 model. Claude has its own permission choices, connected apps, and five-hour and
 weekly usage.
 
-Mac 1.0.97 and iOS build 66 include **Projects** alongside Bots and Group Chats in the native
-sidebar. A project groups source folders on one paired Mac; its Codex or Claude
-Code conversations keep their native session identity. Choose a connection and
-destination separately, then send to start work. Continue on Mac copies an
+The native sidebar puts **Projects** and pinned threads first, with provider
+icons that distinguish Codex and Claude conversations. A project groups source
+folders on one paired Mac; its conversations keep their native session identity.
+Choose a computer and project, then set the model, access, and Plan mode in the
+composer before sending. Bots and Group Chats remain available in the sidebar. Continue on Mac copies an
 exact-session terminal command. Finish work in one client before switching;
 simultaneous control and direct desktop-app opening are not supported.
 
@@ -52,8 +53,8 @@ Wonder's bundled capture helper. Native tools require the corresponding Codex
 installation and permissions. Wonder does not substitute its old
 `wonder_computer_use` tool when native tools are unavailable.
 
-Screenshots use demo content in Wonder’s native views. They contain no personal
-conversations. [Screenshot provenance](assets/screenshots/README.md).
+Screenshots use demo content from an earlier Wonder build; they do not show the
+current Projects-first shell. They contain no personal conversations. [Screenshot provenance](assets/screenshots/README.md).
 
 ## Set up your Mac and phone
 

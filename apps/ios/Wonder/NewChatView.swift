@@ -53,13 +53,20 @@ enum NewChatDraftStore {
         }
         if lastHost == host { lastHost = nil }
     }
+    /// An empty project draft starts with the owner's words and attachments.
+    /// Both destinations remain recoverable, including when a write fails.
     static func selecting(_ destination: ChatDestination, from draft: NewChatDraft, host: String, project: ProjectSummary? = nil) -> NewChatDraft {
         guard !draft.isSubmitted, draft.destination != destination else { return draft }
-        save(draft, host: host)
-        if let saved = load(host: host, destination: destination) { return saved }
-        var next = NewChatDraft(text: draft.destination == nil ? draft.text : "")
-        if draft.destination == nil && destination != .newGroup { next.attachments = draft.attachments }
+        var next = load(host: host, destination: destination) ?? NewChatDraft()
+        if case .project = destination, !next.isSubmitted, next.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, (next.attachments ?? []).isEmpty {
+            next.text = draft.text; next.attachments = draft.attachments
+        }
+        guard save(draft, host: host) else { return draft }
         next.choose(destination, project: project)
+        guard save(next, host: host) else {
+            save(draft, host: host)
+            return draft
+        }
         return next
     }
     private static var attachmentDirectory: URL {
@@ -102,8 +109,8 @@ enum NewChatDraftStore {
     }
 }
 
-/// The normal cold-launch surface: a draft chat whose Connection and
-/// Destination are chosen separately. Choosing either never starts work.
+/// The normal cold-launch surface: a draft chat addressed to a Mac and one of
+/// its projects. Choosing either never starts work.
 struct NewChatView: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
@@ -112,9 +119,7 @@ struct NewChatView: View {
     @State private var sending = false
     @State private var failure: String?
     @State private var addingProject = false
-    @State private var groupDescription: GroupReviewRequest?
     @State private var pairing = false
-    @Environment(\.dynamicTypeSize) private var typeSize
 
     private var model: ConnectionModel? {
         guard let hostID, let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == hostID }) else { return nil }
@@ -126,7 +131,7 @@ struct NewChatView: View {
             if let model {
                 NewChatContent(library: library, shell: shell, model: model, projects: model.projects,
                                hostID: $hostID, draft: $draft, sending: $sending, failure: $failure,
-                               addingProject: $addingProject, groupDescription: $groupDescription, pairing: $pairing)
+                               addingProject: $addingProject, pairing: $pairing)
             } else {
                 noConnection
             }
@@ -134,6 +139,7 @@ struct NewChatView: View {
         .navigationTitle("New chat")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: restore)
+        .onChange(of: hostID, initial: true) { _, host in shell.draftHost = host }
         .onChange(of: shell.newChatRequest) { _, request in apply(request) }
         .onChange(of: library.saved.connections.map(\.credential.hostInstallationId)) { _, hosts in
             if let hostID, !hosts.contains(hostID) { self.hostID = nil; draft = NewChatDraft() }
@@ -158,37 +164,39 @@ struct NewChatView: View {
 
     private struct PersistenceKey: Hashable { let host: String?; let draft: NewChatDraft }
 
+    /// Only shown while no Mac is paired; otherwise a Mac is always selected.
     private var noConnection: some View {
         VStack(spacing: 16) {
             Spacer()
-            ScienceAvatar(shape: "sun", palette: "amber", size: 56).accessibilityHidden(true)
-            Text(library.saved.connections.isEmpty ? "Pair your Mac to get started" : "Choose a connection").font(.title3.weight(.semibold))
-            if library.saved.connections.isEmpty {
-                Button("Add computer", systemImage: "plus") { pairing = true }.buttonStyle(.borderedProminent)
-            } else {
-                ConnectionMenu(library: library, hostID: hostID, choose: switchHost, addComputer: { pairing = true })
-            }
+            Text("Pair your Mac to get started").font(.title3.weight(.semibold))
+            Button("Add computer", systemImage: "plus") { pairing = true }.buttonStyle(.borderedProminent)
             Spacer()
         }.frame(maxWidth: .infinity).padding()
     }
 
     private func restore() {
         guard hostID == nil else { apply(shell.newChatRequest); return }
-        let hosts = library.saved.connections.map(\.credential.hostInstallationId)
-        // Restore only an explicitly chosen, still-paired Mac; never infer one.
-        if let last = NewChatDraftStore.lastHost, hosts.contains(last) { hostID = last }
-        if let hostID { draft = NewChatDraftStore.load(host: hostID) ?? NewChatDraft() }
+        let saved = library.saved.connections
+        let hosts = saved.map(\.credential.hostInstallationId)
+        // One paired Mac needs no choice. With several, the last one used wins,
+        // then one that answers, then the first, so this surface is never a dead end.
+        var chosen = NewChatDraftStore.lastHost.flatMap { hosts.contains($0) ? $0 : nil }
+        if chosen == nil, saved.count > 1 {
+            chosen = saved.first { library.model(for: $0).macConnected == true }?.credential.hostInstallationId
+        }
+        if chosen == nil { chosen = hosts.first }
+        if let chosen {
+            hostID = chosen
+            draft = NewChatDraftStore.load(host: chosen) ?? NewChatDraft()
+        }
         apply(shell.newChatRequest)
     }
 
     private func apply(_ request: NewChatRequest?) {
         guard let request else { return }
         if let host = request.host, host != hostID { switchHost(host) }
-        if let destination = request.destination, !draft.isSubmitted {
-            if let hostID { draft = NewChatDraftStore.selecting(destination, from: draft, host: hostID, project: projectSummary(destination)) }
-        } else if request.destination == nil, request.host == nil || request.host == hostID, !draft.isSubmitted, draft.destination != nil,
-                  case .conversation = draft.destination {
-            draft.destination = nil
+        if let destination = request.destination, !draft.isSubmitted, let hostID {
+            draft = NewChatDraftStore.selecting(destination, from: draft, host: hostID, project: projectSummary(destination))
         }
         shell.newChatRequest = nil
     }
@@ -208,11 +216,6 @@ struct NewChatView: View {
     }
 }
 
-struct GroupReviewRequest: Identifiable {
-    let id = UUID()
-    let description: String
-}
-
 private struct NewChatContent: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
@@ -223,7 +226,6 @@ private struct NewChatContent: View {
     @Binding var sending: Bool
     @Binding var failure: String?
     @Binding var addingProject: Bool
-    @Binding var groupDescription: GroupReviewRequest?
     @Binding var pairing: Bool
     @Environment(\.dynamicTypeSize) private var typeSize
 
@@ -238,6 +240,7 @@ private struct NewChatContent: View {
     @State private var showingCamera = false
     @State private var cameraScope: String?
     @State private var showingModel = false
+    @State private var showingComputer = false
 
     private var draftChat: ChatSummary {
         ChatSummary(conversationId: "new-chat:" + draft.requestID, botId: nil, title: "New chat",
@@ -245,8 +248,14 @@ private struct NewChatContent: View {
             hasUnread: false, isArchived: false, isPinned: false)
     }
 
+    /// The host-level computer view has no conversation; the host reserves this ID for it.
+    private var hostViewChat: ChatSummary {
+        ChatSummary(conversationId: "wonder-host-view", botId: nil, title: "Computer", lastMessagePreview: nil,
+            lastMessageAt: nil, messageCount: 0, deliveryState: nil, hasUnread: false, isArchived: false, isPinned: false)
+    }
+
     private var canAttach: Bool {
-        !sending && !draft.isSubmitted && !loadingAttachment && (draft.attachments ?? []).count < 4 && draft.destination != .newGroup
+        !sending && !draft.isSubmitted && !loadingAttachment && (draft.attachments ?? []).count < 4
     }
 
     private var project: ProjectSummary? {
@@ -257,43 +266,32 @@ private struct NewChatContent: View {
         (projects.options?.models ?? []).filter { !$0.hidden && $0.family == draft.family }
     }
     private var selectedModel: BotOptions.Model? { familyModels.first { $0.id == draft.model } }
-    private var placeholder: String {
-        switch draft.destination {
-        case .newBot: return "Describe what this Bot should help with"
-        case .newGroup: return "Describe the team you want"
-        case .project: return "Message \(project?.name ?? "project")"
-        default: return "Message…"
-        }
+    private var modelTitle: String {
+        selectedModel.map { ModelDefaults.summary(model: $0, effort: draft.effort) } ?? "Model"
     }
+    private var placeholder: String { "Message \(project?.name ?? "project")" }
     private var canSend: Bool {
         guard !sending, model.connection != nil, !model.accessEnded, model.macConnected == true else { return false }
         let text = (draft.submittedBody ?? draft.text).trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!text.isEmpty || !(draft.attachments ?? []).isEmpty), text.utf8.count <= 65536, !loadingAttachment else { return false }
-        switch draft.destination {
-        case .project: return project != nil && draft.family != nil && draft.model != nil && projects.isAvailable(draft.family ?? .codex)
-        case .newBot:
-            return selectedModel != nil && projects.options?.approvalChoices(model: draft.model)?
-                .contains(where: { $0.id == (draft.botApprovalMode ?? .askForApproval).rawValue && $0.allowed }) == true
-        case .newGroup: return !text.isEmpty && (draft.attachments ?? []).isEmpty
-        default: return false
-        }
+        guard case .project = draft.destination else { return false }
+        return project != nil && draft.family != nil && draft.model != nil && projects.isAvailable(draft.family ?? .codex)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
-            emptyState
-            Spacer(minLength: 0)
-        }
+        VStack(spacing: 0) { Spacer(minLength: 0) }
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
         .onTapGesture { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
         .safeAreaInset(edge: .bottom) { composer }
         .task(id: model.assignmentScope) {
+            settleDestination()
             await projects.loadOptions()
             if projects.supportsProjects == nil { await projects.refresh() }
+            settleDestination()
             ensureModel()
         }
+        .onChange(of: projects.projects.filter(\.isIncluded).map(\.id)) { _, _ in settleDestination() }
         .onChange(of: draft.family) { _, _ in ensureModel() }
         .onChange(of: projects.options?.models.count) { _, _ in ensureModel() }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
@@ -330,6 +328,12 @@ private struct NewChatContent: View {
             }
         }
         .sheet(isPresented: $showingModel) { modelSheet }
+        .fullScreenCover(isPresented: $showingComputer) {
+            NavigationStack { ComputerSessionView(model: model, chat: hostViewChat) }
+        }
+        .onChange(of: showingComputer) { _, showing in
+            if showing { model.dictation.captureControlsHidden(conversationID: draftChat.id) }
+        }
         .task(id: selectedPhoto) {
             guard let photo = selectedPhoto, importingFor == draft.requestID, canAttach else { return }
             let request = draft.requestID
@@ -371,49 +375,6 @@ private struct NewChatContent: View {
                 choose(destination: .project(id: saved.id), project: saved)
             }
         }
-        .sheet(item: $groupDescription) { request in
-            GroupReviewSheet(model: model, initialDescription: request.description, draftID: draft.requestID) { conversation in
-                draft.completeSubmission()
-                if let host = hostID {
-                    NewChatDraftStore.save(draft, host: host)
-                    shell.open(host: host, conversation: conversation)
-                }
-            } onCancel: {
-                // The description stays in the draft for another attempt.
-                draft.submittedBody = nil
-            }
-        }
-    }
-
-    @ViewBuilder private var emptyState: some View {
-        VStack(spacing: 14) {
-            switch draft.destination {
-            case .project:
-                Image(systemName: "folder").font(.system(size: 34)).foregroundStyle(.secondary).accessibilityHidden(true)
-                Text(project?.name ?? "Project").font(.title3.weight(.semibold))
-                if let folder = folderName { Text("Starts in \(folder) on \(model.macName)").font(.subheadline).foregroundStyle(.secondary) }
-            case .newBot:
-                ScienceAvatar(shape: "sun", palette: "amber", size: 52).accessibilityHidden(true)
-                Text("New Bot").font(.title3.weight(.semibold))
-                Text("Describe what it should help with. Its name and look can change later.")
-                    .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            case .newGroup:
-                Image(systemName: "person.2").font(.system(size: 34)).foregroundStyle(.secondary).accessibilityHidden(true)
-                Text("New Group Chat").font(.title3.weight(.semibold))
-                Text("Describe the team. You’ll review who joins before anything starts.")
-                    .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            default:
-                ScienceAvatar(shape: "sun", palette: "amber", size: 52).accessibilityHidden(true)
-                Text("What would you like to do?").font(.title3.weight(.semibold))
-            }
-        }
-        .padding(.horizontal, 32)
-        .accessibilityElement(children: .combine)
-    }
-
-    private var folderName: String? {
-        guard let project else { return nil }
-        return (project.folders.first { $0.id == draft.folderId } ?? project.primaryFolder)?.name
     }
 
     private var composer: some View {
@@ -425,7 +386,7 @@ private struct NewChatContent: View {
             if model.macConnected == false {
                 Text("Can’t reach \(model.macName). Your draft is saved.").font(.caption).foregroundStyle(.secondary)
             }
-            if case .project = draft.destination, projects.supportsProjects == false {
+            if projects.supportsProjects == false {
                 Text("Update Wonder on \(model.macName) to use Projects.").font(.caption).foregroundStyle(.secondary)
             }
             pickers
@@ -437,6 +398,12 @@ private struct NewChatContent: View {
                         removalDisabled: sending || draft.isSubmitted,
                         loadRemoteData: { _ in throw FileFailure.notUploaded }, openPhoto: { previewAttachment = $0 },
                         remove: { id in draft.attachments?.removeAll { $0.id == id } })
+                }
+                if projects.supportsModes, draft.planMode == true {
+                    HStack(spacing: 0) {
+                        PlanModeChip(isDisabled: sending || draft.isSubmitted) { draft.planMode = nil }
+                        Spacer(minLength: 0)
+                    }.padding(.horizontal, 8).padding(.top, 4)
                 }
                 BoundedComposerEditor(
                     text: Binding(get: { draft.submittedBody ?? draft.text }, set: { if !draft.isSubmitted { draft.text = $0 } }),
@@ -458,11 +425,16 @@ private struct NewChatContent: View {
                         Button("Camera", systemImage: "camera") {
                             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                             cameraScope = model.assignmentScope; showingCamera = true
+                        }.disabled(!canAttach)
+                        Button("Add photo", systemImage: "photo") { importingFor = draft.requestID; selectingPhoto = true }.disabled(!canAttach)
+                        Button("Attach file", systemImage: "paperclip") { importingFor = draft.requestID; importing = true }.disabled(!canAttach)
+                        if projects.supportsModes {
+                            Toggle(isOn: Binding(get: { draft.planMode == true }, set: { draft.planMode = $0 ? true : nil })) {
+                                Label("Plan mode", systemImage: "list.bullet.clipboard")
+                            }.accessibilityIdentifier("new-chat-plan-mode")
                         }
-                        Button("Add photo", systemImage: "photo") { importingFor = draft.requestID; selectingPhoto = true }
-                        Button("Attach file", systemImage: "paperclip") { importingFor = draft.requestID; importing = true }
                     } label: { Image(systemName: "plus").font(.system(size: 22)).frame(width: 44, height: 44) }
-                    .disabled(!canAttach).accessibilityLabel("Message actions").accessibilityIdentifier("new-chat-attach")
+                    .disabled(sending || draft.isSubmitted).accessibilityLabel("Message actions").accessibilityIdentifier("new-chat-attach")
                     DictationButton(controller: model.dictation, chat: draftChat,
                         unavailable: sending || draft.isSubmitted || model.accessEnded,
                         prepare: {
@@ -472,8 +444,7 @@ private struct NewChatContent: View {
                             }
                             return true
                         })
-                    if project != nil || draft.destination == .newBot { projectSettings }
-                    else { Spacer(minLength: 0) }
+                    if project != nil { projectSettings } else { Spacer(minLength: 0) }
                     Button { Task { await send() } } label: {
                         if sending { ProgressView().frame(width: 44, height: 44) }
                         else { Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44) }
@@ -497,18 +468,65 @@ private struct NewChatContent: View {
         .frame(maxWidth: .infinity)
     }
 
-    @ViewBuilder private var pickers: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                ConnectionMenu(library: library, hostID: hostID, choose: choose(host:), addComputer: { pairing = true })
-                destinationMenu
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                ConnectionMenu(library: library, hostID: hostID, choose: choose(host:), addComputer: { pairing = true })
-                destinationMenu
+    /// Where the chat goes, stacked and left-aligned above the composer.
+    private var pickers: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) { computerMenu.disabled(sending || draft.isSubmitted); Spacer(minLength: 0) }
+            HStack(spacing: 0) { projectMenu.disabled(sending || draft.isSubmitted); Spacer(minLength: 0) }
+            HStack(spacing: 0) {
+                Button { showingComputer = true } label: { PickerRow(systemImage: "desktopcomputer", title: "View computer", showsChevron: false) }
+                    .buttonStyle(.plain).disabled(model.accessEnded)
+                    .accessibilityHint("Shows the screen of \(model.macName)")
+                    .accessibilityIdentifier("view-computer")
+                Spacer(minLength: 0)
             }
         }
-        .disabled(sending || draft.isSubmitted)
+        .padding(.horizontal, 4)
+    }
+
+    private var computerMenu: some View {
+        Menu {
+            ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
+                let candidate = library.model(for: saved)
+                Button { choose(host: saved.credential.hostInstallationId) } label: {
+                    let detail = candidate.accessEnded ? "Access ended" : candidate.macConnected == true ? "Connected" : candidate.macConnected == false ? "Offline" : "Connecting"
+                    if saved.credential.hostInstallationId == hostID { Label("\(candidate.macName) · \(detail)", systemImage: "checkmark") }
+                    else { Text("\(candidate.macName) · \(detail)") }
+                }
+            }
+            Section { Button("Add computer", systemImage: "plus") { pairing = true } }
+        } label: {
+            PickerRow(systemImage: "laptopcomputer", title: model.macName)
+        }
+        .menuOrder(.fixed)
+        // Menu labels otherwise take the accent tint; these read as plain text.
+        .buttonStyle(.plain).tint(.primary)
+        .accessibilityLabel("Computer")
+        .accessibilityValue(model.macName)
+        .accessibilityIdentifier("connection-picker")
+    }
+
+    private var projectMenu: some View {
+        Menu {
+            if projects.supportsProjects != false {
+                ForEach(projects.includedProjects) { listed in
+                    Button { choose(destination: .project(id: listed.id), project: listed) } label: {
+                        if listed.id == project?.id { Label(listed.name, systemImage: "checkmark") }
+                        else { Label(listed.name, systemImage: listed.isPinned ? "pin" : "folder") }
+                    }
+                }
+                Section {
+                    Button("New project", systemImage: "folder.badge.plus") { addingProject = true }
+                }
+            }
+        } label: {
+            PickerRow(systemImage: "folder", title: project?.name ?? "Choose a project")
+        }
+        .menuOrder(.fixed)
+        .buttonStyle(.plain).tint(.primary)
+        .accessibilityLabel("Project")
+        .accessibilityValue(project?.name ?? "None")
+        .accessibilityIdentifier("destination-picker")
     }
 
     private func choose(destination: ChatDestination, project: ProjectSummary? = nil) {
@@ -528,99 +546,18 @@ private struct NewChatContent: View {
         failure = nil
     }
 
-    private var destinationTitle: String {
-        switch draft.destination {
-        case .project: return project?.name ?? "Project"
-        case .newBot: return "New Bot"
-        case .newGroup: return "New Group Chat"
-        case .conversation(let id): return model.chats.first { $0.id == id }?.title ?? "Destination"
-        case nil: return "Destination"
-        }
-    }
-
-    private var destinationMenu: some View {
-        let recent = RecentConversations.visible(model.chats.filter { !$0.isArchived }, showAll: false).rows
-        return Menu {
-            if !recent.isEmpty {
-                Section("Recent Bots") {
-                    ForEach(recent) { chat in
-                        Button { open(chat) } label: {
-                            Label(chat.title, systemImage: chat.botId == nil ? "person.2" : "sun.max")
-                        }
-                    }
-                }
-            }
-            if projects.supportsProjects != false {
-                let listed = Array(projects.includedProjects.prefix(8))
-                if !listed.isEmpty {
-                    Section("Projects") {
-                        ForEach(listed) { project in
-                            Button { choose(destination: .project(id: project.id), project: project) } label: {
-                                if case .project(project.id) = draft.destination { Label(project.name, systemImage: "checkmark") }
-                                else { Label(project.name, systemImage: project.isPinned ? "pin" : "folder") }
-                            }
-                        }
-                    }
-                }
-            }
-            Section {
-                if projects.supportsProjects != false {
-                    Button("Add new project", systemImage: "folder.badge.plus") { addingProject = true }
-                }
-                Button("Add new Bot", systemImage: "sun.max") { choose(destination: .newBot) }
-                Button("Add new Group Chat", systemImage: "person.2.badge.plus") { choose(destination: .newGroup) }
-            }
-        } label: {
-            PickerChip(title: destinationTitle, systemImage: nil)
-        }
-        .menuOrder(.fixed)
-        .accessibilityLabel("Destination")
-        .accessibilityValue(draft.destination == nil ? "None" : destinationTitle)
-        .accessibilityIdentifier("destination-picker")
-    }
-
     private var projectSettings: some View {
         let family = draft.family ?? .codex
         return HStack(spacing: 4) {
-            if draft.destination == .newBot {
-                ApprovalModeMenu(selection: Binding(get: { draft.botApprovalMode ?? .askForApproval }, set: { draft.botApprovalMode = $0 }),
-                    options: projects.options?.approvalChoices(model: draft.model), family: family, onChange: { _ in }) {
-                    Image(systemName: "shield").font(.system(size: 18)).frame(width: 44, height: 44)
-                        .foregroundStyle(draft.botApprovalMode == .fullAccess ? Color.orange : Color.primary)
-                }
-                .accessibilityLabel("Approval").accessibilityIdentifier("new-chat-access")
-            } else {
-            Menu {
-                ForEach(ProjectAccessMode.allCases) { mode in
-                    Button { draft.accessMode = mode } label: {
-                        if mode == draft.accessMode { Label(mode.title(for: family), systemImage: "checkmark") }
-                        else { Text(mode.title(for: family)) }
-                    }
-                }
-                Section { Text(draft.accessMode.detail(for: family)) }
-            } label: {
-                Image(systemName: "shield").font(.system(size: 18)).frame(width: 44, height: 44)
-                    .foregroundStyle(draft.accessMode == .fullAccess ? Color.orange : Color.primary)
-            }
-            .accessibilityLabel("Access")
-            .accessibilityValue(draft.accessMode.title(for: family))
-            .accessibilityIdentifier("new-chat-access")
+            ProjectAccessMenu(family: family, supportsModes: projects.supportsModes, access: draft.access,
+                              identifier: "new-chat-access") { choice in
+                draft.access = choice.result(from: draft.access, family: family, supportsModes: projects.supportsModes)
             }
             Spacer(minLength: 0)
-            Button { showingModel = true } label: {
-                Group {
-                    if typeSize.isAccessibilitySize { Image(systemName: "slider.horizontal.3").font(.system(size: 20)) }
-                    else {
-                        HStack(spacing: 4) {
-                            Text(selectedModel?.displayName ?? family.title).lineLimit(1)
-                            Image(systemName: "chevron.down").imageScale(.small)
-                        }.font(.subheadline)
-                    }
-                }.padding(.horizontal, 4).frame(minWidth: 44, minHeight: 44)
-            }
-            .accessibilityLabel("Model")
-            .accessibilityValue(family.title + ", " + (selectedModel?.displayName ?? "Choose model"))
-            .accessibilityIdentifier("project-agent-picker")
+            Button { showingModel = true } label: { ComposerModelLabel(family: draft.family, title: modelTitle) }
+                .accessibilityLabel("Model")
+                .accessibilityValue(family.title + ", " + (selectedModel == nil ? "Choose model" : modelTitle))
+                .accessibilityIdentifier("project-agent-picker")
         }
         .disabled(sending || draft.isSubmitted)
     }
@@ -631,7 +568,8 @@ private struct NewChatContent: View {
                 Section("Agent") {
                     ForEach(AgentFamily.allCases) { option in
                         Button { var next = draft; next.chooseFamily(option); draft = next } label: {
-                            HStack {
+                            HStack(spacing: 10) {
+                                ProviderIcon(family: option, size: 22)
                                 Text(projects.isAvailable(option) ? option.title : option.title + " (unavailable)")
                                 Spacer()
                                 if option == draft.family { Image(systemName: "checkmark") }
@@ -642,7 +580,7 @@ private struct NewChatContent: View {
                 Section("Model") {
                     if familyModels.isEmpty { Text("Models are unavailable. Check \(model.macName).").foregroundStyle(.secondary) }
                     ForEach(familyModels) { option in
-                        Button { draft.model = option.id; draft.effort = nil; draft.serviceTier = nil } label: {
+                        Button { if option.id != draft.model { draft.chooseModel(option) }; remember() } label: {
                             HStack { Text(option.displayName); Spacer(); if option.id == draft.model { Image(systemName: "checkmark") } }
                         }
                     }
@@ -650,9 +588,9 @@ private struct NewChatContent: View {
                 if let selectedModel, !selectedModel.reasoningEfforts.isEmpty {
                     Section("Reasoning") {
                         ForEach(selectedModel.reasoningEfforts) { option in
-                            Button { draft.effort = option.id } label: {
+                            Button { draft.effort = option.id; remember() } label: {
                                 HStack {
-                                    Text(option.label == "xhigh" ? "Extra high" : option.label.capitalized)
+                                    Text(ModelDefaults.title(of: option))
                                     Spacer()
                                     if option.id == draft.effort { Image(systemName: "checkmark") }
                                 }
@@ -672,15 +610,6 @@ private struct NewChatContent: View {
                         }
                     }
                 }
-                if draft.destination == .newBot, let tiers = selectedModel?.serviceTiers, tiers.count > 1 {
-                    Section("Speed") {
-                        ForEach(tiers) { tier in
-                            Button { draft.serviceTier = tier.id } label: {
-                                HStack { Text(tier.label.capitalized); Spacer(); if tier.id == (draft.serviceTier ?? "default") { Image(systemName: "checkmark") } }
-                            }
-                        }
-                    }
-                }
             }
             .foregroundStyle(.primary)
             .disabled(sending || draft.isSubmitted)
@@ -689,24 +618,30 @@ private struct NewChatContent: View {
         }.presentationDetents([.large]).presentationDragIndicator(.visible)
     }
 
-    /// Choose a model when the family has none selected: the owner's default
-    /// for new Bots if it belongs to this family, otherwise the first offered.
+    /// The next thread with this provider starts from the choice just made.
+    private func remember() {
+        guard let family = draft.family, let model = draft.model else { return }
+        RememberedModels.save(family, model: model, effort: draft.effort)
+    }
+
+    /// A draft with no destination, a Bot, or a project that is gone belongs in
+    /// the first included project.
+    private func settleDestination() {
+        var next = draft
+        guard next.settle(in: projects.includedProjects) else { return }
+        draft = next
+        ensureModel()
+    }
+
+    /// Keep the draft on a model its provider offers, with an effort that model
+    /// supports: the last choice for this provider, else the host's default.
     private func ensureModel() {
-        guard !draft.isSubmitted, project != nil || draft.destination == .newBot else { return }
-        if draft.destination == .newBot, draft.botApprovalMode == nil {
-            let defaults = ModelDefaultPurpose.newBots.load()
-            draft.family = AgentFamily(model: defaults.model)
-            draft.model = defaults.model
-            draft.effort = defaults.reasoningEffort.isEmpty ? nil : defaults.reasoningEffort
-            draft.serviceTier = defaults.serviceTier
-            draft.botApprovalMode = defaults.approvalMode
-        }
-        guard let family = draft.family,
-              !familyModels.contains(where: { $0.id == draft.model }), !familyModels.isEmpty else { return }
-        let preferred = ModelDefaultPurpose.newBots.load().model
-        if AgentFamily(model: preferred) == family, familyModels.contains(where: { $0.id == preferred }) { draft.model = preferred }
-        else { draft.model = (familyModels.first { $0.id != "claude:haiku" } ?? familyModels[0]).id }
-        draft.effort = nil
+        guard !draft.isSubmitted, let project else { return }
+        // A draft saved before its provider was known starts from the project's.
+        if draft.family == nil { draft.family = project.lastFamily ?? .codex; return }
+        var next = draft
+        next.ensureModel(among: familyModels, remembered: RememberedModels.load(draft.family))
+        if next != draft { draft = next }
     }
 
     private func importAttachment(_ load: @escaping @MainActor () async throws -> [StagedFile]) {
@@ -749,25 +684,9 @@ private struct NewChatContent: View {
         }
     }
 
-    /// Keep an existing conversation's durable draft when selecting it.
-    private func open(_ chat: ChatSummary) {
-        guard let hostID else { return }
-        let current = draft, scope = model.assignmentScope
-        Task {
-            do {
-                let files = try await Task.detached { try NewChatDraftStore.files(current.attachments ?? []) }.value
-                guard scope == model.assignmentScope, draft.requestID == current.requestID else { return }
-                if try model.transferDraft(current.text, files: files, to: chat) {
-                    draft.text = ""; draft.attachments = nil
-                    NewChatDraftStore.save(draft, host: hostID)
-                }
-                shell.open(host: hostID, conversation: chat.id)
-            } catch { failure = "Your draft could not be moved. Check its attachments and try again." }
-        }
-    }
-
     private func send() async {
-        guard canSend, let hostID, let device = model.connection?.credential.deviceId else { return }
+        guard canSend, case .project(let projectID) = draft.destination, let hostID,
+              let device = model.connection?.credential.deviceId else { return }
         sending = true; failure = nil
         let scope = model.assignmentScope
         defer { sending = false }
@@ -794,109 +713,57 @@ private struct NewChatContent: View {
             return
         }
         guard scope == model.assignmentScope, !model.accessEnded, !Task.isCancelled else { return }
-        switch draft.destination {
-        case .project(let projectID):
-            do {
-                let conversation: String
-                if let prepared = draft.preparedConversationID { conversation = prepared }
-                else {
-                    let response = try await projects.createThread(projectID: projectID, draft: draft, body: body, deviceID: device)
-                    guard let created = response.conversation.conversationId else { throw PairingFailure.response(500) }
-                    conversation = created
-                    draft.preparedConversationID = created
-                    NewChatDraftStore.save(draft, host: hostID)
-                }
-                let detail = try await projects.loadDetail(conversation)
-                let chat = model.projectChat(detail)
-                try await model.prepareCreation(chat, body: body, requestID: draft.requestID, files: files)
-                draft.completeSubmission()
+        do {
+            let conversation: String
+            if let prepared = draft.preparedConversationID { conversation = prepared }
+            else {
+                let response = try await projects.createThread(projectID: projectID, draft: draft, body: body, deviceID: device)
+                guard let created = response.conversation.conversationId else { throw PairingFailure.response(500) }
+                conversation = created
+                draft.preparedConversationID = created
                 NewChatDraftStore.save(draft, host: hostID)
-                shell.open(host: hostID, conversation: conversation)
-                await model.deliver(chat)
-            } catch PairingFailure.response(412) {
-                draft.rejectSubmission()
-                await projects.refresh()
-                failure = "The project's folders changed. Review the working folder and send again."
-            } catch PairingFailure.response(409) {
-                failure = "This request conflicts with the saved thread or its folder. Check the project on your Mac, then retry this same request."
-            } catch PairingFailure.response(422) {
-                draft.rejectSubmission()
-                failure = "This project, model or access choice can’t be used. Check them and send again."
-            } catch PairingFailure.response(503) {
-                failure = "\(model.macName) isn’t ready yet. Send again in a moment to check the same request."
-            } catch {
-                failure = "Your Mac didn’t confirm the new thread. Send again to retry the same request; it won’t start twice."
             }
-        case .newBot:
-            do {
-                let defaults = NewBotDefaults(model: draft.model ?? "", reasoningEffort: draft.effort ?? "",
-                    serviceTier: draft.serviceTier, approvalMode: draft.botApprovalMode ?? .askForApproval)
-                guard let conversation = try await model.createConversationalBot(requestID: draft.requestID, defaults: defaults) else { throw PairingFailure.response(500) }
-                guard let chat = model.chats.first(where: { $0.id == conversation }) else { throw PairingFailure.response(503) }
-                // Transfer the frozen request to the existing durable outbox
-                // before clearing this creation draft or performing networking.
-                try await model.prepareCreation(chat, body: body, requestID: draft.requestID, files: files)
-                draft.completeSubmission()
-                NewChatDraftStore.save(draft, host: hostID)
-                shell.open(host: hostID, conversation: conversation)
-                await model.deliver(chat)
-            } catch {
-                failure = managementError(error) + " Retry to finish the same Bot and message."
-            }
-        case .newGroup:
-            groupDescription = GroupReviewRequest(description: body)
-        default:
-            draft.submittedBody = nil
+            let detail = try await projects.loadDetail(conversation)
+            let chat = model.projectChat(detail)
+            try await model.prepareCreation(chat, body: body, requestID: draft.requestID, files: files)
+            draft.completeSubmission()
+            NewChatDraftStore.save(draft, host: hostID)
+            shell.open(host: hostID, conversation: conversation)
+            await model.deliver(chat)
+        } catch PairingFailure.response(412) {
+            draft.rejectSubmission()
+            await projects.refresh()
+            failure = "The project's folders changed. Review the working folder and send again."
+        } catch PairingFailure.response(409) {
+            failure = "This request conflicts with the saved thread or its folder. Check the project on your Mac, then retry this same request."
+        } catch PairingFailure.response(422) {
+            draft.rejectSubmission()
+            failure = "This project, model or access choice can’t be used. Check them and send again."
+        } catch PairingFailure.response(503) {
+            failure = "\(model.macName) isn’t ready yet. Send again in a moment to check the same request."
+        } catch {
+            failure = "Your Mac didn’t confirm the new thread. Send again to retry the same request; it won’t start twice."
         }
     }
 }
 
-/// Paired Macs, the current choice and meaningful availability.
-struct ConnectionMenu: View {
-    @ObservedObject var library: ConnectionLibrary
-    let hostID: String?
-    let choose: (String) -> Void
-    let addComputer: () -> Void
-    private var current: ConnectionModel? {
-        guard let hostID, let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == hostID }) else { return nil }
-        return library.model(for: saved)
-    }
-    var body: some View {
-        Menu {
-            ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
-                let model = library.model(for: saved)
-                Button { choose(saved.credential.hostInstallationId) } label: {
-                    let detail = model.accessEnded ? "Access ended" : model.macConnected == true ? "Connected" : model.macConnected == false ? "Offline" : "Connecting"
-                    if saved.credential.hostInstallationId == hostID { Label("\(model.macName) · \(detail)", systemImage: "checkmark") }
-                    else { Text("\(model.macName) · \(detail)") }
-                }
-            }
-            Section { Button("Add computer", systemImage: "plus", action: addComputer) }
-        } label: {
-            PickerChip(title: current?.macName ?? "Choose a connection", systemImage: "laptopcomputer")
-        }
-        .accessibilityLabel("Connection")
-        .accessibilityValue(current?.macName ?? "None")
-        .accessibilityIdentifier("connection-picker")
-    }
-}
-
-/// A compact rounded control that opens an anchored native menu.
-struct PickerChip: View {
+/// A plain, left-aligned row that opens an anchored native menu or an action:
+/// a secondary icon, primary text and, for menus, the up-down chevron.
+struct PickerRow: View {
+    let systemImage: String
     let title: String
-    let systemImage: String?
+    var showsChevron = true
     var body: some View {
-        HStack(spacing: 6) {
-            if let systemImage { Image(systemName: systemImage) }
-            Text(title).lineLimit(1)
-            Image(systemName: "chevron.down").imageScale(.small).foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            Image(systemName: systemImage).foregroundStyle(.secondary).frame(width: 22)
+            Text(title).foregroundStyle(.primary).lineLimit(1)
+            if showsChevron {
+                Image(systemName: "chevron.up.chevron.down").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            }
         }
-        .font(.subheadline)
-        .foregroundStyle(.primary)
-        .padding(.horizontal, 12)
+        .font(.callout)
         .frame(minHeight: 44)
-        .background(Capsule().strokeBorder(Color.secondary.opacity(0.35)))
-        .contentShape(Capsule())
+        .contentShape(Rectangle())
     }
 }
 

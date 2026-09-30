@@ -40,18 +40,30 @@ private struct WonderRoot: View {
     }
 }
 
+/// Settings. It is pushed onto the main navigation stack with a Back button;
+/// only first-launch pairing presents it as a sheet, which needs its own Done.
 struct ConnectionsView: View {
     @ObservedObject var library: ConnectionLibrary
+    var isSheet = false
     @Environment(\.dismiss) private var dismiss
     @State private var adding = false
     var body: some View {
-        NavigationStack {
-            List {
-                if let error = library.error {
-                    FailureDetails("Connection problem", message: error)
-                    if !library.loaded { Button("Try again") { library.load() } }
-                }
-                Section("Connections") {
+        if isSheet {
+            NavigationStack {
+                content
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.accessibilityIdentifier("settings-done") } }
+            }
+        } else {
+            content
+        }
+    }
+    private var content: some View {
+        List {
+            if let error = library.error {
+                FailureDetails("Connection problem", message: error)
+                if !library.loaded { Button("Try again") { library.load() } }
+            }
+            Section("Connections") {
                 ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
                     NavigationLink {
                         ConnectionDetail(model: library.model(for: saved), library: library)
@@ -65,22 +77,13 @@ struct ConnectionsView: View {
                     }
                 }
                 Button("Add computer", systemImage: "plus") { adding = true }.disabled(!library.loaded).accessibilityIdentifier("settings-add-computer")
-                }
-                #if WONDER_DIAGNOSTICS
-                Section { NavigationLink("Diagnostics") { DiagnosticsView(library: library) }.accessibilityIdentifier("diagnostics-settings") }
-                #endif
-                Section("Models") {
-                    NavigationLink("Model settings") {
-                        List { ForEach(ModelDefaultPurpose.allCases) { purpose in
-                            NavigationLink(purpose.title) { NewBotModelSettings(library: library, purpose: purpose) }
-                        } }.navigationTitle("Model settings")
-                    }
-                }
             }
-            .navigationTitle("Settings")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.accessibilityIdentifier("settings-done") } }
-            .sheet(isPresented: $adding) { PairComputerView(model: library.pairingModel()) }
+            #if WONDER_DIAGNOSTICS
+            Section { NavigationLink("Diagnostics") { DiagnosticsView(library: library) }.accessibilityIdentifier("diagnostics-settings") }
+            #endif
         }
+        .navigationTitle("Settings")
+        .sheet(isPresented: $adding) { PairComputerView(model: library.pairingModel()) }
     }
 }
 
@@ -140,7 +143,6 @@ struct ConnectionDetail: View {
             Section {
                 NavigationLink("Projects") { ManageProjectsView(model: model, library: model.projects, embedded: true) }
                     .accessibilityIdentifier("connection-projects")
-                NavigationLink("Archived Bots") { ArchivedBotsView(model: model) }
                 NavigationLink("Connected apps") { ConnectedAppsView(model: model) }
                 NavigationLink("Voice & Dictation") { VoiceSettingsView(model: model, controller: model.dictation) }
             }
@@ -176,11 +178,6 @@ struct ConnectionDetail: View {
                 Text("Codex usage").accessibilityIdentifier("codex-usage-section")
             }
             ClaudeUsageSection(model: model)
-            Section {
-                NavigationLink("Projects") {
-                    ManageProjectsView(model: model, library: model.projects, embedded: true)
-                }.accessibilityIdentifier("connection-projects")
-            }
             Section {
                 Button("Remove connection", role: .destructive) { removing = true }.disabled(model.busy)
             }
@@ -504,115 +501,5 @@ struct ConnectedAppsView: View {
                 failure = "Apps could not be verified. Check Wonder on your computer, then refresh."
             }
         }
-    }
-}
-
-struct NewBotModelSettings: View {
-    @ObservedObject var library: ConnectionLibrary
-    let purpose: ModelDefaultPurpose
-    @State private var defaults: NewBotDefaults
-    init(library: ConnectionLibrary, purpose: ModelDefaultPurpose = .newBots) {
-        self.library = library; self.purpose = purpose
-        _defaults = State(initialValue: purpose.load())
-    }
-    @State private var options: BotOptions?
-    @State private var loading = false
-    @State private var failure: String?
-    private var selected: BotOptions.Model? {
-        defaults.model.isEmpty ? options?.models.first(where: { !$0.hidden }) : options?.models.first(where: { $0.id == defaults.model })
-    }
-    private var automaticModel: String {
-        options?.models.first(where: { !$0.hidden }).map { "Automatic (\($0.displayName))" } ?? "Automatic"
-    }
-    private var automaticEffort: String {
-        guard let selected, let effort = selected.reasoningEfforts.first(where: { $0.id == selected.defaultReasoningEffort }) else { return "Model default" }
-        return "Model default (\(effort.label.capitalized))"
-    }
-    var body: some View {
-        Form {
-            Section {
-                if let options {
-                    Picker("Model", selection: Binding(get: { defaults.model }, set: { value in
-                        let approval = AgentFamily(model: value) == .claude && defaults.approvalMode == .approveForMe ? BotApprovalMode.askForApproval : defaults.approvalMode
-                        save(NewBotDefaults(model: value, approvalMode: approval))
-                    })) {
-                        Text(automaticModel).tag("")
-                        ForEach(options.models.filter { !$0.hidden }) { Text($0.displayName).tag($0.id) }
-                        if !defaults.model.isEmpty && selected == nil { Text("\(defaults.model) (unavailable)").tag(defaults.model) }
-                    }
-                    if let selected, !selected.reasoningEfforts.isEmpty {
-                        Picker("Reasoning", selection: Binding(get: { defaults.reasoningEffort }, set: { value in
-                            save(NewBotDefaults(model: defaults.model, reasoningEffort: value, serviceTier: defaults.serviceTier, approvalMode: defaults.approvalMode))
-                        })) {
-                            Text(automaticEffort).tag("")
-                            ForEach(selected.reasoningEfforts) { Text($0.label == "xhigh" ? "Extra high" : $0.label.capitalized).tag($0.id) }
-                            if !defaults.reasoningEffort.isEmpty && !selected.reasoningEfforts.contains(where: { $0.id == defaults.reasoningEffort }) {
-                                Text("\(defaults.reasoningEffort) (unavailable)").tag(defaults.reasoningEffort)
-                            }
-                        }
-                    }
-                    if let selected, let speeds = selected.serviceTiers, !speeds.isEmpty {
-                        Picker("Speed", selection: Binding(get: { defaults.serviceTier ?? "" }, set: { value in
-                            save(NewBotDefaults(model: defaults.model, reasoningEffort: defaults.reasoningEffort, serviceTier: value.isEmpty ? nil : value, approvalMode: defaults.approvalMode))
-                        })) {
-                            Text("Model default").tag("")
-                            ForEach(speeds) { Text($0.label).tag($0.id) }
-                            if let speed = defaults.serviceTier, !speeds.contains(where: { $0.id == speed }) { Text("\(speed) (unavailable)").tag(speed) }
-                        }
-                    }
-                    Section("Approval") {
-                        Picker("Mode", selection: Binding(get: { defaults.approvalMode }, set: { value in
-                            save(NewBotDefaults(model: defaults.model, reasoningEffort: defaults.reasoningEffort, serviceTier: defaults.serviceTier, approvalMode: value))
-                        })) {
-                            ForEach(BotApprovalMode.allCases.filter { selected?.family != .claude || $0 != .approveForMe }) { mode in Text(mode.title).tag(mode) }
-                        }
-                        .disabled(options.approvalModes == nil)
-                        if options.approvalModes == nil {
-                            Text("Update Wonder on your Mac to change approval settings.").font(.footnote).foregroundStyle(.secondary)
-                        } else if options.approvalChoices(model: selected?.id)?.first(where: { $0.id == defaults.approvalMode.rawValue })?.allowed != true {
-                            Text("This approval choice is unavailable on your Mac. Choose an available option before creating a Bot.").font(.footnote).foregroundStyle(.secondary)
-                        }
-                    }
-                } else if loading { ProgressView("Loading models") }
-                else { Text("Connect a computer to load its available models.").foregroundStyle(.secondary) }
-            } header: { Text(purpose.title) } footer: {
-                Text(purpose == .newBots ? "Applies to new Bots across all connections. Existing Bots keep their own settings." : "Applies across all connections. Participating Bots keep their own model settings.")
-            }
-            if let failure {
-                Section {
-                    Text(failure).foregroundStyle(.secondary)
-                    Button("Try again") { Task { await load() } }.disabled(loading)
-                }
-            }
-            Section {
-                Button("Use automatic defaults") { save(NewBotDefaults()) }
-                    .disabled(defaults == NewBotDefaults())
-            }
-        }
-        .navigationTitle("Model settings").navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
-    }
-    private func save(_ value: NewBotDefaults) {
-        do {
-            if !library.isPreview { try value.save(key: purpose.key) }
-            defaults = value; failure = nil
-        } catch { failure = "Couldn’t save model defaults. Try again." }
-    }
-    private func load() async {
-        loading = true; defer { loading = false }
-        #if DEBUG && targetEnvironment(simulator)
-        if library.isPreview {
-            let json = #"{"groupCollaboration":true,"models":[{"id":"gpt-6-astra","displayName":"GPT-6 Astra","hidden":false,"defaultReasoningEffort":"medium","reasoningEfforts":[{"id":"low","label":"Low"},{"id":"medium","label":"Medium"},{"id":"high","label":"High"},{"id":"xhigh","label":"Extra high"}],"serviceTiers":[{"id":"default","label":"Standard"},{"id":"priority","label":"Fast"}]},{"id":"gpt-5.6-luna","displayName":"GPT-5.6 Luna","hidden":false,"defaultReasoningEffort":"medium","reasoningEfforts":[{"id":"low","label":"Low"},{"id":"medium","label":"Medium"},{"id":"high","label":"High"},{"id":"xhigh","label":"Extra high"}],"serviceTiers":[{"id":"default","label":"Standard"},{"id":"priority","label":"Fast"}]}],"timezone":"UTC","allowedApprovalPolicies":["on-request"],"approvalModes":[{"id":"ask-for-approval","allowed":true},{"id":"approve-for-me","allowed":true},{"id":"full-access","allowed":true}]}"#
-            options = try? JSONDecoder().decode(BotOptions.self, from: Data(json.utf8)); return
-        }
-        #endif
-        let computers = library.saved.connections.map { library.model(for: $0) }
-        for model in computers.sorted(by: { $0.macConnected == true && $1.macConnected != true }) {
-            do {
-                let loaded: BotOptions = try await model.manage("/api/v1/bot-options")
-                if loaded.models.contains(where: { !$0.hidden }) { options = loaded; failure = nil; return }
-            } catch { continue }
-        }
-        failure = "Model choices are unavailable. Check your computer connection and try again."
     }
 }

@@ -70,6 +70,9 @@ pub struct StoredProjectConversation {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub access_mode: String,
+    /// How a Claude thread asks before acting; always `ask` for Codex threads.
+    pub claude_approval: String,
+    pub plan_mode: bool,
     pub is_pinned: bool,
     pub has_unread: bool,
     pub creation_request_id: Option<String>,
@@ -91,8 +94,24 @@ pub struct ProjectConversationInsert<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub access_mode: &'a str,
+    pub claude_approval: &'a str,
+    pub plan_mode: bool,
     pub creation_request_id: Option<&'a str>,
     pub now: &'a str,
+}
+
+/// Fields a PATCH may change; `None` leaves a field as it is.
+#[derive(Clone, Debug, Default)]
+pub struct ProjectConversationPatch<'a> {
+    pub title: Option<&'a str>,
+    pub pinned: Option<bool>,
+    pub unread: Option<bool>,
+    pub model: Option<&'a str>,
+    /// Omitted preserves the current effort; `Some(None)` clears it.
+    pub effort: Option<Option<&'a str>>,
+    pub access_mode: Option<&'a str>,
+    pub claude_approval: Option<&'a str>,
+    pub plan_mode: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,6 +139,8 @@ fn project_conversation(
         model: row.get("model"),
         effort: row.get("effort"),
         access_mode: row.get("access_mode"),
+        claude_approval: row.get("claude_approval"),
+        plan_mode: row.get::<i64, _>("plan_mode") != 0,
         is_pinned: row.get::<i64, _>("is_pinned") != 0,
         has_unread: row.get::<i64, _>("has_unread") != 0,
         creation_request_id: row.get("creation_request_id"),
@@ -156,6 +177,7 @@ fn validate_roots(roots: &[ProjectRootInput], primary: usize) -> Result<(), sqlx
 }
 
 const ACCESS_MODES: [&str; 3] = ["read_only", "workspace", "full_access"];
+const CLAUDE_APPROVALS: [&str; 3] = ["ask", "accept_edits", "auto"];
 
 impl Store {
     async fn load_project(
@@ -450,9 +472,27 @@ impl Store {
         if !ACCESS_MODES.contains(&insert.access_mode) {
             return Err(invalid("Unknown project access mode"));
         }
+        if !CLAUDE_APPROVALS.contains(&insert.claude_approval) {
+            return Err(invalid("Unknown Claude approval mode"));
+        }
+        if insert.family != AgentFamily::Claude && insert.claude_approval != "ask" {
+            return Err(invalid("Claude approval applies only to Claude threads"));
+        }
         if insert.title.trim().is_empty() || insert.title.len() > 400 {
             return Err(invalid("Invalid conversation title"));
         }
+        let creation_payload = serde_json::json!([
+            insert.project_id,
+            insert.family.as_str(),
+            insert.provider_store,
+            insert.cwd,
+            insert.roots_revision,
+            insert.model,
+            insert.effort,
+            insert.access_mode,
+            insert.claude_approval,
+            i64::from(insert.plan_mode)
+        ]);
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(request) = insert.creation_request_id {
             if let Some(row) =
@@ -462,7 +502,12 @@ impl Store {
                     .await?
             {
                 let existing = project_conversation(&row)?;
-                if existing.project_id != insert.project_id || existing.family != insert.family {
+                // Compare the original request, never the current settings:
+                // PATCH can change model, effort and modes after creation.
+                let original: Option<String> = row.get("creation_payload");
+                let original = original
+                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(&payload).ok());
+                if original.as_ref() != Some(&creation_payload) {
                     return Err(invalid("creation_request_conflict"));
                 }
                 tx.commit().await?;
@@ -485,11 +530,12 @@ impl Store {
         }
         sqlx::query("INSERT INTO conversations(id,codex_thread_id,session_id,created_at) VALUES(?,NULL,NULL,?)")
             .bind(insert.conversation_id).bind(insert.now).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO project_conversations(conversation_id,project_id,agent_family,provider_store,native_session_id,cwd,roots_revision,title,model,effort,access_mode,creation_request_id,created_at,updated_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO project_conversations(conversation_id,project_id,agent_family,provider_store,native_session_id,cwd,roots_revision,title,model,effort,access_mode,claude_approval,plan_mode,creation_request_id,creation_payload,created_at,updated_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(insert.conversation_id).bind(insert.project_id).bind(insert.family.as_str())
             .bind(insert.provider_store).bind(insert.native_session_id).bind(insert.cwd)
             .bind(insert.roots_revision).bind(insert.title.trim()).bind(insert.model).bind(insert.effort)
-            .bind(insert.access_mode).bind(insert.creation_request_id)
+            .bind(insert.access_mode).bind(insert.claude_approval).bind(i64::from(insert.plan_mode))
+            .bind(insert.creation_request_id).bind(insert.creation_request_id.map(|_| creation_payload.to_string()))
             .bind(insert.now).bind(insert.now).bind(insert.now)
             .execute(&mut *tx).await?;
         let row = sqlx::query("SELECT * FROM project_conversations WHERE conversation_id=?")
@@ -557,32 +603,66 @@ impl Store {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn update_project_conversation(
         &self,
         conversation: &str,
-        title: Option<&str>,
-        pinned: Option<bool>,
-        unread: Option<bool>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        access_mode: Option<&str>,
+        patch: ProjectConversationPatch<'_>,
         now: &str,
     ) -> Result<Option<StoredProjectConversation>, sqlx::Error> {
-        if access_mode.is_some_and(|mode| !ACCESS_MODES.contains(&mode)) {
+        if patch
+            .access_mode
+            .is_some_and(|mode| !ACCESS_MODES.contains(&mode))
+        {
             return Err(invalid("Unknown project access mode"));
         }
-        if title.is_some_and(|title| title.trim().is_empty() || title.len() > 400) {
+        if patch
+            .claude_approval
+            .is_some_and(|mode| !CLAUDE_APPROVALS.contains(&mode))
+        {
+            return Err(invalid("Unknown Claude approval mode"));
+        }
+        if patch
+            .title
+            .is_some_and(|title| title.trim().is_empty() || title.len() > 400)
+        {
             return Err(invalid("Invalid conversation title"));
         }
-        let updated = sqlx::query("UPDATE project_conversations SET title=COALESCE(?,title),is_pinned=COALESCE(?,is_pinned),has_unread=COALESCE(?,has_unread),model=COALESCE(?,model),effort=COALESCE(?,effort),access_mode=COALESCE(?,access_mode),updated_at=? WHERE conversation_id=?")
-            .bind(title.map(str::trim)).bind(pinned.map(i64::from)).bind(unread.map(i64::from))
-            .bind(model).bind(effort).bind(access_mode).bind(now).bind(conversation)
+        if patch.claude_approval.is_some() {
+            // A thread's family never changes, so this check cannot race.
+            let family: Option<String> = sqlx::query_scalar(
+                "SELECT agent_family FROM project_conversations WHERE conversation_id=?",
+            )
+            .bind(conversation)
+            .fetch_optional(&self.pool)
+            .await?;
+            if family.as_deref().is_some_and(|family| family != "claude") {
+                return Err(invalid("Claude approval applies only to Claude threads"));
+            }
+        }
+        let updated = sqlx::query("UPDATE project_conversations SET title=COALESCE(?,title),is_pinned=COALESCE(?,is_pinned),has_unread=COALESCE(?,has_unread),model=COALESCE(?,model),effort=CASE WHEN ? THEN ? ELSE effort END,access_mode=COALESCE(?,access_mode),claude_approval=COALESCE(?,claude_approval),plan_mode=COALESCE(?,plan_mode),updated_at=? WHERE conversation_id=?")
+            .bind(patch.title.map(str::trim)).bind(patch.pinned.map(i64::from)).bind(patch.unread.map(i64::from))
+            .bind(patch.model).bind(patch.effort.is_some()).bind(patch.effort.flatten()).bind(patch.access_mode)
+            .bind(patch.claude_approval).bind(patch.plan_mode.map(i64::from))
+            .bind(now).bind(conversation)
             .execute(&self.pool).await?;
         if updated.rows_affected() == 0 {
             return Ok(None);
         }
         self.project_conversation(conversation).await
+    }
+
+    /// Attached, pinned conversations of included projects, newest activity first.
+    pub async fn pinned_project_conversations(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<StoredProjectConversation>, sqlx::Error> {
+        sqlx::query("SELECT c.* FROM project_conversations c JOIN projects p ON p.id=c.project_id WHERE c.is_pinned=1 AND p.is_included=1 ORDER BY c.last_activity_at DESC, c.conversation_id LIMIT ?")
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(project_conversation)
+            .collect()
     }
 
     pub async fn touch_project_conversation(
@@ -730,6 +810,8 @@ mod tests {
             model: None,
             effort: None,
             access_mode: "workspace",
+            claude_approval: "ask",
+            plan_mode: false,
             creation_request_id: request,
             now: "now",
         }
@@ -868,16 +950,347 @@ mod tests {
         assert!(store
             .update_project_conversation(
                 "c1",
-                None,
-                None,
-                None,
-                Some("claude:haiku"),
-                None,
-                None,
+                ProjectConversationPatch {
+                    model: Some("claude:haiku"),
+                    ..Default::default()
+                },
                 "now"
             )
             .await
             .is_err());
+    }
+
+    // Contract: a creation request is frozen, including its modes. A retry
+    // that changes access, approval or plan mode must not adopt the first
+    // conversation, and Claude-only approval cannot be stored on a Codex thread.
+    #[tokio::test]
+    async fn creation_retries_match_modes_and_approval_is_claude_only() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        project(&store, "p1", &["/work/app"]).await;
+        let claude = |id, request| ProjectConversationInsert {
+            family: AgentFamily::Claude,
+            provider_store: "claude:home",
+            claude_approval: "accept_edits",
+            plan_mode: true,
+            ..conversation(id, "p1", None, request)
+        };
+        let ProjectConversationCreate::Created(created) = store
+            .create_project_conversation(claude("m1", Some("modes")))
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (created.claude_approval.as_str(), created.plan_mode),
+            ("accept_edits", true)
+        );
+        assert!(matches!(
+            store.create_project_conversation(claude("m2", Some("modes"))).await.unwrap(),
+            ProjectConversationCreate::Existing(c) if c.conversation_id == "m1"
+        ));
+        for changed in [
+            ProjectConversationInsert {
+                plan_mode: false,
+                ..claude("m3", Some("modes"))
+            },
+            ProjectConversationInsert {
+                claude_approval: "auto",
+                ..claude("m3", Some("modes"))
+            },
+            ProjectConversationInsert {
+                access_mode: "full_access",
+                ..claude("m3", Some("modes"))
+            },
+            ProjectConversationInsert {
+                model: Some("claude:haiku"),
+                ..claude("m3", Some("modes"))
+            },
+            ProjectConversationInsert {
+                effort: Some("high"),
+                ..claude("m3", Some("modes"))
+            },
+            ProjectConversationInsert {
+                cwd: "/work/other",
+                ..claude("m3", Some("modes"))
+            },
+        ] {
+            assert!(store.create_project_conversation(changed).await.is_err());
+        }
+        assert!(store.project_conversation("m3").await.unwrap().is_none());
+        for invalid in [
+            ProjectConversationInsert {
+                claude_approval: "yolo",
+                ..claude("m4", None)
+            },
+            // Codex threads keep the default; the field has no meaning there.
+            ProjectConversationInsert {
+                family: AgentFamily::Codex,
+                ..claude("m4", None)
+            },
+        ] {
+            assert!(store.create_project_conversation(invalid).await.is_err());
+        }
+        store
+            .create_project_conversation(conversation("codex", "p1", None, None))
+            .await
+            .unwrap();
+        let codex_plan = store
+            .update_project_conversation(
+                "codex",
+                ProjectConversationPatch {
+                    plan_mode: Some(true),
+                    ..Default::default()
+                },
+                "now",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(codex_plan.plan_mode);
+        for bad in ["auto", "yolo"] {
+            assert!(store
+                .update_project_conversation(
+                    "codex",
+                    ProjectConversationPatch {
+                        claude_approval: Some(bad),
+                        ..Default::default()
+                    },
+                    "now",
+                )
+                .await
+                .is_err());
+        }
+        // Partial updates leave the other mode alone.
+        let updated = store
+            .update_project_conversation(
+                "m1",
+                ProjectConversationPatch {
+                    claude_approval: Some("auto"),
+                    ..Default::default()
+                },
+                "later",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (updated.claude_approval.as_str(), updated.plan_mode),
+            ("auto", true)
+        );
+        store
+            .update_project_conversation(
+                "m1",
+                ProjectConversationPatch {
+                    model: Some("claude:haiku"),
+                    effort: Some(Some("high")),
+                    access_mode: Some("full_access"),
+                    plan_mode: Some(false),
+                    ..Default::default()
+                },
+                "later",
+            )
+            .await
+            .unwrap();
+        // The original request remains valid after later settings changes.
+        assert!(matches!(
+            store.create_project_conversation(claude("retry", Some("modes"))).await.unwrap(),
+            ProjectConversationCreate::Existing(c) if c.conversation_id == "m1" && c.claude_approval == "auto"
+        ));
+        assert!(store
+            .update_project_conversation(
+                "m1",
+                ProjectConversationPatch {
+                    claude_approval: Some("yolo"),
+                    ..Default::default()
+                },
+                "later",
+            )
+            .await
+            .is_err());
+        // Rows written before modes existed default to the previous behavior,
+        // and the database rejects values the API would.
+        sqlx::query("INSERT INTO conversations(id,codex_thread_id,session_id,created_at) VALUES('old',NULL,NULL,'now')")
+            .execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT INTO project_conversations(conversation_id,project_id,agent_family,provider_store,cwd,roots_revision,title,created_at,updated_at,last_activity_at) VALUES('old','p1','codex','codex:home','/work/app',1,'Old','now','now','now')")
+            .execute(&store.pool).await.unwrap();
+        let old = store.project_conversation("old").await.unwrap().unwrap();
+        assert_eq!(
+            (old.claude_approval.as_str(), old.plan_mode),
+            ("ask", false)
+        );
+        assert!(sqlx::query(
+            "UPDATE project_conversations SET claude_approval='yolo' WHERE conversation_id='old'"
+        )
+        .execute(&store.pool)
+        .await
+        .is_err());
+        assert!(sqlx::query(
+            "UPDATE project_conversations SET plan_mode=2 WHERE conversation_id='old'"
+        )
+        .execute(&store.pool)
+        .await
+        .is_err());
+    }
+
+    // Contract: omitted effort preserves it and explicit null clears it.
+    // Regression: a model without effort inherits the previous model's value.
+    // Owner boundary: the persistent project-conversation PATCH operation.
+    #[tokio::test]
+    async fn effort_patch_distinguishes_omission_value_and_clear() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        project(&store, "p1", &["/work/app"]).await;
+        store
+            .create_project_conversation(ProjectConversationInsert {
+                effort: Some("high"),
+                ..conversation("c1", "p1", None, None)
+            })
+            .await
+            .unwrap();
+        for (patch, expected) in [
+            (
+                ProjectConversationPatch {
+                    title: Some("Renamed"),
+                    ..Default::default()
+                },
+                Some("high"),
+            ),
+            (
+                ProjectConversationPatch {
+                    effort: Some(Some("low")),
+                    ..Default::default()
+                },
+                Some("low"),
+            ),
+            (
+                ProjectConversationPatch {
+                    effort: Some(None),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ] {
+            let result = store
+                .update_project_conversation("c1", patch, "later")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.effort.as_deref(), expected);
+        }
+    }
+
+    // Contract: upgrading preserves conversations and records legacy settings
+    // once, so later PATCHes cannot change the creation-retry comparison.
+    // Owner boundary: the actual additive migration on the pre-upgrade table.
+    #[tokio::test]
+    async fn creation_payload_migration_preserves_legacy_settings() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        project(&store, "p1", &["/work/app"]).await;
+        let original = ProjectConversationInsert {
+            family: AgentFamily::Claude,
+            model: Some("claude:haiku"),
+            effort: Some("high"),
+            claude_approval: "auto",
+            plan_mode: true,
+            ..conversation("legacy", "p1", None, Some("legacy-request"))
+        };
+        store
+            .create_project_conversation(original.clone())
+            .await
+            .unwrap();
+        // Removing only the new column restores the exact pre-0080 shape.
+        sqlx::query("ALTER TABLE project_conversations DROP COLUMN creation_payload")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../migrations/0080_project_creation_payload.sql"
+        ))
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let legacy = store.project_conversation("legacy").await.unwrap().unwrap();
+        assert_eq!(legacy.effort.as_deref(), Some("high"));
+        assert_eq!(
+            (legacy.claude_approval.as_str(), legacy.plan_mode),
+            ("auto", true)
+        );
+        store
+            .update_project_conversation(
+                "legacy",
+                ProjectConversationPatch {
+                    effort: Some(None),
+                    plan_mode: Some(false),
+                    ..Default::default()
+                },
+                "later",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.create_project_conversation(original).await.unwrap(),
+            ProjectConversationCreate::Existing(c) if c.conversation_id == "legacy" && c.effort.is_none() && !c.plan_mode
+        ));
+    }
+
+    // Contract: only attached, pinned conversations of included projects feed
+    // the cross-project Pinned list, newest activity first and bounded.
+    #[tokio::test]
+    async fn pinned_conversations_follow_project_visibility_and_activity() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        project(&store, "p1", &["/work/a"]).await;
+        project(&store, "p2", &["/work/b"]).await;
+        for (id, project, activity) in [
+            ("a", "p1", "2026-01-01"),
+            ("b", "p2", "2026-01-03"),
+            ("c", "p1", "2026-01-02"),
+            ("d", "p2", "2026-01-04"),
+        ] {
+            store
+                .create_project_conversation(conversation(id, project, None, None))
+                .await
+                .unwrap();
+            store
+                .update_project_conversation(
+                    id,
+                    ProjectConversationPatch {
+                        pinned: Some(id != "c"),
+                        ..Default::default()
+                    },
+                    "now",
+                )
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE project_conversations SET last_activity_at=? WHERE conversation_id=?",
+            )
+            .bind(activity)
+            .bind(id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+        let ids = |rows: Vec<StoredProjectConversation>| {
+            rows.into_iter()
+                .map(|c| c.conversation_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(store.pinned_project_conversations(50).await.unwrap()),
+            ["d", "b", "a"]
+        );
+        assert_eq!(
+            ids(store.pinned_project_conversations(2).await.unwrap()),
+            ["d", "b"]
+        );
+        store
+            .update_project_metadata("p2", None, Some(false), None, "now")
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(store.pinned_project_conversations(50).await.unwrap()),
+            ["a"]
+        );
     }
 
     // Contract: Bot bindings stay in the Bot scope; a project cannot adopt a
@@ -951,8 +1364,32 @@ mod tests {
         .execute(&store.pool)
         .await
         .is_err());
-        // Project conversations are absent from the Bot inbox.
+        // Project conversations are absent from the Bot inbox, including the
+        // conversation list that clients render as Bots and Group Chats.
         assert!(store.conversation("c2").await.unwrap().is_none());
+        store
+            .upsert_bot(
+                "bot-one",
+                "Bot",
+                "Helper",
+                "Help",
+                "/tmp/bot-one",
+                "profile",
+                None,
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+        let listed: Vec<String> = store
+            .list_conversation_summaries()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.conversation_id)
+            .collect();
+        assert!(listed.contains(&"bot-one".to_owned()));
+        assert!(!listed.iter().any(|id| id == "c1" || id == "c2"));
         assert_eq!(
             store
                 .conversation_execution_directory("c2")
@@ -961,6 +1398,53 @@ mod tests {
                 .as_deref(),
             Some("/work/app")
         );
+    }
+
+    // Contract: the Mac computer view opens for Bot chats, project threads of
+    // included projects, and the owner's host-level view; nothing else.
+    #[tokio::test]
+    async fn computer_view_allows_project_threads_and_host_view_only() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        project(&store, "p1", &["/work/a"]).await;
+        store
+            .create_project_conversation(conversation("thread", "p1", None, None))
+            .await
+            .unwrap();
+        store
+            .upsert_bot(
+                "bot-one",
+                "Bot",
+                "Helper",
+                "Help",
+                "/tmp/bot-one",
+                "profile",
+                None,
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+        store
+            .ensure_conversation_metadata("bot-chat", "bot-one", "Bot", "now")
+            .await
+            .unwrap();
+        for allowed in ["thread", "bot-chat", crate::HOST_VIEW_CONVERSATION_ID] {
+            assert!(
+                store.computer_conversation_allowed(allowed).await.unwrap(),
+                "{allowed}"
+            );
+        }
+        for denied in ["", "unknown", "WONDER-HOST-VIEW", "wonder-host-view "] {
+            assert!(
+                !store.computer_conversation_allowed(denied).await.unwrap(),
+                "{denied}"
+            );
+        }
+        store
+            .update_project_metadata("p1", None, Some(false), None, "now")
+            .await
+            .unwrap();
+        assert!(!store.computer_conversation_allowed("thread").await.unwrap());
     }
 
     #[tokio::test]

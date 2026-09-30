@@ -992,10 +992,14 @@ export interface HistoryQuery {
 }
 
 /** Additive host capabilities from GET /api/v1/host/status. */
-export type HostFeature = "projects-v1" | (string & {});
+export type HostFeature = "projects-v1" | "computer-host-view-v1" | (string & {});
+/** Reserved `conversationId` for an owner's host-level computer view (no conversation yet). */
+export const HOST_VIEW_CONVERSATION_ID = "wonder-host-view";
 
 export type AgentFamily = "codex" | "claude";
 export type ProjectAccessMode = "read_only" | "workspace" | "full_access";
+/** How a Claude thread with workspace access asks before acting. Codex threads always report "ask". */
+export type ClaudeApproval = "ask" | "accept_edits" | "auto";
 
 /** A named group of source folders on one paired Mac. */
 export interface ProjectSummary {
@@ -1012,7 +1016,12 @@ export interface ProjectSummary {
 export interface ProjectsResponse {
   projects: ProjectSummary[];
   families: Array<{ family: AgentFamily; available: boolean }>;
+  /** 1: the host accepts `claudeApproval` and `planMode` and reports `pinned`. */
+  modesVersion: 1;
+  /** Attached, pinned threads of included projects, most recent activity first, at most 50. */
+  pinned: PinnedProjectThread[];
 }
+export interface PinnedProjectThread { projectId: string; thread: ProjectThreadSummary }
 export interface ProjectPartialFailure { family: AgentFamily; detail: string }
 /** Suggestions only; nothing is included until the owner creates a project. */
 export interface ProjectCandidatesResponse {
@@ -1050,6 +1059,10 @@ export interface CreateProjectThreadRequest {
   model: string;
   effort?: string | null;
   accessMode?: ProjectAccessMode;
+  /** Claude threads only; a Codex thread is rejected with 422. Part of the frozen creation request. */
+  claudeApproval?: ClaudeApproval;
+  /** Codex collaboration plan mode, or Claude's plan permission mode. Part of the frozen creation request. */
+  planMode?: boolean;
   folderId?: string | null;
   body: string;
   attachmentIds?: string[];
@@ -1066,6 +1079,8 @@ export interface ProjectConversationDetail {
   model: string | null;
   effort: string | null;
   accessMode: ProjectAccessMode;
+  claudeApproval: ClaudeApproval;
+  planMode: boolean;
   workingFolder: string;
   workingFolderName: string;
   isPinned: boolean;
@@ -1079,8 +1094,12 @@ export interface UpdateProjectConversationRequest {
   isPinned?: boolean;
   hasUnread?: boolean;
   model?: string;
-  effort?: string;
+  /** Omitted preserves the current effort; null clears it for a model without effort. */
+  effort?: string | null;
   accessMode?: ProjectAccessMode;
+  /** Claude threads only; a Codex thread is rejected with 422. */
+  claudeApproval?: ClaudeApproval;
+  planMode?: boolean;
 }
 /** Exact-ID terminal commands; copying never executes anything. */
 export interface DesktopContinuation {

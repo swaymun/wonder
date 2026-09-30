@@ -1,7 +1,7 @@
 // Native Claude Code transcripts are authoritative for project conversations.
 // Project SDK session messages into the same turn/item shapes as the live
 // stream so Wonder reconciles both by stable IDs instead of duplicating them.
-import { toolContent } from "./projection.mjs";
+import { planItem, toolContent } from "./projection.mjs";
 
 const textOf = content => typeof content === "string" ? content
   : Array.isArray(content) ? content.filter(b => b?.type === "text").map(b => b.text ?? "").join("\n") : "";
@@ -41,6 +41,10 @@ export function nativeTurns(messages, journal = [], active = false) {
       blockIndex.set(messageId, index + 1);
       if (block?.type === "text" && block.text) {
         turn.items.push({ type: "agentMessage", id: `${turn.id}:${messageId}:${index}`, text: block.text, status: "completed" });
+      } else if (block?.type === "tool_use" && block.name === "ExitPlanMode") {
+        // Same item ID as the live stream, so history and events reconcile.
+        const plan = planItem(block, "completed");
+        if (plan) turn.items.push(plan);
       } else if (block?.type === "tool_use" && !["Agent", "Task"].includes(block.name)) {
         const item = { type: "mcpToolCall", id: block.id, server: "Claude", tool: block.name, arguments: block.input ?? {}, status: "completed" };
         tools.set(block.id, item);

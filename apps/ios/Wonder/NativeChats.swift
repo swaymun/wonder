@@ -715,6 +715,11 @@ struct ConversationView: View {
     @State private var showingSubagents = false
     @State private var showingGoal = false
     @State private var showingComputer = false
+    @State private var implementingPlan = false
+    /// Mirrors the project library's plan mode and host support for this thread,
+    /// so a change re-renders this view without observing the whole library.
+    @State private var planModeOn: Bool
+    @State private var supportsModes: Bool
     @State private var restoreSubagentRoster = false
     @State private var editingGroup = false
     @State private var importing = false
@@ -783,6 +788,8 @@ struct ConversationView: View {
         self.chat = chat
         self.rootChat = rootChat
         self.readOnly = readOnly
+        _planModeOn = State(initialValue: model.projects.details[chat.id]?.planMode == true)
+        _supportsModes = State(initialValue: model.projects.supportsModes)
     }
     private func subagent(for row: ReadRow) -> SubagentSummary? {
         guard let item = row.item,
@@ -800,7 +807,8 @@ struct ConversationView: View {
         latestActiveActivityEntryID: String?,
         expandedActivityIDs: Set<String>,
         attachmentMetadata: [String: ConversationFile],
-        conversationImageFiles: [ConversationFile]
+        conversationImageFiles: [ConversationFile],
+        implementablePlanID: String?
     ) -> some View {
                                 if let status = entry.rows.first?.profileStatus {
                                     Label(status, systemImage: "pencil")
@@ -816,6 +824,11 @@ struct ConversationView: View {
                                                       expanded: expandedActivityIDs.contains(entry.id)) {
                                         toggleActivity(entry: entry, isExpanded: expandedActivityIDs.contains(entry.id))
                                     }
+                                } else if let row = entry.rows.first, row.isPlan {
+                                    PlanCard(text: row.planText, isRunning: row.activitySummary?.isRunning == true,
+                                             canImplement: row.id == implementablePlanID, isImplementing: implementingPlan,
+                                             implement: implementPlan)
+                                        .frame(maxWidth: 640, alignment: .leading)
                                 } else if let row = entry.rows.first, readOnly || !(model.asyncQuestions[chat.id] ?? []).contains(where: { $0.rowId == row.id }) {
                                 let pending = model.composers[chat.id]?.pending
                                 let speakerBot = row.authorId.flatMap { id in model.managedBots.first { $0.id == id } }
@@ -888,7 +901,7 @@ struct ConversationView: View {
     private func firstExpandableActivity(in entries: [ChatFeedEntry]) -> ReadRow? {
         for entry in entries where entry.isActivity {
             if let row = entry.rows.first(where: { row in
-                row.activitySummary != nil && row.item?.type != "reasoning"
+                row.activitySummary != nil && row.item?.type != "reasoning" && !row.isPlan
             }) {
                 return row
             }
@@ -918,6 +931,38 @@ struct ConversationView: View {
            let run = group.collaboration?.runs.first(where: { $0.parentMessageId == message.messageId }) {
             GroupWorkView(model: model, group: group, run: run, openFile: { path in workspaceRequest = WorkspaceBrowserRequest(initialFilePath: path) })
         }
+    }
+    /// A plan-mode thread offers to implement its newest finished plan once the
+    /// agent is idle and the composer has nothing in progress.
+    private func planToImplement(in timeline: [ReadRow]) -> String? {
+        guard !readOnly, supportsModes, model.isProject(chat), planModeOn, model.activeTurn(chat.id) == nil else { return nil }
+        let intent = model.composers[chat.id]
+        guard (intent?.draft ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (intent?.attachmentCount ?? 0) == 0, intent?.pending == nil else { return nil }
+        return ReadRow.implementablePlanID(in: timeline)
+    }
+    /// Leaves plan mode, then sends the plan for implementation. If the save
+    /// fails the composer reports it and nothing is sent.
+    private func implementPlan() {
+        guard !implementingPlan else { return }
+        implementingPlan = true
+        let scope = model.assignmentScope
+        Task {
+            defer { implementingPlan = false }
+            guard await setPlanMode(false, model: model, library: model.projects, chat: chat),
+                  !Task.isCancelled, scope == model.assignmentScope, model.visibleChat?.id == chat.id,
+                  model.activeTurn(chat.id) == nil else { return }
+            let intent = model.composers[chat.id]
+            guard (intent?.draft ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  (intent?.attachmentCount ?? 0) == 0, intent?.pending == nil else { return }
+            model.editDraft("Implement the plan.", chat: chat.id)
+            await model.send(chat)
+        }
+    }
+    /// Project history belongs to the provider, so it is re-read alongside the
+    /// saved copy that is already on screen. Send waits for the re-read.
+    private func refreshNativeHistory() async {
+        if model.isProject(chat), !readOnly { await model.reloadNativeHistory(chat) }
     }
     var body: some View {
         #if WONDER_DIAGNOSTICS
@@ -963,6 +1008,7 @@ struct ConversationView: View {
         let nodes = ChatFeedNode.visible(entries, expanded: expandedActivityIDs)
         let answeredQuestions = answeredQuestionsOutsideTimeline(timeline)
         let disclosureRevision = disclosureEntries
+        let implementablePlanID = planToImplement(in: timeline)
         #if WONDER_DIAGNOSTICS
         let _ = DiagnosticJournal.shared.record(DiagnosticEvent(operation: "timeline.prepare", durationMs: (ProcessInfo.processInfo.systemUptime - timelineStart) * 1000, count: UInt64(timeline.count)))
         #endif
@@ -997,7 +1043,8 @@ struct ConversationView: View {
                                     latestActiveActivityEntryID: latestActiveActivityEntryID,
                                     expandedActivityIDs: expandedActivityIDs,
                                     attachmentMetadata: attachmentMetadata,
-                                    conversationImageFiles: conversationImageFiles
+                                    conversationImageFiles: conversationImageFiles,
+                                    implementablePlanID: implementablePlanID
                                 )
                                 groupWork(for: entry.rows.first)
                                 ForEach(readOnly ? [] : settledQuestions(for: entry, timeline: timeline)) { question in
@@ -1237,11 +1284,17 @@ struct ConversationView: View {
         .onChange(of: model.assignmentScope) { _, next in
             if cameraScope != nil, cameraScope != next { showingCamera = false; cameraScope = nil }
         }
+        .onReceive(model.projects.$details) { details in
+            let on = details[chat.id]?.planMode == true
+            if planModeOn != on { planModeOn = on }
+        }
+        .onReceive(model.projects.$supportsModes) { supported in
+            if supportsModes != supported { supportsModes = supported }
+        }
         .task(id: chat.id) {
-            // Project history is owned by the provider: re-read turns made on
-            // the Mac before the owner can send the next one.
-            if model.isProject(chat), !readOnly { await model.reloadNativeHistory(chat) }
+            async let history: Void = refreshNativeHistory()
             await model.open(chat, root: rootChat, readOnly: readOnly)
+            await history
             if model.previewMode, ProcessInfo.processInfo.arguments.contains("-preview-document") { workspaceRequest = WorkspaceBrowserRequest() }
         }
         .task(id: chat.id + ":" + model.agentFamily(chat).rawValue) {
@@ -1269,11 +1322,6 @@ struct ConversationView: View {
                 }
                 QuestionDock(model: model, chat: chat)
                 if (!chat.isArchived || model.isSubagent(chat)) && (chat.botId != nil || model.groups[chat.id] != nil || model.isProject(chat)) {
-                    if model.nativeHistoryRefreshing.contains(chat.id) {
-                        Label("Checking your Mac for new turns…", systemImage: "arrow.triangle.2.circlepath")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .accessibilityIdentifier("native-history-refreshing")
-                    }
                     if model.nativeHistoryFailures.contains(chat.id) {
                         Button("Couldn’t check for new turns. Try again") { Task { await model.reloadNativeHistory(chat) } }
                             .font(.caption).frame(minHeight: 44)
@@ -1341,6 +1389,14 @@ struct ConversationView: View {
                             .padding(.horizontal, 12).padding(.top, 8)
                             .accessibilityIdentifier("composer-usage-limit")
                     }
+                    if model.isProject(chat), supportsModes, planModeOn {
+                        HStack(spacing: 0) {
+                            PlanModeChip(isDisabled: model.savingComposerSettings.contains(chat.id) || model.accessEnded) {
+                                Task { await setPlanMode(false, model: model, library: model.projects, chat: chat) }
+                            }
+                            Spacer(minLength: 0)
+                        }.padding(.horizontal, 8).padding(.top, 4)
+                    }
                     messageEditor.padding(.horizontal, 8)
                     HStack(alignment: .center, spacing: 4) {
                         Group {
@@ -1355,6 +1411,13 @@ struct ConversationView: View {
                                 Button(model.attachmentsSupported(chat) ? "Attach file" : "Attachments unavailable — update Wonder on your Mac", systemImage: "paperclip") {
                                     importScope = model.assignmentScope; importing = true
                                 }.disabled(!model.canAttach(chat) || model.loadingPhotos.contains(chat.id))
+                                if model.isProject(chat), supportsModes {
+                                    Toggle(isOn: Binding(get: { planModeOn }, set: { value in
+                                        Task { await setPlanMode(value, model: model, library: model.projects, chat: chat) }
+                                    })) { Label("Plan mode", systemImage: "list.bullet.clipboard") }
+                                        .disabled(model.savingComposerSettings.contains(chat.id) || model.accessEnded || model.previewMode)
+                                        .accessibilityIdentifier("composer-plan-mode")
+                                }
                                 if model.activeTurn(chat.id) != nil {
                                     Button("Stop response", systemImage: "stop.fill") { Task { await model.stop(chat) } }
                                         .disabled(model.stopping.contains(chat.id) || model.accessEnded || model.previewMode)
@@ -2178,6 +2241,41 @@ private struct ChatBubbleSurface: ViewModifier {
         content.padding(.horizontal, 14).padding(.vertical, 10)
             .foregroundStyle(.primary)
             .background(Color(uiColor: isUser ? .systemGray4 : .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+/// A plan the agent proposed, shown as the answer to review rather than as
+/// work. The newest finished plan in a plan-mode thread can be implemented.
+struct PlanCard: View {
+    let text: String?
+    let isRunning: Bool
+    let canImplement: Bool
+    let isImplementing: Bool
+    let implement: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Plan", systemImage: "list.bullet.clipboard")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
+            if let text { BotMessageText(text: text) }
+            else if isRunning { ProgressView().accessibilityLabel("Writing the plan") }
+            if canImplement || isImplementing {
+                Button(action: implement) {
+                    HStack(spacing: 8) {
+                        if isImplementing { ProgressView() }
+                        Text("Implement plan")
+                    }.frame(maxWidth: .infinity).frame(minHeight: 32)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isImplementing)
+                .accessibilityIdentifier("implement-plan")
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plan-card")
     }
 }
 

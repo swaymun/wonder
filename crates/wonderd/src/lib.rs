@@ -2042,12 +2042,10 @@ async fn process_app_server_notification(
                     .store
                     .update_project_conversation(
                         conversation_id,
-                        None,
-                        None,
-                        Some(true),
-                        None,
-                        None,
-                        None,
+                        wonder_store::ProjectConversationPatch {
+                            unread: Some(true),
+                            ..Default::default()
+                        },
                         &now,
                     )
                     .await
@@ -3503,7 +3501,7 @@ async fn host_status(State(state): State<AppState>) -> impl IntoResponse {
             codex_transport: "stdio-jsonl",
             started_at: state.started_at.clone(),
             public_origin,
-            features: vec![projects::FEATURE],
+            features: vec![projects::FEATURE, computer_sessions::HOST_VIEW_FEATURE],
         }),
     )
 }
@@ -7022,12 +7020,12 @@ async fn update_conversation(
             .store
             .update_project_conversation(
                 &conversation_id,
-                request.title.as_deref(),
-                request.is_pinned,
-                request.mark_read.filter(|read| *read).map(|_| false),
-                None,
-                None,
-                None,
+                wonder_store::ProjectConversationPatch {
+                    title: request.title.as_deref(),
+                    pinned: request.is_pinned,
+                    unread: request.mark_read.filter(|read| *read).map(|_| false),
+                    ..Default::default()
+                },
                 &now,
             )
             .await

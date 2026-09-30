@@ -85,6 +85,11 @@ apps/ios/Wonder/Assets.xcassets/ConnectorOpenAIPlatform.imageset/icon.png
 apps/ios/Wonder/Assets.xcassets/ConnectorSites.imageset/Contents.json
 apps/ios/Wonder/Assets.xcassets/ConnectorSites.imageset/icon.svg
 apps/ios/Wonder/Assets.xcassets/Contents.json
+apps/ios/Wonder/Assets.xcassets/ProviderClaude.imageset/Contents.json
+apps/ios/Wonder/Assets.xcassets/ProviderClaude.imageset/claude.png
+apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/Contents.json
+apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex-dark.png
+apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex.png
 apps/ios/Wonder/AssignmentViews.swift
 apps/ios/Wonder/BuildInfo.plist
 apps/ios/Wonder/CameraCapture.swift
@@ -353,6 +358,8 @@ crates/wonder-store/migrations/0075_first_message_model.sql
 crates/wonder-store/migrations/0076_draft_bot_group_isolation.sql
 crates/wonder-store/migrations/0077_group_creation_tombstones.sql
 crates/wonder-store/migrations/0078_projects.sql
+crates/wonder-store/migrations/0079_project_modes.sql
+crates/wonder-store/migrations/0080_project_creation_payload.sql
 crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs

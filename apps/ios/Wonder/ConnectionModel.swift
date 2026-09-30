@@ -177,8 +177,10 @@ struct ManagedBotListMutationState {
         let scope = assignmentScope
         nativeHistoryRefreshing.insert(chat.id)
         guard await connectionReady(), let saved = connection, !accessEnded, scope == assignmentScope else {
-            nativeHistoryRefreshing.remove(chat.id)
-            nativeHistoryFailures.insert(chat.id)
+            if scope == assignmentScope {
+                nativeHistoryRefreshing.remove(chat.id)
+                if !Task.isCancelled { nativeHistoryFailures.insert(chat.id) }
+            }
             return
         }
         defer { if scope == assignmentScope { nativeHistoryRefreshing.remove(chat.id) } }
@@ -1032,6 +1034,9 @@ struct ManagedBotListMutationState {
         // histories otherwise stay in every cache write indefinitely.
         var retained = Set(next.summaries.map(\.id)).union(subagents.values.flatMap { $0.map(\.conversationId) })
         if let visible = visibleChat?.id { retained.insert(visible) }
+        // Project threads are not in the conversation list. Their saved history
+        // stays for pinned threads and the most recently opened ones only.
+        retained.formUnion(projects.retainedConversationIDs)
         let pruned = next.snapshots.keys.filter { !retained.contains($0) }
         for id in pruned { next.snapshots.removeValue(forKey: id); next.markClean(id) }
         try commit(next, publishing: pruned.isEmpty ? [.list, .groups] : .everything)

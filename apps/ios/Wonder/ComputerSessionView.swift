@@ -160,7 +160,7 @@ final class ComputerSessionModel: ObservableObject {
             startReceiver(for: created, connection: connection)
         } catch {
             guard !ended, lifetimeRevision == revision, !Task.isCancelled else { return }
-            failure = Self.readable(error, opening: true)
+            failure = Self.readable(error, opening: true, projectThread: connectionModel.isProject(chat))
             receiverState = .failed(failure ?? "Could not open computer view.")
         }
     }
@@ -846,10 +846,11 @@ final class ComputerSessionModel: ObservableObject {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
     }
 
-    private static func readable(_ error: Error, opening: Bool = false) -> String {
+    private static func readable(_ error: Error, opening: Bool = false, projectThread: Bool = false) -> String {
         if case PairingFailure.response(let status) = error {
             switch status {
             case 401, 403: return "Access to this computer has ended. Reconnect in Settings, then try again."
+            case 404 where opening && projectThread: return "Update Wonder on your Mac to view the computer from threads."
             case 404 where opening: return "Computer viewing needs a newer Wonder host. Update Wonder on your Mac, then try again."
             case 404: return "This computer view is no longer available on your Mac."
             case 409: return "The computer view changed on your Mac. Close this screen and try again."

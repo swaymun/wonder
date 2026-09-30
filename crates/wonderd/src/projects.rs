@@ -23,14 +23,20 @@ use tokio::sync::Mutex;
 use wonder_app_server::{AppServerClient, LaunchConfig, RpcClient};
 use wonder_store::{
     AgentFamily, MessageInsert, ProjectConversationCreate, ProjectConversationInsert,
-    ProjectCreate, ProjectRootInput, StoredProject, StoredProjectConversation,
+    ProjectConversationPatch, ProjectCreate, ProjectRootInput, StoredProject,
+    StoredProjectConversation,
 };
 
 pub const FEATURE: &str = "projects-v1";
+/// Advertised in `GET /api/v1/projects`: the host accepts `claudeApproval` and
+/// `planMode`, and lists pinned threads across included projects.
+const MODES_VERSION: u8 = 1;
+const MAX_PINNED_THREADS: i64 = 50;
 const CODEX_SOURCE_KINDS: [&str; 4] = ["cli", "vscode", "exec", "appServer"];
 const CURSOR_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_CURSORS: usize = 128;
 const ACCESS_MODES: [&str; 3] = ["read_only", "workspace", "full_access"];
+const CLAUDE_APPROVALS: [&str; 3] = ["ask", "accept_edits", "auto"];
 
 /// The normal-home Codex client for project threads. It starts on first use so
 /// a Mac that never opens Projects runs no additional provider process.
@@ -240,6 +246,8 @@ pub(crate) struct ProjectConversationDetail {
     model: Option<String>,
     effort: Option<String>,
     access_mode: String,
+    claude_approval: String,
+    plan_mode: bool,
     working_folder: String,
     working_folder_name: String,
     is_pinned: bool,
@@ -268,6 +276,8 @@ async fn conversation_detail(
         model: conversation.model.clone(),
         effort: conversation.effort.clone(),
         access_mode: conversation.access_mode.clone(),
+        claude_approval: conversation.claude_approval.clone(),
+        plan_mode: conversation.plan_mode,
         working_folder: conversation.cwd.clone(),
         working_folder_name: folder_name(&conversation.cwd),
         is_pinned: conversation.is_pinned,
@@ -381,6 +391,16 @@ fn validate_folders(
 struct ProjectsResponse {
     projects: Vec<ProjectSummary>,
     families: Vec<FamilyAvailability>,
+    modes_version: u8,
+    pinned: Vec<PinnedThread>,
+}
+
+/// A pinned, attached thread and the project it belongs to.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PinnedThread {
+    project_id: String,
+    thread: ProjectThreadSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -403,6 +423,32 @@ pub(crate) async fn list(
             )
         }
     };
+    let pinned = match state
+        .store
+        .pinned_project_conversations(MAX_PINNED_THREADS)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Projects are temporarily unavailable. Try again.",
+            )
+        }
+    };
+    let mut pinned_threads = Vec::with_capacity(pinned.len());
+    for conversation in &pinned {
+        pinned_threads.push(PinnedThread {
+            project_id: conversation.project_id.clone(),
+            thread: attached_summary(
+                &state,
+                conversation,
+                activity_seconds(&conversation.last_activity_at),
+                None,
+            )
+            .await,
+        });
+    }
     let catalog = state.runtime_catalog.read().await;
     let families = [AgentFamily::Codex, AgentFamily::Claude]
         .into_iter()
@@ -418,6 +464,8 @@ pub(crate) async fn list(
     Json(ProjectsResponse {
         projects: projects.iter().map(project_summary).collect(),
         families,
+        modes_version: MODES_VERSION,
+        pinned: pinned_threads,
     })
     .into_response()
 }
@@ -1351,7 +1399,7 @@ async fn attach_native(
                 "project/session/attach",
                 json!({"sessionId": native, "model": model, "cwd": root.path,
                     "wonderProject": claude_project(project, &root.path),
-                    "wonderPolicy": claude_policy(state, project, "workspace", &root.path)}),
+                    "wonderPolicy": claude_policy(state, project, ClaudeModes::default(), &root.path)}),
             )
             .await
             .map_err(|e| (StatusCode::NOT_FOUND, e))?;
@@ -1393,6 +1441,8 @@ async fn attach_native(
             model: None,
             effort: None,
             access_mode: "workspace",
+            claude_approval: "ask",
+            plan_mode: false,
             creation_request_id: None,
             now: &now,
         })
@@ -1443,8 +1493,37 @@ pub(crate) struct UpdateConversationRequest {
     is_pinned: Option<bool>,
     has_unread: Option<bool>,
     model: Option<String>,
-    effort: Option<String>,
+    #[serde(default, deserialize_with = "patch_effort")]
+    effort: Option<Option<String>>,
     access_mode: Option<String>,
+    claude_approval: Option<String>,
+    plan_mode: Option<bool>,
+}
+
+// Serde's ordinary nested Option treats both null and an omitted field as None.
+// A present field must retain its null so PATCH can clear an old model's effort.
+fn patch_effort<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+/// Approval modes exist only for Claude threads, and only with known values.
+fn validate_claude_approval(
+    family: AgentFamily,
+    approval: Option<&str>,
+) -> Result<(), &'static str> {
+    match approval {
+        None => Ok(()),
+        Some(_) if family != AgentFamily::Claude => {
+            Err("Approval modes are available for Claude threads.")
+        }
+        Some(approval) if !CLAUDE_APPROVALS.contains(&approval) => {
+            Err("Choose Ask, Accept edits or Auto.")
+        }
+        Some(_) => Ok(()),
+    }
 }
 
 fn validate_model(
@@ -1486,7 +1565,10 @@ pub(crate) async fn update_conversation(
             &*state.runtime_catalog.read().await,
             existing.family,
             model,
-            request.effort.as_deref(),
+            request
+                .effort
+                .as_ref()
+                .map_or(existing.effort.as_deref(), |effort| effort.as_deref()),
         ) {
             return error(StatusCode::UNPROCESSABLE_ENTITY, message);
         }
@@ -1501,16 +1583,25 @@ pub(crate) async fn update_conversation(
             "Choose Read only, Workspace or Full access.",
         );
     }
+    if let Err(message) =
+        validate_claude_approval(existing.family, request.claude_approval.as_deref())
+    {
+        return error(StatusCode::UNPROCESSABLE_ENTITY, message);
+    }
     match state
         .store
         .update_project_conversation(
             &id,
-            request.title.as_deref(),
-            request.is_pinned,
-            request.has_unread,
-            request.model.as_deref(),
-            request.effort.as_deref(),
-            request.access_mode.as_deref(),
+            ProjectConversationPatch {
+                title: request.title.as_deref(),
+                pinned: request.is_pinned,
+                unread: request.has_unread,
+                model: request.model.as_deref(),
+                effort: request.effort.as_ref().map(|effort| effort.as_deref()),
+                access_mode: request.access_mode.as_deref(),
+                claude_approval: request.claude_approval.as_deref(),
+                plan_mode: request.plan_mode,
+            },
             &now_text(),
         )
         .await
@@ -1542,6 +1633,10 @@ pub(crate) struct CreateThreadRequest {
     effort: Option<String>,
     #[serde(default = "default_access")]
     access_mode: String,
+    /// Claude threads only; part of the frozen creation request.
+    claude_approval: Option<String>,
+    #[serde(default)]
+    plan_mode: bool,
     folder_id: Option<String>,
     roots_revision: Option<i64>,
     body: String,
@@ -1597,6 +1692,11 @@ pub(crate) async fn create_thread(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Choose Read only, Workspace or Full access.",
         );
+    }
+    if let Err(message) =
+        validate_claude_approval(request.family, request.claude_approval.as_deref())
+    {
+        return error(StatusCode::UNPROCESSABLE_ENTITY, message);
     }
     if request.family == AgentFamily::Claude && state.claude.is_none() {
         return error(
@@ -1668,6 +1768,8 @@ pub(crate) async fn create_thread(
             model: Some(&request.model),
             effort: request.effort.as_deref(),
             access_mode: &request.access_mode,
+            claude_approval: request.claude_approval.as_deref().unwrap_or("ask"),
+            plan_mode: request.plan_mode,
             creation_request_id: Some(&request.client_message_id),
             now: &now,
         })
@@ -1771,19 +1873,93 @@ fn claude_project(project: &StoredProject, cwd: &str) -> Value {
     json!({"cwd": cwd, "additionalDirectories": project.roots.iter().map(|r| r.path.clone()).filter(|p| p != cwd).collect::<Vec<_>>()})
 }
 
-fn claude_policy(state: &AppState, project: &StoredProject, mode: &str, cwd: &str) -> Value {
-    let roots = project
-        .roots
-        .iter()
-        .map(|r| r.path.clone())
-        .collect::<Vec<_>>();
-    let (mode, approval, writes) = match mode {
+/// A Claude thread's stored access, approval and plan settings.
+#[derive(Clone, Copy, Debug)]
+struct ClaudeModes<'a> {
+    access_mode: &'a str,
+    approval: &'a str,
+    plan: bool,
+}
+
+impl Default for ClaudeModes<'_> {
+    fn default() -> Self {
+        Self {
+            access_mode: "workspace",
+            approval: "ask",
+            plan: false,
+        }
+    }
+}
+
+impl<'a> From<&'a StoredProjectConversation> for ClaudeModes<'a> {
+    fn from(conversation: &'a StoredProjectConversation) -> Self {
+        Self {
+            access_mode: &conversation.access_mode,
+            approval: &conversation.claude_approval,
+            plan: conversation.plan_mode,
+        }
+    }
+}
+
+/// The bridge policy for one turn. Access decides the file scope; Claude's
+/// approval mode only refines Workspace, so Read only always asks and Full
+/// access never does. Unknown stored values fall back to the safest mode.
+fn claude_policy_value(
+    roots: Vec<String>,
+    denied_roots: &[String],
+    modes: ClaudeModes<'_>,
+    cwd: &str,
+) -> Value {
+    let (mode, approval, writes) = match modes.access_mode {
         "read_only" => ("read_only", "ask", Vec::new()),
         "full_access" => ("full_access", "full_access", roots),
-        _ => ("workspace", "ask", roots),
+        _ => (
+            "workspace",
+            match modes.approval {
+                "accept_edits" => "accept_edits",
+                "auto" => "auto",
+                _ => "ask",
+            },
+            roots,
+        ),
     };
-    json!({"mode": mode, "approvalMode": approval, "workspace": cwd, "readRoots": ["/"],
-        "writeRoots": writes, "deniedRoots": state.denied_roots})
+    json!({"mode": mode, "approvalMode": approval, "planMode": modes.plan, "workspace": cwd,
+        "readRoots": ["/"], "writeRoots": writes, "deniedRoots": denied_roots})
+}
+
+fn claude_policy(
+    state: &AppState,
+    project: &StoredProject,
+    modes: ClaudeModes<'_>,
+    cwd: &str,
+) -> Value {
+    claude_policy_value(root_paths(project), &state.denied_roots, modes, cwd)
+}
+
+/// Codex `turn/start` parameters. Sandbox and approval stay explicit, and the
+/// collaboration mode is always sent so a thread that left plan mode does not
+/// keep the previous turn's mode.
+fn codex_turn_params(
+    thread_id: &str,
+    client_message_id: &str,
+    input: &[Value],
+    turn: &CodexTurn<'_>,
+) -> Value {
+    let (_, approval, sandbox_policy) = codex_policy(turn.access_mode, turn.roots);
+    json!({"threadId": thread_id, "clientUserMessageId": client_message_id, "input": input,
+        "model": turn.model, "effort": turn.effort, "cwd": turn.cwd,
+        "approvalPolicy": approval, "sandboxPolicy": sandbox_policy, "runtimeWorkspaceRoots": turn.roots,
+        "collaborationMode": {"mode": if turn.plan { "plan" } else { "default" },
+            "settings": {"model": turn.model, "reasoning_effort": turn.effort, "developer_instructions": null}}})
+}
+
+struct CodexTurn<'a> {
+    access_mode: &'a str,
+    roots: &'a [String],
+    model: &'a str,
+    effort: Option<&'a str>,
+    cwd: &'a str,
+    plan: bool,
 }
 
 pub(crate) async fn is_project(state: &AppState, conversation: &str) -> bool {
@@ -1953,7 +2129,7 @@ async fn dispatch_inner(
     let mut permission = claude_policy(
         state,
         &project,
-        &conversation.access_mode,
+        ClaudeModes::from(&conversation),
         &conversation.cwd,
     );
     permission["workspace"] = json!(media);
@@ -2072,6 +2248,7 @@ async fn dispatch_inner(
         "schemaVersion": 1, "scope": "projects", "projectId": project.id, "rootsRevision": project.roots_revision,
         "workingDirectory": conversation.cwd, "model": model, "effort": conversation.effort,
         "accessMode": conversation.access_mode, "family": conversation.family,
+        "claudeApproval": conversation.claude_approval, "planMode": conversation.plan_mode,
         "inputSha256": hex::encode(Sha256::digest(serde_json::to_vec(&input).unwrap_or_default())),
     })
     .to_string();
@@ -2082,12 +2259,19 @@ async fn dispatch_inner(
         .map_err(|e| e.to_string())?;
     *submitting = true;
     let params = match conversation.family {
-        AgentFamily::Codex => {
-            let (_, approval, sandbox_policy) = codex_policy(&conversation.access_mode, &roots);
-            json!({"threadId": thread_id, "clientUserMessageId": message.client_message_id, "input": input,
-                "model": model, "effort": conversation.effort, "cwd": conversation.cwd,
-                "approvalPolicy": approval, "sandboxPolicy": sandbox_policy, "runtimeWorkspaceRoots": roots})
-        }
+        AgentFamily::Codex => codex_turn_params(
+            &thread_id,
+            &message.client_message_id,
+            &input,
+            &CodexTurn {
+                access_mode: &conversation.access_mode,
+                roots: &roots,
+                model: &model,
+                effort: conversation.effort.as_deref(),
+                cwd: &conversation.cwd,
+                plan: conversation.plan_mode,
+            },
+        ),
         AgentFamily::Claude => {
             json!({"threadId": thread_id, "clientUserMessageId": message.client_message_id,
             "input": input, "model": model, "effort": conversation.effort,
@@ -2502,7 +2686,7 @@ mod tests {
             is_working: false,
         };
         let page = serde_json::to_value(ThreadsPage {
-            threads: vec![thread],
+            threads: vec![thread.clone()],
             next_cursor: Some("token".into()),
             partial: vec![PartialFailure {
                 family: AgentFamily::Claude,
@@ -2511,6 +2695,47 @@ mod tests {
         })
         .unwrap();
         crate::tests::validate_http_contract("projectThreadsPage", &page);
+        let pinned = ProjectThreadSummary {
+            conversation_id: Some("c1".into()),
+            is_pinned: true,
+            ..thread.clone()
+        };
+        let library = serde_json::to_value(ProjectsResponse {
+            projects: vec![project_summary(&project)],
+            families: vec![FamilyAvailability {
+                family: AgentFamily::Claude,
+                available: true,
+            }],
+            modes_version: MODES_VERSION,
+            pinned: vec![PinnedThread {
+                project_id: "p1".into(),
+                thread: pinned,
+            }],
+        })
+        .unwrap();
+        crate::tests::validate_http_contract("projectsResponse", &library);
+        assert_eq!(library["modesVersion"], 1);
+        let detail = serde_json::to_value(ProjectConversationDetail {
+            conversation_id: "c1".into(),
+            project_id: "p1".into(),
+            project_name: "Wonder".into(),
+            title: "Fix reconnect".into(),
+            family: AgentFamily::Claude,
+            model: Some("claude:sonnet".into()),
+            effort: None,
+            access_mode: "workspace".into(),
+            claude_approval: "accept_edits".into(),
+            plan_mode: true,
+            working_folder: "/work/app".into(),
+            working_folder_name: "app".into(),
+            is_pinned: false,
+            has_unread: false,
+            has_native_session: true,
+            folder_in_project: true,
+            notice: None,
+        })
+        .unwrap();
+        crate::tests::validate_http_contract("projectConversationDetail", &detail);
         let continuation = serde_json::to_value(ContinuationResponse {
             options: vec![ContinuationOption {
                 id: "codex-cli",
@@ -2579,6 +2804,53 @@ mod tests {
             second.1["conversation"]["conversationId"]
         );
         let id = first.1["conversation"]["conversationId"].as_str().unwrap();
+        // The HTTP/store boundary preserves omitted effort and clears explicit
+        // null when switching to an effort-less model, avoiding a rejected Send.
+        let mut effortful = state
+            .runtime_catalog
+            .read()
+            .await
+            .models
+            .iter()
+            .find(|model| model.id == "fake")
+            .unwrap()
+            .clone();
+        effortful.id = "effortful".into();
+        effortful.reasoning_efforts = vec![crate::ChoiceOption {
+            id: "high".into(),
+            label: "High".into(),
+            description: None,
+        }];
+        state.runtime_catalog.write().await.models.push(effortful);
+        state
+            .store
+            .update_project_conversation(
+                id,
+                ProjectConversationPatch {
+                    model: Some("effortful"),
+                    effort: Some(Some("high")),
+                    ..Default::default()
+                },
+                "later",
+            )
+            .await
+            .unwrap();
+        let path = format!("/api/v1/project-conversations/{id}");
+        let preserved = call(&state, "PATCH", &path, json!({"isPinned": false})).await;
+        assert_eq!(preserved.0, StatusCode::OK, "{}", preserved.1);
+        assert_eq!(preserved.1["effort"], "high");
+        let incompatible = call(&state, "PATCH", &path, json!({"model": "fake"})).await;
+        assert_eq!(
+            incompatible.0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            incompatible.1
+        );
+        let clear = json!({"model": "fake", "effort": null});
+        crate::tests::validate_http_contract("updateProjectConversationRequest", &clear);
+        let cleared = call(&state, "PATCH", &path, clear).await;
+        assert_eq!(cleared.0, StatusCode::OK, "{}", cleared.1);
+        assert!(cleared.1["effort"].is_null());
         assert!(state.store.runtime_binding(id).await.unwrap().is_none());
         assert!(state
             .store
@@ -2598,6 +2870,107 @@ mod tests {
         )
         .await;
         assert_eq!(rejected.0, StatusCode::PRECONDITION_FAILED);
+        // Plan mode is part of the frozen creation request, Claude approval
+        // has no meaning for Codex, and pinned threads join the library.
+        let planned = json!({"deviceId":"owner", "clientMessageId":uuid::Uuid::new_v4().to_string(),
+            "family":"codex", "model":"fake", "body":"Plan first", "rootsRevision":1, "prepareOnly":true, "planMode":true});
+        crate::tests::validate_http_contract("createProjectThreadRequest", &planned);
+        let created = call(
+            &state,
+            "POST",
+            "/api/v1/projects/prepare-project/threads",
+            planned.clone(),
+        )
+        .await;
+        assert_eq!(created.0, StatusCode::OK, "{}", created.1);
+        let planned_id = created.1["conversation"]["conversationId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let detail_path = format!("/api/v1/project-conversations/{planned_id}");
+        let detail = call(&state, "GET", &detail_path, Value::Null).await;
+        assert_eq!(detail.0, StatusCode::OK, "{}", detail.1);
+        crate::tests::validate_http_contract("projectConversationDetail", &detail.1);
+        assert_eq!(detail.1["planMode"], true);
+        assert_eq!(detail.1["claudeApproval"], "ask");
+        let mut changed = planned.clone();
+        changed["planMode"] = json!(false);
+        let conflict = call(
+            &state,
+            "POST",
+            "/api/v1/projects/prepare-project/threads",
+            changed,
+        )
+        .await;
+        assert_eq!(conflict.0, StatusCode::CONFLICT, "{}", conflict.1);
+        let mut codex_approval = planned.clone();
+        codex_approval["clientMessageId"] = json!(uuid::Uuid::new_v4().to_string());
+        codex_approval["claudeApproval"] = json!("auto");
+        let unsupported = call(
+            &state,
+            "POST",
+            "/api/v1/projects/prepare-project/threads",
+            codex_approval,
+        )
+        .await;
+        assert_eq!(unsupported.0, StatusCode::UNPROCESSABLE_ENTITY);
+        for bad in [
+            json!({"claudeApproval": "auto"}),
+            json!({"claudeApproval": "yolo"}),
+        ] {
+            let rejected = call(&state, "PATCH", &detail_path, bad).await;
+            assert_eq!(
+                rejected.0,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{}",
+                rejected.1
+            );
+        }
+        let updated = call(
+            &state,
+            "PATCH",
+            &detail_path,
+            json!({"planMode": false, "isPinned": true}),
+        )
+        .await;
+        assert_eq!(updated.0, StatusCode::OK, "{}", updated.1);
+        assert_eq!(updated.1["planMode"], false);
+        // Retry against the immutable original plan setting after PATCH.
+        let retry = call(
+            &state,
+            "POST",
+            "/api/v1/projects/prepare-project/threads",
+            planned,
+        )
+        .await;
+        assert_eq!(retry.0, StatusCode::OK, "{}", retry.1);
+        assert_eq!(retry.1["conversation"]["conversationId"], planned_id);
+        let library = call(&state, "GET", "/api/v1/projects", Value::Null).await;
+        assert_eq!(library.0, StatusCode::OK, "{}", library.1);
+        crate::tests::validate_http_contract("projectsResponse", &library.1);
+        assert_eq!(library.1["modesVersion"], 1);
+        assert_eq!(library.1["pinned"][0]["projectId"], "prepare-project");
+        assert_eq!(
+            library.1["pinned"][0]["thread"]["conversationId"],
+            planned_id
+        );
+        // The project thread never appears in the Bot and Group Chat list.
+        let chats = call(&state, "GET", "/api/v1/conversations", Value::Null).await;
+        assert_eq!(chats.0, StatusCode::OK, "{}", chats.1);
+        assert!(!chats
+            .1
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|chat| chat["conversationId"] == planned_id || chat["conversationId"] == id));
+        let status = call(&state, "GET", "/api/v1/host/status", Value::Null).await;
+        assert_eq!(status.0, StatusCode::OK, "{}", status.1);
+        for feature in [FEATURE, crate::computer_sessions::HOST_VIEW_FEATURE] {
+            assert!(status.1["features"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(feature)));
+        }
         state.app_server.lock().await.shutdown().await.unwrap();
     }
 
@@ -2634,6 +3007,8 @@ mod tests {
                 model: None,
                 effort: None,
                 access_mode: "read_only",
+                claude_approval: "ask",
+                plan_mode: false,
                 creation_request_id: Some("creation"),
                 now: "now",
             })
@@ -2723,6 +3098,95 @@ mod tests {
         assert_eq!(codex_policy("read_only", &roots).2["type"], "readOnly");
         // Unknown stored values fail toward the ordinary workspace boundary.
         assert_eq!(codex_policy("unexpected", &roots).0, "workspace-write");
+    }
+
+    // Contract: every Codex turn names its collaboration mode and reasoning
+    // effort so leaving plan mode takes effect, and the sandbox and approval
+    // policy stay exactly the access mode's.
+    #[test]
+    fn codex_turn_always_names_its_collaboration_mode() {
+        let roots = vec!["/work/app".to_owned()];
+        let input = vec![json!({"type": "text", "text": "Hi"})];
+        for (plan, effort, expected) in [(false, None, "default"), (true, Some("high"), "plan")] {
+            for access in ["read_only", "workspace", "full_access"] {
+                let params = codex_turn_params(
+                    "thread",
+                    "client",
+                    &input,
+                    &CodexTurn {
+                        access_mode: access,
+                        roots: &roots,
+                        model: "gpt-x",
+                        effort,
+                        cwd: "/work/app",
+                        plan,
+                    },
+                );
+                assert_eq!(
+                    params["collaborationMode"],
+                    json!({"mode": expected, "settings": {"model": "gpt-x",
+                        "reasoning_effort": effort, "developer_instructions": null}})
+                );
+                let (_, approval, sandbox) = codex_policy(access, &roots);
+                assert_eq!(params["approvalPolicy"], approval);
+                assert_eq!(params["sandboxPolicy"], sandbox);
+                assert_eq!(params["model"], "gpt-x");
+                assert_eq!(params["effort"], json!(effort));
+            }
+        }
+    }
+
+    // Contract: the bridge policy follows access first. Approval modes refine
+    // Workspace only; Read only always asks, Full access never does, and plan
+    // mode is independent of both.
+    #[test]
+    fn claude_policy_maps_access_approval_and_plan() {
+        let roots = vec!["/work/app".to_owned(), "/work/docs".to_owned()];
+        let denied = vec!["/secrets".to_owned()];
+        let policy = |access_mode, approval, plan| {
+            claude_policy_value(
+                roots.clone(),
+                &denied,
+                ClaudeModes {
+                    access_mode,
+                    approval,
+                    plan,
+                },
+                "/work/app",
+            )
+        };
+        for (access, approval, mode, expected, writes) in [
+            ("read_only", "auto", "read_only", "ask", false),
+            ("read_only", "accept_edits", "read_only", "ask", false),
+            ("workspace", "ask", "workspace", "ask", true),
+            (
+                "workspace",
+                "accept_edits",
+                "workspace",
+                "accept_edits",
+                true,
+            ),
+            ("workspace", "auto", "workspace", "auto", true),
+            ("workspace", "unexpected", "workspace", "ask", true),
+            ("full_access", "ask", "full_access", "full_access", true),
+            ("full_access", "auto", "full_access", "full_access", true),
+            ("unexpected", "auto", "workspace", "auto", true),
+        ] {
+            for plan in [false, true] {
+                let value = policy(access, approval, plan);
+                assert_eq!(value["mode"], mode, "{access}/{approval}");
+                assert_eq!(value["approvalMode"], expected, "{access}/{approval}");
+                assert_eq!(value["planMode"], plan);
+                assert_eq!(
+                    value["writeRoots"],
+                    json!(if writes { roots.clone() } else { vec![] })
+                );
+                assert_eq!(value["workspace"], "/work/app");
+                assert_eq!(value["readRoots"], json!(["/"]));
+                assert_eq!(value["deniedRoots"], json!(denied));
+            }
+        }
+        assert_eq!(ClaudeModes::default().approval, "ask");
     }
 
     // Contract: protected locations and whole-home folders cannot become

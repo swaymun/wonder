@@ -2,56 +2,189 @@ import SwiftUI
 import UIKit
 import WonderPairing
 
+// MARK: - Provider identity
+
+/// The Codex or Claude app icon at a fixed size. It stands in for the words
+/// "Codex" and "Claude" in rows and buttons; VoiceOver still hears the name.
+struct ProviderIcon: View {
+    let family: AgentFamily
+    var size: CGFloat = 16
+    @ScaledMetric(relativeTo: .subheadline) private var scale: CGFloat = 1
+    var body: some View {
+        Image(family == .claude ? "ProviderClaude" : "ProviderCodex")
+            .resizable().interpolation(.high).scaledToFit()
+            .frame(width: size * scale, height: size * scale)
+            .accessibilityLabel(family.title)
+    }
+}
+
+/// The last model and effort chosen for each provider. New threads start from
+/// them; the choice is per provider, never a silent substitution.
+enum RememberedModels {
+    private static func key(_ family: AgentFamily) -> String { "wonder.project.model." + family.rawValue }
+    static func load(_ family: AgentFamily?, defaults: UserDefaults = .standard) -> RememberedModel? {
+        guard let family, let data = defaults.data(forKey: key(family)) else { return nil }
+        return try? JSONDecoder().decode(RememberedModel.self, from: data)
+    }
+    static func save(_ family: AgentFamily, model: String, effort: String?, defaults: UserDefaults = .standard) {
+        guard let data = try? JSONEncoder().encode(RememberedModel(model: model, effort: effort)) else { return }
+        defaults.set(data, forKey: key(family))
+    }
+}
+
+// MARK: - Composer controls shared by new chats and threads
+
+/// Provider icon and "Model · Effort", the button that opens the model sheet.
+struct ComposerModelLabel: View {
+    let family: AgentFamily?
+    let title: String
+    @Environment(\.dynamicTypeSize) private var typeSize
+    var body: some View {
+        Group {
+            if typeSize.isAccessibilitySize {
+                Image(systemName: "slider.horizontal.3").font(.system(size: 20))
+            } else {
+                HStack(spacing: 5) {
+                    if let family { ProviderIcon(family: family, size: 16) }
+                    Text(title).lineLimit(1).minimumScaleFactor(0.8).layoutPriority(-1)
+                    Image(systemName: "chevron.down").imageScale(.small)
+                }.font(.subheadline)
+            }
+        }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 4).frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Shows that plan mode is on; tapping turns it off.
+struct PlanModeChip: View {
+    var isDisabled = false
+    let turnOff: () -> Void
+    var body: some View {
+        Button(action: turnOff) {
+            HStack(spacing: 4) {
+                Image(systemName: "list.bullet.clipboard").imageScale(.small)
+                Text("Plan")
+                Image(systemName: "xmark").font(.caption2.weight(.bold))
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(Color.accentColor)
+            .padding(.horizontal, 10).frame(minHeight: 28)
+            .background(Color.accentColor.opacity(0.12), in: Capsule())
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .accessibilityLabel("Plan mode on")
+        .accessibilityHint("Turns plan mode off")
+        .accessibilityIdentifier("plan-mode-chip")
+    }
+}
+
+/// The shield menu for a project thread or draft. Rows and labels follow the
+/// provider; `choose` receives the row the owner picked.
+struct ProjectAccessMenu: View {
+    let family: AgentFamily
+    let supportsModes: Bool
+    let access: ProjectAccess
+    var isDisabled = false
+    let identifier: String
+    let choose: (ProjectAccessChoice) -> Void
+    var body: some View {
+        let selected = ProjectAccessChoice.selected(for: access, family: family, supportsModes: supportsModes)
+        Menu {
+            ForEach(ProjectAccessChoice.choices(family: family, supportsModes: supportsModes, current: access)) { choice in
+                Button { choose(choice) } label: {
+                    Text(choice.title(for: family, supportsModes: supportsModes))
+                    Text(choice.detail(for: family))
+                    if choice == selected { Image(systemName: "checkmark") }
+                }
+                .tint(choice.isElevated ? Color.orange : nil)
+                .accessibilityIdentifier("access-choice-" + choice.rawValue)
+            }
+        } label: {
+            Image(systemName: "shield").font(.system(size: 18)).frame(width: 44, height: 44)
+                .foregroundStyle(selected.isElevated ? Color.orange : Color.primary)
+                .contentShape(Rectangle())
+        }
+        .menuOrder(.fixed)
+        .disabled(isDisabled)
+        .accessibilityLabel("Access")
+        .accessibilityValue(selected.title(for: family, supportsModes: supportsModes))
+        .accessibilityIdentifier(identifier)
+    }
+}
+
 // MARK: - Conversation chrome
 
-/// Compact title with the project and provider; no provider avatar.
+/// Compact title with the provider icon and project name.
 struct ProjectConversationHeader: View {
     let detail: ProjectConversationDetail
     var body: some View {
         VStack(spacing: 1) {
             Text(detail.title).font(.headline).lineLimit(1)
-            Text("\(detail.projectName) · \(detail.family.title)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            HStack(spacing: 4) {
+                ProviderIcon(family: detail.family, size: 12)
+                Text(detail.projectName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(detail.title), \(detail.projectName) project, \(detail.family.title)")
         .accessibilityIdentifier("project-conversation-header")
     }
 }
 
-/// Model, effort and access for one project thread. The provider family is
-/// fixed once the thread exists; only models from that family are offered.
+/// Turns a project thread's plan mode on or off. Sending waits for the save,
+/// and a failure is reported in the composer.
+@MainActor @discardableResult func setPlanMode(_ enabled: Bool, model: ConnectionModel, library: ProjectLibrary, chat: ChatSummary) async -> Bool {
+    guard library.supportsModes, !model.savingComposerSettings.contains(chat.id), !model.accessEnded else { return false }
+    let scope = model.assignmentScope
+    model.savingComposerSettings.insert(chat.id); model.controlErrors[chat.id] = nil
+    defer { if scope == model.assignmentScope { model.savingComposerSettings.remove(chat.id) } }
+    do {
+        try await library.updateConversation(chat.id, fields: ["planMode": enabled])
+        return !Task.isCancelled && scope == model.assignmentScope && library.details[chat.id]?.planMode == enabled
+    } catch {
+        if scope == model.assignmentScope { model.controlErrors[chat.id] = "Plan mode wasn’t changed. " + managementError(error) }
+        return false
+    }
+}
+
+/// Model, effort and access for one project thread. The provider is fixed once
+/// the thread exists; only models from that provider are offered.
 struct ProjectComposerSettings: View {
     @ObservedObject var model: ConnectionModel
     @ObservedObject var library: ProjectLibrary
     let chat: ChatSummary
     @State private var showingModel = false
-    @State private var saving = false
     @State private var failure: String?
-    @Environment(\.dynamicTypeSize) private var typeSize
     private var detail: ProjectConversationDetail? { library.details[chat.id] }
+    private var saving: Bool { model.savingComposerSettings.contains(chat.id) }
     private var models: [BotOptions.Model] {
         (library.options?.models ?? []).filter { !$0.hidden && $0.family == detail?.family }
     }
-    private var selected: BotOptions.Model? { models.first { $0.id == detail?.model } }
+    /// A thread that never chose a model uses its provider's default.
+    private var selected: BotOptions.Model? {
+        guard let detail else { return nil }
+        if let stored = detail.model { return models.first { $0.id == stored } }
+        return ModelDefaults.defaultModel(in: models)
+    }
+    private var effort: String? { selected.flatMap { ModelDefaults.effort(detail?.effort, for: $0) } }
+    private var title: String {
+        if let selected { return ModelDefaults.summary(model: selected, effort: effort) }
+        return detail?.model ?? "Model"
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
                 accessMenu
                 Spacer(minLength: 0)
-                Button { showingModel = true } label: {
-                    Group {
-                        if typeSize.isAccessibilitySize { Image(systemName: "slider.horizontal.3").font(.system(size: 20)) }
-                        else {
-                            HStack(spacing: 4) {
-                                Text(selected?.displayName ?? detail?.model ?? "Model").lineLimit(1)
-                                Image(systemName: "chevron.down").imageScale(.small)
-                            }.font(.subheadline)
-                        }
-                    }.padding(.horizontal, 4).frame(minWidth: 44, minHeight: 44)
-                }
-                .disabled(saving || detail == nil)
-                .accessibilityLabel("Model").accessibilityValue(selected?.displayName ?? "Default")
-                .accessibilityIdentifier("project-composer-model")
+                Button { showingModel = true } label: { ComposerModelLabel(family: detail?.family, title: title) }
+                    .disabled(saving || detail == nil)
+                    .accessibilityLabel("Model").accessibilityValue(title)
+                    .accessibilityIdentifier("project-composer-model")
             }
             if saving { ProgressView("Saving…").font(.caption).padding(.horizontal, 12) }
             if let failure { FailureDetails("Settings not saved", message: failure).padding(.horizontal, 12) }
@@ -63,16 +196,16 @@ struct ProjectComposerSettings: View {
                     Section("Model") {
                         if models.isEmpty { Text("Models are unavailable. Check \(model.macName).").foregroundStyle(.secondary) }
                         ForEach(models) { option in
-                            Button { Task { await save(["model": option.id]) } } label: {
-                                HStack { Text(option.displayName); Spacer(); if detail?.model == option.id { Image(systemName: "checkmark") } }
+                            Button { Task { await choose(option) } } label: {
+                                HStack { Text(option.displayName); Spacer(); if option.id == selected?.id { Image(systemName: "checkmark") } }
                             }.foregroundStyle(.primary)
                         }
                     }
                     if let selected, !selected.reasoningEfforts.isEmpty {
                         Section("Reasoning") {
                             ForEach(selected.reasoningEfforts) { option in
-                                Button { Task { await save(["model": selected.id, "effort": option.id]) } } label: {
-                                    HStack { Text(option.label == "xhigh" ? "Extra high" : option.label.capitalized); Spacer(); if detail?.effort == option.id { Image(systemName: "checkmark") } }
+                                Button { Task { await choose(selected, effort: option.id) } } label: {
+                                    HStack { Text(ModelDefaults.title(of: option)); Spacer(); if option.id == effort { Image(systemName: "checkmark") } }
                                 }.foregroundStyle(.primary)
                             }
                         }
@@ -86,28 +219,28 @@ struct ProjectComposerSettings: View {
         }
     }
     private var accessMenu: some View {
-        let family = detail?.family ?? .codex
-        return Menu {
-            ForEach(ProjectAccessMode.allCases) { mode in
-                Button { Task { await save(["accessMode": mode.rawValue]) } } label: {
-                    if detail?.accessMode == mode { Label(mode.title(for: family), systemImage: "checkmark") }
-                    else { Text(mode.title(for: family)) }
-                }
-            }
-            if let mode = detail?.accessMode { Section { Text(mode.detail(for: family)) } }
-        } label: {
-            Image(systemName: "shield").font(.system(size: 18)).frame(width: 44, height: 44)
-                .foregroundStyle(detail?.accessMode == .fullAccess ? Color.orange : Color.primary)
+        ProjectAccessMenu(family: detail?.family ?? .codex, supportsModes: library.supportsModes, access: detail?.access ?? ProjectAccess(),
+                          isDisabled: saving || detail == nil || model.accessEnded, identifier: "project-composer-access") { choice in
+            guard let detail else { return }
+            let next = choice.result(from: detail.access, family: detail.family, supportsModes: library.supportsModes)
+            Task { _ = await save(detail.access.changes(to: next, family: detail.family, supportsModes: library.supportsModes)) }
         }
-        .disabled(saving || detail == nil || model.accessEnded)
-        .accessibilityLabel("Access").accessibilityValue(detail.map { $0.accessMode.title(for: $0.family) } ?? "")
-        .accessibilityIdentifier("project-composer-access")
     }
-    private func save(_ fields: [String: Any]) async {
-        saving = true; failure = nil
-        defer { saving = false }
-        do { try await library.updateConversation(chat.id, fields: fields) }
-        catch { failure = managementError(error) }
+    /// Picking a model starts from that model's default effort.
+    private func choose(_ option: BotOptions.Model, effort: String? = nil) async {
+        // Choosing the current model again keeps the effort already chosen.
+        guard let family = detail?.family, effort != nil || option.id != selected?.id else { return }
+        let chosen = effort ?? ModelDefaults.effort(for: option)
+        let fields: [String: Any] = ["model": option.id, "effort": chosen as Any? ?? NSNull()]
+        if await save(fields) { RememberedModels.save(family, model: option.id, effort: chosen) }
+    }
+    @discardableResult private func save(_ fields: [String: Any]) async -> Bool {
+        guard !fields.isEmpty, !saving else { return false }
+        let scope = model.assignmentScope
+        model.savingComposerSettings.insert(chat.id); failure = nil
+        defer { if scope == model.assignmentScope { model.savingComposerSettings.remove(chat.id) } }
+        do { try await library.updateConversation(chat.id, fields: fields); return true }
+        catch { failure = managementError(error); return false }
     }
 }
 
@@ -122,7 +255,7 @@ struct ProjectConversationDetailsView: View {
     @State private var title = ""
     @State private var saving = false
     @State private var failure: String?
-    @State private var copied: String?
+    @State private var copied = false
     private var detail: ProjectConversationDetail? { library.details[chat.id] }
     var body: some View {
         NavigationStack {
@@ -131,14 +264,18 @@ struct ProjectConversationDetailsView: View {
                     Section {
                         TextField("Thread name", text: $title).submitLabel(.done)
                             .onSubmit { Task { await save(["title": title]) } }
-                        Toggle("Pin thread", isOn: Binding(get: { detail.isPinned }, set: { value in Task { await save(["isPinned": value]) } }))
+                        Toggle("Pin thread", isOn: Binding(get: { self.detail?.isPinned ?? false }, set: { value in Task { await save(["isPinned": value]) } }))
+                            .accessibilityIdentifier("project-thread-pin")
                     }
                     Section("Project") {
                         LabeledContent("Project", value: detail.projectName)
-                        LabeledContent("Agent", value: detail.family.title)
+                        LabeledContent("Agent") {
+                            HStack(spacing: 6) { ProviderIcon(family: detail.family, size: 16); Text(detail.family.title) }
+                        }
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Working folder").font(.subheadline)
-                            Text(detail.workingFolder).font(.footnote.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                            Text(detail.workingFolder).font(.footnote.monospaced()).foregroundStyle(.secondary)
+                                .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
                         }
                         if !detail.folderInProject {
                             Text("This folder is no longer part of the project. Add it back in project settings to continue here.")
@@ -146,27 +283,28 @@ struct ProjectConversationDetailsView: View {
                         }
                         if let notice = detail.notice { Text(notice).font(.footnote).foregroundStyle(.secondary) }
                     }
-                    Section {
-                        if let continuation {
-                            ForEach(continuation.options) { option in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text(option.title).font(.headline)
-                                    Text(option.detail).font(.footnote).foregroundStyle(.secondary)
-                                    Text(option.command).font(.footnote.monospaced()).textSelection(.enabled)
-                                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                                        .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 8))
-                                    Button(copied == option.id ? "Copied" : "Copy command", systemImage: copied == option.id ? "checkmark" : "doc.on.doc") {
-                                        UIPasteboard.general.string = option.command
-                                        copied = option.id
-                                    }
-                                    .accessibilityIdentifier("copy-continuation-" + option.id)
-                                }.padding(.vertical, 4)
+                    Section("Continue on Mac") {
+                        if let option = continuation?.options.first {
+                            HStack(spacing: 12) {
+                                Text(option.command).font(.footnote.monospaced()).lineLimit(1).truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .accessibilityLabel("Command to continue on your Mac")
+                                Button(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc") {
+                                    UIPasteboard.general.string = option.command
+                                    copied = true
+                                }
+                                .buttonStyle(.borderless).labelStyle(.titleAndIcon).font(.subheadline)
+                                .accessibilityIdentifier("copy-continuation-" + option.id)
                             }
-                            ForEach(continuation.notes, id: \.self) { note in Text(note).font(.footnote).foregroundStyle(.secondary) }
+                            .task(id: copied) {
+                                guard copied else { return }
+                                try? await Task.sleep(for: .seconds(2))
+                                if !Task.isCancelled { copied = false }
+                            }
                         } else if let continuationFailure {
                             Text(continuationFailure).foregroundStyle(.secondary)
                         } else { ProgressView() }
-                    } header: { Text("Continue on Mac") }
+                    }
                 } else {
                     ProgressView("Loading thread…")
                 }
@@ -194,7 +332,10 @@ struct ProjectConversationDetailsView: View {
     private func save(_ fields: [String: Any]) async {
         saving = true; failure = nil
         defer { saving = false }
-        do { try await library.updateConversation(chat.id, fields: fields) }
+        do {
+            try await library.updateConversation(chat.id, fields: fields)
+            if fields["isPinned"] != nil { await library.refresh() }
+        }
         catch { failure = managementError(error) }
     }
 }

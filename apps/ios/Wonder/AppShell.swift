@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import WonderPairing
 
 /// What the main surface shows. Every conversation address carries its Mac.
@@ -20,18 +21,22 @@ struct NewChatRequest: Equatable {
     @Published var route: ShellRoute = .newChat
     @Published var sidebarOpen = false
     @Published var newChatRequest: NewChatRequest?
+    /// Settings is pushed onto the main navigation stack.
     @Published var settingsOpen = false
-    @Published var managingProjectsHost: String?
+    /// The Mac the new-chat draft is addressed to, reported by the draft view.
+    @Published var draftHost: String?
 
     func open(host: String, conversation: String) {
         route = .conversation(host: host, id: conversation)
         sidebarOpen = false
+        settingsOpen = false
     }
     /// A fresh draft; in a project the draft stays in that project.
     func newChat(host: String? = nil, destination: ChatDestination? = nil) {
         newChatRequest = NewChatRequest(host: host, destination: destination)
         route = .newChat
         sidebarOpen = false
+        settingsOpen = false
     }
     var selectedConversation: (host: String, id: String)? {
         if case .conversation(let host, let id) = route { return (host, id) }
@@ -47,59 +52,26 @@ struct ChatShell: View {
     @State private var sceneID = UUID()
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.scenePhase) private var phase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var columns = NavigationSplitViewVisibility.all
     @State private var choosingProjectsHost: String?
-    @AccessibilityFocusState private var sidebarFocused: Bool
+    /// First launch has no Mac to show, so pairing comes first as a sheet.
+    @State private var pairing = false
 
     var body: some View {
         Group {
             if sizeClass == .regular {
                 NavigationSplitView(columnVisibility: $columns) {
-                    SidebarView(library: library, shell: shell, isDrawer: false)
+                    SidebarView(library: library, shell: shell)
                         .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
                         .toolbar(.hidden, for: .navigationBar)
                 } detail: {
                     NavigationStack { ShellMain(library: library, shell: shell, showsSidebarButton: false) }
                 }
             } else {
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        NavigationStack { ShellMain(library: library, shell: shell, showsSidebarButton: true) }
-                            .accessibilityHidden(shell.sidebarOpen)
-                        if shell.sidebarOpen {
-                            // Background controls are inert while the drawer is open.
-                            Color.black.opacity(0.4).ignoresSafeArea()
-                                .onTapGesture { closeDrawer() }
-                                .accessibilityLabel("Close sidebar")
-                                .accessibilityAddTraits(.isButton)
-                                .transition(.opacity)
-                        }
-                            SidebarView(library: library, shell: shell, isDrawer: true)
-                                .frame(width: min(geometry.size.width * 0.85, 420))
-                                .background(Color(uiColor: .systemBackground))
-                                .overlay(alignment: .trailing) { Divider() }
-                                .accessibilityFocused($sidebarFocused)
-                                .offset(x: shell.sidebarOpen ? 0 : -min(geometry.size.width * 0.85, 420))
-                                .opacity(shell.sidebarOpen ? 1 : 0)
-                                .allowsHitTesting(shell.sidebarOpen)
-                                .accessibilityHidden(!shell.sidebarOpen)
-                                .zIndex(1)
-                    }
-                }
+                PhoneDrawerLayout(library: library, shell: shell)
             }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: shell.sidebarOpen)
-        .onChange(of: shell.sidebarOpen) { _, open in
-            if open {
-                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-            }
-            sidebarFocused = open
-        }
-        .sheet(isPresented: $shell.settingsOpen) { ConnectionsView(library: library) }
-        .sheet(item: Binding(get: { shell.managingProjectsHost.map(HostSheet.init) }, set: { shell.managingProjectsHost = $0?.id })) { sheet in
-            if let model = model(sheet.id) { ManageProjectsView(model: model, library: model.projects) }
-        }
+        .sheet(isPresented: $pairing) { ConnectionsView(library: library, isSheet: true) }
         .sheet(item: Binding(get: { choosingProjectsHost.map(HostSheet.init) }, set: { choosingProjectsHost = $0?.id })) { sheet in
             if let model = model(sheet.id) { ChooseProjectsView(model: model, library: model.projects) }
         }
@@ -123,12 +95,11 @@ struct ChatShell: View {
         .task {
             library.load(); PushNotifications.shared.attach(library)
             #if DEBUG || WONDER_DIAGNOSTICS
-            if ProcessInfo.processInfo.arguments.contains("-show-connections") { shell.settingsOpen = true }
+            if ProcessInfo.processInfo.arguments.contains("-show-connections") { pairing = true }
             #endif
         }
         .task(id: library.saved.connections.isEmpty) {
-            // First launch: pairing comes before anything else.
-            if library.loaded, library.saved.connections.isEmpty, !library.isPreview { shell.settingsOpen = true }
+            if library.loaded, library.saved.connections.isEmpty, !library.isPreview { pairing = true }
         }
         .onChange(of: library.saved.connections.map { $0.credential.deviceId }) { _, _ in PushNotifications.shared.refresh() }
         .background {
@@ -141,13 +112,133 @@ struct ChatShell: View {
             }
         }
     }
-    private func closeDrawer() { shell.sidebarOpen = false }
     private func model(_ host: String) -> ConnectionModel? {
         library.saved.connections.first { $0.credential.hostInstallationId == host }.map { library.model(for: $0) }
     }
 }
 
 private struct HostSheet: Identifiable { let id: String }
+
+/// The iPhone layout: the conversation with a sidebar drawer that follows the finger.
+/// Drag state lives here, so only the drawer's offset and the dimming change per frame;
+/// the conversation and the sidebar list are not re-evaluated while dragging.
+private struct PhoneDrawerLayout: View {
+    @ObservedObject var library: ConnectionLibrary
+    @ObservedObject var shell: ShellState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The finger's horizontal travel while a drag opens or closes the drawer.
+    @State private var drag: CGFloat = 0
+    @State private var dragEngaged = false
+    /// The drawer width of the last drag, for a settle that has no gesture geometry.
+    @State private var dragWidth: CGFloat = 0
+    /// True while a finger is down, so a cancelled drag still settles.
+    @GestureState private var touching = false
+
+    private static let edgeWidth: CGFloat = 20
+    private static let navigationBarHeight: CGFloat = 44
+    private static let commitFraction: CGFloat = 0.4
+    private static let commitVelocity: CGFloat = 500
+    private var animation: Animation? { reduceMotion ? nil : .easeOut(duration: 0.22) }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = min(geometry.size.width * 0.85, 420)
+            let offset = min(0, max(-width, (shell.sidebarOpen ? 0 : -width) + drag))
+            let progress = width > 0 ? 1 + offset / width : 0
+            ZStack(alignment: .leading) {
+                NavigationStack { ShellMain(library: library, shell: shell, showsSidebarButton: true) }
+                    .accessibilityHidden(shell.sidebarOpen)
+                    .allowsHitTesting(!shell.sidebarOpen)
+                    .overlay(alignment: .leading) {
+                        // Only the leading edge below the navigation bar opens the drawer, so
+                        // horizontal scrolling in the conversation and the header buttons keep working.
+                        if !shell.sidebarOpen && !shell.settingsOpen {
+                            Color.clear.frame(width: Self.edgeWidth).contentShape(Rectangle())
+                                .padding(.top, Self.navigationBarHeight)
+                                .gesture(openGesture(width: width))
+                                .accessibilityHidden(true)
+                        }
+                    }
+                // Background controls are inert while the drawer is open.
+                Color.black.opacity(0.4 * progress).ignoresSafeArea()
+                    .onTapGesture { close() }
+                    .simultaneousGesture(closeGesture(width: width))
+                    .allowsHitTesting(shell.sidebarOpen)
+                    .accessibilityHidden(!shell.sidebarOpen)
+                    .accessibilityLabel("Close sidebar")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityIdentifier("sidebar-scrim")
+                SidebarView(library: library, shell: shell)
+                    .frame(width: width)
+                    .background(Color(uiColor: .systemBackground))
+                    // A horizontal dismissal must cancel a pressed row rather than open it.
+                    .disabled(dragEngaged)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityAction(.escape) { close() }
+                    .offset(x: offset)
+                    .allowsHitTesting(shell.sidebarOpen)
+                    .accessibilityHidden(!shell.sidebarOpen)
+                    .simultaneousGesture(closeGesture(width: width))
+                    .zIndex(1)
+            }
+            .animation(animation, value: shell.sidebarOpen)
+        }
+        .onChange(of: shell.sidebarOpen) { _, open in
+            if open {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            }
+        }
+        .onChange(of: touching) { _, isTouching in
+            // A system-cancelled drag delivers no end; put the drawer where it belongs.
+            if !isTouching, dragEngaged { settle(width: dragWidth, translation: drag, velocity: 0) }
+        }
+    }
+
+    private func close() {
+        withAnimation(animation) { shell.sidebarOpen = false; drag = 0 }
+    }
+
+    private func openGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 6)
+            .updating($touching) { _, state, _ in state = true }
+            .onChanged { value in
+                guard !shell.sidebarOpen else { return }
+                let travel = value.translation
+                if dragEngaged || abs(travel.width) > abs(travel.height) {
+                    dragEngaged = true; dragWidth = width
+                    drag = max(0, min(travel.width, width))
+                }
+            }
+            .onEnded { value in settle(width: width, translation: value.translation.width, velocity: value.velocity.width) }
+    }
+
+    private func closeGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 10)
+            .updating($touching) { _, state, _ in state = true }
+            .onChanged { value in
+                guard shell.sidebarOpen else { return }
+                let travel = value.translation
+                if dragEngaged || (travel.width < 0 && abs(travel.width) > abs(travel.height) * 1.5) {
+                    dragEngaged = true; dragWidth = width
+                    drag = max(-width, min(0, travel.width))
+                }
+            }
+            .onEnded { value in settle(width: width, translation: value.translation.width, velocity: value.velocity.width) }
+    }
+
+    /// Commits on a quick flick or once the drawer moved past 40% of its travel.
+    private func settle(width: CGFloat, translation: CGFloat, velocity: CGFloat) {
+        guard dragEngaged else { return }
+        dragEngaged = false
+        let wasOpen = shell.sidebarOpen
+        let open: Bool
+        if velocity > Self.commitVelocity { open = true }
+        else if velocity < -Self.commitVelocity { open = false }
+        else if wasOpen { open = -translation <= width * Self.commitFraction }
+        else { open = translation > width * Self.commitFraction }
+        withAnimation(animation) { drag = 0; shell.sidebarOpen = open }
+    }
+}
 
 /// Keeps a connection's checks and project catalog fresh while the app is in
 /// the foreground; one owner per connection, cancelled with the scene.
@@ -197,6 +288,15 @@ private struct ShellMain: View {
     @ObservedObject var shell: ShellState
     let showsSidebarButton: Bool
     @AccessibilityFocusState private var sidebarButtonFocused: Bool
+    @State private var creatingProjectHost: String?
+    private var onNewChat: Bool { shell.route == .newChat }
+    /// The Mac a new project belongs to: the one the draft is addressed to.
+    private var draftHostID: String? {
+        let connections = library.saved.connections
+        let chosen = connections.first { $0.credential.hostInstallationId == shell.draftHost }
+            ?? (connections.count == 1 ? connections.first : connections.first { library.model(for: $0).macConnected == true })
+        return chosen?.credential.hostInstallationId
+    }
     var body: some View {
         Group {
             switch shell.route {
@@ -223,19 +323,31 @@ private struct ShellMain: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button { newChat() } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("New chat")
-                    .accessibilityIdentifier("new-chat")
-                    .disabled(shell.sidebarOpen)
+                Button { plus() } label: { Image(systemName: onNewChat ? "folder.badge.plus" : "plus") }
+                    .accessibilityLabel(onNewChat ? "New project" : "New chat")
+                    .accessibilityIdentifier(onNewChat ? "new-project" : "new-chat")
+                    .disabled(shell.sidebarOpen || (onNewChat && draftHostID == nil))
+            }
+        }
+        .navigationDestination(isPresented: $shell.settingsOpen) { ConnectionsView(library: library) }
+        .sheet(item: Binding(get: { creatingProjectHost.map(HostSheet.init) }, set: { creatingProjectHost = $0?.id })) { sheet in
+            if let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == sheet.id }) {
+                let model = library.model(for: saved)
+                ProjectEditorView(model: model, library: model.projects, project: nil) { created in
+                    shell.newChat(host: sheet.id, destination: .project(id: created.id))
+                }
             }
         }
         .onChange(of: shell.sidebarOpen) { _, open in if !open { sidebarButtonFocused = true } }
     }
-    private func newChat() {
-        // In a project thread, the new draft stays in that project.
-        if let selected = shell.selectedConversation,
-           let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == selected.host }),
-           let detail = library.model(for: saved).projects.details[selected.id] {
+    private func plus() {
+        if onNewChat {
+            // On the new-chat screen the destination is the project, so "+" adds one.
+            creatingProjectHost = draftHostID
+        } else if let selected = shell.selectedConversation,
+                  let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == selected.host }),
+                  let detail = library.model(for: saved).projects.details[selected.id] {
+            // In a project thread, the new draft stays in that project.
             shell.newChat(host: selected.host, destination: .project(id: detail.projectId))
         } else {
             shell.newChat(host: shell.selectedConversation?.host)
@@ -243,7 +355,9 @@ private struct ShellMain: View {
     }
 }
 
-/// Resolves an address to a Bot/Group chat or a project thread on its Mac.
+/// Resolves an address to a project thread on its Mac, or a Bot chat opened
+/// from a notification. A thread with saved detail renders at once; the
+/// detail refreshes behind it.
 private struct ShellConversation: View {
     @ObservedObject var model: ConnectionModel
     @ObservedObject var projects: ProjectLibrary
@@ -251,26 +365,156 @@ private struct ShellConversation: View {
     @State private var resolving = false
     @State private var unavailable = false
     var body: some View {
-        if !model.accessEnded, let detail = projects.details[chatID] {
-            ConversationView(model: model, chat: model.projectChat(detail))
-        } else if !model.accessEnded, let chat = model.chats.first(where: { $0.id == chatID }) {
-            ConversationView(model: model, chat: chat)
-        } else if unavailable || model.accessEnded {
-            ContentUnavailableView("Chat unavailable", systemImage: "bubble.left",
-                                   description: Text(model.accessEnded ? "Pair this computer again in Settings." : "This chat is no longer on \(model.macName)."))
-        } else {
-            ProgressView("Loading chat…").accessibilityIdentifier("conversation-loading")
-                .task(id: chatID + ":" + String(model.macConnected == true)) {
-                    // A notification or restored route can arrive before chats load.
-                    guard model.macConnected == true, !resolving else { return }
-                    resolving = true
-                    defer { resolving = false }
-                    if model.chats.isEmpty { await model.loadChats(force: true) }
-                    guard !model.chats.contains(where: { $0.id == chatID }) else { return }
-                    do { try await projects.loadDetail(chatID) }
-                    catch PairingFailure.response(404) { unavailable = true }
-                    catch {}
-                }
+        Group {
+            if !model.accessEnded, !projects.unavailable.contains(chatID), let detail = projects.details[chatID] {
+                ConversationView(model: model, chat: model.projectChat(detail))
+            } else if !model.accessEnded, let chat = model.chats.first(where: { $0.id == chatID }) {
+                ConversationView(model: model, chat: chat)
+            } else if unavailable || model.accessEnded || projects.unavailable.contains(chatID) {
+                ContentUnavailableView("Chat unavailable", systemImage: "bubble.left",
+                                       description: Text(model.accessEnded ? "Pair this computer again in Settings." : "This chat is no longer on \(model.macName)."))
+            } else {
+                ProgressView("Loading chat…").accessibilityIdentifier("conversation-loading")
+            }
+        }
+        .task(id: chatID + ":" + String(model.macConnected == true)) { await resolve() }
+    }
+
+    private func resolve() async {
+        if projects.details[chatID] != nil {
+            projects.noteOpened(chatID)
+            guard model.macConnected == true else { return }
+            await projects.refreshDetail(chatID)
+            return
+        }
+        // A notification or restored route can arrive before anything is saved.
+        guard model.macConnected == true, !resolving, !model.chats.contains(where: { $0.id == chatID }) else { return }
+        resolving = true
+        defer { resolving = false }
+        do {
+            try await projects.loadDetail(chatID)
+            projects.noteOpened(chatID)
+            return
+        } catch PairingFailure.response(404) {
+        } catch { return }
+        if model.chats.isEmpty { await model.loadChats(force: true) }
+        guard !model.chats.contains(where: { $0.id == chatID }) else { return }
+        unavailable = true
+    }
+}
+
+// MARK: - Sidebar presentation
+
+/// Prepares the whole sidebar as one flat row list whenever an input or a Mac's
+/// catalog changes, so the view only renders rows. Change notifications from the
+/// Macs are coalesced to one rebuild per main-actor turn and unchanged results
+/// are not published.
+@MainActor private final class SidebarPresenter: ObservableObject {
+    struct Inputs: Equatable {
+        var models: [ObjectIdentifier]
+        /// Empty shows every Mac; otherwise the single selected Mac.
+        var visibleHosts: Set<String>
+        var search: String
+        var expanded: Set<String>
+        var collapsedHosts: Set<String>
+        var selection: ShellRoute
+        var expansionInitialized: Bool
+    }
+    struct Source {
+        let hostID: String
+        let model: ConnectionModel
+    }
+    struct Pill: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let isOnline: Bool
+    }
+
+    @Published private(set) var rows: [SidebarRow] = []
+    @Published private(set) var pills: [Pill] = []
+    @Published private(set) var hasResults = false
+    /// First run: the project to open so the sidebar is not a list of closed folders.
+    @Published private(set) var expansionSuggestion: String?
+    private var inputs: Inputs?
+    private var sources: [Source] = []
+    private var subscriptions: [AnyCancellable] = []
+    private var rebuildScheduled = false
+
+    func configure(_ inputs: Inputs, sources: [Source]) {
+        let rebind = self.inputs?.models != inputs.models
+        self.inputs = inputs
+        self.sources = sources
+        if rebind { subscribe() }
+        rebuild()
+    }
+
+    private func subscribe() {
+        subscriptions = sources.flatMap { source -> [AnyCancellable] in
+            let model = source.model
+            let changes: [AnyPublisher<Void, Never>] = [
+                model.projects.objectWillChange.map { _ in }.eraseToAnyPublisher(),
+                model.$macConnected.dropFirst().map { _ in }.eraseToAnyPublisher(),
+                model.$accessEnded.dropFirst().map { _ in }.eraseToAnyPublisher(),
+                model.$connection.dropFirst().map { _ in }.eraseToAnyPublisher(),
+            ]
+            return changes.map { $0.sink { [weak self] in self?.scheduleRebuild() } }
+        }
+    }
+
+    /// The observed change has not been applied yet when it is announced.
+    private func scheduleRebuild() {
+        guard !rebuildScheduled else { return }
+        rebuildScheduled = true
+        Task { @MainActor [weak self] in
+            self?.rebuildScheduled = false
+            self?.rebuild()
+        }
+    }
+
+    private func rebuild() {
+        guard let inputs else { return }
+        let visible = sources.filter { inputs.visibleHosts.isEmpty || inputs.visibleHosts.contains($0.hostID) }
+        let hosts = visible.map { source -> SidebarHostProjects in
+            let model = source.model, catalog = model.projects
+            return SidebarHostProjects(hostID: source.hostID, name: model.macName, isOnline: model.macConnected == true && !model.accessEnded,
+                                       supportsProjects: catalog.supportsProjects, projects: catalog.projects, threads: catalog.threads,
+                                       pinned: catalog.pinned,
+                                       notice: model.accessEnded ? .pairAgain : (model.macConnected == false ? .offline : nil))
+        }
+        var selectedHost: String?, selectedConversation: String?
+        if case .conversation(let host, let id) = inputs.selection { selectedHost = host; selectedConversation = id }
+        let next = SidebarProjection.rows(hosts: hosts, expanded: inputs.expanded, collapsedHosts: inputs.collapsedHosts,
+                                          selectedHost: selectedHost, selectedConversation: selectedConversation, search: inputs.search)
+        if next != rows { rows = next }
+        let results = next.contains(where: \.isResult)
+        if results != hasResults { hasResults = results }
+        let nextPills = sources.map { Pill(id: $0.hostID, name: $0.model.macName, isOnline: $0.model.macConnected == true && !$0.model.accessEnded) }
+        if nextPills != pills { pills = nextPills }
+        let suggestion = inputs.expansionInitialized ? nil : firstRunExpansion(visible)
+        if suggestion != expansionSuggestion { expansionSuggestion = suggestion }
+        loadExpandedThreads(visible, inputs)
+    }
+
+    private func firstRunExpansion(_ visible: [Source]) -> String? {
+        for source in visible {
+            let included = source.model.projects.projects.filter(\.isIncluded)
+            let recent = included.max { ($0.lastUsedAt ?? $0.createdAt) < ($1.lastUsedAt ?? $1.createdAt) } ?? included.first
+            if let recent { return SidebarProjection.expansionKey(host: source.hostID, project: recent.id) }
+        }
+        return nil
+    }
+
+    /// First page for each expanded project that has not been asked for. A failed
+    /// load keeps its retry row instead of looping.
+    private func loadExpandedThreads(_ visible: [Source], _ inputs: Inputs) {
+        for source in visible where !(inputs.search.isEmpty && inputs.collapsedHosts.contains(source.hostID)) {
+            let catalog = source.model.projects
+            guard catalog.supportsProjects != false else { continue }
+            for project in catalog.projects where project.isIncluded
+                && inputs.expanded.contains(SidebarProjection.expansionKey(host: source.hostID, project: project.id)) {
+                if let state = catalog.threads[project.id], state.hasLoaded || state.isLoading || state.failure != nil { continue }
+                catalog.loadThreads(project.id)
+            }
         }
     }
 }
@@ -280,61 +524,61 @@ private struct ShellConversation: View {
 struct SidebarView: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
-    let isDrawer: Bool
-    @StateObject private var chatActions = ChatListActions()
+    @StateObject private var presenter = SidebarPresenter()
+    @AccessibilityFocusState private var headingFocused: Bool
     @SceneStorage("sidebar.search") private var search = ""
-    @SceneStorage("sidebar.allBots") private var showAllBots = false
     @SceneStorage("sidebar.expanded") private var expandedStorage = ""
+    @SceneStorage("sidebar.collapsedHosts") private var collapsedStorage = ""
     @SceneStorage("sidebar.expansionInitialized") private var expansionInitialized = false
-    private var visibleComputers: [SavedConnection] {
-        library.saved.connections.filter { library.saved.includes($0.credential.hostInstallationId) }
+    /// The thread being attached or copied; its row shows a spinner.
+    @State private var busyThread: String?
+    @State private var failure: String?
+    @State private var editing: ProjectEditTarget?
+    @State private var renaming: ThreadTarget?
+    @State private var renameText = ""
+
+    private struct ProjectEditTarget: Identifiable {
+        let host: String
+        /// nil creates a project.
+        let project: ProjectSummary?
+        var id: String { host + "/" + (project?.id ?? "new") }
     }
-    private var expanded: Set<String> {
-        Set(expandedStorage.split(separator: "\n").map(String.init))
+    private struct ThreadTarget: Identifiable {
+        let host: String
+        let project: String
+        let thread: ProjectThreadSummary
+        var id: String { host + "/" + thread.reference }
     }
+
+    private var expanded: Set<String> { Set(expandedStorage.split(separator: "\n").map(String.init)) }
+    private var collapsedHosts: Set<String> { Set(collapsedStorage.split(separator: "\n").map(String.init)) }
     private func setExpanded(_ key: String, _ value: Bool) {
         var next = expanded
         if value { next.insert(key) } else { next.remove(key) }
         expandedStorage = next.sorted().joined(separator: "\n")
     }
-    private struct BotEntry: Identifiable {
-        let host: String
-        let chat: ChatSummary
-        let model: ConnectionModel
-        var id: String { host + ":" + chat.id }
+    private func setHostCollapsed(_ host: String, _ collapsed: Bool) {
+        var next = collapsedHosts
+        if collapsed { next.insert(host) } else { next.remove(host) }
+        collapsedStorage = next.sorted().joined(separator: "\n")
     }
-    private var botEntries: (rows: [BotEntry], hasMore: Bool) {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let all = visibleComputers.flatMap { saved -> [BotEntry] in
-            let model = library.model(for: saved)
-            guard !model.accessEnded else { return [] }
-            return model.chats.filter { !$0.isArchived && $0.matchesName(query) }
-                .map { BotEntry(host: saved.credential.hostInstallationId, chat: $0, model: model) }
-        }
-        let ordered = all.sorted { lhs, rhs in
-            if lhs.chat.isPinned != rhs.chat.isPinned { return lhs.chat.isPinned }
-            let left = lhs.chat.lastMessageAt ?? "", right = rhs.chat.lastMessageAt ?? ""
-            if left != right { return left > right }
-            return lhs.id < rhs.id
-        }
-        if showAllBots || !query.isEmpty { return (ordered, false) }
-        let pinned = ordered.filter(\.chat.isPinned), recent = ordered.filter { !$0.chat.isPinned }
-        return (pinned + recent.prefix(RecentConversations.initialLimit), recent.count > RecentConversations.initialLimit)
+    private var trimmedSearch: String { search.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var inputs: SidebarPresenter.Inputs {
+        SidebarPresenter.Inputs(models: library.saved.connections.map { ObjectIdentifier(library.model(for: $0)) },
+                                visibleHosts: library.saved.selectedHostIDs, search: search, expanded: expanded,
+                                collapsedHosts: collapsedHosts, selection: shell.route, expansionInitialized: expansionInitialized)
+    }
+    private func model(_ host: String) -> ConnectionModel? {
+        library.saved.connections.first { $0.credential.hostInstallationId == host }.map { library.model(for: $0) }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Wonder").font(.title2.weight(.bold))
-                Spacer()
-                if library.saved.connections.count > 1 { computerFilter }
-                if isDrawer {
-                    Button { shell.sidebarOpen = false } label: { Image(systemName: "xmark").font(.body.weight(.semibold)).frame(width: 44, height: 44) }
-                        .accessibilityLabel("Close sidebar")
-                        .accessibilityIdentifier("close-sidebar")
-                }
-            }
-            .padding(.leading, 20).padding(.trailing, isDrawer ? 8 : 20).padding(.top, 8)
+            Text("Wonder").font(.title3.weight(.bold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20).padding(.top, 12)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityFocused($headingFocused)
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search chats and projects", text: $search)
@@ -348,343 +592,326 @@ struct SidebarView: View {
             .padding(.horizontal, 12).frame(minHeight: 40)
             .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
             .padding(.horizontal, 16).padding(.vertical, 8)
+            if presenter.pills.count > 1 { filterPills }
             List {
                 if let error = library.error { FailureDetails("Connection problem", message: error).listRowSeparator(.hidden) }
-                botsSection
-                ForEach(visibleComputers, id: \.credential.hostInstallationId) { saved in
-                    let model = library.model(for: saved)
-                    HostProjectsSection(model: model, projects: model.projects, shell: shell, search: search,
-                                        showsHeader: saved.credential.hostInstallationId == visibleComputers.first?.credential.hostInstallationId,
-                                        expanded: expanded, setExpanded: setExpanded,
-                                        expansionInitialized: $expansionInitialized)
+                ForEach(presenter.rows) { row in
+                    rowView(row)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
                 }
-                if !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    ForEach(visibleComputers, id: \.credential.hostInstallationId) { saved in
-                        let model = library.model(for: saved)
-                        if model.macConnected == true && !model.accessEnded {
-                            Section {
-                                MessageSearchResults(model: model, query: search.trimmingCharacters(in: .whitespacesAndNewlines))
-                            } header: { Text(visibleComputers.count > 1 ? "Messages on \(model.macName)" : "Messages") }
-                        }
-                    }
+                if library.saved.connections.isEmpty {
+                    Text("Add a computer in Settings").foregroundStyle(.secondary).listRowSeparator(.hidden)
+                } else if !trimmedSearch.isEmpty && !presenter.hasResults {
+                    Text("No matching chats").foregroundStyle(.secondary).listRowSeparator(.hidden)
                 }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .environment(\.defaultMinListRowHeight, 44)
+            .environment(\.defaultMinListRowHeight, 40)
             .refreshable {
                 await withTaskGroup(of: Void.self) { group in
-                    for saved in visibleComputers {
+                    for saved in library.saved.connections where library.saved.includes(saved.credential.hostInstallationId) {
                         let model = library.model(for: saved)
                         group.addTask { await model.loadChats(force: true); await model.projects.refresh() }
                     }
                 }
             }
-            Divider().padding(.horizontal, 16)
+            .alert("Rename thread", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+                TextField("Title", text: $renameText)
+                Button("Rename") { if let target = renaming { rename(target) } }
+                Button("Cancel", role: .cancel) {}
+            }
             Button { shell.settingsOpen = true; shell.sidebarOpen = false } label: {
                 Label("Settings", systemImage: "gearshape").font(.body).frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
             }
             .buttonStyle(.plain).padding(.horizontal, 20).padding(.bottom, 4)
             .accessibilityIdentifier("sidebar-settings")
         }
-        .modifier(ChatActionDialogs(actions: chatActions))
-    }
-
-    @ViewBuilder private var botsSection: some View {
-        let entries = botEntries
-        Section {
-            ForEach(entries.rows) { entry in
-                SidebarBotRow(model: entry.model, chat: entry.chat, host: entry.host, actions: chatActions,
-                              showsComputer: library.saved.connections.count > 1,
-                              selected: shell.selectedConversation.map { $0.host == entry.host && $0.id == entry.chat.id } ?? false) {
-                    shell.open(host: entry.host, conversation: entry.chat.id)
+        .alert("Couldn’t complete that", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK") { failure = nil }
+        } message: { Text(failure ?? "") }
+        .sheet(item: $editing) { target in
+            if let model = model(target.host) {
+                ProjectEditorView(model: model, library: model.projects, project: target.project) { saved in
+                    if target.project == nil { setExpanded(SidebarProjection.expansionKey(host: target.host, project: saved.id), true) }
                 }
             }
-            if entries.hasMore || showAllBots {
-                Button(showAllBots ? "Show less" : "Show more") { showAllBots.toggle() }
-                    .foregroundStyle(.secondary).listRowSeparator(.hidden)
+        }
+        .onChange(of: inputs, initial: true) {
+            presenter.configure(inputs, sources: library.saved.connections.map {
+                SidebarPresenter.Source(hostID: $0.credential.hostInstallationId, model: library.model(for: $0))
+            })
+        }
+        .onChange(of: presenter.expansionSuggestion, initial: true) { _, key in
+            guard let key, !expansionInitialized else { return }
+            expansionInitialized = true
+            setExpanded(key, true)
+        }
+        .onChange(of: shell.sidebarOpen) { _, open in headingFocused = open }
+    }
+
+    // MARK: Header
+
+    private var filterPills: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                pill("All", isOnline: nil, selected: library.saved.selectedHostIDs.isEmpty, id: "all") { library.filter(nil) }
+                ForEach(presenter.pills) { item in
+                    pill(item.name, isOnline: item.isOnline, selected: library.saved.selectedHostIDs.contains(item.id), id: item.id) { library.filter(item.id) }
+                }
             }
-            if entries.rows.isEmpty {
-                let connecting = visibleComputers.contains { let model = library.model(for: $0); return model.macConnected == nil && !model.accessEnded }
-                Text(connecting ? "Loading chats…" : visibleComputers.isEmpty ? "Add a computer in Settings" : search.isEmpty ? "No chats yet" : "No matching chats")
-                    .foregroundStyle(.secondary).listRowSeparator(.hidden)
+            .padding(.horizontal, 16)
+        }
+        .padding(.bottom, 8)
+    }
+
+    private func pill(_ title: String, isOnline: Bool?, selected: Bool, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let isOnline { Circle().fill(isOnline ? Color.green : Color.secondary.opacity(0.6)).frame(width: 7, height: 7) }
+                Text(title).font(.subheadline.weight(selected ? .semibold : .regular)).lineLimit(1)
             }
-            ForEach(visibleComputers, id: \.credential.hostInstallationId) { saved in
-                SidebarConnectionNotice(model: library.model(for: saved))
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .padding(.horizontal, 12).frame(minHeight: 32)
+            .background(selected ? Color.accentColor.opacity(0.16) : Color(uiColor: .secondarySystemFill), in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityLabel(isOnline == nil ? title : title + (isOnline == true ? ", connected" : ", not connected"))
+        .accessibilityIdentifier("computer-filter:" + id)
+    }
+
+    // MARK: Rows
+
+    @ViewBuilder private func rowView(_ row: SidebarRow) -> some View {
+        switch row {
+        case .pinnedHeader:
+            sectionTitle("Pinned")
+        case .pinned(let host, let projectID, let projectName, let hostName, let thread, let isSelected):
+            threadRow(host: host, projectID: projectID, thread: thread, isSelected: isSelected,
+                      subtitle: hostName.map { projectName + " · " + $0 } ?? projectName, leading: 4, prefix: "pinned-thread:")
+        case .host(let host, let name, let isOnline, let isCollapsed):
+            Button { setHostCollapsed(host, !isCollapsed) } label: {
+                HStack(spacing: 8) {
+                    Circle().fill(isOnline ? Color.green : Color.secondary.opacity(0.6)).frame(width: 8, height: 8)
+                    Text(name).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isCollapsed ? -90 : 0))
+                }
+                .padding(.horizontal, 4).frame(minHeight: 40).contentShape(Rectangle())
             }
-        } header: {
-            Text("Bots").font(.subheadline).foregroundStyle(.secondary).textCase(nil)
+            .buttonStyle(.plain)
+            .accessibilityLabel(name + (isOnline ? ", connected" : ", not connected"))
+            .accessibilityValue(isCollapsed ? "Collapsed" : "Expanded")
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("host-header:" + host)
+        case .hostNotice(_, let name, let kind):
+            switch kind {
+            case .pairAgain:
+                Text("\(name): pair again in Settings.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
+            case .offline:
+                Text("Can’t reach \(name). Showing saved chats.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
+                    .accessibilityIdentifier("computer-offline-notice")
+            }
+        case .project(let host, let project, let isExpanded, let isSelected):
+            projectRow(host: host, project: project, isExpanded: isExpanded, isSelected: isSelected)
+        case .thread(let host, let projectID, let thread, let isSelected):
+            threadRow(host: host, projectID: projectID, thread: thread, isSelected: isSelected, subtitle: nil, leading: 34, prefix: "project-thread:")
+        case .threadsLoading:
+            ProgressView().frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 38)
+        case .threadsNotice(let host, let projectID, let message, let canRetry):
+            Button { if canRetry { model(host)?.projects.loadThreads(projectID) } } label: {
+                Text(message).font(.caption).foregroundStyle(.secondary).padding(.leading, 38).frame(maxWidth: .infinity, alignment: .leading)
+            }.buttonStyle(.plain).disabled(!canRetry)
+        case .moreThreads(let host, let projectID, let isLoading):
+            Button { model(host)?.projects.loadThreads(projectID, more: true) } label: {
+                HStack { Text("Show more"); if isLoading { ProgressView().controlSize(.small) } }
+                    .font(.subheadline).foregroundStyle(.secondary).padding(.leading, 38).frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+            }.buttonStyle(.plain).disabled(isLoading)
+        case .updateRequired(let host):
+            Text("Update Wonder on \(model(host)?.macName ?? "your computer") to use Projects.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
+        case .newProject(let host):
+            Button { editing = ProjectEditTarget(host: host, project: nil) } label: {
+                Label("New project", systemImage: "plus").font(.subheadline).foregroundStyle(.secondary)
+                    .padding(.leading, 6).frame(maxWidth: .infinity, minHeight: 40, alignment: .leading).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("new-project:" + host)
         }
     }
 
-    private var computerFilter: some View {
-        Menu {
-            Button { library.filter(nil) } label: {
-                if library.saved.selectedHostIDs.isEmpty { Label("All computers", systemImage: "checkmark") } else { Text("All computers") }
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+            .padding(.horizontal, 4).frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private func projectRow(host: String, project: ProjectSummary, isExpanded: Bool, isSelected: Bool) -> some View {
+        let key = SidebarProjection.expansionKey(host: host, project: project.id)
+        return HStack(spacing: 0) {
+            Button { setExpanded(key, !isExpanded) } label: {
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0)).frame(width: 36, height: 40)
             }
-            ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
-                let model = library.model(for: saved)
-                Button { library.filter(saved.credential.hostInstallationId) } label: {
-                    if library.saved.selectedHostIDs.contains(saved.credential.hostInstallationId) { Label(model.macName, systemImage: "checkmark") }
-                    else { Text(model.macName) }
-                }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isExpanded ? "Collapse \(project.name)" : "Expand \(project.name)")
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityIdentifier("project-disclosure:" + project.id)
+            Button {
+                setExpanded(key, true)
+                shell.newChat(host: host, destination: .project(id: project.id))
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder").foregroundStyle(.primary)
+                    Text(project.name).lineLimit(1)
+                    Spacer(minLength: 4)
+                    if project.isPinned { Image(systemName: "pin").font(.caption).foregroundStyle(.secondary).accessibilityLabel("Pinned") }
+                }.contentShape(Rectangle()).frame(minHeight: 40)
             }
-        } label: {
-            Image(systemName: "line.3.horizontal.decrease.circle").font(.title3).frame(width: 44, height: 44)
+            .buttonStyle(.plain)
+            .accessibilityHint("Starts a new chat in this project")
+            .accessibilityIdentifier("project-row:" + project.id)
         }
-        .accessibilityLabel("Filter computers")
+        .listRowBackground(selectionFill(isSelected))
+        .contextMenu {
+            Button(project.isPinned ? "Unpin" : "Pin", systemImage: project.isPinned ? "pin.slash" : "pin") {
+                Task { await update(host, project, ["isPinned": !project.isPinned]) }
+            }
+            Button("Edit project", systemImage: "pencil") { editing = ProjectEditTarget(host: host, project: project) }
+            Button("Hide from sidebar", systemImage: "eye.slash") { Task { await update(host, project, ["isIncluded": false]) } }
+        }
+    }
+
+    private func threadRow(host: String, projectID: String, thread: ProjectThreadSummary, isSelected: Bool,
+                           subtitle: String?, leading: CGFloat, prefix: String) -> some View {
+        Button { open(host, projectID, thread) } label: {
+            HStack(spacing: 8) {
+                SidebarProviderIcon(family: thread.family)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(thread.title).lineLimit(1)
+                    if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                }
+                Spacer(minLength: 4)
+                if busyThread == thread.reference { ProgressView().controlSize(.small) }
+                else if thread.isWorking { ProgressView().controlSize(.small).accessibilityLabel("Working") }
+                else if thread.hasUnread { Circle().fill(Color.primary).frame(width: 7, height: 7).accessibilityLabel("Unread") }
+            }
+            .padding(.leading, leading).contentShape(Rectangle()).frame(minHeight: subtitle == nil ? 40 : 46)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(selectionFill(isSelected))
+        .accessibilityLabel(thread.title)
+        .accessibilityValue([thread.family.title, subtitle,
+                             busyThread == thread.reference ? "Opening" : thread.isWorking ? "Working" : thread.hasUnread ? "Unread" : nil]
+            .compactMap { $0 }.joined(separator: ", "))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityIdentifier(prefix + thread.reference)
+        .contextMenu {
+            Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
+                setPinned(host, projectID, thread, !thread.isPinned)
+            }
+            Button("Rename", systemImage: "pencil") {
+                renameText = thread.title
+                renaming = ThreadTarget(host: host, project: projectID, thread: thread)
+            }
+            Button("Copy resume command", systemImage: "terminal") { copyResumeCommand(host, projectID, thread) }
+        }
+    }
+
+    // MARK: Actions
+
+    /// A thread with a conversation opens at once from what is saved; only a
+    /// provider-only thread waits for attach.
+    private func open(_ host: String, _ projectID: String, _ thread: ProjectThreadSummary) {
+        guard let model = model(host) else { return }
+        if let conversation = thread.conversationId {
+            model.projects.noteOpened(conversation)
+            shell.open(host: host, conversation: conversation)
+            return
+        }
+        guard busyThread == nil else { return }
+        busyThread = thread.reference
+        Task {
+            defer { busyThread = nil }
+            do {
+                let conversation = try await model.projects.attach(projectID, thread: thread)
+                model.projects.noteOpened(conversation)
+                shell.open(host: host, conversation: conversation)
+            } catch PairingFailure.response(404) {
+                failure = "That thread is no longer on \(model.macName)."
+            } catch is CancellationError {
+            } catch {
+                failure = "The thread couldn’t be opened. Check \(model.macName) and try again."
+            }
+        }
+    }
+
+    private func setPinned(_ host: String, _ projectID: String, _ thread: ProjectThreadSummary, _ value: Bool) {
+        guard let model = model(host) else { return }
+        Task {
+            do { try await model.projects.setPinned(projectID, thread: thread, value) }
+            catch is CancellationError {}
+            catch { failure = "The pin couldn’t be saved. Try again." }
+        }
+    }
+
+    private func rename(_ target: ThreadTarget) {
+        let title = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title != target.thread.title, let model = model(target.host) else { return }
+        Task {
+            do { try await model.projects.rename(target.project, thread: target.thread, to: title) }
+            catch is CancellationError {}
+            catch { failure = "The new name couldn’t be saved. Try again." }
+        }
+    }
+
+    private func copyResumeCommand(_ host: String, _ projectID: String, _ thread: ProjectThreadSummary) {
+        guard busyThread == nil, let model = model(host) else { return }
+        busyThread = thread.reference
+        Task {
+            defer { busyThread = nil }
+            do {
+                let conversation = try await model.projects.attach(projectID, thread: thread)
+                let continuation = try await model.projects.continuation(conversation)
+                guard let command = continuation.options.first?.command else {
+                    failure = "There is no resume command for this thread yet."
+                    return
+                }
+                UIPasteboard.general.string = command
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } catch PairingFailure.response(409) {
+                failure = "Send the first message before continuing on your Mac."
+            } catch is CancellationError {
+            } catch {
+                failure = "The resume command couldn’t be loaded. Check \(model.macName) and try again."
+            }
+        }
+    }
+
+    private func update(_ host: String, _ project: ProjectSummary, _ fields: [String: Any]) async {
+        guard let model = model(host) else { return }
+        do { _ = try await model.projects.update(project.id, fields: fields) }
+        catch { failure = managementError(error) }
     }
 }
 
 /// A restrained fill for the one selected row; other rows stay on the sidebar.
 func selectionFill(_ selected: Bool) -> some View {
-    RoundedRectangle(cornerRadius: 10)
+    RoundedRectangle(cornerRadius: 8)
         .fill(selected ? Color(uiColor: .tertiarySystemFill) : Color.clear)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 6)
 }
 
-private struct SidebarBotRow: View {
-    @ObservedObject var model: ConnectionModel
-    let chat: ChatSummary
-    let host: String
-    @ObservedObject var actions: ChatListActions
-    let showsComputer: Bool
-    let selected: Bool
-    let open: () -> Void
-    private var bot: ManagedBot? { model.managedBots.first { $0.id == chat.botId } }
-    private var status: ChatListStatus { model.chatListStatus(chat) }
+/// The provider's mark in place of its name.
+private struct SidebarProviderIcon: View {
+    let family: AgentFamily
     var body: some View {
-        Button(action: open) { label }
-            .buttonStyle(.plain)
-            .listRowBackground(selectionFill(selected))
-            .listRowSeparator(.hidden)
-            .accessibilityLabel(chat.title + (chat.botId == nil ? ", Group Chat" : ""))
-            .accessibilityValue(actions.status(chat, model: model) ?? status.accessibilityValue)
-            .accessibilityAddTraits(selected ? .isSelected : [])
-            .accessibilityIdentifier("chat-row:" + host + ":" + chat.id)
-            .contextMenu {
-                Button(chat.isPinned ? "Unpin" : "Pin", systemImage: chat.isPinned ? "pin.slash" : "pin") {
-                    Task { await actions.setPinned(ChatListActions.Target(chat, model: model), !chat.isPinned) }
-                }
-                ChatContextMenu(actions: actions, model: model, chat: chat)
-            }
-    }
-    private var label: some View {
-        HStack(spacing: 12) {
-            avatar
-            Text(chat.title).lineLimit(1)
-            Spacer(minLength: 4)
-            if chat.isPinned {
-                Image(systemName: "pin").font(.caption).foregroundStyle(.secondary).accessibilityLabel("Pinned")
-            }
-            if showsComputer {
-                Text(model.macName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            ChatStatusIndicator(status: status, action: actions.status(chat, model: model))
-        }.contentShape(Rectangle())
-    }
-    @ViewBuilder private var avatar: some View {
-        if chat.botId == nil {
-            Image(systemName: "person.2").font(.system(size: 17)).frame(width: 30, height: 30)
-        } else {
-            ChatAvatar(name: chat.title, identity: chat.botId, hexColor: bot?.avatarColor, avatarShape: bot?.avatarShape,
-                       avatarPalette: bot?.avatarPalette, isLoaded: bot != nil, size: 30)
-        }
-    }
-}
-
-private struct SidebarConnectionNotice: View {
-    @ObservedObject var model: ConnectionModel
-    var body: some View {
-        if model.accessEnded {
-            Text("\(model.macName): pair again in Settings.").font(.caption).foregroundStyle(.secondary).listRowSeparator(.hidden)
-        } else if model.macConnected == false {
-            Text("Can’t reach \(model.macName). Showing saved chats.").font(.caption).foregroundStyle(.secondary)
-                .listRowSeparator(.hidden)
-                .accessibilityIdentifier("computer-offline-notice")
-        }
-    }
-}
-
-/// One Mac's projects as flat rows: folders, indented threads and paging.
-private struct HostProjectsSection: View {
-    @ObservedObject var model: ConnectionModel
-    @ObservedObject var projects: ProjectLibrary
-    @ObservedObject var shell: ShellState
-    let search: String
-    let showsHeader: Bool
-    let expanded: Set<String>
-    let setExpanded: (String, Bool) -> Void
-    @Binding var expansionInitialized: Bool
-    @State private var opening: String?
-    @State private var failure: String?
-    @State private var editing: ProjectSummary?
-    @State private var rows: [SidebarRow] = []
-    private var host: String { model.connection?.credential.hostInstallationId ?? "" }
-    private func prepareRows() {
-        rows = SidebarProjection.projectRows(
-            hosts: [SidebarHostProjects(hostID: host, name: model.macName, isOnline: model.macConnected == true,
-                                        supportsProjects: projects.supportsProjects, projects: projects.projects, threads: projects.threads)],
-            expanded: expanded,
-            selectedConversation: shell.selectedConversation.flatMap { $0.host == host ? $0.id : nil },
-            selectedProject: nil,
-            search: search)
-    }
-    var body: some View {
-        Section {
-            HStack(spacing: 8) {
-                Circle().fill(model.macConnected == true && !model.accessEnded ? Color.green : Color.secondary.opacity(0.6)).frame(width: 8, height: 8)
-                Text(model.macName).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
-            }
-            .listRowSeparator(.hidden)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(model.macName + (model.macConnected == true ? ", connected" : ", not connected"))
-            ForEach(rows) { row in
-                rowView(row)
-                    .listRowSeparator(.hidden)
-            }
-            if let failure { Text(failure).font(.caption).foregroundStyle(.secondary).listRowSeparator(.hidden) }
-            if projects.supportsProjects != false && search.isEmpty {
-                Button { shell.managingProjectsHost = host; shell.sidebarOpen = false } label: {
-                    Label("Manage projects", systemImage: "slider.horizontal.3").foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain).listRowSeparator(.hidden)
-                .accessibilityIdentifier("manage-projects:" + host)
-            }
-        } header: {
-            if showsHeader { Text("Projects").font(.subheadline).foregroundStyle(.secondary).textCase(nil) }
-        }
-        .task(id: projects.projects.map(\.id)) { initializeExpansion() }
-        .onChange(of: host, initial: true) { prepareRows() }
-        .onChange(of: projects.projects) { prepareRows() }
-        .onChange(of: projects.threads) { prepareRows() }
-        .onChange(of: projects.supportsProjects) { prepareRows() }
-        .onChange(of: model.macConnected) { prepareRows() }
-        .onChange(of: shell.route) { prepareRows() }
-        .onChange(of: search) { prepareRows() }
-        .onChange(of: expanded) { _, keys in prepareRows(); loadExpanded(keys) }
-        .onAppear { loadExpanded(expanded) }
-        .sheet(item: $editing) { project in ProjectEditorView(model: model, library: projects, project: project) }
-    }
-
-    @ViewBuilder private func rowView(_ row: SidebarRow) -> some View {
-        switch row {
-        case .host:
-            EmptyView()
-        case .project(_, let project, let isExpanded, let isSelected):
-            let key = SidebarProjection.expansionKey(host: host, project: project.id)
-            HStack(spacing: 6) {
-                Button { setExpanded(key, !isExpanded) } label: {
-                    Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0)).frame(width: 44, height: 44)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isExpanded ? "Collapse \(project.name)" : "Expand \(project.name)")
-                .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
-                .accessibilityIdentifier("project-disclosure:" + project.id)
-                Button {
-                    setExpanded(key, true)
-                    shell.newChat(host: host, destination: .project(id: project.id))
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "folder").foregroundStyle(.primary)
-                        Text(project.name).lineLimit(1)
-                        Spacer(minLength: 4)
-                        if project.isPinned { Image(systemName: "pin").font(.caption).foregroundStyle(.secondary).accessibilityLabel("Pinned") }
-                    }.contentShape(Rectangle()).frame(minHeight: 44)
-                }
-                .buttonStyle(.plain)
-                .accessibilityHint("Starts a new chat in this project")
-                .accessibilityIdentifier("project-row:" + project.id)
-            }
-            .listRowBackground(selectionFill(isSelected))
-            .contextMenu {
-                Button(project.isPinned ? "Unpin" : "Pin", systemImage: project.isPinned ? "pin.slash" : "pin") {
-                    Task { await update(project, ["isPinned": !project.isPinned]) }
-                }
-                Button("Edit project", systemImage: "pencil") { editing = project }
-                Button("Hide from sidebar", systemImage: "eye.slash") { Task { await update(project, ["isIncluded": false]) } }
-            }
-        case .thread(_, let projectID, let thread, let isSelected):
-            Button { Task { await open(projectID, thread) } } label: {
-                HStack(spacing: 8) {
-                    Text(thread.title).lineLimit(1)
-                    Spacer(minLength: 4)
-                    if opening == thread.reference { ProgressView().controlSize(.small) }
-                    else if thread.isWorking { ProgressView().controlSize(.small).accessibilityLabel("Working") }
-                    else if thread.hasUnread { Circle().fill(Color.primary).frame(width: 7, height: 7).accessibilityLabel("Unread") }
-                    if thread.isPinned { Image(systemName: "pin").font(.caption2).foregroundStyle(.secondary).accessibilityLabel("Pinned") }
-                    Text(thread.family.title).font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(.leading, 38).contentShape(Rectangle()).frame(minHeight: 44)
-            }
-            .buttonStyle(.plain)
-            .listRowBackground(selectionFill(isSelected))
-            .accessibilityLabel("\(thread.title), \(thread.family.title)")
-            .accessibilityAddTraits(isSelected ? .isSelected : [])
-            .accessibilityIdentifier("project-thread:" + thread.reference)
-            .contextMenu {
-                Button(thread.isPinned ? "Unpin" : "Pin", systemImage: thread.isPinned ? "pin.slash" : "pin") {
-                    Task { await pin(projectID, thread, !thread.isPinned) }
-                }
-            }
-        case .threadsLoading:
-            ProgressView().frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 38)
-        case .threadsNotice(_, let projectID, let message, let canRetry):
-            Button { if canRetry { projects.loadThreads(projectID) } } label: {
-                Text(message).font(.caption).foregroundStyle(.secondary).padding(.leading, 38).frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.plain).disabled(!canRetry)
-        case .moreThreads(_, let projectID, let isLoading):
-            Button { projects.loadThreads(projectID, more: true) } label: {
-                HStack { Text("Show more"); if isLoading { ProgressView().controlSize(.small) } }
-                    .foregroundStyle(.secondary).padding(.leading, 38).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            }.buttonStyle(.plain).disabled(isLoading)
-        case .updateRequired:
-            Text("Update Wonder on \(model.macName) to use Projects.").font(.caption).foregroundStyle(.secondary)
-        case .emptyProjects:
-            Button { shell.managingProjectsHost = host; shell.sidebarOpen = false } label: {
-                Text("Add a project folder").foregroundStyle(.secondary)
-            }.buttonStyle(.plain)
-        }
-    }
-
-    private func initializeExpansion() {
-        guard !expansionInitialized, !projects.projects.isEmpty else { return }
-        expansionInitialized = true
-        // First run: open the most recently used included project.
-        let included = projects.projects.filter(\.isIncluded)
-        let recent = included.max { ($0.lastUsedAt ?? $0.createdAt) < ($1.lastUsedAt ?? $1.createdAt) } ?? included.first
-        if let recent { setExpanded(SidebarProjection.expansionKey(host: host, project: recent.id), true) }
-    }
-    private func loadExpanded(_ keys: Set<String>) {
-        for project in projects.projects where keys.contains(SidebarProjection.expansionKey(host: host, project: project.id)) {
-            if !(projects.threads[project.id]?.hasLoaded ?? false) { projects.loadThreads(project.id) }
-        }
-    }
-    private func open(_ projectID: String, _ thread: ProjectThreadSummary) async {
-        guard opening == nil else { return }
-        opening = thread.reference; failure = nil
-        defer { opening = nil }
-        do {
-            let conversation = try await projects.attach(projectID, thread: thread)
-            if model.macConnected == true || projects.details[conversation] == nil { try await projects.loadDetail(conversation) }
-            shell.open(host: host, conversation: conversation)
-        } catch PairingFailure.response(404) {
-            failure = "That thread is no longer on \(model.macName)."
-        } catch {
-            failure = "The thread couldn’t be opened. Check \(model.macName) and try again."
-        }
-    }
-    private func pin(_ projectID: String, _ thread: ProjectThreadSummary, _ value: Bool) async {
-        do {
-            // Pinning a provider-only thread first attaches it, without work.
-            let conversation = try await projects.attach(projectID, thread: thread)
-            try await projects.updateConversation(conversation, fields: ["isPinned": value])
-            projects.loadThreads(projectID)
-        } catch { failure = "The pin couldn’t be saved. Try again." }
-    }
-    private func update(_ project: ProjectSummary, _ fields: [String: Any]) async {
-        do { _ = try await projects.update(project.id, fields: fields) }
-        catch { failure = managementError(error) }
+        Image(family == .claude ? "ProviderClaude" : "ProviderCodex").resizable().scaledToFit()
+            .frame(width: 16, height: 16).clipShape(RoundedRectangle(cornerRadius: 4))
+            .accessibilityLabel(family.title)
     }
 }

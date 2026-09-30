@@ -51,6 +51,14 @@ export function questionAnswer(original, normalized, response) {
   return { ...original, answers };
 }
 
+// ExitPlanMode carries the proposed plan as markdown. The conversation shows it
+// as a plan item shaped like Codex's ({ type, id, text }); a call without plan
+// text has nothing to show and produces no row.
+export function planItem(block, status) {
+  const text = typeof block?.input?.plan === "string" ? block.input.plan : "";
+  return text.trim() ? { type: "plan", id: block.id, text, status } : null;
+}
+
 export function usageWindow(type, source, timestamp = Date.now()) {
   const definitions = { five_hour: ["5-hour limit", 300], seven_day: ["Weekly limit", 10080],
     seven_day_sonnet: ["Weekly · Sonnet", 10080], seven_day_opus: ["Weekly · Opus", 10080] };
@@ -148,6 +156,12 @@ export class TurnProjection {
       // The verified task lifecycle supplies the existing agent activity row.
       // Launch acknowledgements contain internal IDs/paths, not a user reply.
       this.agentTools.set(block.id, block);
+      return;
+    }
+    if (block.name === "ExitPlanMode") {
+      // The owner reads the plan in the conversation; the tool result is not a row.
+      const plan = planItem(block, "inProgress");
+      if (plan) this.finishItem(this.startItem(plan));
       return;
     }
     const wonder = block.name?.startsWith("mcp__wonder__") ? block.name.slice("mcp__wonder__".length) : null;

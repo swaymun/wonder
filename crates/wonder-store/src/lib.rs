@@ -13,9 +13,9 @@ mod runtime_bindings;
 pub use runtime_bindings::{AgentFamily, RuntimeBinding};
 mod projects;
 pub use projects::{
-    ProjectConversationCreate, ProjectConversationInsert, ProjectCreate, ProjectRootInput,
-    StoredProject, StoredProjectConversation, StoredProjectRoot, EXECUTION_SCOPE_BOTS,
-    EXECUTION_SCOPE_PROJECTS, MAX_PROJECT_ROOTS,
+    ProjectConversationCreate, ProjectConversationInsert, ProjectConversationPatch, ProjectCreate,
+    ProjectRootInput, StoredProject, StoredProjectConversation, StoredProjectRoot,
+    EXECUTION_SCOPE_BOTS, EXECUTION_SCOPE_PROJECTS, MAX_PROJECT_ROOTS,
 };
 
 use std::{cmp::Ordering, collections::HashMap, time::Duration};
@@ -106,7 +106,9 @@ mod computer_sessions;
 pub use computer_sessions::{
     ComputerControlLeaseCreate, ComputerLeaseAcquireResult, StoredComputerControlLease,
 };
-pub use computer_sessions::{ComputerSessionCreate, ComputerSessionState, StoredComputerSession};
+pub use computer_sessions::{
+    ComputerSessionCreate, ComputerSessionState, StoredComputerSession, HOST_VIEW_CONVERSATION_ID,
+};
 mod teaching;
 pub use teaching::{
     NewSkillFixtureRun, SkillFixtureRunReservation, SkillVersionReservation, StoredBotSkill,
@@ -3060,6 +3062,10 @@ impl Store {
              AND NOT EXISTS (
                  SELECT 1 FROM subagent_ownership child
                  WHERE child.conversation_id=conversation_ids.conversation_id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM project_conversations project
+                 WHERE project.conversation_id=conversation_ids.conversation_id
              )
              ORDER BY conversation_ids.conversation_id ASC",
         )

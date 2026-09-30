@@ -319,6 +319,22 @@ final class ActivityPresentationTests: XCTestCase {
         XCTAssertEqual(ThreadValue.string("plain output").toolOutputText, "plain output")
     }
 
+    // Contract: a plan is the answer the owner reviews. It stays a card of its
+    // own between Working groups, and only the newest finished plan can be implemented.
+    func testPlansStayOutOfWorkingGroupsAndOnlyTheLatestCompletePlanIsImplementable() throws {
+        let first = row("plan-1", type: "plan", itemText: "1. Read the parser\n2. Fix the bug")
+        let second = row("plan-2", type: "plan", state: "streaming", itemText: "1. Revised")
+        let entries = ChatFeedEntry.grouping([row("a", type: "commandExecution"), first, row("b", type: "webSearch")])
+        XCTAssertEqual(entries.map(\.id), ["a", "plan-1", "b"])
+        XCTAssertEqual(entries.map(\.isActivity), [true, false, true])
+        XCTAssertEqual(first.planText, "1. Read the parser\n2. Fix the bug")
+        XCTAssertNil(row("reply", type: "agentMessage").planText)
+        XCTAssertNil(row("empty", type: "plan", itemText: "  \n").planText)
+        XCTAssertEqual(ReadRow.implementablePlanID(in: [first]), "plan-1")
+        XCTAssertNil(ReadRow.implementablePlanID(in: [first, second]), "A streaming plan may still change and supersedes the earlier one")
+        XCTAssertNil(ReadRow.implementablePlanID(in: [row("a", type: "commandExecution")]))
+    }
+
     func testCommentaryCollapsesWithWork() {
         let commentary = row("comment", type: "agentMessage", payload: ["phase": .string("commentary")])
         XCTAssertTrue(commentary.isCommentary)
