@@ -90,7 +90,6 @@ apps/ios/Wonder/Assets.xcassets/ProviderClaude.imageset/claude.png
 apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/Contents.json
 apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex-dark.png
 apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex.png
-apps/ios/Wonder/AssignmentViews.swift
 apps/ios/Wonder/BuildInfo.plist
 apps/ios/Wonder/CameraCapture.swift
 apps/ios/Wonder/ComposerApprovalSettings.swift
@@ -112,7 +111,6 @@ apps/ios/Wonder/ProjectsModel.swift
 apps/ios/Wonder/PushNotifications.swift
 apps/ios/Wonder/ScienceAvatar.swift
 apps/ios/Wonder/ScienceAvatarGeometry.swift
-apps/ios/Wonder/SearchViews.swift
 apps/ios/Wonder/SubagentDock.swift
 apps/ios/Wonder/WebRTC-LICENSE.md
 apps/ios/Wonder/Wonder.entitlements
@@ -167,7 +165,6 @@ apps/native/Sources/WonderComputerView/ComputerReceiver.swift
 apps/native/Sources/WonderComputerView/ComputerVideoView.swift
 apps/native/Sources/WonderPairing/ActivityDisclosurePolicy.swift
 apps/native/Sources/WonderPairing/ActivityPresentation.swift
-apps/native/Sources/WonderPairing/Assignments.swift
 apps/native/Sources/WonderPairing/Attention.swift
 apps/native/Sources/WonderPairing/ComputerSession.swift
 apps/native/Sources/WonderPairing/Dictation.swift
@@ -183,12 +180,10 @@ apps/native/Sources/WonderPairing/SavedConnections.swift
 apps/native/Sources/WonderPairing/Search.swift
 apps/native/Sources/WonderPairing/SendIntent.swift
 apps/native/Sources/WonderPairing/SigningIdentity.swift
-apps/native/Sources/WonderPairing/Teaching.swift
 apps/native/Tests/WonderComputerViewTests/ComputerReceiverTests.swift
 apps/native/Tests/WonderPairingTests/ActivityDisclosurePolicyTests.swift
 apps/native/Tests/WonderPairingTests/ActivityLayoutTests.swift
 apps/native/Tests/WonderPairingTests/ActivityPresentationTests.swift
-apps/native/Tests/WonderPairingTests/AssignmentTests.swift
 apps/native/Tests/WonderPairingTests/AttentionTests.swift
 apps/native/Tests/WonderPairingTests/BotStartupTests.swift
 apps/native/Tests/WonderPairingTests/ChatNameSearchTests.swift
@@ -210,7 +205,6 @@ apps/native/Tests/WonderPairingTests/ReadAcknowledgementTests.swift
 apps/native/Tests/WonderPairingTests/ReadCacheTests.swift
 apps/native/Tests/WonderPairingTests/ReadTimestampTests.swift
 apps/native/Tests/WonderPairingTests/SavedConnectionsTests.swift
-apps/native/Tests/WonderPairingTests/SearchTests.swift
 apps/native/Tests/WonderPairingTests/SendIntentTests.swift
 apps/native/Tests/WonderPairingTests/SendTransportTests.swift
 apps/native/Tests/WonderPairingTests/SigningIdentityTests.swift

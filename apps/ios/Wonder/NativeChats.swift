@@ -22,312 +22,6 @@ struct FailureDetails: View {
     }
 }
 
-struct ChatsView: View {
-    @ObservedObject var model: ConnectionModel
-    @State private var selection: String?
-    @State private var creatingGroup = false
-    @State private var creatingBot = false
-    @State private var creationError: String?
-    @State private var showingRequests = false
-    @StateObject private var chatActions = ChatListActions()
-    @State private var searchText = ""
-    private var matchingChats: [ChatSummary] { model.chats.filter { $0.matchesName(searchText) } }
-    init(model: ConnectionModel) {
-        self.model = model
-        _selection = State(initialValue: model.previewMode && !ProcessInfo.processInfo.arguments.contains("-chats-preview") ? "preview" : nil)
-    }
-    var body: some View {
-        NavigationSplitView {
-            List(selection: $selection) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(model.accessEnded || model.macConnected == false ? Color.red : model.macConnected == true ? Color.green : Color.secondary)
-                        .frame(width: 6, height: 6)
-                        .accessibilityHidden(true)
-                    Text("\(model.macName) · \(model.macStatus)")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("mac-connection-status")
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
-                if let notice = model.chatNotice { Text(notice).font(.caption).foregroundStyle(.secondary) }
-                if model.loadingChats { ProgressView("Refreshing chats…") }
-                ForEach(matchingChats) { chat in
-                NavigationLink(value: chat.id) {
-                    HStack(spacing: 10) {
-                    ChatAvatar(name: chat.title, identity: chat.botId ?? chat.id,
-                               hexColor: model.managedBots.first { $0.id == chat.botId }?.avatarColor,
-                               avatarShape: model.managedBots.first { $0.id == chat.botId }?.avatarShape,
-                               avatarPalette: model.managedBots.first { $0.id == chat.botId }?.avatarPalette,
-                               isLoaded: chat.botId == nil || model.managedBots.contains { $0.id == chat.botId })
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(chat.title).font(.headline)
-                            Spacer()
-                        }
-                        Text(chat.lastMessagePreview ?? "No messages yet")
-                            .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-                    }.padding(.vertical, 5)
-                    ChatStatusIndicator(status: model.chatListStatus(chat), action: chatActions.status(chat, model: model))
-                    }
-                }
-                .navigationLinkIndicatorVisibility(.hidden)
-                .accessibilityValue(chatActions.status(chat, model: model) ?? model.chatListStatus(chat).accessibilityValue)
-                .accessibilityIdentifier("chat-row:" + chat.id)
-                .contextMenu { ChatContextMenu(actions: chatActions, model: model, chat: chat) }
-            }
-                if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    MessageSearchResults(model: model, query: searchText.trimmingCharacters(in: .whitespacesAndNewlines))
-                }
-            }
-            .navigationTitle("Chats")
-            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search chats and messages")
-            .toolbar { Menu {
-                Button("New Bot", systemImage: "plus") { Task { creatingBot = true; defer { creatingBot = false }; do { selection = try await model.createConversationalBot() } catch { creationError = managementError(error) } } }.disabled(creatingBot)
-                Button("New Group Chat", systemImage: "person.2") { creatingGroup = true }
-            } label: { Image(systemName: "plus").accessibilityLabel("New chat") }.disabled(model.connection == nil) }
-            .toolbar {
-                if !model.unmappedApprovalRequests.isEmpty {
-                    Button("Requests", systemImage: "hand.raised") {
-                        if let chat = model.selectedChat { model.dictation.captureControlsHidden(conversationID: chat.id) }
-                        showingRequests = true
-                    }.accessibilityIdentifier("unmapped-requests")
-                }
-            }
-            .sheet(isPresented: $showingRequests) {
-                NavigationStack {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 16) {
-                            if model.unmappedApprovalRequests.isEmpty { Text("No requests waiting.").foregroundStyle(.secondary) }
-                            ForEach(model.unmappedApprovalRequests) { request in AttentionRow(model: model, request: request) }
-                        }.frame(maxWidth: 768, alignment: .leading).padding()
-                    }.navigationTitle("Requests")
-                        .toolbar { Button("Done") { showingRequests = false } }
-                        .task { await model.loadAttention() }
-                }
-            }
-            .alert("Couldn’t create Bot", isPresented: Binding(get: { creationError != nil }, set: { if !$0 { creationError = nil } })) { Button("OK") { creationError = nil } } message: { Text(creationError ?? "") }
-            .sheet(isPresented: $creatingGroup) { GroupCreationView(model: model) }
-            .overlay {
-                if !model.loadingChats {
-                    if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.chats.isEmpty {
-                        ContentUnavailableView("No chats", systemImage: "bubble.left.and.bubble.right")
-                    }
-                }
-            }
-        } detail: {
-            NavigationStack {
-                if let selected = model.chats.first(where: { $0.id == selection }) {
-                    ConversationView(model: model, chat: selected).id(selected.id)
-                } else {
-                    ContentUnavailableView("Choose a chat", systemImage: "bubble.left")
-                }
-            }
-        }
-
-        .modifier(ChatActionDialogs(actions: chatActions))
-        .task { await model.loadChats() }
-        .onChange(of: model.assignmentScope) { _, _ in
-            searchText = ""; chatActions.deletion = nil; chatActions.failure = nil
-        }
-        .onChange(of: model.selectedChat?.id) { previous, next in
-            if let next { selection = next }
-            else if selection == previous { selection = nil }
-        }
-        .onChange(of: selection) { previous, next in
-            if next == nil { model.selectedChat = nil }
-        }
-        .onChange(of: showingRequests || creatingBot || creatingGroup || chatActions.deletion != nil, initial: true) { _, covered in
-            model.setChatsModalPresented(covered)
-        }
-        .refreshable { await model.loadChats(force: true) }
-    }
-}
-
-enum ChatListStatus: String {
-    case working, unread, read
-    var accessibilityValue: String {
-        switch self {
-        case .working: "Working"
-        case .unread: "Unread"
-        case .read: "Read"
-        }
-    }
-}
-
-/// One trailing status replaces the navigation chevron in both chat lists.
-struct ChatStatusIndicator: View {
-    let status: ChatListStatus
-    var action: String?
-    var body: some View {
-        Group {
-            if action != nil || status == .working {
-                ProgressView().tint(.primary)
-            } else if status == .unread {
-                Circle().fill(.white)
-                    .overlay(Circle().strokeBorder(Color.primary.opacity(0.35), lineWidth: 0.5))
-                    .frame(width: 8, height: 8)
-            } else { Color.clear }
-        }
-        .frame(width: 20, height: 20)
-        .accessibilityHidden(true)
-    }
-}
-
-/// Both chat lists use the same actions and keep dialogs alive when a row leaves
-/// the list after its archive request completes.
-@MainActor final class ChatListActions: ObservableObject {
-    struct Target {
-        let chat: ChatSummary
-        let model: ConnectionModel
-        let scope: String
-        var key: String { scope + ":" + chat.id }
-        @MainActor init(_ chat: ChatSummary, model: ConnectionModel) {
-            self.chat = chat; self.model = model; scope = model.assignmentScope
-        }
-    }
-    @Published var deletion: Target?
-    @Published var failure: String?
-    @Published private var pending: [String: String] = [:]
-
-    func status(_ chat: ChatSummary, model: ConnectionModel) -> String? {
-        pending[Target(chat, model: model).key]
-    }
-    func canChange(_ target: Target) -> Bool {
-        let model = target.model
-        return pending[target.key] == nil && target.scope == model.assignmentScope
-            && !model.previewMode && !model.accessEnded && model.connection != nil
-    }
-    private func isCurrent(_ target: Target) -> Bool {
-        target.scope == target.model.assignmentScope && !target.model.accessEnded && !Task.isCancelled
-    }
-    private func groupPath(_ target: Target) async throws -> String {
-        struct GroupIdentity: Decodable, Sendable { let id: String; let conversationId: String }
-        let groups: [GroupIdentity] = try await target.model.manage("/api/v1/group-chats")
-        guard isCurrent(target) else { throw CancellationError() }
-        guard let group = groups.first(where: { $0.conversationId == target.chat.id }) else { throw PairingFailure.response(404) }
-        return "/api/v1/group-chats/" + ConnectionModel.escape(group.id)
-    }
-    private func archiveBot(_ id: String, model: ConnectionModel) async throws {
-        let bot: ManagedBot = try await model.manage("/api/v1/bots/" + ConnectionModel.escape(id) + "/archive", method: "POST", values: [:])
-        guard bot.isArchived else { throw PairingFailure.response(409) }
-    }
-    /// Pinning changes ordering only; the Mac keeps the pin for every device.
-    func setPinned(_ target: Target, _ pinned: Bool) async {
-        guard canChange(target) else { return }
-        pending[target.key] = pinned ? "Pinning" : "Unpinning"
-        defer { pending.removeValue(forKey: target.key) }
-        do {
-            struct Summary: Decodable, Sendable {}
-            let _: Summary = try await target.model.manage("/api/v1/conversations/" + ConnectionModel.escape(target.chat.id),
-                method: "PATCH", body: Data("{\"isPinned\":\(pinned)}".utf8))
-            guard isCurrent(target) else { return }
-            await target.model.loadChats(force: true)
-        } catch {
-            guard isCurrent(target) else { return }
-            failure = "The pin couldn’t be saved. Try again."
-        }
-    }
-    func archive(_ target: Target) async {
-        guard canChange(target) else { return }
-        pending[target.key] = "Archiving"
-        defer { pending.removeValue(forKey: target.key) }
-        let model = target.model
-        do {
-            if let bot = target.chat.botId { try await archiveBot(bot, model: model) }
-            else {
-                let path = try await groupPath(target)
-                struct Archived: Decodable, Sendable { let isArchived: Bool }
-                let result: Archived = try await model.manage(path, method: "PATCH", body: Data("{\"isArchived\":true}".utf8))
-                guard result.isArchived else { throw PairingFailure.response(409) }
-            }
-            guard isCurrent(target) else { return }
-            if model.selectedChat?.id == target.chat.id { model.selectedChat = nil }
-            await model.loadChats(force: true)
-        } catch {
-            guard isCurrent(target) else { return }
-            if case PairingFailure.response(409) = error {
-                failure = target.chat.botId == nil
-                    ? "Finish or stop this Group Chat’s work before archiving it."
-                    : "Finish or stop this Bot’s work and clear its queue before archiving. If it leads a Group Chat, choose another lead first."
-            } else { failure = managementError(error) }
-        }
-    }
-    func delete(_ target: Target) async {
-        guard canChange(target) else { return }
-        pending[target.key] = "Deleting"
-        defer { pending.removeValue(forKey: target.key) }
-        let model = target.model
-        var archivedBot = false
-        var deletedOnMac = false
-        do {
-            let path: String
-            if let bot = target.chat.botId {
-                // Keep the existing active-work and Group leadership safeguards.
-                try await archiveBot(bot, model: model)
-                archivedBot = true
-                path = "/api/v1/bots/" + ConnectionModel.escape(bot)
-            } else { path = try await groupPath(target) }
-            guard isCurrent(target) else { return }
-            struct Deleted: Decodable, Sendable {}
-            let _: Deleted = try await model.manage(path, method: "DELETE")
-            deletedOnMac = true
-            guard isCurrent(target) else { return }
-            try model.removeDeletedConversation(target.chat.id)
-            await model.loadChats(force: true)
-        } catch {
-            guard isCurrent(target) else { return }
-            if deletedOnMac {
-                failure = "The chat was deleted on your Mac, but this device could not refresh. Reopen Chats to try again."
-                await model.loadChats(force: true)
-            } else if archivedBot {
-                failure = "The Bot was archived, but deletion could not be confirmed. Open Archived Bots in Settings to check and retry Delete forever."
-                await model.loadChats(force: true)
-            } else if case PairingFailure.response(409) = error {
-                failure = target.chat.botId == nil
-                    ? "Finish or stop this Group Chat’s work and automations before deleting it."
-                    : "Finish or stop this Bot’s work and clear its queue before deleting it. If it leads a Group Chat, choose another lead first."
-            } else { failure = managementError(error) }
-        }
-    }
-}
-
-struct ChatContextMenu: View {
-    @ObservedObject var actions: ChatListActions
-    @ObservedObject var model: ConnectionModel
-    let chat: ChatSummary
-    var body: some View {
-        let target = ChatListActions.Target(chat, model: model)
-        Button("Archive", systemImage: "archivebox") { Task { await actions.archive(target) } }
-            .disabled(!actions.canChange(target))
-        Menu("Advanced", systemImage: "ellipsis") {
-            Button("Copy ID", systemImage: "doc.on.doc") { UIPasteboard.general.string = chat.id }
-            Button("Delete", systemImage: "trash", role: .destructive) { actions.deletion = target }
-                .disabled(!actions.canChange(target))
-        }
-    }
-}
-
-struct ChatActionDialogs: ViewModifier {
-    @ObservedObject var actions: ChatListActions
-    func body(content: Content) -> some View {
-        content
-            .alert("Couldn’t update chat", isPresented: Binding(get: { actions.failure != nil }, set: { if !$0 { actions.failure = nil } })) {
-                Button("OK") { actions.failure = nil }
-            } message: { Text(actions.failure ?? "") }
-            .confirmationDialog("Delete \(actions.deletion?.chat.title ?? "chat") forever?", isPresented: Binding(get: { actions.deletion != nil }, set: { if !$0 { actions.deletion = nil } }), titleVisibility: .visible, presenting: actions.deletion) { target in
-                Button("Delete forever", role: .destructive) { Task { await actions.delete(target) } }
-                Button("Cancel", role: .cancel) {}
-            } message: { target in
-                Text(target.chat.botId == nil
-                    ? "This permanently removes this Group Chat, its conversation history and automations. Its Bots stay available. This cannot be undone."
-                    : "This permanently removes this Bot’s direct conversations, automations and private files. Shared Group history and external project folders stay intact. This cannot be undone.")
-            }
-    }
-}
-
 /// The receipt of the latest row while its end is inside the viewport. The row
 /// reports visibility rather than its frame, so scrolling changes the
 /// scroller's state only when visibility flips, not on every frame.
@@ -531,7 +225,7 @@ private struct ConversationScroller<Content: View>: View {
 
     private var visibleReadReceipt: VisibleReadReceipt? {
         guard restored, phase == .active, !model.previewMode, !model.accessEnded,
-              !model.chatsReadPresentation.isCovered, !isCovered,
+              !isCovered,
               model.macConnected == true, !model.cachedConversationIds.contains(chat.id),
               model.chats.first(where: { $0.id == chat.id })?.hasUnread == true,
               let receipt = visibleLatestReceipt,
@@ -721,7 +415,6 @@ struct ConversationView: View {
     @State private var planModeOn: Bool
     @State private var supportsModes: Bool
     @State private var restoreSubagentRoster = false
-    @State private var editingGroup = false
     @State private var importing = false
     @State private var selectingPhoto = false
     @State private var showingCamera = false
@@ -748,7 +441,7 @@ struct ConversationView: View {
         model.cameraContextID.uuidString + ":" + chat.id
     }
     private var conversationCovered: Bool {
-        showingDetails || showingApps || workspaceRequest != nil || editingGroup || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents || showingGoal || showingComputer
+        showingDetails || showingApps || workspaceRequest != nil || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents || showingGoal || showingComputer
     }
     private var avatarMotionState: ScienceAvatarMotionState {
         guard let turnID = model.activeTurn(chat.id),
@@ -1224,7 +917,6 @@ struct ConversationView: View {
                 model.stage(url, chat: chat, mime: mime)
             } else if case .failure = result { model.controlErrors[chat.id] = "The file could not be opened. Try selecting it again." }
         }
-        .sheet(isPresented: $editingGroup) { GroupEditor(model: model, group: model.groups[chat.id]) }
         .safeAreaInset(edge: .bottom) {
             if !readOnly {
                 composer
@@ -1401,6 +1093,15 @@ struct ConversationView: View {
                     HStack(alignment: .center, spacing: 4) {
                         Group {
                             Menu {
+                                // The menu opens upward and lists bottom-up, so Plan mode
+                                // appears below the attachment actions.
+                                if model.isProject(chat), supportsModes {
+                                    Toggle(isOn: Binding(get: { planModeOn }, set: { value in
+                                        Task { await setPlanMode(value, model: model, library: model.projects, chat: chat) }
+                                    })) { Label("Plan mode", systemImage: "list.bullet.clipboard") }
+                                        .disabled(model.savingComposerSettings.contains(chat.id) || model.accessEnded || model.previewMode)
+                                        .accessibilityIdentifier("composer-plan-mode")
+                                }
                                 Button("Camera", systemImage: "camera") {
                                     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                                     cameraScope = model.assignmentScope; showingCamera = true
@@ -1411,13 +1112,6 @@ struct ConversationView: View {
                                 Button(model.attachmentsSupported(chat) ? "Attach file" : "Attachments unavailable — update Wonder on your Mac", systemImage: "paperclip") {
                                     importScope = model.assignmentScope; importing = true
                                 }.disabled(!model.canAttach(chat) || model.loadingPhotos.contains(chat.id))
-                                if model.isProject(chat), supportsModes {
-                                    Toggle(isOn: Binding(get: { planModeOn }, set: { value in
-                                        Task { await setPlanMode(value, model: model, library: model.projects, chat: chat) }
-                                    })) { Label("Plan mode", systemImage: "list.bullet.clipboard") }
-                                        .disabled(model.savingComposerSettings.contains(chat.id) || model.accessEnded || model.previewMode)
-                                        .accessibilityIdentifier("composer-plan-mode")
-                                }
                                 if model.activeTurn(chat.id) != nil {
                                     Button("Stop response", systemImage: "stop.fill") { Task { await model.stop(chat) } }
                                         .disabled(model.stopping.contains(chat.id) || model.accessEnded || model.previewMode)
@@ -2509,215 +2203,6 @@ struct ConversationAvatarHeader: View {
         .accessibilityLabel(isLoaded ? "\(name), \(resolvedShape.title) character, \(resolvedPalette.name) palette" : name)
         .accessibilityValue(motion.state.title)
         .accessibilityIdentifier("conversation-avatar-header")
-    }
-}
-
-
-struct GroupEditor: View {
-    @ObservedObject var model: ConnectionModel
-    let group: GroupRead?
-    @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var purpose = ""
-    @State private var instructions = ""
-    @State private var selected: Set<String> = []
-    @State private var lead = ""
-    @State private var busy = false
-    @State private var failure: String?
-    @State private var current: GroupRead?
-    @State private var scope: String?
-    private var activeBots: [ManagedBot] { model.managedBots.filter { !$0.isArchived } }
-    var body: some View {
-        NavigationStack {
-            Form {
-                if group == nil {
-                    TextField("Group name", text: $name)
-                    Section("Lead Bot") {
-                        Picker("Lead Bot", selection: $lead) {
-                            Text("Choose a Bot").tag("")
-                            ForEach(activeBots) { bot in Text(bot.name).tag(bot.id) }
-                        }
-                    }
-                    Section("Members") {
-                        ForEach(activeBots.filter { $0.id != lead }) { bot in
-                            Toggle(bot.name, isOn: Binding(get: { selected.contains(bot.id) }, set: { if $0 { selected.insert(bot.id) } else { selected.remove(bot.id) } }))
-                        }
-                    }
-                } else {
-                    if group?.collaboration != nil {
-                        Section("Group") {
-                            TextField("Name", text: $name)
-                            TextField("Purpose", text: $purpose, axis: .vertical)
-                            TextField("Instructions", text: $instructions, axis: .vertical)
-                            Button("Save") { saveProfile() }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
-                    } else {
-                    Section("Lead Bot") {
-                        Picker("Lead Bot", selection: $lead) {
-                            ForEach(((current ?? group)?.members ?? []).filter { member in activeBots.contains { $0.id == member.botId } }) { member in
-                                Text(member.botName).tag(member.botId)
-                            }
-                        }
-                        Button("Save lead") { changeLead() }.disabled(lead.isEmpty || lead == (current ?? group)?.coordinatorBotId)
-                    }
-                    }
-                    Section("Members") {
-                        ForEach((current ?? group)?.members ?? []) { member in
-                            NavigationLink {
-                                GroupMemberSettings(model: model, botID: member.botId)
-                            } label: {
-                                let bot = model.managedBots.first { $0.id == member.botId }
-                                HStack {
-                                    ChatAvatar(name: member.botName, identity: member.botId,
-                                               hexColor: bot?.avatarColor,
-                                               avatarShape: bot?.avatarShape,
-                                               avatarPalette: bot?.avatarPalette)
-                                    Text(member.botName); Spacer()
-                                    if group?.collaboration == nil && member.botId == (current ?? group)?.coordinatorBotId { Text("Lead Bot").foregroundStyle(.secondary) }
-                                }
-                            }
-                            .swipeActions {
-                                if (group?.collaboration != nil && ((current ?? group)?.members?.count ?? 0) > 1) || member.botId != (current ?? group)?.coordinatorBotId {
-                                    Button("Remove", role: .destructive) { changeMember(member.botId, removing: true) }
-                                }
-                            }
-                        }
-                    }
-                    let availableBots = activeBots.filter { bot in !((current ?? group)?.members ?? []).contains(where: { $0.botId == bot.id }) }
-                    if !availableBots.isEmpty {
-                        Section("Add a Bot") {
-                            ForEach(availableBots) { bot in
-                                Button(bot.name) { changeMember(bot.id, removing: false) }
-                            }
-                        }
-                    }
-                }
-                if let failure { FailureDetails(message: failure) }
-                if busy { ProgressView("Saving…") }
-            }.disabled(busy || (scope != nil && scope != model.assignmentScope) || model.accessEnded || model.previewMode)
-            .navigationTitle(group == nil ? "New Group Chat" : "Group settings")
-            .task {
-                if scope == nil { scope = model.assignmentScope; name = group?.name ?? ""; purpose = group?.description ?? ""; instructions = group?.collaboration?.configuration.instructions ?? "" }
-                if lead.isEmpty { lead = group?.coordinatorBotId ?? "" }
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() }.disabled(busy) }
-                if group == nil { ToolbarItem(placement: .confirmationAction) { Button("Create") { create() }.disabled(busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.utf8.count > 80 || lead.isEmpty) } }
-            }
-        }
-    }
-    private func saveProfile() {
-        guard let group, let config = group.collaboration?.configuration, scope == model.assignmentScope else { return }
-        busy = true
-        Task {
-            defer { busy = false }
-            do {
-                struct Reply: Decodable {}
-                let path = "/api/v1/group-chats/" + ConnectionModel.escape(group.id)
-                let _: Reply = try await model.manage(path, method: "PATCH", values: ["name": name, "description": purpose])
-                let payload: [String: Any] = ["instructions": instructions, "routing": try JSONSerialization.jsonObject(with: JSONEncoder().encode(config.routing))]
-                guard let saved = model.connection else { return }
-                let _: Reply = try await model.api.request(path + "/collaboration", origin: saved.origin, body: JSONSerialization.data(withJSONObject: payload), credential: saved.credential, method: "PUT")
-                guard scope == model.assignmentScope else { return }
-                current = try await model.manage(path); await model.loadChats(force: true); failure = nil
-            } catch { failure = managementError(error) }
-        }
-    }
-    private func create() {
-        guard let saved = model.connection, scope == model.assignmentScope, !model.accessEnded else { return }
-        busy = true; failure = nil
-        Task {
-            defer { busy = false }
-            do {
-                struct Request: Encodable { let name: String; let coordinatorBotId: String; let memberBotIds: [String] }
-                let created: GroupRead = try await model.api.request("/api/v1/group-chats", origin: saved.origin,
-                    body: JSONEncoder().encode(Request(name: name, coordinatorBotId: lead, memberBotIds: selected.sorted())), credential: saved.credential)
-                guard scope == model.assignmentScope, !model.accessEnded else { return }
-                await model.loadChats(force: true)
-                guard scope == model.assignmentScope, !model.accessEnded else { return }
-                model.selectedChat = model.chats.first { $0.id == created.conversationId }; dismiss()
-            } catch { failure = "Could not create the group. Your choices are still here. Refresh Chats before retrying if the connection was lost." }
-        }
-    }
-    private func changeLead() {
-        guard let group, scope == model.assignmentScope, !model.accessEnded else { return }
-        busy = true; failure = nil
-        Task {
-            defer { busy = false }
-            do {
-                struct Reply: Decodable, Sendable {}
-                let path = "/api/v1/group-chats/" + ConnectionModel.escape(group.id)
-                let _: Reply = try await model.manage(path, method: "PATCH", values: ["coordinatorBotId": lead])
-                guard scope == model.assignmentScope, !model.accessEnded else { return }
-                current = try await model.manage(path)
-                await model.loadChats(force: true)
-            } catch { failure = "Could not change the lead. Finish or stop this Group’s active work, refresh, and try again." }
-        }
-    }
-    private func changeMember(_ bot: String, removing: Bool) {
-        guard let group, let saved = model.connection, scope == model.assignmentScope, !model.accessEnded else { return }
-        busy = true; failure = nil
-        Task {
-            defer { busy = false }
-            do {
-                let path = "/api/v1/group-chats/\(ConnectionModel.escape(group.id))/members"
-                if removing {
-                    struct Empty: Decodable, Sendable {}
-                    let _: Empty = try await model.api.request(path + "/" + ConnectionModel.escape(bot), origin: saved.origin, credential: saved.credential, method: "DELETE")
-                } else {
-                    struct Request: Encodable { let botId: String }
-                    let _: GroupRead = try await model.api.request(path, origin: saved.origin, body: JSONEncoder().encode(Request(botId: bot)), credential: saved.credential)
-                }
-                guard scope == model.assignmentScope, !model.accessEnded else { return }
-                let refreshed: GroupRead = try await model.api.request("/api/v1/group-chats/\(ConnectionModel.escape(group.id))", origin: saved.origin, credential: saved.credential)
-                guard scope == model.assignmentScope, !model.accessEnded else { return }
-                current = refreshed
-                await model.loadChats(force: true)
-            } catch { failure = "Could not update members. Refresh Chats and try again." }
-        }
-    }
-}
-
-
-struct GroupMemberSettings: View {
-    @ObservedObject var model: ConnectionModel
-    let botID: String
-    @State private var scope: String?
-    @State private var botWorkspacePath: String?
-    private var bot: ManagedBot? { model.managedBots.first { $0.id == botID } }
-    var body: some View {
-        Form {
-            if let bot {
-                Section {
-                    if let chat = model.chats.first(where: { $0.id == bot.conversationId && $0.botId == bot.id }) {
-                        ComposerSettings(model: model, chat: chat, botID: bot.id)
-                    } else {
-                        Text("Bot settings are unavailable. Refresh to load this Bot’s conversation.")
-                        Button("Refresh") { Task { await model.loadChats(force: true) } }
-                    }
-                } header: { Text("Model and permissions") } footer: {
-                    Text("Changes apply to this Bot in every chat.")
-                }
-                Section {
-                    LabeledContent("Workspace") {
-                        Text(botWorkspacePath ?? bot.workingDirectory ?? bot.workspacePath)
-                            .font(.footnote)
-                            .textSelection(.enabled)
-                    }
-                    NavigationLink("File access") {
-                        BotFileAccessView(model: model, bot: bot) { path in
-                            botWorkspacePath = path
-                        }
-                    }
-                }
-            } else {
-                Text("This Bot is unavailable.")
-                Button("Refresh") { Task { await model.loadChats(force: true) } }
-            }
-        }
-        .disabled(scope != nil && scope != model.assignmentScope)
-        .task { if scope == nil { scope = model.assignmentScope } }
-        .navigationTitle(bot?.name ?? "Bot settings").navigationBarTitleDisplayMode(.inline)
     }
 }
 

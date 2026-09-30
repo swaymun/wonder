@@ -377,6 +377,30 @@ import WonderPairing
         try await updateConversation(conversation, fields: ["title": title])
     }
 
+    func hasUnread(_ conversationID: String) -> Bool {
+        details[conversationID]?.hasUnread == true
+            || pinned.contains { $0.thread.conversationId == conversationID && $0.thread.hasUnread }
+            || threads.values.contains { $0.threads.contains { $0.conversationId == conversationID && $0.hasUnread } }
+    }
+
+    /// Applies a read acknowledgement the Mac has confirmed.
+    func markRead(_ conversationID: String) {
+        for (project, var state) in threads where state.threads.contains(where: { $0.conversationId == conversationID && $0.hasUnread }) {
+            state.threads = state.threads.map { $0.conversationId == conversationID ? $0.settingRead() : $0 }
+            threads[project] = state
+        }
+        if pinned.contains(where: { $0.thread.conversationId == conversationID && $0.thread.hasUnread }) {
+            pinned = pinned.map { $0.thread.conversationId == conversationID ? PinnedProjectThread(projectId: $0.projectId, thread: $0.thread.settingRead()) : $0 }
+        }
+        if let detail = details[conversationID], detail.hasUnread,
+           var fields = (try? JSONEncoder().encode(detail)).flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) {
+            fields["hasUnread"] = false
+            if let data = try? JSONSerialization.data(withJSONObject: fields),
+               let read = try? JSONDecoder().decode(ProjectConversationDetail.self, from: data) { details[conversationID] = read }
+        }
+        saveCache()
+    }
+
     private func replaceThread(_ projectID: String, reference: String, _ transform: (ProjectThreadSummary) -> ProjectThreadSummary) {
         guard var state = threads[projectID], let index = state.threads.firstIndex(where: { $0.reference == reference }) else { return }
         state.threads[index] = transform(state.threads[index])

@@ -27,9 +27,7 @@
 		97EB3739BD8610E06A7E97BC /* WonderPairing in Frameworks */ = {isa = PBXBuildFile; productRef = 90E35E164141A24FE33D9F29 /* WonderPairing */; };
 		A10000000000000000000002 /* ManagementViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001 /* ManagementViews.swift */; };
 		A10000000000000000000004 /* MacFileAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000003 /* MacFileAccess.swift */; };
-		A10000000000000000000006 /* AssignmentViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000005 /* AssignmentViews.swift */; };
 		A10000000000000000000008 /* DictationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000007 /* DictationViews.swift */; };
-		A10000000000000000000010 /* SearchViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000009 /* SearchViews.swift */; };
 		A10000000000000000000012 /* GroupCollaborationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* GroupCollaborationViews.swift */; };
 		A10000000000000000000014 /* CameraCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* CameraCapture.swift */; };
 		A10000000000000000000015 /* ScienceAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* ScienceAvatar.swift */; };
@@ -118,9 +116,7 @@
 		A0A97AAF060C3698CD66A9EF /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000000000000000000001 /* ManagementViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagementViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000003 /* MacFileAccess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacFileAccess.swift; sourceTree = "<group>"; };
-		A10000000000000000000005 /* AssignmentViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssignmentViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000007 /* DictationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationViews.swift; sourceTree = "<group>"; };
-		A10000000000000000000009 /* SearchViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000011 /* GroupCollaborationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupCollaborationViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000013 /* CameraCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCapture.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* ScienceAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScienceAvatar.swift; sourceTree = "<group>"; };
@@ -218,9 +214,7 @@
 				00000000000000000000000E /* Assets.xcassets */,
 				A10000000000000000000001 /* ManagementViews.swift */,
 				A10000000000000000000003 /* MacFileAccess.swift */,
-				A10000000000000000000005 /* AssignmentViews.swift */,
 				A10000000000000000000007 /* DictationViews.swift */,
-				A10000000000000000000009 /* SearchViews.swift */,
 				B20000000000000000000007 /* ProjectsModel.swift */,
 				B20000000000000000000005 /* ProjectViews.swift */,
 				B20000000000000000000003 /* NewChatView.swift */,
@@ -502,9 +496,7 @@
 				A10000000000000000000093 /* ComputerInput.swift in Sources */,
 				A10000000000000000000002 /* ManagementViews.swift in Sources */,
 				A10000000000000000000004 /* MacFileAccess.swift in Sources */,
-				A10000000000000000000006 /* AssignmentViews.swift in Sources */,
 				A10000000000000000000008 /* DictationViews.swift in Sources */,
-				A10000000000000000000010 /* SearchViews.swift in Sources */,
 				B20000000000000000000008 /* ProjectsModel.swift in Sources */,
 				B20000000000000000000006 /* ProjectViews.swift in Sources */,
 				B20000000000000000000004 /* NewChatView.swift in Sources */,

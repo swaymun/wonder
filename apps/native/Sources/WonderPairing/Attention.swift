@@ -1,6 +1,38 @@
 import Foundation
 import CryptoKit
 
+/// A decoded JSON value for structured approval requests and decisions.
+public enum JSONValue: Codable, Equatable, Sendable {
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case null
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .null }
+        else if let value = try? container.decode([String: JSONValue].self) { self = .object(value) }
+        else if let value = try? container.decode([JSONValue].self) { self = .array(value) }
+        else if let value = try? container.decode(String.self) { self = .string(value) }
+        else if let value = try? container.decode(Bool.self) { self = .bool(value) }
+        else { self = .number(try container.decode(Double.self)) }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .object(let value): try container.encode(value)
+        case .array(let value): try container.encode(value)
+        case .string(let value): try container.encode(value)
+        case .number(let value): try container.encode(value)
+        case .bool(let value): try container.encode(value)
+        case .null: try container.encodeNil()
+        }
+    }
+}
+
 public struct AttentionRequest: Codable, Identifiable, Sendable {
     public let approvalId: String
     public let method: String
@@ -40,15 +72,15 @@ public struct AttentionParams: Codable, Sendable {
     public let changes: [RequestedFileChange]?
     // Unknown structured decisions are deliberately not converted to strings.
     public let availableDecisions: [DecisionValue]?
-    public let permissions: TeachingJSONValue?
-    public let additionalPermissions: TeachingJSONValue?
-    public let networkApprovalContext: TeachingJSONValue?
+    public let permissions: JSONValue?
+    public let additionalPermissions: JSONValue?
+    public let networkApprovalContext: JSONValue?
     public let grantRoot: String?
     public let message: String?
     public let mode: String?
     public let url: String?
-    public let requestedSchema: TeachingJSONValue?
-    public let elicitationContext: TeachingJSONValue?
+    public let requestedSchema: JSONValue?
+    public let elicitationContext: JSONValue?
 }
 
 public struct PhoneApprovalChoice: Identifiable, Equatable, Sendable {
@@ -56,9 +88,9 @@ public struct PhoneApprovalChoice: Identifiable, Equatable, Sendable {
     public let title: String
     public let detail: String?
     public let decision: String
-    public let structuredDecision: TeachingJSONValue?
+    public let structuredDecision: JSONValue?
     fileprivate init(_ id: String, _ title: String, _ detail: String? = nil,
-                     decision: String? = nil, structured: TeachingJSONValue? = nil) {
+                     decision: String? = nil, structured: JSONValue? = nil) {
         self.id = id; self.title = title; self.detail = detail
         self.decision = decision ?? id; structuredDecision = structured
     }
@@ -75,7 +107,7 @@ public struct PhoneApprovalField: Identifiable, Sendable {
     public let defaultValue: String?
     public let required: Bool
     public let secret: Bool
-    fileprivate let schema: [String: TeachingJSONValue]
+    fileprivate let schema: [String: JSONValue]
 }
 
 public enum PhoneApprovalError: Error, LocalizedError {
@@ -180,7 +212,7 @@ extension AttentionRequest {
             && params.elicitationContext?.approvalDictionary?["isComputerUse"] == .bool(true)
     }
 
-    private var parsedPermissions: TeachingJSONValue? {
+    private var parsedPermissions: JSONValue? {
         guard let permissions = params.permissions, permissionDescriptions(permissions) != nil else { return nil }
         return permissions
     }
@@ -223,13 +255,13 @@ extension AttentionRequest {
         guard phoneChoices.contains(choice) else { throw PhoneApprovalError.invalidChoice }
         switch method {
         case "item/permissions/requestApproval":
-            let permissions: TeachingJSONValue
+            let permissions: JSONValue
             if choice.id == "decline" { permissions = .object([:]) }
             else if let requested = parsedPermissions { permissions = requested }
             else { throw PhoneApprovalError.invalidChoice }
             return try approvalJSON(.object(["permissions": permissions, "scope": .string(choice.id == "allowSession" ? "session" : "turn")]))
         case "mcpServer/elicitation/request":
-            var value: [String: TeachingJSONValue] = ["action": .string(choice.decision)]
+            var value: [String: JSONValue] = ["action": .string(choice.decision)]
             if choice.decision == "accept", elicitationURL == nil { value["content"] = try formContent(answers) }
             return try approvalJSON(.object(value))
         case "item/tool/call":
@@ -258,9 +290,9 @@ extension AttentionRequest {
         return result
     }
 
-    private func formContent(_ answers: [String: String]) throws -> TeachingJSONValue {
+    private func formContent(_ answers: [String: String]) throws -> JSONValue {
         guard let fields = parsedForm, Set(answers.keys).isSubset(of: Set(fields.map(\.id))) else { throw PhoneApprovalError.invalidAnswers }
-        var content: [String: TeachingJSONValue] = [:]
+        var content: [String: JSONValue] = [:]
         for field in fields {
             if let value = try field.answer(answers[field.id]) { content[field.id] = value }
         }
@@ -333,7 +365,7 @@ public struct ComputerAction: Codable, Sendable {
     }
 }
 private extension PhoneApprovalField {
-    init?(id: String, value: TeachingJSONValue, required: Bool) {
+    init?(id: String, value: JSONValue, required: Bool) {
         guard let schema = value.approvalDictionary, let type = schema["type"]?.approvalString else { return nil }
         let common: Set<String> = ["type", "title", "description", "default", "writeOnly", "isSecret"]
         let allowed: Set<String>
@@ -364,7 +396,7 @@ private extension PhoneApprovalField {
         var options: [String] = []
         var optionTitles: [String: String] = [:]
         if type == "array" || schema["enum"] != nil || schema["oneOf"] != nil {
-            let source: [String: TeachingJSONValue]
+            let source: [String: JSONValue]
             if type == "array" {
                 guard let items = schema["items"]?.approvalDictionary,
                       Set(items.keys).isSubset(of: ["type", "enum", "anyOf"]),
@@ -415,7 +447,7 @@ private extension PhoneApprovalField {
         }
     }
 
-    func answer(_ input: String?) throws -> TeachingJSONValue? {
+    func answer(_ input: String?) throws -> JSONValue? {
         guard let input, !input.isEmpty else {
             if required { throw PhoneApprovalError.invalidAnswers }
             return nil
@@ -446,7 +478,7 @@ private extension PhoneApprovalField {
             guard let choices = try? JSONDecoder().decode([String].self, from: Data(input.utf8)),
                   Set(choices).count == choices.count, choices.allSatisfy(options.contains),
                   within(Double(choices.count), "minItems", "maxItems") else { throw PhoneApprovalError.invalidAnswers }
-            return .array(choices.map(TeachingJSONValue.string))
+            return .array(choices.map(JSONValue.string))
         }
     }
 
@@ -471,7 +503,7 @@ private extension PhoneApprovalField {
     }
 }
 
-private func permissionDescriptions(_ value: TeachingJSONValue) -> [String]? {
+private func permissionDescriptions(_ value: JSONValue) -> [String]? {
     guard let profile = value.approvalDictionary, Set(profile.keys).isSubset(of: ["fileSystem", "network"]) else { return nil }
     var result: [String] = []
     if let value = profile["network"], value != .null {
@@ -506,7 +538,7 @@ private func permissionDescriptions(_ value: TeachingJSONValue) -> [String]? {
     return result.isEmpty ? ["No additional file or network access."] : result
 }
 
-private func permissionPath(_ value: TeachingJSONValue) -> String? {
+private func permissionPath(_ value: JSONValue) -> String? {
     guard let path = value.approvalDictionary else { return nil }
     switch path["type"]?.approvalString {
     case "path": guard Set(path.keys) == ["type", "path"] else { return nil }; return path["path"]?.approvalString
@@ -533,9 +565,9 @@ private func permissionPath(_ value: TeachingJSONValue) -> String? {
     }
 }
 
-private extension TeachingJSONValue {
-    var approvalDictionary: [String: TeachingJSONValue]? { if case .object(let value) = self { return value }; return nil }
-    var approvalArray: [TeachingJSONValue]? { if case .array(let value) = self { return value }; return nil }
+private extension JSONValue {
+    var approvalDictionary: [String: JSONValue]? { if case .object(let value) = self { return value }; return nil }
+    var approvalArray: [JSONValue]? { if case .array(let value) = self { return value }; return nil }
     var approvalString: String? { if case .string(let value) = self { return value }; return nil }
     var approvalNumber: Double? { if case .number(let value) = self { return value }; return nil }
     var approvalStrings: [String]? {
@@ -556,7 +588,7 @@ private extension TeachingJSONValue {
 
 /// Rust serde_json stores object keys in UTF-8 lexical order. Foundation's
 /// sortedKeys can use numeric or locale collation, so order objects explicitly.
-private func approvalJSON(_ value: TeachingJSONValue) throws -> String {
+private func approvalJSON(_ value: JSONValue) throws -> String {
     switch value {
     case .object(let object):
         let keys = object.keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
@@ -568,11 +600,11 @@ private func approvalJSON(_ value: TeachingJSONValue) throws -> String {
 }
 
 public enum DecisionValue: Codable, Sendable {
-    case text(String), structured(TeachingJSONValue), unsupported
+    case text(String), structured(JSONValue), unsupported
     public init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
         if let text = try? c.decode(String.self) { self = .text(text) }
-        else if let value = try? c.decode(TeachingJSONValue.self), case .object = value { self = .structured(value) }
+        else if let value = try? c.decode(JSONValue.self), case .object = value { self = .structured(value) }
         else { self = .unsupported }
     }
     public func encode(to encoder: Encoder) throws {
@@ -624,8 +656,8 @@ public struct DecisionIntent: Codable, Sendable {
     public let expectedState = "pending"
     public let idempotencyKey: String
     public let responseJson: String?
-    public let structuredDecision: TeachingJSONValue?
-    public init(request: AttentionRequest, decision: String, responseJson: String?, structuredDecision: TeachingJSONValue? = nil) {
+    public let structuredDecision: JSONValue?
+    public init(request: AttentionRequest, decision: String, responseJson: String?, structuredDecision: JSONValue? = nil) {
         let computer = request.computerAction != nil && ["accept", "decline"].contains(decision)
         self.decision = computer ? "respond" : decision; actionNonce = request.actionNonce
         idempotencyKey = request.resolutionIdempotencyKey ?? UUID().uuidString

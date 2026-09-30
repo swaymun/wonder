@@ -10,12 +10,8 @@ navigation; `WONDER_PROJECT_CAPTURE=1` starts the existing bounded two-minute
 resource capture. Neither selection nor navigation sends a message. Retain the
 actual observation window separately from the capture window.
 
-`testGroupReviewRetainsEditsAndRetriesExactAcceptedRoster` uses the existing
-isolated Group API fixture with `-diagnostics-group-review`. It checks that
-refinement includes the owner's edits, closing restores the reviewed roster,
-and a failed Create retries identical bytes. It creates no real Bots or group
-and starts no model work. Run on iPhone and iPad alongside the durable creation
-outbox, draft restoration, and shared scene ownership diagnostics tests.
+Run it on iPhone and iPad alongside the durable creation outbox, draft
+restoration, and shared scene ownership diagnostics tests.
 
 Wonder has separate Production and Testing identities, each with two optimized
 distribution profiles. Testing is the default for development acceptance and
@@ -148,33 +144,11 @@ icons load in both appearances. Neither test contacts connectors or starts model
 work. Bridge tests separately own prefix removal and resolved model labels while
 preserving selection and permission identities.
 
-`WonderUITests/WonderUITests/testNewBotOpensComposerWithoutSetupQuestion`
-uses `-read-preview -new-bot-preview`. It checks the saved Luna/Ocean identity,
-immediately available composer, absence of a setup question, and both Codex and
-Claude in the existing model sheet. The offline fixture starts no model work.
-Run it on iPhone and iPad. `BotStartupTests` covers legacy read-cache decoding,
-durable first-send model revision and stable avatar defaults. Host tests own
-zero-work creation, revision conflicts, first-message acceptance and family lock.
-Physical and live paired-host acceptance remain separate from fixture checks.
+`BotStartupTests` covers legacy read-cache decoding, durable first-send model
+revision and stable avatar identities for existing Bot conversations. Physical
+and live paired-host acceptance remain separate from fixture checks.
 
-## Avatar geometry and compact picker regression
-
-`testDiagnosticsScienceAvatarsSelectPersistAndExposeMotionStates` exercises the
-shared horizontal character/color picker, selected state, 44 pt color targets,
-saved selection restoration, and motion using `-diagnostics-avatar-fixture`.
-`testBotSettingsUsesCompactAvatarSection` opens the actual Bot settings Form
-through a synthetic conversation and verifies the same compact section with no
-large preview or Character/Palette subheadings. These tests send no messages or
-Bot mutations. Run on iPhone and iPad, including large Dynamic Type.
-
-`testBotAvatarSettingsMatchSavedIdentityAndSaveAcrossRelaunch` exercises the
-actual Bot editor against an isolated synthetic host. It starts with a stale
-unrelated draft, checks selection against the chat header, rejects the first save
-with a conflict and asserts the immediately visible error alert,
-restores the edited draft after relaunch, retries, and verifies character-only
-and color-only updates after reopening and restarting. Its PATCH requests and
-saved appearance remain in the `wonder.diagnostics.avatar-settings` fixture
-suite; it never changes a real Bot or starts model work.
+## Avatar geometry regression
 
 The daemon regression
 `bot_management_tests::avatar_updates_persist_with_active_or_uncertain_work_and_unchanged_profile_fields`
@@ -187,17 +161,17 @@ host-side rule.
 `testScienceAvatarRenderedCatalog` retains native light/dark comparison sheets
 for all seven Violet avatars at 160, 32 and 48 pt. Inspect them against the SVG
 preview; size assertions alone cannot detect broken crescent or ring geometry.
-The geometry, large-text sizing and motion semantics tests remain required.
+The geometry and motion semantics tests remain required.
 Run `generate-ios.py --check` and `test_generate_ios.py` in
 `assets/bot-avatars/science` to verify source synchronization, SVG arc direction,
 large arcs, relative/reflected curves and unsupported-feature rejection.
 
-## Chat status and visible read regression
+## Conversation layout and visible read regression
 
 ### Initial conversation layout
 
 `testChatInitialLayoutKeepsMarginsBeforeFirstDrag` opens a cached conversation
-ten times through the product Chats tab. `testChatInitialLayoutWithoutSavedPosition`
+ten times through the synthetic layout fixture. `testChatInitialLayoutWithoutSavedPosition`
 repeats five times without a saved anchor. Both compare the reply bounds before
 and after the first short vertical drag, including the space above the composer.
 Run both on iPhone and iPad for 30 opening/drag cycles.
@@ -206,23 +180,15 @@ These tests explicitly select the standard text size.
 an accessibility text size without inheriting the Simulator's last setting.
 
 `testChatRestoresOlderReadingPositionAndReturnsToBottom` checks an older saved
-reply, reopening on iPhone, the bottom button, and activity expansion/collapse.
+reply, the bottom button, and activity expansion/collapse.
 These use `-diagnostics-chat-layout` with the existing isolated synthetic
 transport, plus `-diagnostics-chat-layout-unsaved` or
 `-diagnostics-chat-layout-older`. History is loaded before navigating so the
 tests cover cached first layout, not only a network-delayed conversation.
 No real chats, messages, or model work are involved.
 
-`testChatStatusesAndVisibleReadRetryClearUnreadWithoutScrolling` runs the real
-Chats/Conversation views against the synthetic transport with
-`-diagnostics-subagent-fixture -diagnostics-read-status`. It shows unread,
-working, and read rows; the first read request fails with 503 and the retry
-clears unread without scrolling. Live replay is disabled only for this offline
-transport. No messages or model work start. Run on iPhone and iPad alongside
-`testChatContextMenuPreview`, which covers both chat lists and their menus.
-`testChatListStatusPrioritizesWorkAndUsesFreshState` checks cold-list activity,
-completed/active snapshots, and invalidated cached work. `ReadAcknowledgementTests`
-preserves viewport, newer-unseen-message, host, and covering-sheet safeguards.
+`ReadAcknowledgementTests` preserves viewport, newer-unseen-message and host
+safeguards.
 
 ## Composer image paste regression
 

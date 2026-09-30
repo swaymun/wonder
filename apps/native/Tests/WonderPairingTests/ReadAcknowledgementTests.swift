@@ -3,20 +3,6 @@ import CoreGraphics
 @testable import WonderPairing
 
 final class ReadAcknowledgementTests: XCTestCase {
-    func testCoveringSheetInvalidatesInFlightReadEvenAfterDismissal() {
-        var fence = ReadPresentationFence()
-        let beforePresentation = fence.revision
-        XCTAssertTrue(fence.acceptsReply(startedAt: beforePresentation))
-        fence.setCovered(true)
-        XCTAssertTrue(fence.isCovered)
-        XCTAssertFalse(fence.acceptsReply(startedAt: beforePresentation))
-        XCTAssertFalse(fence.acceptsReply(startedAt: fence.revision))
-        fence.setCovered(false)
-        XCTAssertFalse(fence.acceptsReply(startedAt: beforePresentation))
-        let afterDismissal = fence.revision
-        fence.setCovered(false)
-        XCTAssertTrue(fence.acceptsReply(startedAt: afterDismissal))
-    }
     private func snapshot(sequence: UInt64 = 4, epoch: String = "epoch") throws -> ConversationSnapshot {
         try JSONDecoder().decode(ConversationSnapshot.self, from: Data("{\"conversationId\":\"chat\",\"hostEpoch\":\"\(epoch)\",\"lastSequence\":\(sequence),\"messages\":[],\"assistantMessages\":[],\"thread\":{\"hydrated\":true}}".utf8))
     }

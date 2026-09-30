@@ -219,7 +219,7 @@ struct DiagnosticLaunchView: View {
 }
 
 /// A Diagnostics-only App Server-shaped parent/child route. This uses the
-/// production ChatsView/ConversationView and durable ReadStore with a
+/// production ConversationView and durable ReadStore with a
 /// synthetic URLProtocol transport, so later image/workspace fixtures can add
 /// responses without introducing successful-send branches into Release.
 enum DiagnosticSubagentFixture {
@@ -239,11 +239,7 @@ enum DiagnosticSubagentFixture {
     }
     static var approvalDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.approval-settings")! }
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
-    static var readStatusFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-read-status") }
-    static var avatarSettingsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-avatar-settings") }
-    static var groupCreationFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-group-creation") }
-    static var hostID: String { groupCreationFixture ? "diagnostic-group-creation-host" : avatarSettingsFixture ? "diagnostic-avatar-settings-host" : "diagnostic-host" }
-    static var avatarDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.avatar-settings")! }
+    static let hostID = "diagnostic-host"
     static let parentID = "fixture-parent-conversation"
     static let childID = "fixture-child-conversation"
     static let parentThreadID = "fixture-parent-thread"
@@ -267,30 +263,8 @@ enum DiagnosticSubagentFixture {
     }
 
     @MainActor static func model() -> ConnectionModel {
-        if groupCreationFixture {
-            let store = ManagementDraftStore(host: hostID)
-            store.remove("group.new")
-            if ProcessInfo.processInfo.arguments.contains("-diagnostics-group-review") { store.remove("group.review.fixture-review") }
-            if ProcessInfo.processInfo.arguments.contains("-diagnostics-group-frozen") {
-                var draft = ManagementDraft()
-                let payload: [String: Any] = ["clientRequestId": draft.requestId, "name": "Synthetic group", "purpose": "Supplied facts only",
-                    "memberBotIds": ["fixture-bot"], "newBots": [
-                        ["name": "Duplicate", "purpose": "First purpose", "instructions": "First instructions"],
-                        ["name": "Duplicate", "purpose": "Second purpose", "instructions": "Second instructions"]],
-                    "routing": ["model": "fixture-model", "reasoningEffort": ""], "newBotDefaults": ["model": "fixture-model", "reasoningEffort": ""]]
-                draft.values["payload"] = String(decoding: try! JSONSerialization.data(withJSONObject: payload, options: .sortedKeys), as: UTF8.self)
-                try! store.save(draft, key: "group.new")
-            }
-        }
         if approvalSettingsFixture && ProcessInfo.processInfo.arguments.contains("-diagnostics-approval-reset") {
             approvalDefaults.removePersistentDomain(forName: "wonder.diagnostics.approval-settings")
-        }
-        if avatarSettingsFixture && ProcessInfo.processInfo.arguments.contains("-diagnostics-avatar-settings-reset") {
-            avatarDefaults.removePersistentDomain(forName: "wonder.diagnostics.avatar-settings")
-            // An unrelated edit saved before this Bot changed on another device.
-            var staleDraft = ManagementDraft()
-            staleDraft.values = ["name": "Fixture Bot", "role": "Diagnostics", "systemPrompt": "Fixture", "avatarShape": "sun", "avatarPalette": "amber"]
-            try! ManagementDraftStore(host: hostID).save(staleDraft, key: "bot.fixture-bot")
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [DiagnosticSubagentURLProtocol.self]
@@ -300,7 +274,7 @@ enum DiagnosticSubagentFixture {
             cameraFixtureStoreRoot: root,
             saved: savedConnection(),
             chat: nil,
-            api: PairingAPI(configuration: configuration), replayEnabled: !readStatusFixture && !avatarSettingsFixture && !chatLayoutFixture && !approvalSettingsFixture && !groupCreationFixture)
+            api: PairingAPI(configuration: configuration), replayEnabled: !chatLayoutFixture && !approvalSettingsFixture)
         if chatLayoutFixture {
             model.snapshots[parentID] = try! JSONDecoder().decode(ConversationSnapshot.self, from: JSONSerialization.data(withJSONObject: chatLayoutSnapshot()))
             let entries = ChatFeedEntry.grouping(model.feedRows(for: parentChat()))
@@ -384,14 +358,11 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var delayNextChildSend = false
         var childRevision = 2
         var childStatus = "completed"
-        var unread = true
-        var readAttempts = 0
         var goalPresent = DiagnosticSubagentFixture.goalFixture
         var goalObjective = "Prepare a reliable beta launch with the Scout helper."
         var goalStatus = DiagnosticSubagentFixture.goalFixtureStatus
         var goalTokenBudget: Int? = 1_000
         var goalTimeBudgetSeconds: Int? = 600
-        var createdGroup: [String: Any]?
     }
     static let state = State()
 
@@ -443,69 +414,6 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
     override func stopLoading() {}
 
     private func respond(method: String, path: String, body: Data?) {
-        if DiagnosticSubagentFixture.groupCreationFixture {
-            if method == "POST", path == "/api/v1/group-chats/propose" {
-                let payload = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any]
-                let current = payload?["current"] as? [String: Any]
-                if current != nil && current?["name"] as? String != "Edited team" {
-                    finish(status: 400, body: Data("{}".utf8)); return
-                }
-                finish(status: 200, body: json(["name": current?["name"] as? String ?? "Suggested team", "purpose": "Review supplied facts",
-                    "memberBotIds": ["fixture-bot"], "newBots": [], "summary": current == nil ? "Review before creating." : "Kept your edits."])); return
-            }
-            if path == "/api/v1/bot-options" {
-                var models: [String: [String: Any]] = [:]
-                for purpose in ModelDefaultPurpose.allCases {
-                    let defaults = purpose.load()
-                    let id = defaults.model.isEmpty ? "fixture-model" : defaults.model
-                    var option = models[id] ?? ["id": id, "displayName": "Fixture", "hidden": false]
-                    var efforts = option["reasoningEfforts"] as? [[String: String]] ?? []
-                    if !defaults.reasoningEffort.isEmpty && !efforts.contains(where: { $0["id"] == defaults.reasoningEffort }) {
-                        efforts.append(["id": defaults.reasoningEffort, "label": "Fixture"])
-                    }
-                    var tiers = option["serviceTiers"] as? [[String: String]] ?? []
-                    let tier = defaults.serviceTier ?? "default"
-                    if !tiers.contains(where: { $0["id"] == tier }) { tiers.append(["id": tier, "label": "Fixture"]) }
-                    option["reasoningEfforts"] = efforts; option["serviceTiers"] = tiers
-                    models[id] = option
-                }
-                finish(status: 200, body: json(["models": models.keys.sorted().compactMap { models[$0] }, "groupCollaboration": true,
-                    "approvalModes": BotApprovalMode.allCases.map { ["id": $0.rawValue, "allowed": true] as [String: Any] }, "allowedApprovalPolicies": []])); return
-            }
-            if method == "POST", path == "/api/v1/group-chats/new" {
-                let requests = Self.state.lock.withLock { Self.state.requests.filter { $0.method == "POST" && $0.path == path }.compactMap(\.body) }
-                if ProcessInfo.processInfo.arguments.contains("-diagnostics-group-review") {
-                    guard requests.first == requests.last else { finish(status: 409, body: Data("{}".utf8)); return }
-                    if requests.count == 1 { finish(status: 503, body: Data("{}".utf8)); return }
-                }
-                let frozen = ProcessInfo.processInfo.arguments.contains("-diagnostics-group-frozen")
-                if frozen && requests.count <= 2 {
-                    finish(status: requests.first == requests.last ? 503 : 409, body: Data("{}".utf8)); return
-                }
-                guard let payload = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any],
-                      let newBots = payload["newBots"] as? [[String: String]], let members = payload["memberBotIds"] as? [String], members == ["fixture-bot"] else {
-                    finish(status: 400, body: Data("{}".utf8)); return
-                }
-                if frozen {
-                    let first = (try? JSONSerialization.jsonObject(with: requests[0])) as? [String: Any]
-                    guard requests[0] == requests[1], payload["clientRequestId"] as? String != first?["clientRequestId"] as? String,
-                          newBots.count == 1, newBots[0]["name"] == "Surviving Bot", newBots[0]["purpose"] == "Second purpose" else {
-                        finish(status: 400, body: Data("{}".utf8)); return
-                    }
-                } else {
-                    guard newBots.isEmpty, (payload["routing"] as? NSDictionary) == (payload["newBotDefaults"] as? NSDictionary) else {
-                        finish(status: 400, body: Data("{}".utf8)); return
-                    }
-                }
-                let group: [String: Any] = ["id": payload["clientRequestId"]!, "conversationId": "fixture-created-group", "name": "Verified group", "isArchived": false,
-                    "members": [["botId": "fixture-bot", "botName": "Fixture Bot", "role": "coordinator", "position": 0]], "messages": []]
-                Self.state.lock.withLock { Self.state.createdGroup = group }
-                finish(status: 200, body: json(group)); return
-            }
-            if path == "/api/v1/group-chats" {
-                finish(status: 200, body: json(Self.state.lock.withLock { Self.state.createdGroup.map { [$0] } ?? [] })); return
-            }
-        }
         if path == "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/goal" {
             let state = Self.state
             switch method {
@@ -542,37 +450,6 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             DiagnosticSubagentFixture.approvalDefaults.set(raw, forKey: "mode")
             finish(status: 200, body: json(bot())); return
         }
-        if DiagnosticSubagentFixture.avatarSettingsFixture, method == "PATCH", path == "/api/v1/bots/fixture-bot" {
-            guard let values = try? JSONDecoder().decode([String: String].self, from: body ?? Data()),
-                  values["avatarColor"] == nil, values["model"] == nil, values["approvalMode"] == nil else {
-                finish(status: 400, body: Data("{}".utf8)); return
-            }
-            let defaults = DiagnosticSubagentFixture.avatarDefaults
-            var requests = defaults.array(forKey: "patches") as? [[String: String]] ?? []
-            requests.append(values)
-            defaults.set(requests, forKey: "patches")
-            if !defaults.bool(forKey: "failedOnce") {
-                defaults.set(true, forKey: "failedOnce")
-                finish(status: 409, body: Data("{}".utf8)); return
-            }
-            var appearance = defaults.dictionary(forKey: "appearance") as? [String: String] ?? [:]
-            for key in ["avatarShape", "avatarPalette"] {
-                if let value = values[key] { appearance[key] = value }
-            }
-            defaults.set(appearance, forKey: "appearance")
-            finish(status: 200, body: json(bot())); return
-        }
-        if DiagnosticSubagentFixture.readStatusFixture, method == "PATCH", path == "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)" {
-            let attempts = Self.state.lock.withLock {
-                Self.state.readAttempts += 1
-                if Self.state.readAttempts > 1 { Self.state.unread = false }
-                return Self.state.readAttempts
-            }
-            // First read deliberately fails to exercise bounded retry while
-            // the reader remains stationary. The second persists on this host.
-            finish(status: attempts == 1 ? 503 : 200, body: attempts == 1 ? Data("{}".utf8) : json(parentSummary()))
-            return
-        }
         if method == "POST" && path == "/api/v1/conversations/\(DiagnosticSubagentFixture.childID)/messages" {
             let request = (try? JSONDecoder().decode(SendRequest.self, from: body ?? Data()))
             let messageBody = request?.body ?? ""
@@ -595,19 +472,8 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             finish(status: 200, body: json(["models": [], "allowedApprovalPolicies": [], "approvalModes": BotApprovalMode.allCases.map { ["id": $0.rawValue, "allowed": true] as [String: Any] }]))
         case "/api/v1/bots/fixture-bot" where DiagnosticSubagentFixture.approvalSettingsFixture:
             finish(status: 200, body: json(bot()))
-        case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/composer-options" where DiagnosticSubagentFixture.avatarSettingsFixture:
-            finish(status: 200, body: json(["models": [], "allowedApprovalPolicies": [], "approvalModes": [["id": "ask-for-approval", "allowed": true]]]))
         case "/api/v1/conversations":
-            var summaries = [parentSummary()]
-            if DiagnosticSubagentFixture.readStatusFixture {
-                for (id, title, state, unread) in [("fixture-working", "Working Bot", "streaming", true), ("fixture-read", "Read Bot", "completed", false)] {
-                    var summary = parentSummary()
-                    summary["conversationId"] = id; summary["title"] = title
-                    summary["deliveryState"] = state; summary["hasUnread"] = unread
-                    summaries.append(summary)
-                }
-            }
-            finish(status: 200, body: json(summaries))
+            finish(status: 200, body: json([parentSummary()]))
         case "/api/v1/group-chats": finish(status: 200, body: Data("[]".utf8))
         case "/api/v1/bots": finish(status: 200, body: json([bot()]))
         case "/api/v1/approvals" where DiagnosticSubagentFixture.marketingApprovalFixture:
@@ -665,17 +531,15 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
     private func parentSummary() -> [String: Any] { [
         "conversationId": DiagnosticSubagentFixture.parentID, "botId": "fixture-bot", "title": DiagnosticSubagentFixture.botName,
         "lastMessagePreview": "A verified subagent is working.", "lastMessageAt": "1700000000000", "messageCount": 1,
-        "deliveryState": "completed", "hasUnread": DiagnosticSubagentFixture.readStatusFixture && Self.state.lock.withLock { Self.state.unread }, "isArchived": false, "isPinned": false
+        "deliveryState": "completed", "hasUnread": false, "isArchived": false, "isPinned": false
     ] }
     private func bot() -> [String: Any] {
-        let appearance = DiagnosticSubagentFixture.avatarSettingsFixture
-            ? DiagnosticSubagentFixture.avatarDefaults.dictionary(forKey: "appearance") as? [String: String] ?? [:] : [:]
-        return [
+        [
         "id": "fixture-bot", "name": DiagnosticSubagentFixture.botName, "role": "Diagnostics", "systemPrompt": "Fixture",
         "workspacePath": "/tmp/fixture", "permissionProfile": ":read-only", "permissionMode": "read-only",
         "approvalMode": DiagnosticSubagentFixture.approvalSettingsFixture ? DiagnosticSubagentFixture.approvalDefaults.string(forKey: "mode") ?? "ask-for-approval" : "ask-for-approval", "model": DiagnosticSubagentFixture.marketingFixture ? "gpt-5.6-luna" : "fixture-model", "reasoningEffort": "medium",
         "serviceTier": "priority", "isArchived": false, "conversationId": DiagnosticSubagentFixture.parentID,
-        "avatarShape": appearance["avatarShape"] ?? "luna", "avatarPalette": appearance["avatarPalette"] ?? "ocean"
+        "avatarShape": "luna", "avatarPalette": "ocean"
     ] }
     private func childSummary() -> [String: Any] { [
         "conversationId": DiagnosticSubagentFixture.childID, "threadId": DiagnosticSubagentFixture.childThreadID,
@@ -743,26 +607,18 @@ struct DiagnosticChatLayoutFixtureView: View {
 
 struct DiagnosticSubagentFixtureView: View {
     @StateObject private var model: ConnectionModel
-    @State private var reviewing = false
-    @State private var created = false
+    @State private var chat: ChatSummary?
     init() { _model = StateObject(wrappedValue: DiagnosticSubagentFixture.model()) }
     var body: some View {
-        Group {
-            if ProcessInfo.processInfo.arguments.contains("-diagnostics-group-review") {
-                VStack {
-                    Button("Review team") { reviewing = true }.disabled(model.managedBots.isEmpty)
-                    if created { Text("Verified group") }
-                }
-                .sheet(isPresented: $reviewing) {
-                    GroupReviewSheet(model: model, initialDescription: "Review supplied facts", draftID: "fixture-review",
-                        onCreated: { _ in created = true }, onCancel: {})
-                }
-            } else { ChatsView(model: model) }
+        NavigationStack {
+            if let chat { ConversationView(model: model, chat: chat) }
+            else { ProgressView() }
         }
-            .task {
-                model.setForeground(true)
-                await model.loadChats(force: true)
-            }
+        .task {
+            model.setForeground(true)
+            await model.loadChats(force: true)
+            chat = model.chats.first { $0.id == DiagnosticSubagentFixture.parentID }
+        }
     }
 }
 
@@ -1005,107 +861,6 @@ struct DiagnosticSubagentFixtureView: View {
         let cachedSnapshot = decode(cached)
         let newestSnapshot = decode(newest)
         return try! newestSnapshot.mergingOlder(cachedSnapshot)
-    }
-}
-
-@MainActor struct ScienceAvatarDiagnosticFixtureView: View {
-    private static let storageKey = "wonder.diagnostics.science-avatar"
-    @State private var shape = ScienceAvatarCatalog.defaultShape
-    @State private var paletteID = ScienceAvatarCatalog.defaultPalette
-    @State private var motionState: ScienceAvatarMotionState = .idle
-    @State private var savedPayload = "No avatar payload saved"
-    @State private var loaded = false
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("Offline avatar fixture")
-                        .font(.headline)
-                    Text("Seven characters, twelve named palettes, and motion states. This fixture never connects or starts model work.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
-                    Text("Avatar").font(.headline)
-                    ScienceAvatarPicker(shape: $shape, paletteID: $paletteID)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Conversation header").font(.subheadline.weight(.semibold))
-                        ConversationAvatarHeader(
-                            name: "Fixture Bot",
-                            identity: "fixture-bot",
-                            hexColor: nil,
-                            avatarShape: shape.rawValue,
-                            avatarPalette: paletteID,
-                            motion: ScienceAvatarHeaderMotionOutput(state: motionState)
-                        )
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Preview motion").font(.subheadline.weight(.semibold))
-                        ScienceAvatar(shape: shape.rawValue, palette: paletteID, size: 144, state: motionState, animate: true)
-                            .accessibilityIdentifier("science-avatar-preview")
-                        Picker("Preview motion", selection: $motionState) {
-                            ForEach(ScienceAvatarMotionState.allCases) { state in
-                                Text(state.title).tag(state)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .accessibilityIdentifier("science-avatar-motion-picker")
-                        Text("Only this enlarged preview animates; list avatars stay static.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Persistence payload").font(.subheadline.weight(.semibold))
-                        Text(savedPayload)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .accessibilityIdentifier("science-avatar-saved-payload")
-                        HStack {
-                            Button("Save avatar selection") { save() }
-                                .accessibilityIdentifier("science-avatar-save")
-                            Button("Reload saved avatar") { restore() }
-                                .accessibilityIdentifier("science-avatar-reload")
-                        }
-                    }
-                }
-                .padding()
-            }
-            .accessibilityIdentifier("science-avatar-fixture-scroll")
-            .navigationTitle("Science avatars")
-        }
-        .task {
-            guard !loaded else { return }
-            loaded = true
-            if ProcessInfo.processInfo.arguments.contains("-diagnostics-avatar-reset") {
-                UserDefaults.standard.removeObject(forKey: Self.storageKey)
-            }
-            restore()
-        }
-    }
-
-    private func save() {
-        let payload = ["avatarPalette": paletteID, "avatarShape": shape.rawValue]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
-        UserDefaults.standard.set(data, forKey: Self.storageKey)
-        savedPayload = String(decoding: data, as: UTF8.self)
-    }
-
-    private func restore() {
-        guard let data = UserDefaults.standard.data(forKey: Self.storageKey),
-              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-              let rawShape = payload["avatarShape"],
-              let restoredShape = ScienceAvatarShape(rawValue: rawShape),
-              let restoredPalette = payload["avatarPalette"] else {
-            savedPayload = "No avatar payload saved"
-            return
-        }
-        shape = restoredShape
-        paletteID = ScienceAvatarPalette.resolve(restoredPalette).id
-        savedPayload = String(decoding: data, as: UTF8.self)
     }
 }
 

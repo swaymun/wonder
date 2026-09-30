@@ -596,6 +596,11 @@ extension ProjectThreadSummary {
         ProjectThreadSummary(reference: reference, conversationId: conversationId, title: title, family: family,
                              updatedAt: updatedAt, isPinned: value, hasUnread: hasUnread, isWorking: isWorking)
     }
+    /// The same thread after the owner has read it.
+    public func settingRead() -> ProjectThreadSummary {
+        ProjectThreadSummary(reference: reference, conversationId: conversationId, title: title, family: family,
+                             updatedAt: updatedAt, isPinned: isPinned, hasUnread: false, isWorking: isWorking)
+    }
 }
 
 /// The most recently opened project conversations, newest first. Their saved

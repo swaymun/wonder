@@ -189,7 +189,7 @@ struct ProjectComposerSettings: View {
             if saving { ProgressView("Saving…").font(.caption).padding(.horizontal, 12) }
             if let failure { FailureDetails("Settings not saved", message: failure).padding(.horizontal, 12) }
         }
-        .task(id: model.assignmentScope) { await library.loadOptions() }
+        .task(id: model.assignmentScope + ":" + String(model.macConnected == true)) { await library.loadOptions() }
         .sheet(isPresented: $showingModel) {
             NavigationStack {
                 Form {
@@ -510,19 +510,27 @@ struct ManageProjectsView: View {
                     Section {
                         ForEach(filtered) { project in
                             HStack(spacing: 12) {
-                                Image(systemName: "folder").foregroundStyle(.secondary)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(project.name)
-                                    Text(project.folders.map(\.name).joined(separator: ", ")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                // Only the name opens the editor; a row-wide tap
+                                // gesture swallowed taps meant for the switch.
+                                Button { editing = project } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "folder").foregroundStyle(.secondary)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(project.name).foregroundStyle(.primary)
+                                            Text(project.folders.map(\.name).joined(separator: ", ")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }.contentShape(Rectangle())
                                 }
-                                Spacer()
+                                .buttonStyle(.plain)
+                                .accessibilityHint("Edits this project")
                                 if busy.contains(project.id) { ProgressView() }
                                 Toggle("Show in sidebar", isOn: Binding(get: { project.isIncluded }, set: { value in Task { await set(project, ["isIncluded": value]) } }))
                                     .labelsHidden()
+                                    .disabled(busy.contains(project.id))
                                     .accessibilityLabel("Show \(project.name) in sidebar")
+                                    .accessibilityIdentifier("project-include:" + project.id)
                             }
-                            .contentShape(Rectangle())
-                            .onTapGesture { editing = project }
                             .swipeActions(edge: .leading) {
                                 Button(project.isPinned ? "Unpin" : "Pin", systemImage: project.isPinned ? "pin.slash" : "pin") {
                                     Task { await set(project, ["isPinned": !project.isPinned]) }

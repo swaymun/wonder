@@ -185,7 +185,7 @@ final class AttentionTests: XCTestCase {
     }
     func testStructuredDecisionCanonicalMatchesRustAndOldIntentsStillDecode() throws {
         let request = try phoneRequest("item/commandExecution/requestApproval", [:])
-        let structured: TeachingJSONValue = .object(["z":.array([.string("quote\"/📸")]), "a":.object(["2":.string("two"), "10":.string("ten"), "A":.bool(true), "a":.bool(false)])])
+        let structured: JSONValue = .object(["z":.array([.string("quote\"/📸")]), "a":.object(["2":.string("two"), "10":.string("ten"), "A":.bool(true), "a":.bool(false)])])
         let intent = DecisionIntent(request: request, decision: "amendment", responseJson: nil, structuredDecision: structured)
         let restored = try JSONDecoder().decode(DecisionIntent.self, from: JSONEncoder().encode(intent))
         XCTAssertEqual(restored.structuredDecision, structured)

@@ -29,18 +29,6 @@ public struct VisibleReadReceipt: Equatable, Sendable {
     }
 }
 
-/// A covering sheet invalidates an in-flight read even if dismissed before its reply.
-public struct ReadPresentationFence: Sendable {
-    public private(set) var isCovered = false
-    public private(set) var revision: UInt64 = 0
-    public init() {}
-    public mutating func setCovered(_ covered: Bool) {
-        guard covered != isCovered else { return }
-        isCovered = covered; revision &+= 1
-    }
-    public func acceptsReply(startedAt revision: UInt64) -> Bool { !isCovered && self.revision == revision }
-}
-
 public enum ReadVisibility {
     /// A long final message counts only when its end reaches the actual viewport.
     /// Merely constructing the message's VStack, or seeing its beginning, is insufficient.

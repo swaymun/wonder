@@ -2,60 +2,45 @@ import XCTest
 @testable import WonderPairing
 
 final class ManagementTests: XCTestCase {
-    // The creation request must use the selected provider's approval choices,
+    // Group routing must use the selected provider's approval choices,
     // including an SDK model with no reasoning control and additive metadata.
-    func testClaudeCreationUsesItsOwnPermissionsAndAcceptsAdditiveModelMetadata() throws {
+    func testGroupRoutingUsesTheSelectedProvidersApprovalChoicesAndAcceptsAdditiveModelMetadata() throws {
         let options = try JSONDecoder().decode(BotOptions.self, from: Data(#"{"models":[{"id":"claude:haiku","agentFamily":"claude","displayName":"Haiku 4.5","hidden":false,"reasoningEfforts":[],"capabilities":{"guide":false,"goals":false,"imageGeneration":false,"futureCapability":true},"futureSDKField":{}}],"allowedApprovalPolicies":[],"approvalModes":[{"id":"approve-for-me","allowed":true}],"permissionsByFamily":{"claude":{"permissionModes":[{"id":"workspace","allowed":true}],"approvalModes":[{"id":"ask-for-approval","allowed":true},{"id":"full-access","allowed":true}]}}}"#.utf8))
         XCTAssertEqual(options.models.first?.family, .claude)
         XCTAssertEqual(options.models.first?.capabilities?.guide, false)
         XCTAssertEqual(try NewBotDefaults(model: "claude:haiku").creationValues(options: options), ["model":"claude:haiku", "approvalMode":"ask-for-approval"])
         XCTAssertThrowsError(try NewBotDefaults(model: "claude:haiku", approvalMode: .approveForMe).creationValues(options: options))
         XCTAssertThrowsError(try NewBotDefaults(model: "claude:haiku", reasoningEffort: "high").creationValues(options: options))
-        var draft = ManagementDraft()
-        draft.values = ["model":"claude:haiku", "approvalMode":"approve-for-me"]
-        XCTAssertFalse(draft.canSaveBotApproval(options: options))
-        draft.values["approvalMode"] = "full-access"
-        XCTAssertTrue(draft.canSaveBotApproval(options: options))
     }
-    func testGlobalDefaultsSurviveConnectionRemovalAndFreezeCreationRetries() throws {
+    func testGlobalDefaultsSurviveDraftRemovalAndAreValidatedAgainstHostChoices() throws {
         let suite = "WonderDefaultsTests." + UUID().uuidString
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { preferences.removePersistentDomain(forName: suite) }
         let json = #"{"models":[{"id":"model","displayName":"Model","hidden":false,"reasoningEfforts":[{"id":"low","label":"Low"},{"id":"high","label":"High"}],"defaultReasoningEffort":"low"}],"timezone":"UTC","allowedApprovalPolicies":[],"approvalModes":[{"id":"ask-for-approval","allowed":true},{"id":"approve-for-me","allowed":true},{"id":"full-access","allowed":true}]}"#
         let options = try JSONDecoder().decode(BotOptions.self, from: Data(json.utf8))
         try NewBotDefaults(model: "model", reasoningEffort: "high").save(to: preferences)
-        var draft = ManagementDraft()
-        try draft.prepareNewBot(defaults: NewBotDefaults.load(from: preferences), options: options)
+        var draft = ManagementDraft(); draft.values = ["name": "Ada"]
         let first = ManagementDraftStore(host: "first", defaults: preferences)
         let second = ManagementDraftStore(host: "second", defaults: preferences)
         try first.save(draft, key: "create")
         try second.save(draft, key: "create")
         first.removeAll()
         XCTAssertEqual(NewBotDefaults.load(from: preferences).reasoningEffort, "high")
-        XCTAssertEqual(second.load("create")?.values["reasoningEffort"], "high")
-        try draft.prepareNewBot(defaults: NewBotDefaults(), options: options)
-        XCTAssertEqual(draft.values["reasoningEffort"], "high")
+        XCTAssertEqual(second.load("create")?.values["name"], "Ada")
+        XCTAssertEqual(try NewBotDefaults.load(from: preferences).creationValues(options: options)["reasoningEffort"], "high")
         XCTAssertEqual(try NewBotDefaults().creationValues(options: options)["reasoningEffort"], "low")
         XCTAssertThrowsError(try NewBotDefaults(model: "missing").creationValues(options: options))
         XCTAssertThrowsError(try NewBotDefaults(model: "model", reasoningEffort: "light").creationValues(options: options))
     }
-    func testModelDefaultsSeparatePurposesAndFreezeSpeedWithPendingSend() throws {
+    func testGroupParticipationDefaultsFreezeSpeedWithPendingSend() throws {
         let suite = "group-defaults-" + UUID().uuidString
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { preferences.removePersistentDomain(forName: suite) }
-        let creationKey = ModelDefaultPurpose.groupCreation.key
-        let creationFallback = ModelDefaultPurpose.groupCreation.initial
-        XCTAssertEqual(NewBotDefaults.load(from: preferences, key: creationKey, fallback: creationFallback).reasoningEffort, "medium")
         XCTAssertEqual(ModelDefaultPurpose.groupParticipation.initial.reasoningEffort, "xhigh")
         // An explicit prior choice must win over the faster unsaved default.
-        let savedCreation = NewBotDefaults(model: "luna", reasoningEffort: "xhigh", serviceTier: "priority")
-        try savedCreation.save(to: preferences, key: creationKey)
-        XCTAssertEqual(NewBotDefaults.load(from: preferences, key: creationKey, fallback: creationFallback), savedCreation)
-        preferences.removeObject(forKey: creationKey)
         let selection = NewBotDefaults(model: "luna", reasoningEffort: "xhigh", serviceTier: "priority")
         try selection.save(to: preferences, key: ModelDefaultPurpose.groupParticipation.key)
         XCTAssertEqual(NewBotDefaults.load(from: preferences, key: ModelDefaultPurpose.groupParticipation.key), selection)
-        XCTAssertNotEqual(NewBotDefaults.load(from: preferences, key: ModelDefaultPurpose.groupCreation.key), selection)
         let options = try JSONDecoder().decode(BotOptions.self, from: Data(#"{"models":[{"id":"luna","displayName":"Luna","hidden":false,"reasoningEfforts":[{"id":"xhigh","label":"Extra high"}],"serviceTiers":[{"id":"priority","label":"Fast"}]}],"timezone":"UTC","allowedApprovalPolicies":[],"approvalModes":[{"id":"ask-for-approval","allowed":true},{"id":"approve-for-me","allowed":true},{"id":"full-access","allowed":true}]}"#.utf8))
         XCTAssertEqual(try selection.creationValues(options: options)["serviceTier"], "priority")
         XCTAssertThrowsError(try NewBotDefaults(model: "luna", reasoningEffort: "xhigh", serviceTier: "unknown").creationValues(options: options))
@@ -99,10 +84,6 @@ final class ManagementTests: XCTestCase {
         first.removeAll()
         XCTAssertNil(first.load("new"))
         XCTAssertEqual(second.load("new")?.requestId, draft.requestId)
-    }
-    func testAutomationRunHasAuthoritativeConversationDestination() throws {
-        let run = try JSONDecoder().decode(ManagedAutomationRun.self, from: Data(##"{"id":"run","status":"completed","startedAt":"2026-09-09T12:00:00Z","conversationId":"actual-result"}"##.utf8))
-        XCTAssertEqual(run.conversationId, "actual-result")
     }
     func testBotAndOptionsDecodeDaemonContract() throws {
         let bot = try JSONDecoder().decode(ManagedBot.self, from: Data(##"{"id":"ada","name":"Ada","role":"Research","systemPrompt":"Read carefully","workspacePath":"/Bots/ada","permissionProfile":"bot-ada","model":null,"reasoningEffort":null,"serviceTier":null,"isArchived":false,"conversationId":"chat","avatarColor":"#ffb51c","avatarShape":"orbit","avatarPalette":"coral","workingDirectory":"/Projects/report"}"##.utf8))
@@ -164,15 +145,6 @@ final class ManagementTests: XCTestCase {
         }
         let options = try JSONDecoder().decode(BotOptions.self, from: Data(#"{"models":[],"timezone":"UTC","allowedApprovalPolicies":[],"permissionModes":[{"id":"read-only","allowed":true},{"id":"workspace","allowed":false},{"id":"full-access","allowed":true}]}"#.utf8))
         XCTAssertEqual(options.permissionModes?.map(\.allowed), [true, false, true])
-        var draft = ManagementDraft()
-        XCTAssertTrue(draft.canSaveBotPermission(options: nil))
-        draft.values["permissionMode"] = "workspace"
-        XCTAssertFalse(draft.canSaveBotPermission(options: nil))
-        XCTAssertFalse(draft.canSaveBotPermission(options: options))
-        draft.values["permissionMode"] = "read-only"
-        XCTAssertTrue(draft.canSaveBotPermission(options: options))
-        let oldOptions = try JSONDecoder().decode(BotOptions.self, from: Data(#"{"models":[],"timezone":"UTC","allowedApprovalPolicies":[]}"#.utf8))
-        XCTAssertFalse(draft.canSaveBotPermission(options: oldOptions))
     }
 
     func testApprovalModesUseExactWireIDsAndOldComposerOptionsRemainActionable() throws {
@@ -202,54 +174,6 @@ final class ManagementTests: XCTestCase {
         XCTAssertEqual(queued.executionSettings?.workingDirectory, "/Projects/report")
     }
 
-    func testApprovalDraftMigrationPreservesLegacyScopeAndSubmittedPayload() {
-        for (scope, mode) in [("read-only", "ask-for-approval"), ("workspace", "ask-for-approval"), ("full-access", "full-access")] {
-            var draft = ManagementDraft()
-            draft.values = ["permissionMode": scope]
-            draft.prepareBotApproval(isNew: true, currentMode: nil)
-            XCTAssertEqual(draft.values["approvalMode"], mode)
-            XCTAssertEqual(draft.values["permissionMode"], scope)
-            draft.values = ["permissionMode": scope, "_submitted": "true"]
-            let submitted = draft
-            draft.prepareBotApproval(isNew: true, currentMode: nil)
-            XCTAssertEqual(draft, submitted)
-        }
-    }
-
-    func testPermissionDefaultPreservesExistingAndSubmittedDraftPayloads() throws {
-        var draft = ManagementDraft()
-        draft.prepareBotPermission(isNew: false, currentMode: nil)
-        XCTAssertNil(draft.values["permissionMode"])
-        draft.values = ["name": "Ada", "_submitted": "true"]
-        let payload = draft
-        draft.prepareBotPermission(isNew: true, currentMode: nil)
-        XCTAssertEqual(draft, payload)
-        draft.values.removeValue(forKey: "_submitted")
-        draft.prepareBotPermission(isNew: true, currentMode: nil)
-        XCTAssertEqual(draft.values["permissionMode"], "workspace")
-        draft.values["permissionMode"] = "read-only"
-        draft.prepareBotPermission(isNew: false, currentMode: "full-access")
-        XCTAssertEqual(draft.values["permissionMode"], "read-only")
-    }
-
-    func testPermissionChangesKeepFileSelectionAndDurableRequestIdentity() throws {
-        var draft = ManagementDraft(); var files = BotFileSelection()
-        files.select(path: "/Project", isDirectory: true, writable: true)
-        files.workingDirectory = "/OtherFolder"
-        draft.values = ["name": "Ada", "_fileAccess": files.encodedDraft]
-        for mode in BotPermissionMode.allCases {
-            draft.values["permissionMode"] = mode.rawValue
-            let restored = try JSONDecoder().decode(ManagementDraft.self, from: JSONEncoder().encode(draft))
-            XCTAssertEqual(restored.requestId, draft.requestId)
-            let selection = BotFileSelection.draft(restored.values["_fileAccess"])
-            XCTAssertEqual(selection, files)
-            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: selection.creationBody(fields: restored.values)) as? [String: Any])
-            XCTAssertEqual(body["permissionMode"] as? String, mode.rawValue)
-            XCTAssertEqual(body["writeRoots"] as? [String], ["/Project"])
-            XCTAssertEqual(body["workingDirectory"] as? String, "/OtherFolder")
-        }
-    }
-
     func testDeletedConversationIntentRemovalDoesNotRemoveAnotherChat() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -260,58 +184,6 @@ final class ManagementTests: XCTestCase {
         try store.removeIntent(conversation: "deleted")
         XCTAssertNil(try store.loadIntent(conversation: "deleted"))
         XCTAssertEqual(try store.loadIntent(conversation: "retained"), Data("retained draft".utf8))
-    }
-
-    func testBotScopedAutomationEditPreservesOriginalContinuationChat() throws {
-        let json = ##"{"id":"automation","name":"Daily check","kind":"continuation","botId":"ada","conversationId":"original-chat","prompt":"Check progress","rrule":"FREQ=DAILY","timezone":"UTC","status":"active","scopeType":"bot","scopeId":"ada"}"##
-        let automation = try JSONDecoder().decode(ManagedAutomation.self, from: Data(json.utf8))
-        XCTAssertEqual(automation.targetConversation(selectedKind: "continuation", currentConversation: "different-chat"), "original-chat")
-        let standalone = try JSONDecoder().decode(ManagedAutomation.self, from: Data(json.replacingOccurrences(of: "continuation", with: "standalone").utf8))
-        XCTAssertEqual(standalone.targetConversation(selectedKind: "continuation", currentConversation: "different-chat"), "different-chat")
-    }
-
-    func testSimpleScheduleControlsPreserveExactDesktopRuleUntilEdited() {
-        let original = "FREQ=DAILY;INTERVAL=1;BYHOUR=9;BYMINUTE=0"
-        var values = AutomationScheduleForm.values(for: original)
-        XCTAssertEqual(values["schedule"], "daily")
-        XCTAssertEqual(values["hour"], "9")
-        XCTAssertEqual(values["minute"], "0")
-        values["name"] = "Renamed"; values["timezone"] = "America/New_York"
-        XCTAssertEqual(AutomationScheduleForm.rule(for: values), original)
-        values["hour"] = "15"; values["_scheduleChanged"] = "true"
-        XCTAssertEqual(AutomationScheduleForm.rule(for: values), "FREQ=DAILY;BYHOUR=15;BYMINUTE=0")
-    }
-    func testSupportedScheduleVariantsHaveFriendlyControls() {
-        let samples = [
-            ("FREQ=HOURLY;INTERVAL=1;BYMINUTE=30", "hourly"),
-            ("FREQ=WEEKLY;BYDAY=FR,TH,WE,TU,MO;BYHOUR=8;BYMINUTE=15", "weekdays"),
-            ("FREQ=WEEKLY;INTERVAL=1;BYDAY=SA;BYHOUR=10", "weekly"),
-            ("FREQ=MONTHLY;INTERVAL=1;BYMONTHDAY=31;BYHOUR=9;BYMINUTE=0", "monthly")
-        ]
-        for (rule, kind) in samples {
-            let values = AutomationScheduleForm.values(for: rule)
-            XCTAssertEqual(values["schedule"], kind)
-            XCTAssertEqual(AutomationScheduleForm.rule(for: values), rule)
-        }
-    }
-    func testUnrepresentableRecurrencesStayCustomWithoutDataLoss() {
-        for rule in ["FREQ=HOURLY;INTERVAL=2", "FREQ=WEEKLY;BYDAY=MO,FR", "FREQ=DAILY;BYHOUR=9,17", "FREQ=MONTHLY;BYMONTHDAY=0", "FREQ=DAILY;BYHOUR=9;BYHOUR=10", "FREQ=MONTHLY;BYSETPOS=2"] {
-            let values = AutomationScheduleForm.values(for: rule)
-            XCTAssertEqual(values["schedule"], "custom")
-            XCTAssertEqual(AutomationScheduleForm.rule(for: values), rule)
-        }
-    }
-
-    func testRestoredSubmittedCustomDraftKeepsItsRequestPayload() {
-        let original = "FREQ=DAILY;INTERVAL=1;BYHOUR=9;BYMINUTE=0"
-        var draft = ManagementDraft()
-        draft.values = ["schedule": "custom", "custom": original, "_scheduleChanged": "true", "_submitted": "true"]
-        let requestId = draft.requestId
-        draft.values.merge(AutomationScheduleForm.values(for: original)) { _, parsed in parsed }
-        XCTAssertEqual(draft.values["schedule"], "daily")
-        XCTAssertEqual(draft.values["_submitted"], "true")
-        XCTAssertEqual(draft.requestId, requestId)
-        XCTAssertEqual(AutomationScheduleForm.rule(for: draft.values), original)
     }
 
 }

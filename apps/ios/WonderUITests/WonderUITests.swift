@@ -21,9 +21,6 @@ import UIKit
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved", "-diagnostics-history-replay"]
         app.launch()
-        openSidebarIfNeeded(app)
-        let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
-        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 10))
         let scroll = anyElement(app, identifier: "conversation-scroll")
         XCTAssertTrue(scroll.exists)
@@ -56,8 +53,6 @@ import UIKit
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-marketing", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
-        let chat = app.buttons["chat-row:fixture-parent-conversation"]
-        XCTAssertTrue(chat.waitForExistence(timeout: 10)); chat.tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "A little structure, plenty of room.")).firstMatch.waitForExistence(timeout: 10))
         let pill = app.buttons["subagent-status-pill"]
         XCTAssertTrue(pill.waitForExistence(timeout: 5))
@@ -68,7 +63,6 @@ import UIKit
         app.terminate()
         app.launchArguments.append("-diagnostics-marketing-approval")
         app.launch()
-        XCTAssertTrue(chat.waitForExistence(timeout: 10)); chat.tap()
         XCTAssertTrue(app.staticTexts["Save your Saturday plan."].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Allow once"].isEnabled)
         retainMenuScreenshot(app, name: "Native sample approval request")
@@ -94,10 +88,6 @@ import UIKit
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout", "-UIPreferredContentSizeCategoryName", contentSize] + extra
         app.launch()
-        openSidebarIfNeeded(app)
-        let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
-        row.tap()
         let draft = app.textViews["message-draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 10))
         let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Reply 12.")).firstMatch
@@ -177,10 +167,6 @@ import UIKit
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-older", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
-        openSidebarIfNeeded(app)
-        let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
-        row.tap()
         let draft = app.textViews["message-draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 10))
         let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Reply 6.")).firstMatch
@@ -194,15 +180,6 @@ import UIKit
         XCTAssertGreaterThanOrEqual(olderWork.staticTexts.firstMatch.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
         XCTAssertGreaterThan(reply.frame.maxY, header.frame.maxY)
         XCTAssertLessThan(reply.frame.minY, conversationLayoutBottom(app, draft: draft))
-        if !row.isHittable {
-            header.buttons.firstMatch.tap()
-            XCTAssertTrue(row.waitForExistence(timeout: 5))
-            row.tap()
-            XCTAssertTrue(reply.waitForExistence(timeout: 5))
-            retainConversationLayoutEvidence(app, name: "Older reply restored after returning to chat", reply: reply, header: header, draft: draft)
-            XCTAssertGreaterThan(reply.frame.maxY, header.frame.maxY)
-            XCTAssertLessThan(reply.frame.minY, conversationLayoutBottom(app, draft: draft))
-        }
         let bottom = app.buttons["scroll-to-bottom"]
         XCTAssertTrue(bottom.waitForExistence(timeout: 5))
         bottom.tap()
@@ -232,10 +209,6 @@ import UIKit
         app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-older",
                                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXXXL"]
         app.launch()
-        openSidebarIfNeeded(app)
-        let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
-        row.tap()
         let work = app.buttons["activity-group:layout-turn-6/layout-work-6"]
         let scroll = anyElement(app, identifier: "conversation-scroll")
         let draft = app.textViews["message-draft"]
@@ -277,39 +250,6 @@ import UIKit
         evidence.name = name + " geometry"
         evidence.lifetime = .keepAlways
         add(evidence)
-    }
-
-    func testChatStatusesAndVisibleReadRetryClearUnreadWithoutScrolling() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-read-status"]
-        app.launch()
-        let unread = app.buttons["chat-row:fixture-parent-conversation"]
-        let working = app.buttons["chat-row:fixture-working"]
-        let read = app.buttons["chat-row:fixture-read"]
-        XCTAssertTrue(unread.waitForExistence(timeout: 10))
-        XCTAssertEqual(unread.value as? String, "Unread")
-        XCTAssertEqual(working.value as? String, "Working")
-        XCTAssertEqual(read.value as? String, "Read")
-        retainMenuScreenshot(app, name: "Chat status: unread dot, working spinner, read blank")
-        unread.tap()
-        XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 10))
-        // The first PATCH receives 503. Stay still while the same visible
-        // snapshot retries, then return to the list and check the host reply.
-        let settled = NSPredicate { _, _ in (unread.value as? String) == "Read" }
-        // On iPhone the sidebar is offscreen, so use the return to Chats after
-        // the bounded retry window rather than reading a hidden row.
-        if !unread.isHittable {
-            let expectation = XCTestExpectation(description: "Allow the read retry")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { expectation.fulfill() }
-            wait(for: [expectation], timeout: 4)
-            app.navigationBars.buttons.firstMatch.tap()
-        }
-        expectation(for: settled, evaluatedWith: nil)
-        waitForExpectations(timeout: 8)
-        XCTAssertEqual(unread.value as? String, "Read")
-        XCTAssertEqual(working.value as? String, "Working")
-        retainMenuScreenshot(app, name: "Unread cleared after visible read acknowledgement")
     }
 
     func testWorkingImagesFollowActivityExpansion() throws {
@@ -424,36 +364,6 @@ import UIKit
         }
     }
 
-    func testChatContextMenuPreview() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        // Synthetic, offline Bot and Group rows exercise the real menu. Network
-        // mutations stay disabled, while Copy ID remains available.
-        for arguments in [["-read-preview", "-send-preview", "-chats-preview"], ["-read-preview", "-chats-preview"], ["-connections-preview"]] {
-            app.launchArguments = arguments
-            app.launch()
-            let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:")).firstMatch
-            XCTAssertTrue(row.waitForExistence(timeout: 10))
-            row.press(forDuration: 1)
-            XCTAssertTrue(app.buttons["Advanced"].waitForExistence(timeout: 3))
-            XCTAssertTrue(app.buttons["Archive"].exists)
-            XCTAssertFalse(app.buttons["Archive"].isEnabled)
-            XCTAssertFalse(app.buttons["Copy ID"].exists)
-            XCTAssertFalse(app.buttons["Delete"].exists)
-            retainMenuScreenshot(app, name: arguments.contains("-send-preview") ? "Bot menu" : "Group menu")
-            app.buttons["Advanced"].tap()
-            XCTAssertTrue(app.buttons["Copy ID"].waitForExistence(timeout: 3))
-            XCTAssertTrue(app.buttons["Copy ID"].isEnabled)
-            XCTAssertTrue(app.buttons["Delete"].exists)
-            XCTAssertFalse(app.buttons["Delete"].isEnabled)
-            retainMenuScreenshot(app, name: "Advanced menu")
-            app.buttons["Copy ID"].tap()
-            XCTAssertFalse(app.buttons["Advanced"].exists)
-            XCTAssertTrue(row.isHittable)
-            app.terminate()
-        }
-    }
-
     func testComposerApprovalChangesWithoutSavingIndicatorAndPersists() throws {
         try checkOptimisticApprovals(minimumDuration: 0, minimumChanges: 12)
     }
@@ -472,8 +382,6 @@ import UIKit
         let arguments = ["-diagnostics-subagent-fixture", "-diagnostics-optimistic-approval", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launchArguments = arguments + ["-diagnostics-approval-reset"]
         app.launch()
-        let chat = app.buttons["chat-row:fixture-parent-conversation"]
-        XCTAssertTrue(chat.waitForExistence(timeout: 10)); chat.tap()
         let approval = app.buttons["composer-permissions"]
         XCTAssertTrue(approval.waitForExistence(timeout: 10))
         XCTAssertTrue(approval.isEnabled)
@@ -507,7 +415,6 @@ import UIKit
         app.terminate()
         app.launchArguments = arguments
         app.launch()
-        XCTAssertTrue(chat.waitForExistence(timeout: 10)); chat.tap()
         XCTAssertTrue(approval.waitForExistence(timeout: 10))
         XCTAssertEqual(approval.value as? String, finalTitle)
         let evidence = XCTAttachment(string: "Completed \(changes) permission changes and \(helperCycles) helper open/close cycles in \(Date().timeIntervalSince(started)) seconds. Synthetic host; no messages or model work.")
@@ -542,8 +449,6 @@ import UIKit
             app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-goal-fixture",
                                    "-diagnostics-goal-status", status]
             app.launch()
-            let parent = app.buttons["chat-row:fixture-parent-conversation"]
-            XCTAssertTrue(parent.waitForExistence(timeout: 10)); parent.tap()
             let goal = app.buttons["goal-status-pill"]
             let agents = app.buttons["subagent-status-pill"]
             XCTAssertTrue(goal.waitForExistence(timeout: 10))
@@ -574,8 +479,6 @@ import UIKit
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-goal-fixture",
                                "-UIPreferredContentSizeCategoryName", contentSize]
         app.launch()
-        let parent = app.buttons["chat-row:fixture-parent-conversation"]
-        XCTAssertTrue(parent.waitForExistence(timeout: 10)); parent.tap()
         let draft = app.textViews["message-draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 10))
         draft.tap(); draft.typeText("parent draft")
@@ -688,8 +591,6 @@ import UIKit
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-UIPreferredContentSizeCategoryName", contentSize]
         app.launch()
-        let parent = app.buttons["chat-row:fixture-parent-conversation"]
-        XCTAssertTrue(parent.waitForExistence(timeout: 10)); parent.tap()
         let parentDraft = app.textViews["message-draft"]
         XCTAssertTrue(parentDraft.waitForExistence(timeout: 10))
         parentDraft.tap(); parentDraft.typeText("parent draft")
@@ -1033,11 +934,7 @@ import UIKit
         try checkPhysicalComputerView()
     }
 
-    func testPhysicalClaudeAnswersQuestionAndViewsComputer() throws {
-        try checkPhysicalComputerView(chatName: "Claude acceptance")
-    }
-
-    private func checkPhysicalComputerView(chatName: String? = nil) throws {
+    private func checkPhysicalComputerView() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
@@ -1062,38 +959,12 @@ import UIKit
                            "The expected Local Network permission alert was not dismissed.")
         }
 
-        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:"))
-        let row = chatName.map { rows.matching(NSPredicate(format: "label CONTAINS %@", $0)).firstMatch } ?? rows.firstMatch
-        if chatName != nil { XCTAssertTrue(row.waitForExistence(timeout: 20), "Prepare the exact owned Claude acceptance Bot before this test") }
+        openSidebarIfNeeded(app)
+        let row = threadRows(app).firstMatch
         guard row.waitForExistence(timeout: 20) else {
             throw XCTSkip("Requires an unlocked physical device paired with the updated Wonder host.")
         }
         row.tap()
-        if chatName != nil {
-            let model = app.buttons["composer-model"]
-            XCTAssertTrue(model.waitForExistence(timeout: 10))
-            expectation(for: NSPredicate(format: "value == %@", "Haiku 4.5"), evaluatedWith: model)
-            waitForExpectations(timeout: 10)
-            // Only answer the prepared synthetic request. This test never
-            // submits a prompt or approves file, command, or connector work.
-            let first = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND identifier ENDSWITH %@", "question-option-", "-A, B")).firstMatch
-            let second = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND identifier ENDSWITH %@", "question-option-", "-C")).firstMatch
-            let finalReply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Phone acceptance complete")).firstMatch
-            // A device rerun can verify the durable completed reply without
-            // spending another subscription prompt for the same fixture.
-            if !finalReply.exists {
-                XCTAssertTrue(first.waitForExistence(timeout: 30))
-                first.tap(); second.tap()
-                XCTAssertTrue(first.isSelected && second.isSelected)
-                let reply = app.buttons["Reply"]
-                XCTAssertTrue(reply.isEnabled)
-                retainMenuScreenshot(app, name: "Live Claude multi-select question")
-                reply.tap()
-            }
-            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Phone acceptance complete")).firstMatch.waitForExistence(timeout: 60))
-            XCTAssertTrue(app.buttons["subagent-status-pill"].waitForExistence(timeout: 15))
-            retainMenuScreenshot(app, name: "Live Claude reply and helper")
-        }
         let viewComputer = app.buttons["computer-status-pill"]
         XCTAssertTrue(viewComputer.waitForExistence(timeout: 15))
         viewComputer.tap()
@@ -1173,7 +1044,8 @@ import UIKit
         defer { removeUIInterruptionMonitor(localNetworkMonitor) }
         app.launch()
 
-        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:")).firstMatch
+        openSidebarIfNeeded(app)
+        let row = threadRows(app).firstMatch
         guard row.waitForExistence(timeout: 20) else {
             throw XCTSkip("Requires an unlocked physical device paired with the updated Wonder host.")
         }
@@ -1259,8 +1131,8 @@ import UIKit
     func testPhysicalComputerTrackpadAndKeyboardThreeMinuteSession() throws {
         continueAfterFailure = false
         guard let qaRowID = ProcessInfo.processInfo.environment["WONDER_PAIRING_QA_CONVERSATION_ID"],
-              qaRowID.hasPrefix("chat-row:"), qaRowID.count > "chat-row:".count else {
-            throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA chat-row accessibility identifier.")
+              isThreadRowIdentifier(qaRowID) else {
+            throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA thread-row accessibility identifier.")
         }
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
@@ -1282,7 +1154,7 @@ import UIKit
         captureEvidence.name = "Bounded diagnostics capture window"
         captureEvidence.lifetime = .keepAlways
         add(captureEvidence)
-        app.buttons["settings-done"].tap()
+        leaveSettings(app)
         openSidebarIfNeeded(app)
 
         let row = app.buttons.matching(identifier: qaRowID).firstMatch
@@ -1525,14 +1397,15 @@ import UIKit
     func testPhysicalComputerRecenterActionDismissesMenuThreeTimes() throws {
         continueAfterFailure = false
         guard let qaRowID = ProcessInfo.processInfo.environment["WONDER_PAIRING_QA_CONVERSATION_ID"],
-              qaRowID.hasPrefix("chat-row:"), qaRowID.count > "chat-row:".count else {
-            throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA chat-row accessibility identifier.")
+              isThreadRowIdentifier(qaRowID) else {
+            throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA thread-row accessibility identifier.")
         }
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
         defer { removeUIInterruptionMonitor(localNetworkMonitor) }
         app.launch()
 
+        openSidebarIfNeeded(app)
         let row = app.buttons.matching(identifier: qaRowID).firstMatch
         guard row.waitForExistence(timeout: 20) else {
             throw XCTSkip("Requires the explicitly selected QA chat and a paired, unlocked physical device.")
@@ -1597,14 +1470,15 @@ import UIKit
     func testPhysicalComputerControlExternalRevocationLeavesViewOnly() throws {
         continueAfterFailure = false
         guard let qaRowID = ProcessInfo.processInfo.environment["WONDER_PAIRING_QA_CONVERSATION_ID"],
-              qaRowID.hasPrefix("chat-row:"), qaRowID.count > "chat-row:".count else {
-            throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA chat-row accessibility identifier.")
+              isThreadRowIdentifier(qaRowID) else {
+            throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA thread-row accessibility identifier.")
         }
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
         defer { removeUIInterruptionMonitor(localNetworkMonitor) }
         app.launch()
 
+        openSidebarIfNeeded(app)
         let row = app.buttons.matching(identifier: qaRowID).firstMatch
         guard row.waitForExistence(timeout: 20) else {
             throw XCTSkip("Requires the explicitly selected QA chat and a paired, unlocked physical device.")
@@ -1705,195 +1579,6 @@ import UIKit
         }
     }
 
-    func testDiagnosticsTeachingUnavailableFixture() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-diagnostics-teaching-fixture"]
-        app.launch()
-
-        XCTAssertTrue(app.collectionViews["teaching-view"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Teach Orbit"].exists)
-        XCTAssertTrue(app.staticTexts["Teaching capture unavailable"].exists)
-        XCTAssertTrue(app.staticTexts["Teaching requires a newer Wonder host. Update Wonder on your Mac, then try again."].exists)
-        let outcome = app.textFields["teaching-outcome"]
-        XCTAssertTrue(outcome.waitForExistence(timeout: 5))
-        XCTAssertFalse((outcome.value as? String ?? "").contains("Create a preview file"))
-        XCTAssertFalse(app.buttons["teaching-done"].exists)
-        let start = app.buttons["teaching-start"]
-        XCTAssertTrue(start.exists)
-        XCTAssertFalse(start.isEnabled)
-        XCTAssertTrue(app.staticTexts["Saved · Version 1 · Replay not verified"].exists)
-        retainMenuScreenshot(app, name: "Teaching capture unavailable")
-
-        app.buttons["teaching-skill-fixture-private-skill"].tap()
-        XCTAssertTrue(app.staticTexts["Visibility, This Bot only"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Version 1, Replay not verified"].exists)
-        XCTAssertTrue(app.textFields["teaching-fixture-title"].exists)
-        XCTAssertTrue(app.textFields["teaching-fixture-date"].exists)
-        app.buttons["teaching-fixture-run"].tap()
-        let fixtureSuccess = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture tested · Version 1 ·")).firstMatch
-        XCTAssertTrue(fixtureSuccess.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Preview artifact verified (256 bytes). Real supervised replay remains unverified."].exists)
-        XCTAssertTrue(app.staticTexts["Version 1, Fixture tested"].exists)
-        retainMenuScreenshot(app, name: "Fixture tested")
-    }
-
-    func testDiagnosticsTeachingAvailableFixtureRecordsReviewsAndSaves() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-diagnostics-teaching-fixture", "-diagnostics-teaching-flow-fixture"]
-        app.launch()
-
-        XCTAssertTrue(app.collectionViews["teaching-view"].waitForExistence(timeout: 10))
-        let start = app.buttons["teaching-start"]
-        XCTAssertTrue(start.waitForExistence(timeout: 5))
-        XCTAssertTrue(start.isEnabled)
-        XCTAssertFalse(app.buttons["teaching-done"].exists)
-        XCTAssertEqual(app.textFields["teaching-outcome"].value as? String, "Create a preview file")
-        XCTAssertFalse(app.staticTexts["Take control is required"].exists)
-        retainMenuScreenshot(app, name: "Teaching ready after control lease")
-
-        start.tap()
-        XCTAssertTrue(app.buttons["teaching-stop"].waitForExistence(timeout: 5))
-        let recording = app.descendants(matching: .any).matching(identifier: "teaching-recording-status").firstMatch
-        XCTAssertTrue(recording.waitForExistence(timeout: 5))
-        XCTAssertTrue(recording.label.contains("Recording"))
-        let privacyCopy = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "No screenshots or clipboard text")).firstMatch
-        XCTAssertTrue(privacyCopy.exists)
-        retainMenuScreenshot(app, name: "Teaching recording")
-
-        app.buttons["teaching-stop"].tap()
-        let teachingForm = app.collectionViews["teaching-view"]
-        let reviewStatus = app.descendants(matching: .any).matching(identifier: "teaching-session-status").firstMatch
-        for _ in 0..<6 {
-            if reviewStatus.exists {
-                break
-            }
-            teachingForm.swipeDown(velocity: .slow)
-        }
-        XCTAssertTrue(reviewStatus.waitForExistence(timeout: 5))
-        let readyToReview = expectation(
-            for: NSPredicate(format: "value == %@", "Ready to review"),
-            evaluatedWith: reviewStatus
-        )
-        wait(for: [readyToReview], timeout: 5)
-        XCTAssertEqual(reviewStatus.value as? String, "Ready to review")
-        retainMenuScreenshot(app, name: "Teaching after stop")
-        let capturedActions = app.buttons
-            .matching(NSPredicate(format: "label BEGINSWITH %@", "Captured actions ·"))
-            .firstMatch
-        var capturedActionsVisible = false
-        for _ in 0..<12 {
-            if capturedActions.exists {
-                let frame = capturedActions.frame
-                if capturedActions.isHittable && frame.minY >= app.frame.minY && frame.maxY <= app.frame.maxY - 8 {
-                    capturedActionsVisible = true
-                    break
-                }
-                if frame.minY < app.frame.minY {
-                    teachingForm.swipeDown(velocity: .slow)
-                } else {
-                    teachingForm.swipeUp(velocity: .slow)
-                }
-            } else {
-                teachingForm.swipeUp(velocity: .slow)
-            }
-        }
-        XCTAssertTrue(capturedActionsVisible, "Captured actions did not become fully visible within the bounded reveal loop")
-        XCTAssertTrue(capturedActions.waitForExistence(timeout: 5))
-        assertFullyVisible(capturedActions, in: app)
-        XCTAssertEqual(capturedActions.value as? String, "Collapsed")
-        capturedActions.tap()
-        let expanded = expectation(
-            for: NSPredicate(format: "value == %@", "Expanded"),
-            evaluatedWith: capturedActions
-        )
-        wait(for: [expanded], timeout: 5)
-        XCTAssertEqual(capturedActions.value as? String, "Expanded")
-        let capturedEvent = app.descendants(matching: .any).matching(identifier: "teaching-event-1-0").firstMatch
-        XCTAssertTrue(capturedEvent.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Text input redacted"].exists)
-        XCTAssertTrue(app.staticTexts["Showing first 3 of 4 actions"].exists)
-        retainMenuScreenshot(app, name: "Teaching captured event review")
-        for _ in 0..<6 where !app.textFields["teaching-draft-inputs"].exists {
-            teachingForm.swipeUp(velocity: .slow)
-        }
-        XCTAssertTrue(app.textFields["teaching-draft-inputs"].waitForExistence(timeout: 5))
-
-        for _ in 0..<6 {
-            let review = app.buttons["teaching-review"]
-            if review.isHittable && review.frame.minY >= app.frame.minY && review.frame.maxY <= app.frame.maxY - 8 {
-                break
-            }
-            teachingForm.swipeUp(velocity: .slow)
-        }
-        let review = app.buttons["teaching-review"]
-        XCTAssertTrue(review.waitForExistence(timeout: 5))
-        assertFullyVisible(review, in: app)
-        review.tap()
-        for _ in 0..<6 where !app.buttons["teaching-save"].exists {
-            teachingForm.swipeUp(velocity: .slow)
-        }
-        XCTAssertTrue(app.buttons["teaching-save"].waitForExistence(timeout: 5))
-        app.buttons["teaching-save"].tap()
-        for _ in 0..<6 where !app.staticTexts["Saved privately"].exists || !app.staticTexts["Saved is distinct from Replay verified. This demonstration has not been replay-verified."].exists {
-            teachingForm.swipeUp(velocity: .slow)
-        }
-        XCTAssertTrue(app.staticTexts["Saved privately"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Saved is distinct from Replay verified. This demonstration has not been replay-verified."].exists)
-        retainMenuScreenshot(app, name: "Teaching saved private skill")
-    }
-
-    func testDiagnosticsTeachingCancelLeavesNoDemonstration() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-diagnostics-teaching-fixture", "-diagnostics-teaching-flow-fixture"]
-        app.launch()
-
-        XCTAssertTrue(app.buttons["teaching-start"].waitForExistence(timeout: 10))
-        app.buttons["teaching-start"].tap()
-        XCTAssertTrue(app.buttons["teaching-cancel"].waitForExistence(timeout: 5))
-        app.buttons["teaching-cancel"].tap()
-        let cancelled = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Cancelled")).firstMatch
-        XCTAssertTrue(cancelled.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["teaching-save"].exists)
-        XCTAssertFalse(app.staticTexts["Saved privately"].exists)
-    }
-
-    func testLiveChatContextMenuCancellation() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launch()
-        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:"))
-        guard rows.firstMatch.waitForExistence(timeout: 15) else { throw XCTSkip("Requires a paired device with a chat in the list.") }
-        let row = app.buttons[rows.firstMatch.identifier]
-        // Read-only interaction: open Delete, then Cancel. Never confirm a
-        // deletion or archive an owner's conversation during this live check.
-        for iteration in 0..<12 {
-            row.press(forDuration: 0.8)
-            XCTAssertTrue(app.buttons["Advanced"].waitForExistence(timeout: 3))
-            XCTAssertTrue(app.buttons["Archive"].isEnabled)
-            if iteration == 0 { retainMenuScreenshot(app, name: "Live chat menu") }
-            app.buttons["Advanced"].tap()
-            XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 3))
-            XCTAssertTrue(app.buttons["Copy ID"].isEnabled)
-            if iteration == 0 { retainMenuScreenshot(app, name: "Live advanced menu") }
-            app.buttons["Delete"].tap()
-            XCTAssertTrue(app.buttons["Delete forever"].waitForExistence(timeout: 3))
-            if iteration == 0 { retainMenuScreenshot(app, name: "Delete confirmation") }
-            if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() }
-            else {
-                // Newer iOS can present confirmation as a popover, where
-                // cancellation is tapping its native outside-dismiss region.
-                let dismiss = app.otherElements["PopoverDismissRegion"]
-                XCTAssertTrue(dismiss.exists)
-                dismiss.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.2)).tap()
-            }
-            XCTAssertFalse(app.buttons["Delete forever"].exists)
-            XCTAssertTrue(row.isHittable)
-        }
-    }
-
     private func retainMenuScreenshot(_ app: XCUIApplication, name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name
@@ -1945,6 +1630,7 @@ import UIKit
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launch()
+        openSidebarIfNeeded(app)
         let chat = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Wonder iOS")).firstMatch
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation.") }
         chat.tap()
@@ -1995,6 +1681,7 @@ import UIKit
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launch()
+        openSidebarIfNeeded(app)
         let chat = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Wonder iOS")).firstMatch
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation with a generated image.") }
         chat.tap()
@@ -2045,12 +1732,13 @@ import UIKit
         app.launchEnvironment["WONDER_DIAGNOSTICS_CAPTURE"] = "1"
         let launchStart = Date()
         app.launch()
+        openSidebarIfNeeded(app)
         func row(_ id: String) -> XCUIElement {
-            app.buttons.matching(NSPredicate(format: "identifier ENDSWITH %@", ":" + id)).firstMatch
+            threadRows(app).matching(NSPredicate(format: "identifier ENDSWITH %@", ":" + id)).firstMatch
         }
         guard row(ids[0]).waitForExistence(timeout: 30) else {
             retainMenuScreenshot(app, name: "Selected conversation rows missing")
-            let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:")).allElementsBoundByIndex.prefix(40).map(\.identifier)
+            let rows = threadRows(app).allElementsBoundByIndex.prefix(40).map(\.identifier)
             let evidence = XCTAttachment(string: "state=\(app.state.rawValue)\nrows=\(rows.joined(separator: "\n"))")
             evidence.name = "Visible chat rows"; evidence.lifetime = .keepAlways; add(evidence)
             throw XCTSkip("Requires a paired device listing the selected conversations.")
@@ -2062,11 +1750,7 @@ import UIKit
         measure(metrics: [XCTClockMetric(), XCTCPUMetric(application: app), XCTMemoryMetric(application: app), XCTOSSignpostMetric.scrollingAndDecelerationMetric], options: options) {
             for id in ids {
                 let chat = row(id)
-                if !chat.isHittable {
-                    // Edge swipe back: a top-left tap can land on a notification banner.
-                    app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
-                        .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)))
-                }
+                if !chat.isHittable { openSidebarIfNeeded(app) }
                 guard chat.waitForExistence(timeout: 15) else { XCTFail("Missing conversation row \(id)"); return }
                 let start = Date()
                 chat.tap()
@@ -2148,8 +1832,9 @@ import UIKit
         continueAfterFailure=false
         let app=XCUIApplication(bundleIdentifier:appBundleIdentifier)
         app.launch()
+        openSidebarIfNeeded(app)
         let chat=app.buttons.matching(NSPredicate(format:"label BEGINSWITH %@", "Diagnostics image preview")).firstMatch
-        guard chat.waitForExistence(timeout:15) else { throw XCTSkip("Prepare the dedicated image test Bot with Preview fixture 4000x3000.png first.") }
+        guard chat.waitForExistence(timeout:15) else { throw XCTSkip("Prepare the dedicated image test thread with Preview fixture 4000x3000.png first.") }
         chat.tap()
         app.buttons["Conversation details"].tap()
         app.buttons["Files"].tap()
@@ -2182,6 +1867,7 @@ import UIKit
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launch()
+        openSidebarIfNeeded(app)
         let chat = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Wonder iOS")).firstMatch
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation.") }
         chat.tap()
@@ -3053,273 +2739,6 @@ import UIKit
         }
     }
 
-    func testNewBotOpensComposerWithoutSetupQuestion() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-read-preview", "-new-bot-preview"]
-        app.launch()
-        let chat = app.staticTexts["Luna"].firstMatch
-        XCTAssertTrue(chat.waitForExistence(timeout: 10))
-        chat.tap()
-        let header = app.otherElements["conversation-avatar-header"]
-        XCTAssertTrue(header.waitForExistence(timeout: 10))
-        XCTAssertTrue(header.label.contains("Luna character, Ocean palette"))
-        XCTAssertTrue(app.textViews["Message Luna"].exists)
-        XCTAssertFalse(app.staticTexts["What should I help with?"].exists)
-        XCTAssertFalse(app.buttons["Skip"].exists)
-        XCTAssertFalse(app.activityIndicators["bot-initialization-progress"].exists)
-        app.buttons["composer-model"].tap()
-        XCTAssertTrue(app.buttons["Claude Haiku 4.5"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["GPT-6 Astra"].exists)
-        retainMenuScreenshot(app, name: "New Bot family selection")
-    }
-
-    func testGroupCreationUsesExistingMembersAndRecoversFrozenSuggestedEdits() throws {
-        continueAfterFailure = false
-        for frozen in [false, true] {
-            let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-            app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-group-creation"] + (frozen ? ["-diagnostics-group-frozen"] : [])
-            app.launch()
-            defer { app.terminate() }
-            let menu = app.buttons["New chat"]
-            XCTAssertTrue(menu.waitForExistence(timeout: 10))
-            menu.tap()
-            app.buttons["New Group Chat"].tap()
-            if frozen {
-                let retry = app.buttons["Retry"]
-                XCTAssertTrue(retry.waitForExistence(timeout: 5))
-                retry.tap()
-                let reset = app.buttons["group-new-draft-action"]
-                XCTAssertTrue(reset.waitForExistence(timeout: 5))
-                retry.tap()
-                XCTAssertTrue(reset.waitForExistence(timeout: 5))
-                reset.tap()
-                let confirm = app.buttons.matching(identifier: "group-start-new-draft").firstMatch
-                XCTAssertTrue(confirm.waitForExistence(timeout: 5))
-                confirm.tap()
-                XCTAssertFalse(retry.exists)
-                let duplicates = app.buttons.matching(NSPredicate(format: "label == %@", "Duplicate"))
-                XCTAssertEqual(duplicates.count, 2)
-                duplicates.firstMatch.tap()
-                app.buttons["Remove Bot"].tap()
-                if app.buttons["Remove Bot"].exists { app.navigationBars.buttons.firstMatch.tap() }
-                XCTAssertEqual(duplicates.count, 1)
-                duplicates.firstMatch.tap()
-                let name = app.textFields["Name"]
-                XCTAssertTrue(name.waitForExistence(timeout: 5))
-                name.tap()
-                name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Duplicate".count) + "Surviving Bot")
-                app.navigationBars.buttons.firstMatch.tap()
-                XCTAssertTrue(app.buttons["Surviving Bot"].waitForExistence(timeout: 5))
-            } else {
-                let member = app.switches.matching(NSPredicate(format: "label == ''")).firstMatch
-                XCTAssertTrue(member.waitForExistence(timeout: 5))
-                member.tap()
-                XCTAssertEqual(member.value as? String, "1")
-            }
-            retainMenuScreenshot(app, name: frozen ? "Recovered suggested group edits" : "Existing members group creation")
-            app.buttons["Create"].tap()
-            XCTAssertTrue(app.staticTexts["Verified group"].firstMatch.waitForExistence(timeout: 10),
-                          "The host must accept the edited payload and the group must appear in Chats")
-            XCTAssertFalse(app.buttons["Retry"].exists)
-            app.terminate()
-        }
-    }
-
-    func testBotSettingsUsesCompactAvatarSection() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-read-status"]
-        app.launch()
-        let chat = app.buttons["chat-row:fixture-parent-conversation"]
-        XCTAssertTrue(chat.waitForExistence(timeout: 10))
-        chat.tap()
-        let details = app.buttons["Conversation details"]
-        XCTAssertTrue(details.waitForExistence(timeout: 10))
-        details.tap()
-        let settings = app.buttons["Bot settings"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        settings.tap()
-        XCTAssertTrue(app.textFields["bot-name"].waitForExistence(timeout: 10))
-        let characters = app.scrollViews["science-avatar-character-row"]
-        let colors = app.scrollViews["science-avatar-color-row"]
-        XCTAssertTrue(characters.waitForExistence(timeout: 10))
-        XCTAssertTrue(colors.exists)
-        XCTAssertFalse(app.images["science-avatar-preview"].exists)
-        XCTAssertFalse(app.staticTexts["Character"].exists)
-        XCTAssertFalse(app.staticTexts["Palette"].exists)
-        XCTAssertLessThan(characters.frame.height + colors.frame.height, 210)
-        XCTAssertEqual(app.buttons["science-avatar-shape-luna"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["science-avatar-palette-ocean"].value as? String, "Selected")
-        retainMenuScreenshot(app, name: "Bot settings compact Avatar section")
-    }
-
-    func testBotAvatarSettingsMatchSavedIdentityAndSaveAcrossRelaunch() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        let arguments = ["-diagnostics-subagent-fixture", "-diagnostics-avatar-settings"]
-        app.launchArguments = arguments + ["-diagnostics-avatar-settings-reset"]
-
-        func openChat() {
-            let chat = app.buttons["chat-row:fixture-parent-conversation"]
-            XCTAssertTrue(chat.waitForExistence(timeout: 10))
-            chat.tap()
-            XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 10))
-        }
-        func checkHeader(_ identity: String) {
-            let header = app.descendants(matching: .any)["conversation-avatar-header"].firstMatch
-            let matches = NSPredicate(format: "label CONTAINS %@", identity)
-            XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: matches, object: header)], timeout: 10) == .completed)
-        }
-        func openSettings(shape: String, palette: String) {
-            app.buttons["Conversation details"].tap()
-            let settings = app.buttons["Bot settings"]
-            XCTAssertTrue(settings.waitForExistence(timeout: 10))
-            settings.tap()
-            XCTAssertTrue(app.textFields["bot-name"].waitForExistence(timeout: 10))
-            for id in ["science-avatar-shape-" + shape, "science-avatar-palette-" + palette] {
-                let selected = app.buttons[id]
-                XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Selected"), object: selected)], timeout: 5) == .completed)
-            }
-        }
-        func select(_ id: String, rowID: String) {
-            let target = app.buttons[id]
-            let row = app.scrollViews[rowID]
-            for _ in 0..<12 {
-                if target.isHittable && target.frame.minX >= row.frame.minX && target.frame.maxX <= row.frame.maxX { break }
-                if target.frame.midX < row.frame.midX { row.swipeRight(velocity: .slow) }
-                else { row.swipeLeft(velocity: .slow) }
-            }
-            XCTAssertTrue(target.isHittable)
-            target.tap()
-            XCTAssertEqual(target.value as? String, "Selected")
-        }
-        func save() {
-            let button = app.buttons["save-bot"]
-            XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: button)], timeout: 10) == .completed)
-            button.tap()
-        }
-
-        app.launch()
-        openChat()
-        checkHeader("Luna character, Ocean palette")
-        // The seeded unrelated draft has stale Sun/Amber values but no avatar edits.
-        openSettings(shape: "luna", palette: "ocean")
-        select("science-avatar-shape-atom", rowID: "science-avatar-character-row")
-        save() // A host conflict must be visible without scrolling the settings form.
-        let saveFailure = app.alerts["Couldn’t save Bot"]
-        XCTAssertTrue(saveFailure.waitForExistence(timeout: 5))
-        XCTAssertTrue(saveFailure.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "This change is blocked")).firstMatch.exists)
-        retainMenuScreenshot(app, name: "Avatar save conflict is immediately visible")
-        saveFailure.buttons["OK"].tap()
-        XCTAssertEqual(app.buttons["science-avatar-shape-atom"].value as? String, "Selected")
-        app.terminate()
-
-        app.launchArguments = arguments
-        app.launch()
-        openChat()
-        checkHeader("Luna character, Ocean palette")
-        openSettings(shape: "atom", palette: "ocean")
-        save()
-        XCTAssertTrue(waitUntilGone(app.textFields["bot-name"], timeout: 10))
-        checkHeader("Atom character, Ocean palette")
-        openSettings(shape: "atom", palette: "ocean")
-        select("science-avatar-palette-rose", rowID: "science-avatar-color-row")
-        save()
-        XCTAssertTrue(waitUntilGone(app.textFields["bot-name"], timeout: 10))
-        checkHeader("Atom character, Rose palette")
-        app.terminate()
-
-        app.launch()
-        openChat()
-        checkHeader("Atom character, Rose palette")
-        openSettings(shape: "atom", palette: "rose")
-        retainMenuScreenshot(app, name: "Saved Bot avatar matches settings after relaunch")
-        app.terminate()
-    }
-
-    func testDiagnosticsScienceAvatarsSelectPersistAndExposeMotionStates() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-diagnostics-avatar-fixture", "-diagnostics-avatar-reset"]
-        app.launch()
-
-        let preview = app.images["science-avatar-preview"]
-        XCTAssertTrue(preview.waitForExistence(timeout: 10))
-        let shapes = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "science-avatar-shape-"))
-        let palettes = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "science-avatar-palette-"))
-        XCTAssertEqual(shapes.count, 7)
-        XCTAssertEqual(palettes.count, 12)
-        let characterRow = app.scrollViews["science-avatar-character-row"]
-        let colorRow = app.scrollViews["science-avatar-color-row"]
-        XCTAssertTrue(characterRow.exists)
-        XCTAssertTrue(colorRow.exists)
-        XCTAssertFalse(app.staticTexts["Character"].exists)
-        XCTAssertFalse(app.staticTexts["Palette"].exists)
-        XCTAssertLessThanOrEqual(colorRow.frame.height, 48)
-        retainMenuScreenshot(app, name: "Compact avatar rows")
-
-        func reveal(_ target: XCUIElement, in row: XCUIElement) {
-            for _ in 0..<12 {
-                if target.isHittable && target.frame.minX >= row.frame.minX && target.frame.maxX <= row.frame.maxX { return }
-                row.swipeLeft(velocity: .slow)
-            }
-            XCTFail("Could not reveal \(target.identifier) in its horizontal row")
-        }
-        let luna = app.buttons["science-avatar-shape-luna"]
-        let ocean = app.buttons["science-avatar-palette-ocean"]
-        reveal(luna, in: characterRow)
-        XCTAssertTrue(luna.label.contains("Luna character"))
-        XCTAssertTrue(luna.label.contains("Amber palette"))
-        XCTAssertEqual(luna.value as? String, "Not selected")
-        luna.tap()
-        reveal(ocean, in: colorRow)
-        XCTAssertEqual(ocean.frame.width, 44, accuracy: 0.5)
-        XCTAssertEqual(ocean.frame.height, 44, accuracy: 0.5)
-        XCTAssertEqual(ocean.label, "Ocean color")
-        ocean.tap()
-        XCTAssertEqual(luna.value as? String, "Selected")
-        XCTAssertTrue(luna.label.contains("Ocean palette"))
-        XCTAssertEqual(ocean.value as? String, "Selected")
-        retainMenuScreenshot(app, name: "Selected Luna and Ocean in compact rows")
-
-        let motionPicker = app.buttons["science-avatar-motion-picker"]
-        XCTAssertTrue(motionPicker.waitForExistence(timeout: 5))
-        let fixtureScroll = app.scrollViews["science-avatar-fixture-scroll"]
-        for _ in 0..<6 {
-            if motionPicker.isHittable { break }
-            fixtureScroll.swipeUp(velocity: .slow)
-        }
-        motionPicker.tap()
-        let working = app.buttons["Working"]
-        XCTAssertTrue(working.waitForExistence(timeout: 5))
-        working.tap()
-        retainMenuScreenshot(app, name: "Science avatars Luna Ocean Working")
-
-        let saveAvatar = app.buttons["science-avatar-save"]
-        for _ in 0..<6 {
-            if saveAvatar.isHittable { break }
-            fixtureScroll.swipeUp(velocity: .slow)
-        }
-        saveAvatar.tap()
-        let payload = app.staticTexts["science-avatar-saved-payload"]
-        XCTAssertTrue(payload.label.contains("avatarShape"))
-        XCTAssertTrue(payload.label.contains("luna"))
-        XCTAssertTrue(payload.label.contains("avatarPalette"))
-        XCTAssertTrue(payload.label.contains("ocean"))
-        XCTAssertFalse(payload.label.contains("avatarColor"))
-        app.terminate()
-
-        let relaunched = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        relaunched.launchArguments = ["-diagnostics-avatar-fixture"]
-        relaunched.launch()
-        XCTAssertTrue(relaunched.buttons["science-avatar-shape-luna"].waitForExistence(timeout: 10))
-        XCTAssertEqual(relaunched.buttons["science-avatar-shape-luna"].value as? String, "Selected")
-        XCTAssertEqual(relaunched.buttons["science-avatar-palette-ocean"].value as? String, "Selected")
-        XCTAssertTrue(relaunched.staticTexts["science-avatar-saved-payload"].label.contains("luna"))
-        relaunched.terminate()
-    }
-
     func testDiagnosticsApprovalPickerUsesThreeChoicesPersistsAndShowsOldHostState() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -3435,8 +2854,13 @@ import UIKit
         XCTAssertEqual(result, .completed, "Closing moves the drawer off-screen and makes the main menu usable")
     }
 
-    private func liveChatRowIdentifiers(_ app: XCUIApplication) -> Set<String> {
-        Set(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:")).allElementsBoundByIndex.map(\.identifier))
+    /// Thread rows of the Projects sidebar, including pinned threads.
+    private func threadRows(_ app: XCUIApplication) -> XCUIElementQuery {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ OR identifier BEGINSWITH %@", "project-thread:", "pinned-thread:"))
+    }
+
+    private func isThreadRowIdentifier(_ identifier: String) -> Bool {
+        ["project-thread:", "pinned-thread:"].contains { identifier.hasPrefix($0) && identifier.count > $0.count }
     }
 
     private func assertFullyVisible(_ element: XCUIElement, in app: XCUIApplication, bottomInset: CGFloat = 8) {
@@ -3449,44 +2873,6 @@ import UIKit
     private func waitUntilGone(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !element.exists }, object: nil)
         return XCTWaiter.wait(for: [gone], timeout: timeout) == .completed
-    }
-
-    /// New Bot creation opens its direct chat before the hidden initialization
-    /// turn is necessarily archivable. Retry only the exact created row after
-    /// the server's busy/409 response; never fall back to another row.
-    private func archiveExactNewBotRow(_ row: XCUIElement, app: XCUIApplication, timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if !row.exists { return true }
-            row.press(forDuration: 0.8)
-            let archive = app.buttons["Archive"]
-            guard archive.waitForExistence(timeout: 5) else { continue }
-            guard archive.isEnabled else {
-                RunLoop.current.run(until: min(deadline, Date().addingTimeInterval(1)))
-                continue
-            }
-            archive.tap()
-
-            let actionDeadline = min(deadline, Date().addingTimeInterval(12))
-            while Date() < actionDeadline {
-                if !row.exists { return true }
-                let alert = app.alerts.firstMatch
-                if alert.exists {
-                    let text = ([alert.label] + alert.staticTexts.allElementsBoundByIndex.map(\.label))
-                        .joined(separator: " ").lowercased()
-                    let busyInitialization = text.contains("couldn’t update chat") ||
-                        text.contains("couldn't update chat") || text.contains("finish or stop") ||
-                        text.contains("initial") || text.contains("queue") || text.contains("working")
-                    guard busyInitialization else { return false }
-                    let ok = alert.buttons["OK"]
-                    if ok.exists { ok.tap() } else if alert.buttons.firstMatch.exists { alert.buttons.firstMatch.tap() }
-                    RunLoop.current.run(until: min(deadline, Date().addingTimeInterval(1)))
-                    break
-                }
-                RunLoop.current.run(until: min(actionDeadline, Date().addingTimeInterval(0.25)))
-            }
-        }
-        return !row.exists
     }
 
     // Navigation is read-only: choosing a project, changing destination and
@@ -3633,38 +3019,6 @@ import UIKit
         XCTAssertEqual(draft.value as? String, text)
     }
 
-    // The existing isolated Group API fixture rejects a changed retry and
-    // refinements that omit the owner's edits. No model or real Bot runs.
-    func testGroupReviewRetainsEditsAndRetriesExactAcceptedRoster() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-group-creation", "-diagnostics-group-review"]
-        app.launch()
-        let review = app.buttons["Review team"]
-        XCTAssertTrue(review.waitForExistence(timeout: 10)); review.tap()
-        let name = app.textFields["group-review-name"]
-        if !name.waitForExistence(timeout: 10) {
-            if app.buttons["Action failed"].exists { app.buttons["Action failed"].tap() }
-            XCTFail(app.debugDescription)
-            return
-        }
-        name.tap()
-        name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Suggested team".count) + "Edited team")
-        let refine = app.textFields["group-review-refine"]
-        refine.tap(); refine.typeText("Keep the existing Bot")
-        app.buttons["Send change"].tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Kept your edits.")).firstMatch.waitForExistence(timeout: 10))
-        app.buttons["Close"].tap(); review.tap()
-        XCTAssertTrue(name.waitForExistence(timeout: 10))
-        XCTAssertEqual(name.value as? String, "Edited team")
-        retainMenuScreenshot(app, name: "Group review restores owner edits")
-        app.buttons["group-review-create"].tap()
-        XCTAssertTrue(app.buttons["Retry create"].waitForExistence(timeout: 10))
-        XCTAssertFalse(name.isEnabled)
-        app.buttons["group-review-create"].tap()
-        XCTAssertTrue(app.staticTexts["Verified group"].waitForExistence(timeout: 10))
-    }
-
     func testPairForLiveRun() throws {
         continueAfterFailure = false
         guard let link = ProcessInfo.processInfo.environment["WONDER_PAIRING_LINK"] else { throw XCTSkip("No explicit pairing offer supplied.") }
@@ -3744,8 +3098,8 @@ import UIKit
         continueAfterFailure = false
         guard let host = ProcessInfo.processInfo.environment["WONDER_PAIRING_HOST_NAME"] else { throw XCTSkip("An explicit paired host is required.") }
         guard let qaRowID = ProcessInfo.processInfo.environment["WONDER_PAIRING_QA_CONVERSATION_ID"],
-              qaRowID.hasPrefix("chat-row:"), qaRowID.count > "chat-row:".count else {
-            throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA chat-row accessibility identifier.")
+              isThreadRowIdentifier(qaRowID) else {
+            throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA thread-row accessibility identifier.")
         }
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-show-connections"]
@@ -3760,8 +3114,8 @@ import UIKit
             let connected = app.staticTexts["Connected to your computer."]
             XCTAssertTrue(connected.waitForExistence(timeout: 20))
             XCTAssertFalse(app.buttons["Pair again"].exists)
-            app.buttons["settings-done"].tap()
-        openSidebarIfNeeded(app)
+            leaveSettings(app)
+            openSidebarIfNeeded(app)
             let chat = app.buttons.matching(identifier: qaRowID).firstMatch
             XCTAssertTrue(chat.waitForExistence(timeout: 20))
             chat.tap()
@@ -3778,9 +3132,6 @@ import UIKit
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
             "-diagnostics-folder-poll-offline", "-diagnostics-usage-fixture", "-diagnostics-usage-exhausted"]
         app.launch()
-        openSidebarIfNeeded(app)
-        let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
-        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         let draft = app.textViews["message-draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 10)); draft.tap(); draft.typeText("Keep this draft")
         let limit = app.staticTexts["composer-usage-limit"]
@@ -3908,157 +3259,6 @@ import UIKit
             retainMenuScreenshot(app, name: "Multiple question choices " + size)
             app.terminate()
         }
-    }
-
-    func testPhysicalNewBotCreationOpensAndArchivesExactChat() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = []
-        app.launch()
-        var createdRowID: String?
-        var cleanupCompleted = false
-        var creationStarted: Date?
-        var creationElapsed: TimeInterval?
-        var creationOutcome = "Not started"
-        defer {
-            if let creationStarted {
-                let elapsed = creationElapsed ?? Date().timeIntervalSince(creationStarted)
-                let attachment = XCTAttachment(string: "Outcome: \(creationOutcome)\nNew chat tap-to-outcome: \(String(format: "%.3f", elapsed)) seconds")
-                attachment.name = "New Bot creation outcome"
-                attachment.lifetime = .keepAlways
-                add(attachment)
-            }
-            if let createdRowID, !cleanupCompleted {
-                if !app.buttons[createdRowID].exists {
-                    let back = app.navigationBars.buttons.firstMatch
-                    if back.exists { back.tap() }
-                }
-                let row = app.buttons[createdRowID]
-                if row.waitForExistence(timeout: 5) {
-                    cleanupCompleted = archiveExactNewBotRow(row, app: app, timeout: 90)
-                }
-            }
-            app.terminate()
-        }
-
-        let newChatMenu = app.buttons.matching(NSPredicate(format: "label == %@", "New chat and requests")).firstMatch
-        guard newChatMenu.waitForExistence(timeout: 20) else {
-            if app.buttons["settings-add-computer"].waitForExistence(timeout: 3) || app.staticTexts["Add a computer in Settings"].exists {
-                throw XCTSkip("Requires an existing paired Mac connection.")
-            }
-            XCTFail("The paired Diagnostics Chats UI did not appear.")
-            return
-        }
-
-        let existingRowIDs = liveChatRowIdentifiers(app)
-        let connectedHostLabels = Set(app.buttons.allElementsBoundByIndex.compactMap { button -> String? in
-            guard button.isEnabled, (button.value as? String) == "Connected", !button.label.isEmpty else { return nil }
-            return button.label
-        })
-        retainMenuScreenshot(app, name: "Physical New Bot before create")
-        guard newChatMenu.isEnabled else {
-            XCTFail("The Chats New Bot menu is unavailable because the paired Mac is not connected.")
-            return
-        }
-
-        let started = Date()
-        creationStarted = started
-        newChatMenu.tap()
-        let newBot = app.buttons["New Bot"]
-        if !newBot.waitForExistence(timeout: 1) {
-            retainMenuScreenshot(app, name: "Physical New Bot host picker")
-            let hostButtons = app.buttons.allElementsBoundByIndex.filter { button in
-                button.isEnabled && button.isHittable && connectedHostLabels.contains(button.label)
-                    && ((button.value as? String) ?? "").isEmpty
-            }
-            guard hostButtons.count == 1 else {
-                creationOutcome = "Failed to select the connected host submenu"
-                creationElapsed = Date().timeIntervalSince(started)
-                XCTFail("Expected one enabled connected-host submenu, found \(hostButtons.count).")
-                return
-            }
-            hostButtons[0].tap()
-            guard newBot.waitForExistence(timeout: 5), newBot.isEnabled, newBot.isHittable else {
-                creationOutcome = "Connected host submenu did not expose New Bot"
-                creationElapsed = Date().timeIntervalSince(started)
-                XCTFail("The connected host submenu did not expose a hittable New Bot action.")
-                return
-            }
-        }
-        XCTAssertTrue(newBot.isEnabled, "The resolved New Bot action is disabled.")
-        XCTAssertTrue(newBot.isHittable, "The resolved New Bot action is not hittable.")
-        newBot.tap()
-
-        let header = anyElement(app, identifier: "conversation-avatar-header")
-        let composer = app.textViews["message-draft"]
-        let deadline = Date().addingTimeInterval(60)
-        let progress = app.descendants(matching: .any).matching(identifier: "new-bot-progress").firstMatch
-        var sawProgress = false
-        var opened = false
-        while Date() < deadline {
-            if header.exists && composer.exists {
-                opened = true
-                creationOutcome = "Conversation opened"
-                creationElapsed = Date().timeIntervalSince(started)
-                break
-            }
-            if progress.exists || app.staticTexts["Creating Bot…"].exists {
-                sawProgress = true
-                creationOutcome = "Creation progress visible"
-            }
-            if app.alerts.firstMatch.exists {
-                creationOutcome = "Creation alert appeared"
-                creationElapsed = Date().timeIntervalSince(started)
-                break
-            }
-            RunLoop.current.run(until: min(deadline, Date().addingTimeInterval(0.25)))
-        }
-
-        XCTAssertTrue(sawProgress || opened, "New Bot creation did not expose progress before the conversation opened.")
-        guard opened else {
-            let alert = app.alerts.firstMatch
-            if alert.exists {
-                retainMenuScreenshot(app, name: "Physical New Bot creation failure")
-                let message = alert.staticTexts.allElementsBoundByIndex
-                    .map(\.label)
-                    .filter { !$0.isEmpty && $0 != "Couldn’t create Bot" }
-                    .joined(separator: " ")
-                let failure = message.isEmpty ? alert.label : message
-                creationOutcome = "Failed: \(failure)"
-                XCTFail("New Bot creation failed: \(failure)")
-            } else {
-                retainMenuScreenshot(app, name: "Physical New Bot creation timeout")
-                creationOutcome = "Timed out before chat or error"
-                creationElapsed = Date().timeIntervalSince(started)
-                XCTFail("New Bot did not open a conversation with both its header and composer within 60 seconds.")
-            }
-            return
-        }
-
-        XCTAssertTrue(header.exists)
-        XCTAssertTrue(composer.exists)
-        retainMenuScreenshot(app, name: "Physical New Bot after open")
-
-        let back = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 10), "The opened Bot conversation did not expose a navigation back control.")
-        back.tap()
-
-        var newRowIDs = Set<String>()
-        let rowDeadline = Date().addingTimeInterval(30)
-        while Date() < rowDeadline {
-            newRowIDs = liveChatRowIdentifiers(app).subtracting(existingRowIDs)
-            if !newRowIDs.isEmpty { break }
-            RunLoop.current.run(until: min(rowDeadline, Date().addingTimeInterval(0.25)))
-        }
-        XCTAssertEqual(newRowIDs.count, 1, "Expected exactly one new chat row by identifier difference, found \(newRowIDs.count): \(newRowIDs.sorted())")
-        guard let newRowID = newRowIDs.first, newRowIDs.count == 1 else { return }
-        createdRowID = newRowID
-
-        let newRow = app.buttons[newRowID]
-        XCTAssertTrue(newRow.waitForExistence(timeout: 10))
-        cleanupCompleted = archiveExactNewBotRow(newRow, app: app, timeout: 90)
-        XCTAssertTrue(cleanupCompleted, "The exact newly created Bot row did not disappear after archival.")
-        retainMenuScreenshot(app, name: "Physical New Bot after cleanup")
     }
 
     func testPhysicalTenMinuteLiveScenarioCompletes() throws {

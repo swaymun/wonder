@@ -355,36 +355,6 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertNil(model.conversationLoadFailures["saved-chat"])
     }
 
-    @MainActor func testChatListStatusPrioritizesWorkAndUsesFreshState() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let model = ConnectionModel(cameraFixtureStoreRoot: root, saved: Self.cameraSavedConnection())
-        func chat(_ state: String, unread: Bool = true) throws -> ChatSummary {
-            try JSONDecoder().decode(ChatSummary.self, from: Data("""
-            {"conversationId":"status","botId":"bot","title":"Bot","messageCount":1,"deliveryState":"\(state)","hasUnread":\(unread),"isArchived":false,"isPinned":false}
-            """.utf8))
-        }
-        for state in ["accepted_by_wonder", "dispatching_to_codex", "accepted_by_codex", "streaming"] {
-            XCTAssertEqual(model.chatListStatus(try chat(state)), .working)
-        }
-        XCTAssertEqual(model.chatListStatus(try chat("completed")), .unread)
-        XCTAssertEqual(model.chatListStatus(try chat("completed", unread: false)), .read)
-        for state in ["interrupted", "failed", "uncertain", "safe_to_retry"] {
-            XCTAssertEqual(model.chatListStatus(try chat(state)), .unread)
-        }
-        func snapshot(_ status: String) throws -> ConversationSnapshot {
-            try JSONDecoder().decode(ConversationSnapshot.self, from: Data("""
-            {"conversationId":"status","hostEpoch":"epoch","lastSequence":1,"messages":[],"assistantMessages":[],"thread":{"hydrated":true,"turns":[{"id":"turn","status":"\(status)","items":[]}]}}
-            """.utf8))
-        }
-        model.snapshots["status"] = try snapshot("completed")
-        XCTAssertEqual(model.chatListStatus(try chat("streaming")), .unread)
-        model.snapshots["status"] = try snapshot("inProgress")
-        XCTAssertEqual(model.chatListStatus(try chat("interrupted")), .working)
-        model.cachedConversationIds.insert("status")
-        XCTAssertEqual(model.chatListStatus(try chat("completed", unread: false)), .read)
-    }
-
     private func managedBot(_ id: String, avatar: String, archived: Bool = false) throws -> ManagedBot {
         let json = """
         {"id":"\(id)","name":"\(id)","role":"Test","systemPrompt":"","workspacePath":"/Bots/\(id)","permissionProfile":"bot-\(id)","permissionMode":"workspace","approvalMode":"ask-for-approval","model":"model","reasoningEffort":"medium","serviceTier":"default","isArchived":\(archived),"conversationId":"chat-\(id)","avatarColor":"#ffb51c","avatarShape":"sun","avatarPalette":"\(avatar)","workingDirectory":"/Workspace"}
@@ -568,15 +538,6 @@ final class WonderDiagnosticsTests: XCTestCase {
         }
     }
 
-    @MainActor func testScienceAvatarPickerContainsLargeTextWithoutHorizontalOverflow() {
-        let view = ScienceAvatarPicker(shape: .constant(.sun), paletteID: .constant(ScienceAvatarCatalog.defaultPalette))
-            .environment(\.dynamicTypeSize, .accessibility5)
-        let host = UIHostingController(rootView: view)
-        host.loadViewIfNeeded()
-        let measured = host.sizeThatFits(in: CGSize(width: 390, height: 4000))
-        XCTAssertLessThanOrEqual(measured.width, 390.5)
-    }
-
     @MainActor func testScienceAvatarFallbacksAndMotionSemanticsAreDeterministic() {
         XCTAssertEqual(ScienceAvatarPresentation.shape(rawValue: nil, identity: "fixture-bot"), ScienceAvatarCatalog.stableShape(for: "fixture-bot"))
         XCTAssertEqual(ScienceAvatarPresentation.palette(rawValue: nil, legacyColor: "#3864A0").id, "ocean")
@@ -681,44 +642,6 @@ final class WonderDiagnosticsTests: XCTestCase {
 
         reducer.reduce(activeTurnID: nil, trackedTurnStatus: .completed, isPresented: true, reduceMotion: false)
         XCTAssertEqual(reducer.output.doneTrigger, 1)
-    }
-
-    func testBotAvatarPayloadUsesNamedIdentityAndPreservesUnrelatedFields() {
-        let draft = [
-            "name": "Renamed Bot",
-            "role": "A useful Bot",
-            "avatarColor": "#123456",
-            "avatarShape": ScienceAvatarShape.atom.rawValue,
-            "avatarPalette": "ocean",
-            "_approvalChanged": "true"
-        ]
-        let payload = BotAvatarPayload.sanitized(draft)
-        XCTAssertEqual(payload["name"], "Renamed Bot")
-        XCTAssertEqual(payload["role"], "A useful Bot")
-        XCTAssertEqual(payload["avatarShape"], "atom")
-        XCTAssertEqual(payload["avatarPalette"], "ocean")
-        XCTAssertNil(payload["avatarColor"])
-        XCTAssertNil(payload["_approvalChanged"])
-
-        let oldBot = BotAvatarPayload.sanitized(["name": "Old", "avatarColor": "#3864A0"])
-        XCTAssertEqual(oldBot["name"], "Old")
-        XCTAssertNil(oldBot["avatarShape"])
-        XCTAssertNil(oldBot["avatarPalette"])
-
-        let futureBot = BotAvatarPayload.sanitized(
-            ["name": "Future", "avatarShape": "quasar", "avatarPalette": "ultraviolet"],
-            avatarFields: []
-        )
-        XCTAssertEqual(futureBot["name"], "Future")
-        XCTAssertNil(futureBot["avatarShape"])
-        XCTAssertNil(futureBot["avatarPalette"])
-
-        let shapeOnly = BotAvatarPayload.sanitized(
-            ["name": "Future", "avatarShape": "luna", "avatarPalette": "ultraviolet"],
-            avatarFields: ["avatarShape"]
-        )
-        XCTAssertEqual(shapeOnly["avatarShape"], "luna")
-        XCTAssertNil(shapeOnly["avatarPalette"])
     }
 
     @MainActor func testImageCanvasKeepsItsHeightWhileLoadingAndOnFailure() {
@@ -1073,58 +996,6 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(bodies.first, bodies.last, "An ambiguous reply must not silently become Skip")
     }
 
-    @MainActor func testConversationalBotRetryKeepsPayloadAndRevokedCreationDoesNotSubmit() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { MessageRecoveryURLProtocol.releaseHeld(); try? FileManager.default.removeItem(at: root) }
-        MessageRecoveryURLProtocol.reset()
-        let model = recoveryModel(root: root)
-        model.managementDrafts?.remove("bot.conversational-new")
-        defer { model.managementDrafts?.remove("bot.conversational-new") }
-        let defaults = NewBotDefaults.load()
-        let options = try JSONSerialization.data(withJSONObject: [
-            "firstMessageModelSelection": true,
-            "models": [["id": defaults.model.isEmpty ? "fixture-model" : defaults.model, "displayName": "Fixture", "hidden": false,
-                "reasoningEfforts": defaults.reasoningEffort.isEmpty ? [] : [["id": defaults.reasoningEffort, "label": "Fixture"]],
-                "serviceTiers": [["id": defaults.serviceTier ?? "default", "label": "Fixture"]]]],
-            "approvalModes": [["id": defaults.approvalMode.rawValue, "allowed": true]], "allowedApprovalPolicies": []
-        ])
-        for _ in 0..<2 { MessageRecoveryURLProtocol.enqueue(path: "/api/v1/bot-options", body: options) }
-        MessageRecoveryURLProtocol.fail(path: "/api/v1/bots/new", error: .timedOut)
-        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/bots/new", body: try JSONEncoder().encode(managedBot("created", avatar: "ocean")))
-        do { _ = try await model.createConversationalBot(); XCTFail("Ambiguous creation must retain its request") }
-        catch { XCTAssertNotNil(model.managementDrafts?.load("bot.conversational-new")) }
-        _ = try await model.createConversationalBot()
-        let bodies = MessageRecoveryURLProtocol.bodies(path: "/api/v1/bots/new")
-        XCTAssertEqual(bodies.count, 2)
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: bodies[0]) as? NSDictionary,
-                       try JSONSerialization.jsonObject(with: bodies[1]) as? NSDictionary)
-        XCTAssertNil(model.managementDrafts?.load("bot.conversational-new"))
-
-        MessageRecoveryURLProtocol.reset()
-        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/bot-options", body: options)
-        MessageRecoveryURLProtocol.hold(path: "/api/v1/bot-options")
-        let pending = Task { try await model.createConversationalBot() }
-        for _ in 0..<100 {
-            if !MessageRecoveryURLProtocol.bodies(path: "/api/v1/bot-options", includingEmpty: true).isEmpty { break }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: "/api/v1/bot-options", includingEmpty: true).count, 1)
-        let reserved = try XCTUnwrap(model.managementDrafts?.load("bot.conversational-new"))
-        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/bot-options", body: options)
-        let second = Task { try await model.createConversationalBot() }
-        for _ in 0..<100 {
-            if MessageRecoveryURLProtocol.bodies(path: "/api/v1/bot-options", includingEmpty: true).count == 2 { break }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        XCTAssertEqual(model.managementDrafts?.load("bot.conversational-new")?.requestId, reserved.requestId,
-                       "Overlapping entry paths must share the durable creation identity before waiting for options")
-        model.accessEnded = true
-        MessageRecoveryURLProtocol.releaseHeld()
-        do { _ = try await pending.value; XCTFail("Revoked creation must be cancelled") } catch {}
-        do { _ = try await second.value; XCTFail("Revoked overlapping creation must be cancelled") } catch {}
-        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/bots/new").isEmpty)
-    }
-
     @MainActor func testSharedConnectionMaintenanceSurvivesAnotherWindowClosing() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1337,6 +1208,34 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/conversations/project-chat/messages").isEmpty)
     }
 
+    // Contract: a confirmed read clears the thread's unread dot everywhere it
+    // shows and after relaunch. Regression: the Mac confirms project reads with
+    // an empty reply, which the Bot summary decoder rejected, so the dot stayed.
+    @MainActor func testProjectReadClearsUnreadAcrossSidebarAndRelaunch() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        model.projects.forgetCache()
+        defer { model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
+        await model.projects.refresh()
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects/project/threads", body: projectPage(pinned: false, unread: true))
+        model.projects.loadThreads("project")
+        for _ in 0..<100 {
+            if model.projects.threads["project"]?.hasLoaded == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", body: projectDetail(pinned: false, unread: true))
+        try await model.projects.loadDetail("project-chat")
+        XCTAssertTrue(model.projects.hasUnread("project-chat"))
+        model.projects.markRead("project-chat")
+        XCTAssertFalse(model.projects.hasUnread("project-chat"))
+        XCTAssertEqual(model.projects.threads["project"]?.threads.first?.hasUnread, false)
+        XCTAssertEqual(model.projects.details["project-chat"]?.hasUnread, false)
+        let restarted = recoveryModel(root: root)
+        XCTAssertFalse(restarted.projects.hasUnread("project-chat"))
+    }
+
     @MainActor private func prepareProject(_ model: ConnectionModel) async throws {
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
         await model.projects.refresh()
@@ -1350,11 +1249,11 @@ final class WonderDiagnosticsTests: XCTestCase {
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", body: projectDetail(pinned: false))
         try await model.projects.loadDetail("project-chat")
     }
-    private func projectDetail(pinned: Bool, plan: Bool = false) -> Data {
-        Data(#"{"conversationId":"project-chat","projectId":"project","projectName":"Project","title":"Thread","family":"claude","model":"claude:sonnet","effort":"high","accessMode":"workspace","workingFolder":"/fixture","workingFolderName":"fixture","isPinned":\#(pinned),"hasUnread":false,"hasNativeSession":true,"folderInProject":true,"claudeApproval":"ask","planMode":\#(plan)}"#.utf8)
+    private func projectDetail(pinned: Bool, plan: Bool = false, unread: Bool = false) -> Data {
+        Data(#"{"conversationId":"project-chat","projectId":"project","projectName":"Project","title":"Thread","family":"claude","model":"claude:sonnet","effort":"high","accessMode":"workspace","workingFolder":"/fixture","workingFolderName":"fixture","isPinned":\#(pinned),"hasUnread":\#(unread),"hasNativeSession":true,"folderInProject":true,"claudeApproval":"ask","planMode":\#(plan)}"#.utf8)
     }
-    private func projectPage(pinned: Bool) -> Data {
-        Data(#"{"threads":[{"reference":"claude:fixture","conversationId":"project-chat","title":"Thread","family":"claude","updatedAt":1,"isPinned":\#(pinned),"hasUnread":false,"isWorking":false}],"nextCursor":null,"partial":[]}"#.utf8)
+    private func projectPage(pinned: Bool, unread: Bool = false) -> Data {
+        Data(#"{"threads":[{"reference":"claude:fixture","conversationId":"project-chat","title":"Thread","family":"claude","updatedAt":1,"isPinned":\#(pinned),"hasUnread":\#(unread),"isWorking":false}],"nextCursor":null,"partial":[]}"#.utf8)
     }
     private func projectCatalog(pinned: Bool) -> Data {
         let pins = pinned ? #"[{"projectId":"project","thread":{"reference":"claude:fixture","conversationId":"project-chat","title":"Thread","family":"claude","updatedAt":1,"isPinned":true,"hasUnread":false,"isWorking":false}}]"# : "[]"
@@ -2547,7 +2446,6 @@ extension WonderDiagnosticsTests {
         model.editDraft("Stale view edit", chat: chat.id)
         XCTAssertEqual(try store.loadComposer(conversation: chat.id).draft, fresh.draft)
         XCTAssertTrue(model.accessEnded)
-        XCTAssertEqual(model.macStatus, "Pair again")
     }
 }
 
@@ -3026,444 +2924,5 @@ extension WonderDiagnosticsTests {
         if let response { value["response"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(response)) }
         else { value.removeValue(forKey: "response") }
         return try JSONDecoder().decode(AsyncQuestion.self, from: JSONSerialization.data(withJSONObject: value))
-    }
-}
-
-extension WonderDiagnosticsTests {
-    @MainActor func testTeachingCancelWhileStartingCancelsTheLateReceipt() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root); TeachingLifecycleURLProtocol.releaseHeld() }
-        TeachingLifecycleURLProtocol.hold(method: "POST", suffix: "/sessions")
-        let start = Task { await teaching.start() }
-        try await waitForTeachingRequest(suffix: "/sessions")
-        XCTAssertTrue(teaching.isStarting)
-        XCTAssertTrue(teaching.hasCaptureToResolve)
-        await teaching.cancel()
-        XCTAssertTrue(teaching.interrupted)
-        XCTAssertFalse(teaching.isRecording)
-        TeachingLifecycleURLProtocol.releaseHeld()
-        await start.value
-        XCTAssertEqual(teaching.session?.state, "cancelled")
-        XCTAssertFalse(teaching.isStarting)
-        XCTAssertFalse(teaching.hasCaptureToResolve)
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/cancel"), 1)
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/sessions"), 1)
-    }
-
-    @MainActor func testTeachingControlEndedDuringStartIsIdempotent() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root); TeachingLifecycleURLProtocol.releaseHeld() }
-        TeachingLifecycleURLProtocol.hold(method: "POST", suffix: "/sessions")
-        let start = Task { await teaching.start() }
-        try await waitForTeachingRequest(suffix: "/sessions")
-        teaching.markControlEnded()
-        XCTAssertTrue(teaching.interrupted)
-        XCTAssertFalse(teaching.isRecording)
-        await teaching.controlEnded()
-        await teaching.controlEnded()
-        TeachingLifecycleURLProtocol.releaseHeld()
-        await start.value
-        await teaching.controlEnded()
-        XCTAssertTrue(teaching.interrupted)
-        XCTAssertFalse(teaching.isRecording)
-        XCTAssertEqual(teaching.session?.state, "cancelled")
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/cancel"), 1)
-    }
-
-    @MainActor func testTeachingAmbiguousStartRetriesExactRequest() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        TeachingLifecycleURLProtocol.failNextStart()
-        await teaching.start()
-        XCTAssertNil(teaching.session)
-        XCTAssertNotNil(teaching.startRequestID)
-        teaching.outcome = "A changed field must not alter the saved request"
-        await teaching.retry()
-        let requests = TeachingLifecycleURLProtocol.bodies(suffix: "/sessions")
-        XCTAssertEqual(requests.count, 2)
-        XCTAssertEqual(requests.first, requests.last)
-        XCTAssertTrue(teaching.isRecording)
-        XCTAssertNil(teaching.startRequestID)
-    }
-
-    @MainActor func testTeachingInterruptedUnknownStartDoesNotCreateAnotherCapture() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        TeachingLifecycleURLProtocol.failNextStart()
-        await teaching.start()
-        await teaching.controlEnded()
-        await teaching.retry()
-        await teaching.start()
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/sessions"), 1)
-        XCTAssertTrue(teaching.interrupted)
-        XCTAssertTrue(teaching.hasCaptureToResolve)
-        XCTAssertFalse(teaching.isRecording)
-        XCTAssertNotNil(teaching.failure)
-    }
-
-    @MainActor func testTeachingStopReviewsSameSessionAndIgnoresLateRecordingPoll() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root); TeachingLifecycleURLProtocol.releaseHeld() }
-        await teaching.start()
-        let id = try XCTUnwrap(teaching.session?.id)
-        TeachingLifecycleURLProtocol.hold(method: "GET", suffix: "/capture")
-        let read = Task { await teaching.readSession() }
-        try await waitForTeachingRequest(suffix: "/capture")
-        await teaching.stop()
-        XCTAssertEqual(teaching.session?.id, id)
-        XCTAssertEqual(teaching.session?.state, "reviewing")
-        teaching.draftName = "My reviewed name"
-        TeachingLifecycleURLProtocol.releaseHeld()
-        await read.value
-        XCTAssertEqual(teaching.session?.state, "reviewing")
-        XCTAssertEqual(teaching.session?.revision, 2)
-        XCTAssertEqual(teaching.draftName, "My reviewed name")
-        XCTAssertFalse(teaching.hasCaptureToResolve)
-        let stop = try XCTUnwrap(TeachingLifecycleURLProtocol.bodies(suffix: "/stop").first)
-        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: stop) as? [String: Any])
-        XCTAssertEqual(payload["expectedRevision"] as? Int, 1)
-    }
-
-    @MainActor func testTeachingStopRefreshesStaleRevisionAndRetriesSameSessionOnce() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        await teaching.start()
-        TeachingLifecycleURLProtocol.advanceCaptureRevision()
-        await teaching.stop()
-        XCTAssertEqual(teaching.session?.id, "capture")
-        XCTAssertEqual(teaching.session?.state, "reviewing")
-        XCTAssertEqual(teaching.session?.revision, 4)
-        XCTAssertNil(teaching.failure)
-        let revisions = try TeachingLifecycleURLProtocol.bodies(suffix: "/stop").map {
-            try XCTUnwrap((JSONSerialization.jsonObject(with: $0) as? [String: Any])?["expectedRevision"] as? Int)
-        }
-        XCTAssertEqual(revisions, [1, 3])
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/sessions"), 1)
-    }
-
-    @MainActor func testTeachingStopConflictRetryIsBounded() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        await teaching.start()
-        TeachingLifecycleURLProtocol.advanceCaptureRevision(alwaysConflict: true)
-        await teaching.stop()
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/stop"), 2)
-        XCTAssertEqual(teaching.session?.id, "capture")
-        XCTAssertEqual(teaching.session?.state, "recording")
-        XCTAssertNotNil(teaching.failure)
-    }
-
-    @MainActor func testTeachingCancellationDoesNotDependOnStaleRevision() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        await teaching.start()
-        await teaching.controlEnded()
-        await teaching.controlEnded()
-        XCTAssertEqual(teaching.session?.state, "cancelled")
-        XCTAssertTrue(teaching.interrupted)
-        XCTAssertFalse(teaching.isRecording)
-        let body = try XCTUnwrap(TeachingLifecycleURLProtocol.bodies(suffix: "/cancel").first)
-        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertNil(payload["expectedRevision"])
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/cancel"), 1)
-    }
-
-    @MainActor func testTeachingSaveKeepsUnverifiedStateAndExistingSkills() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let oldSkill = try JSONDecoder().decode(BotSkill.self, from: TeachingLifecycleURLProtocol.skillData(id: "existing"))
-        teaching.response = BotSkillListResponse(capability: teaching.capability, skills: [oldSkill])
-        await teaching.start()
-        await teaching.stop()
-        teaching.draftName = "Reviewed task"
-        await teaching.review()
-        await teaching.save()
-        XCTAssertEqual(teaching.session?.id, "capture")
-        XCTAssertEqual(teaching.session?.state, "approvedVersion")
-        XCTAssertEqual(Set(teaching.response?.skills.map(\.id) ?? []), ["existing", "saved"])
-        let version = try XCTUnwrap(teaching.response?.skills.first(where: { $0.id == "saved" })?.versions?.first)
-        XCTAssertEqual(version.verificationState, "unverified")
-    }
-
-    @MainActor func testTeachingSaveRequiresReviewOfEveryEditedDraftField() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        await teaching.start()
-        await teaching.stop()
-        await teaching.review()
-        XCTAssertTrue(teaching.hasReviewedCurrentDraft)
-        let fields: [(ReferenceWritableKeyPath<TeachingSessionModel, String>, String)] = [
-            (\.draftName, "Changed name"), (\.draftDescription, "Changed description"),
-            (\.draftGoal, "Changed goal"), (\.draftInputSchema, #"{"flag":true}"#),
-            (\.draftPrerequisites, "Changed prerequisites"), (\.draftSteps, "Changed steps"),
-            (\.draftResultChecks, "Changed result checks")
-        ]
-        for (field, edited) in fields {
-            let reviewed = teaching[keyPath: field]
-            teaching[keyPath: field] = edited
-            XCTAssertFalse(teaching.hasReviewedCurrentDraft)
-            await teaching.save()
-            XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/save-version"), 0)
-            XCTAssertEqual(teaching[keyPath: field], edited)
-            XCTAssertEqual(teaching.session?.state, "skillDraft")
-            XCTAssertEqual(teaching.failure, "Review your latest changes before saving.")
-            teaching[keyPath: field] = reviewed
-            XCTAssertTrue(teaching.hasReviewedCurrentDraft)
-        }
-        teaching.draftSteps = "Save only these newly reviewed instructions"
-        await teaching.review()
-        XCTAssertTrue(teaching.hasReviewedCurrentDraft)
-        let review = try XCTUnwrap(TeachingLifecycleURLProtocol.bodies(suffix: "/review").last)
-        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: review) as? [String: Any])
-        XCTAssertEqual(payload["steps"] as? String, teaching.draftSteps)
-        await teaching.save()
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/save-version"), 1)
-        XCTAssertEqual(teaching.session?.state, "approvedVersion")
-    }
-
-    @MainActor func testTeachingNewerSessionRevisionRequiresAnotherReviewBeforeSave() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        await teaching.start()
-        await teaching.stop()
-        await teaching.review()
-        let reviewed = try XCTUnwrap(teaching.session)
-        let draft = teaching.draftSteps
-        var latest = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(reviewed)) as? [String: Any])
-        latest["revision"] = reviewed.revision + 1
-        latest["steps"] = "A newer accepted review"
-        teaching.session = try JSONDecoder().decode(TeachingSession.self, from: JSONSerialization.data(withJSONObject: latest))
-        XCTAssertFalse(teaching.hasReviewedCurrentDraft)
-        await teaching.save()
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/save-version"), 0)
-        XCTAssertEqual(teaching.draftSteps, draft)
-    }
-
-    @MainActor func testTeachingLateReviewReceiptDoesNotApproveNewerEdits() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root); TeachingLifecycleURLProtocol.releaseHeld() }
-        await teaching.start()
-        await teaching.stop()
-        TeachingLifecycleURLProtocol.hold(method: "POST", suffix: "/review")
-        let review = Task { await teaching.review() }
-        try await waitForTeachingRequest(suffix: "/review")
-        teaching.draftSteps = "Edited after the review request was sent"
-        TeachingLifecycleURLProtocol.releaseHeld()
-        await review.value
-        XCTAssertFalse(teaching.hasReviewedCurrentDraft)
-        await teaching.save()
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/save-version"), 0)
-        XCTAssertEqual(teaching.draftSteps, "Edited after the review request was sent")
-        XCTAssertEqual(teaching.session?.state, "skillDraft")
-    }
-
-    @MainActor func testTeachingReviewDraftSurvivesControlEndWithoutRecordingAgain() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        await teaching.start()
-        await teaching.stop()
-        let sessionID = try XCTUnwrap(teaching.session?.id)
-        teaching.draftName = "My unsaved review"
-        teaching.draftSteps = "Keep my edited instructions"
-        for expectedState in ["reviewing", "skillDraft"] {
-            XCTAssertEqual(teaching.session?.state, expectedState)
-            XCTAssertTrue(teaching.hasReviewDraft)
-            XCTAssertFalse(teaching.hasCaptureToResolve)
-            teaching.markControlEnded()
-            await teaching.controlEnded()
-            XCTAssertEqual(teaching.session?.id, sessionID)
-            XCTAssertEqual(teaching.session?.state, expectedState)
-            XCTAssertEqual(teaching.draftName, "My unsaved review")
-            XCTAssertEqual(teaching.draftSteps, "Keep my edited instructions")
-            XCTAssertFalse(teaching.interrupted)
-            if expectedState == "reviewing" { await teaching.review() }
-        }
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/sessions"), 1)
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/cancel"), 0)
-    }
-
-    @MainActor func testTeachingNewTaskRequiresResolvedCaptureAndExplicitReset() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        await teaching.start()
-        XCTAssertFalse(teaching.canStartAnotherTask)
-        teaching.startAnotherTask()
-        XCTAssertTrue(teaching.isRecording)
-        await teaching.cancel()
-        XCTAssertTrue(teaching.canStartAnotherTask)
-        XCTAssertEqual(teaching.session?.state, "cancelled")
-        teaching.startAnotherTask()
-        XCTAssertNil(teaching.session)
-        XCTAssertFalse(teaching.interrupted)
-        XCTAssertFalse(teaching.hasCaptureToResolve)
-        XCTAssertEqual(teaching.outcome, "")
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/sessions"), 1)
-    }
-
-    @MainActor func testTeachingHostInterruptionStaysVisibleWithoutRestarting() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        await teaching.start()
-        TeachingLifecycleURLProtocol.interruptNextRead()
-        await teaching.readSession()
-        XCTAssertEqual(teaching.session?.state, "interrupted")
-        XCTAssertTrue(teaching.interrupted)
-        XCTAssertFalse(teaching.isRecording)
-        XCTAssertFalse(teaching.hasCaptureToResolve)
-        XCTAssertTrue(teaching.canStartAnotherTask)
-        XCTAssertNotNil(teaching.failure)
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/sessions"), 1)
-    }
-
-    @MainActor func testTeachingValidatesOutcomeByteLimitBeforeStarting() async throws {
-        let (teaching, root) = try teachingModel()
-        defer { try? FileManager.default.removeItem(at: root) }
-        teaching.outcome = String(repeating: "😀", count: 501)
-        await teaching.start()
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/sessions"), 0)
-        XCTAssertNotNil(teaching.failure)
-        teaching.outcome = String(repeating: "😀", count: 500)
-        await teaching.start()
-        XCTAssertEqual(TeachingLifecycleURLProtocol.count(suffix: "/sessions"), 1)
-        XCTAssertTrue(teaching.isRecording)
-    }
-
-    @MainActor private func teachingModel() throws -> (TeachingSessionModel, URL) {
-        TeachingLifecycleURLProtocol.reset()
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [TeachingLifecycleURLProtocol.self]
-        let saved = try JSONDecoder().decode(SavedConnection.self, from: Data(#"{"origin":"https://teaching-unit.invalid","credential":{"sessionToken":"fixture-session","deviceId":"fixture-device","csrfToken":"fixture-csrf","hostInstallationId":"fixture-host"}}"#.utf8))
-        let connection = ConnectionModel(cameraFixtureStoreRoot: root, saved: saved,
-            api: PairingAPI(configuration: configuration), replayEnabled: false)
-        let teaching = TeachingSessionModel(model: connection, botID: "fixture-bot", botName: "Fixture",
-            conversationID: "computer-fixture", computerSessionID: "fixture-computer-session",
-            controlLeaseID: "fixture-control-lease", controlBindingIsActive: { true })
-        teaching.response = BotSkillListResponse(capability: TeachingLifecycleURLProtocol.capability, skills: [])
-        teaching.outcome = "Create a preview file"
-        return (teaching, root)
-    }
-
-    @MainActor private func waitForTeachingRequest(suffix: String) async throws {
-        for _ in 0..<100 {
-            if TeachingLifecycleURLProtocol.count(suffix: suffix) > 0 { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        XCTFail("The synthetic teaching request was not received")
-        throw URLError(.timedOut)
-    }
-}
-
-private final class TeachingLifecycleURLProtocol: URLProtocol, @unchecked Sendable {
-    private final class State: @unchecked Sendable {
-        let lock = NSLock()
-        var requests: [(String, Data)] = []
-        var heldMethod: String?
-        var heldSuffix: String?
-        var held: [() -> Void] = []
-        var failStart = false
-        var requestID = ""
-        var interruptRead = false
-        var recordingRevision = 1
-        var alwaysConflict = false
-    }
-    private static let state = State()
-    static let capability = TeachingCapability(available: true, action: "none", reason: "Synthetic teaching",
-        provider: "authenticated-remote-control-v1", maxDurationSeconds: 600, maxEvents: 20_000, maxEvidenceBytes: 52_428_800)
-    static func reset() {
-        releaseHeld()
-        state.lock.withLock { state.requests = []; state.failStart = false; state.requestID = ""; state.interruptRead = false; state.recordingRevision = 1; state.alwaysConflict = false }
-    }
-    static func advanceCaptureRevision(alwaysConflict: Bool = false) {
-        state.lock.withLock { state.recordingRevision = 3; state.alwaysConflict = alwaysConflict }
-    }
-    static func interruptNextRead() { state.lock.withLock { state.interruptRead = true } }
-    static func failNextStart() { state.lock.withLock { state.failStart = true } }
-    static func hold(method: String, suffix: String) {
-        state.lock.withLock { state.heldMethod = method; state.heldSuffix = suffix }
-    }
-    static func releaseHeld() {
-        let work = state.lock.withLock {
-            let work = state.held; state.held = []; state.heldMethod = nil; state.heldSuffix = nil; return work
-        }
-        work.forEach { $0() }
-    }
-    static func count(suffix: String) -> Int { state.lock.withLock { state.requests.filter { $0.0.hasSuffix(suffix) }.count } }
-    static func bodies(suffix: String) -> [Data] { state.lock.withLock { state.requests.filter { $0.0.hasSuffix(suffix) }.map(\.1) } }
-    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "teaching-unit.invalid" }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func stopLoading() {}
-    override func startLoading() {
-        var body = request.httpBody ?? Data()
-        if body.isEmpty, let stream = request.httpBodyStream {
-            stream.open(); defer { stream.close() }
-            var buffer = [UInt8](repeating: 0, count: 4096)
-            while stream.hasBytesAvailable {
-                let size = stream.read(&buffer, maxLength: buffer.count)
-                guard size > 0 else { break }
-                body.append(contentsOf: buffer.prefix(size))
-            }
-        }
-        let path = request.url!.path
-        let payload = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-        let action: (Bool, Bool) = Self.state.lock.withLock {
-            Self.state.requests.append((path, body))
-            if let id = payload?["clientRequestId"] as? String, path.hasSuffix("/sessions") { Self.state.requestID = id }
-            let fail = path.hasSuffix("/sessions") && Self.state.failStart
-            if fail { Self.state.failStart = false }
-            let hold = Self.state.heldMethod == request.httpMethod && Self.state.heldSuffix.map(path.hasSuffix) == true
-            if hold { Self.state.held.append { [weak self] in self?.respond(path: path, fail: fail) } }
-            return (fail, hold)
-        }
-        if !action.1 { respond(path: path, fail: action.0) }
-    }
-    private func respond(path: String, fail: Bool) {
-        if fail { client?.urlProtocol(self, didFailWithError: URLError(.timedOut)); return }
-        let (id, revision, alwaysConflict) = Self.state.lock.withLock {
-            (Self.state.requestID, Self.state.recordingRevision, Self.state.alwaysConflict)
-        }
-        if path.hasSuffix("/stop") {
-            let data = Self.bodies(suffix: "/stop").last ?? Data()
-            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            if alwaysConflict || body?["expectedRevision"] as? Int != revision {
-                finish(status: 409, body: Data("{}".utf8))
-                return
-            }
-        }
-        let body: Data
-        if path.hasSuffix("/save-version") {
-            let value: [String: Any] = ["teachingSession": Self.sessionObject(state: "approvedVersion", revision: 4, requestID: id),
-                "skill": Self.skillObject(id: "saved"), "version": Self.versionObject()]
-            body = try! JSONSerialization.data(withJSONObject: value)
-        } else {
-            let interrupted = Self.state.lock.withLock { Self.state.interruptRead }
-            let status: (String, Int) = path.hasSuffix("/capture") && interrupted ? ("interrupted", 2) : path.hasSuffix("/cancel") ? ("cancelled", 5)
-                : path.hasSuffix("/review") ? ("skillDraft", 3) : path.hasSuffix("/stop") ? ("reviewing", revision + 1) : ("recording", revision)
-            body = try! JSONSerialization.data(withJSONObject: Self.sessionObject(state: status.0, revision: status.1, requestID: id))
-        }
-        finish(status: 200, body: body)
-    }
-    private func finish(status: Int, body: Data) {
-        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: body)
-        client?.urlProtocolDidFinishLoading(self)
-    }
-    private static func sessionObject(state: String, revision: Int, requestID: String) -> [String: Any] {
-        ["id": "capture", "clientRequestId": requestID, "ownerDeviceId": "fixture-device", "hostInstallationId": "fixture-host",
-         "botId": "fixture-bot", "conversationId": "computer-fixture", "computerSessionId": "fixture-computer-session",
-         "controlLeaseId": "fixture-control-lease", "state": state, "captureScope": "authenticated-remote-control",
-         "captureProvider": "authenticated-remote-control-v1", "outcome": "Create a preview file", "revision": revision,
-         "eventCount": 1, "evidenceBytes": 0, "createdAt": "2026-09-19T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z",
-         "events": [], "capability": try! JSONSerialization.jsonObject(with: JSONEncoder().encode(capability))]
-    }
-    static func skillData(id: String) throws -> Data { try JSONSerialization.data(withJSONObject: skillObject(id: id)) }
-    private static func skillObject(id: String) -> [String: Any] {
-        ["id": id, "botId": "fixture-bot", "slug": id, "name": "Preview file", "description": "Reviewed task",
-         "state": "active", "activeVersion": 1, "discoverability": "bot-private", "versions": [versionObject()]]
-    }
-    private static func versionObject() -> [String: Any] {
-        ["id": "version", "version": 1, "sourceSessionId": "capture", "contentHash": String(repeating: "a", count: 64),
-         "inputSchema": [:], "createdAt": "2026-09-19T00:00:00Z", "verificationState": "unverified"]
     }
 }

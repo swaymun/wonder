@@ -89,13 +89,6 @@ public enum ScienceAvatarCatalog {
         }
         return shapes[Int(hash) % shapes.count]
     }
-
-    public static func stablePalette(for identity: String) -> String {
-        let hash = ("palette:" + identity).utf8.reduce(UInt32(2_166_136_261)) { value, byte in
-            (value ^ UInt32(byte)) &* 16_777_619
-        }
-        return palettes[Int(hash) % palettes.count].id
-    }
 }
 
 public enum AgentFamily: String, Codable, CaseIterable, Sendable, Identifiable {
@@ -132,22 +125,6 @@ public enum BotPermissionMode: String, CaseIterable, Codable, Sendable, Identifi
     public var id: String { rawValue }
     public var title: String {
         switch self { case .readOnly: "Read-only"; case .workspace: "Workspace"; case .fullAccess: "Full access" }
-    }
-    public static let selectedWorkspaceDescription = "Use the Workspace and locations added in Bot settings, keeping each location’s saved read or write access."
-    public var scopeDescription: String {
-        switch self {
-        case .readOnly: "Read files across your Mac. Ask before editing files or accessing the network. macOS protections still apply."
-        case .workspace: "Read files across your Mac. Edit the Workspace, folders you added with write access in Bot settings, and system temporary folders. Ask before writing elsewhere or accessing the network."
-        case .fullAccess: "Access files and the network without Codex sandbox restrictions or approval prompts. Saved locations do not limit access. macOS protections still apply."
-        }
-    }
-    public func scopeDescription(for family: AgentFamily) -> String {
-        guard family == .claude else { return scopeDescription }
-        switch self {
-        case .readOnly: return "Read files without editing them. Wonder’s private data stays protected."
-        case .workspace: return "Edit the Workspace and folders added with write access. Wonder’s private data stays protected."
-        case .fullAccess: return "Edit files across your Mac. Wonder’s private data and macOS protections still apply."
-        }
     }
 }
 
@@ -232,37 +209,6 @@ public struct BotOptions: Decodable, Sendable {
         return permissionsByFamily?[family.rawValue]?.approvalModes ?? approvalModes
     }
 }
-public struct ManagedAutomation: Codable, Identifiable, Sendable {
-    public let id: String
-    public let name: String
-    public let kind: String
-    public let botId: String
-    public let conversationId: String?
-    public let prompt: String
-    public let rrule: String
-    public let timezone: String
-    public let status: String
-    public let scopeType: String
-    public let scopeId: String
-    public let nextRunAt: String?
-    public let lastAttemptAt: String?
-    public let lastSuccessAt: String?
-    /// A Bot-level automation may be edited while another of its chats is open.
-    public func targetConversation(selectedKind: String, currentConversation: String) -> String {
-        if kind == "continuation", selectedKind == "continuation", let conversationId { return conversationId }
-        return currentConversation
-    }
-}
-public struct ManagedAutomationRun: Decodable, Identifiable, Sendable {
-    public let id: String
-    public let status: String
-    public let startedAt: String
-    public let finishedAt: String?
-    public let error: String?
-    public let conversationId: String?
-}
-public struct SchedulePreview: Decodable, Sendable { public let nextRunAt: String?; public let timezone: String }
-
 /// Only display a visible speaker at a change of speaker in a Group.
 /// Direct conversations retain their identity in the header and accessibility text.
 public enum SpeakerPresentation {
@@ -278,29 +224,6 @@ public struct ManagementDraft: Codable, Equatable, Sendable {
     public var requestId = UUID().uuidString
     public var values: [String: String] = [:]
     public init() {}
-    public mutating func prepareNewBot(defaults: NewBotDefaults, options: BotOptions) throws {
-        guard values["_defaultsResolved"] == nil else { return }
-        values = try defaults.creationValues(options: options)
-        values["_defaultsResolved"] = "true"
-    }
-    public func canSaveBotPermission(options: BotOptions?) -> Bool {
-        guard let selected = values["permissionMode"] else { return true }
-        return options?.permissionModes?.first(where: { $0.id == selected })?.allowed == true
-    }
-    public func canSaveBotApproval(options: BotOptions?) -> Bool {
-        guard let selected = values["approvalMode"] else { return true }
-        return options?.approvalChoices(model: values["model"])?.first(where: { $0.id == selected })?.allowed == true
-    }
-    /// A submitted create is an immutable retry payload, including omitted fields.
-    public mutating func prepareBotPermission(isNew: Bool, currentMode: String?) {
-        guard values["permissionMode"] == nil, values["_submitted"] != "true" else { return }
-        if let currentMode { values["permissionMode"] = currentMode }
-        else if isNew { values["permissionMode"] = BotPermissionMode.workspace.rawValue }
-    }
-    public mutating func prepareBotApproval(isNew: Bool, currentMode: String?) {
-        guard values["approvalMode"] == nil, values["_submitted"] != "true" else { return }
-        values["approvalMode"] = currentMode ?? (values["permissionMode"] == BotPermissionMode.fullAccess.rawValue ? BotApprovalMode.fullAccess.rawValue : BotApprovalMode.askForApproval.rawValue)
-    }
 }
 public struct ManagementDraftStore {
     public let host: String
@@ -315,58 +238,6 @@ public struct ManagementDraftStore {
     public func removeAll() { for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) { defaults.removeObject(forKey: key) } }
 }
 
-/// Map only recurrence combinations the native controls can represent exactly.
-/// Keep the received rule byte-for-byte until a recurrence control is changed.
-public enum AutomationScheduleForm {
-    public static let recurrenceFields: Set<String> = ["schedule", "hour", "minute", "weekday", "monthday", "custom"]
-    public static func values(for rule: String) -> [String: String] {
-        var result = ["schedule": "custom", "custom": rule, "_originalRule": rule, "_scheduleChanged": "false", "hour": "9", "minute": "0", "weekday": "MO", "monthday": "1"]
-        var fields: [String: String] = [:]
-        for component in rule.split(separator: ";", omittingEmptySubsequences: false) {
-            let parts = component.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2, fields[String(parts[0])] == nil else { return result }
-            fields[String(parts[0])] = String(parts[1])
-        }
-        guard Set(fields.keys).isSubset(of: ["FREQ", "INTERVAL", "BYHOUR", "BYMINUTE", "BYDAY", "BYMONTHDAY"]),
-              Int(fields["INTERVAL"] ?? "1") == 1,
-              let hour = Int(fields["BYHOUR"] ?? "9"), (0...23).contains(hour),
-              let minute = Int(fields["BYMINUTE"] ?? "0"), (0...59).contains(minute),
-              let monthDay = Int(fields["BYMONTHDAY"] ?? "1"), (1...31).contains(monthDay)
-        else { return result }
-        let days = Set((fields["BYDAY"] ?? "").split(separator: ",").map(String.init))
-        let validDays: Set<String> = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
-        guard days.isSubset(of: validDays) else { return result }
-        let schedule: String
-        switch fields["FREQ"] {
-        case "HOURLY" where fields["BYHOUR"] == nil && fields["BYDAY"] == nil && fields["BYMONTHDAY"] == nil:
-            schedule = "hourly"
-        case "DAILY", "WEEKLY":
-            guard fields["BYMONTHDAY"] == nil else { return result }
-            if days.isEmpty && fields["FREQ"] == "DAILY" && fields["BYDAY"] == nil { schedule = "daily" }
-            else if days == ["MO", "TU", "WE", "TH", "FR"] { schedule = "weekdays" }
-            else if days.count == 1 { schedule = "weekly"; result["weekday"] = days.first }
-            else { return result }
-        case "MONTHLY" where fields["BYDAY"] == nil:
-            schedule = "monthly"
-        default: return result
-        }
-        result["schedule"] = schedule; result["hour"] = String(hour); result["minute"] = String(minute); result["monthday"] = String(monthDay)
-        return result
-    }
-    public static func rule(for values: [String: String]) -> String {
-        if values["_scheduleChanged"] != "true", let original = values["_originalRule"] { return original }
-        let hour = values["hour", default: "9"], minute = values["minute", default: "0"]
-        switch values["schedule", default: "daily"] {
-        case "hourly": return "FREQ=HOURLY;BYMINUTE=\(minute)"
-        case "weekdays": return "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=\(hour);BYMINUTE=\(minute)"
-        case "weekly": return "FREQ=WEEKLY;BYDAY=\(values["weekday", default: "MO"]);BYHOUR=\(hour);BYMINUTE=\(minute)"
-        case "monthly": return "FREQ=MONTHLY;BYMONTHDAY=\(values["monthday", default: "1"]);BYHOUR=\(hour);BYMINUTE=\(minute)"
-        case "custom": return values["custom", default: ""]
-        default: return "FREQ=DAILY;BYHOUR=\(hour);BYMINUTE=\(minute)"
-        }
-    }
-}
-
 public struct MacLocationPage: Decodable, Sendable {
     public struct Entry: Decodable, Identifiable, Sendable {
         public let name: String
@@ -379,47 +250,6 @@ public struct MacLocationPage: Decodable, Sendable {
     public let entries: [Entry]
     public let nextOffset: Int?
 }
-public struct BotFileAccessState: Decodable, Sendable {
-    public let revision: Int
-    public let appliedRevision: Int
-    public let readRoots: [String]
-    public let writeRoots: [String]
-}
-public struct BotFileAccessReply: Decodable, Sendable { public let access: BotFileAccessState }
-
-/// Persist both permission level and location kind with the Bot draft.
-public struct BotFileSelection: Codable, Equatable, Sendable {
-    public var readRoots: [String] = []
-    public var writeRoots: [String] = []
-    public var directoryRoots: [String] = []
-    public var workingDirectory: String?
-    public init() {}
-    public mutating func select(path: String, isDirectory: Bool, writable: Bool) {
-        readRoots.removeAll { $0 == path }; writeRoots.removeAll { $0 == path }
-        if writable { writeRoots.append(path); writeRoots.sort() }
-        else { readRoots.append(path); readRoots.sort() }
-        if isDirectory, !directoryRoots.contains(path) { directoryRoots.append(path); directoryRoots.sort() }
-    }
-    public mutating func remove(path: String) {
-        readRoots.removeAll { $0 == path }; writeRoots.removeAll { $0 == path }; directoryRoots.removeAll { $0 == path }
-        if let directory = workingDirectory, (directory == path || directory.hasPrefix(path + "/")),
-           !(readRoots + writeRoots).contains(where: { directory == $0 || directory.hasPrefix($0 + "/") }) { workingDirectory = nil }
-    }
-    public var encodedDraft: String { (try? String(data: JSONEncoder().encode(self), encoding: .utf8)) ?? "" }
-    public static func draft(_ value: String?) -> Self {
-        value.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode(Self.self, from: $0) } ?? Self()
-    }
-    public func matches(_ state: BotFileAccessState) -> Bool {
-        Set(readRoots) == Set(state.readRoots) && Set(writeRoots) == Set(state.writeRoots)
-    }
-    public func creationBody(fields: [String: String]) throws -> Data {
-        var body: [String: Any] = fields.filter { !$0.key.hasPrefix("_") }
-        body["readRoots"] = readRoots; body["writeRoots"] = writeRoots
-        if let workingDirectory { body["workingDirectory"] = workingDirectory }
-        return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
-    }
-}
-
 /// Global client preference, deliberately independent of host-scoped drafts.
 public struct NewBotDefaults: Codable, Equatable, Sendable {
     public static let storageKey = "wonder.newBotDefaults.v1"
@@ -474,19 +304,9 @@ public struct NewBotDefaults: Codable, Equatable, Sendable {
 }
 
 /// Client-wide choices. Each accepted operation snapshots these settings.
-public enum ModelDefaultPurpose: String, CaseIterable, Identifiable {
-    case newBots, groupParticipation, groupCreation
-    public var id: String { rawValue }
-    public var title: String {
-        switch self { case .newBots: "New Bots"; case .groupParticipation: "Group participation"; case .groupCreation: "Group creation" }
-    }
-    public var key: String { self == .newBots ? NewBotDefaults.storageKey : "wonder.\(rawValue).v1" }
-    public var initial: NewBotDefaults {
-        switch self {
-        case .newBots: NewBotDefaults()
-        case .groupCreation: NewBotDefaults(model: "gpt-5.6-luna", reasoningEffort: "medium")
-        case .groupParticipation: NewBotDefaults(model: "gpt-5.6-luna", reasoningEffort: "xhigh")
-        }
-    }
+public enum ModelDefaultPurpose: String, CaseIterable {
+    case groupParticipation
+    public var key: String { "wonder.\(rawValue).v1" }
+    public var initial: NewBotDefaults { NewBotDefaults(model: "gpt-5.6-luna", reasoningEffort: "xhigh") }
     public func load() -> NewBotDefaults { NewBotDefaults.load(key: key, fallback: initial) }
 }

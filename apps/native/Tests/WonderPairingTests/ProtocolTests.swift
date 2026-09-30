@@ -169,55 +169,6 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(session.state, .unavailable)
     }
 
-    func testTeachingUnavailableAndPrivateSkillFixturesDecodeWithoutReplayClaim() throws {
-        let sessionData = Data(#"{"id":"session","clientRequestId":"request","ownerDeviceId":"phone","hostInstallationId":"mac","botId":"bot","conversationId":"chat","state":"unavailable","captureScope":"foreground-window","captureProvider":"none","outcome":"Create a preview","name":null,"description":null,"goal":null,"inputSchema":null,"prerequisites":null,"steps":null,"resultChecks":null,"failureReason":"Capture unavailable","revision":1,"eventCount":0,"evidenceBytes":0,"contentHash":null,"createdAt":"now","updatedAt":"now","startedAt":null,"endedAt":"now","expiresAt":"later","capability":{"available":false,"action":"update-host","reason":"Capture unavailable","provider":"none","maxDurationSeconds":600,"maxEvents":20000,"maxEvidenceBytes":52428800}}"#.utf8)
-        let session = try JSONDecoder().decode(TeachingSession.self, from: sessionData)
-        XCTAssertEqual(session.state, "unavailable")
-        XCTAssertFalse(session.capability.available)
-        XCTAssertEqual(session.eventCount, 0)
-
-        let skillData = Data(#"{"id":"skill","botId":"bot","slug":"preview-file","name":"Preview file","description":"Create a preview","state":"active","activeVersion":1,"discoverability":"bot-private","versions":[{"id":"version","version":1,"sourceSessionId":"session","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","inputSchema":{"title":{"type":"string"}},"verificationState":"structurallyVerified","createdAt":"now"}]}"#.utf8)
-        let skill = try JSONDecoder().decode(BotSkill.self, from: skillData)
-        XCTAssertEqual(skill.discoverability, "bot-private")
-        XCTAssertEqual(skill.versions?.first?.verificationState, "structurallyVerified")
-        XCTAssertNotEqual(skill.versions?.first?.verificationState, "replayVerified")
-    }
-
-    func testAuthenticatedTeachingBindingAndRedactedEventFixtureRoundTrip() throws {
-        let request = StartTeachingSessionRequest(
-            clientRequestId: "request",
-            conversationId: "chat",
-            computerSessionId: "computer-session",
-            controlLeaseId: "control-lease",
-            captureScope: "authenticated-remote-control",
-            outcome: "Open the preview"
-        )
-        let requestObject = try JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(request)
-        ) as! [String: Any]
-        XCTAssertEqual(requestObject["computerSessionId"] as? String, "computer-session")
-        XCTAssertEqual(requestObject["controlLeaseId"] as? String, "control-lease")
-
-        let fixture = Data(#"{"id":"session","clientRequestId":"request","ownerDeviceId":"phone","hostInstallationId":"mac","botId":"bot","conversationId":"chat","computerSessionId":"computer-session","controlLeaseId":"control-lease","state":"reviewing","captureScope":"authenticated-remote-control","captureProvider":"authenticated-remote-control-v1","outcome":"Open the preview","name":null,"description":null,"goal":null,"inputSchema":null,"prerequisites":null,"steps":null,"resultChecks":null,"failureReason":null,"revision":2,"eventCount":1,"evidenceBytes":54,"contentHash":null,"createdAt":"now","updatedAt":"later","startedAt":"now","endedAt":"later","expiresAt":"later","events":[{"sequence":4,"actionIndex":0,"kind":"text","payload":{"characterCount":11,"redacted":true},"createdAt":"later"}],"capability":{"available":true,"action":"none","reason":"Capture available","provider":"authenticated-remote-control-v1","maxDurationSeconds":600,"maxEvents":20000,"maxEvidenceBytes":52428800}}"#.utf8)
-        let session = try JSONDecoder().decode(TeachingSession.self, from: fixture)
-        XCTAssertEqual(session.computerSessionId, "computer-session")
-        XCTAssertEqual(session.controlLeaseId, "control-lease")
-        XCTAssertEqual(session.events.count, 1)
-        XCTAssertEqual(session.events[0].kind, "text")
-        XCTAssertEqual(session.events[0].payload["redacted"], .bool(true))
-        XCTAssertEqual(session.events[0].payload["characterCount"], .number(11))
-        XCTAssertNil(session.events[0].payload["text"])
-    }
-
-    func testFixtureReceiptIsDistinctFromSupervisedReplay() throws {
-        let data = Data(#"{"id":"run","clientRequestId":"11111111-1111-4111-8111-111111111111","ownerDeviceId":"phone","botId":"bot","skillId":"skill","version":2,"contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","inputSchemaHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","inputSchema":{"date":{"format":"date","type":"string"},"title":{"type":"string"}},"inputs":{"date":"2026-09-12","title":"Changed"},"workingDirectory":"fixtures/changed-cwd","provider":"deterministic-local","executionKind":"deterministicFixture","status":"succeeded","verificationState":"fixtureVerified","artifactPath":".wonder/fixture-runs/bot/run/preview.json","artifactHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","artifactBytes":256,"evidence":{"kind":"deterministicFixture","verified":true,"checks":["title","date","artifact contents"]},"failureReason":null,"createdAt":"now","completedAt":"later"}"#.utf8)
-        let receipt = try JSONDecoder().decode(BotSkillFixtureTestReceipt.self, from: data)
-        XCTAssertEqual(receipt.executionKind, "deterministicFixture")
-        XCTAssertEqual(receipt.verificationState, "fixtureVerified")
-        XCTAssertEqual(receipt.inputs["title"], .string("Changed"))
-        XCTAssertNotEqual(receipt.verificationState, "replayVerified")
-    }
-
     func testRejectsUntrustedLinks() throws {
         for value in ["http://example.com", "https://user@example.com", "https://example.com/path", "https://example.com?secret=x", "https://example.com#secret=x"] {
             XCTAssertThrowsError(try PairingLink.origin(value))

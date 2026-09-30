@@ -278,13 +278,17 @@ private struct NewChatContent: View {
         return project != nil && draft.family != nil && draft.model != nil && projects.isAvailable(draft.family ?? .codex)
     }
 
+    private var optionsLoadKey: String { model.assignmentScope + (model.macConnected == true ? ":ready" : ":waiting") }
+
     var body: some View {
         VStack(spacing: 0) { Spacer(minLength: 0) }
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
         .onTapGesture { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
         .safeAreaInset(edge: .bottom) { composer }
-        .task(id: model.assignmentScope) {
+        // Rerun once the connection is ready: a launch-time read can fail
+        // before the session renews, and the model list must not stay empty.
+        .task(id: optionsLoadKey) {
             settleDestination()
             await projects.loadOptions()
             if projects.supportsProjects == nil { await projects.refresh() }
@@ -422,17 +426,18 @@ private struct NewChatContent: View {
                     .padding(.horizontal, 8)
                 HStack(alignment: .center, spacing: 4) {
                     Menu {
+                        // Listed bottom-up when the menu opens above the composer.
+                        if projects.supportsModes {
+                            Toggle(isOn: Binding(get: { draft.planMode == true }, set: { draft.planMode = $0 ? true : nil })) {
+                                Label("Plan mode", systemImage: "list.bullet.clipboard")
+                            }.accessibilityIdentifier("new-chat-plan-mode")
+                        }
                         Button("Camera", systemImage: "camera") {
                             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                             cameraScope = model.assignmentScope; showingCamera = true
                         }.disabled(!canAttach)
                         Button("Add photo", systemImage: "photo") { importingFor = draft.requestID; selectingPhoto = true }.disabled(!canAttach)
                         Button("Attach file", systemImage: "paperclip") { importingFor = draft.requestID; importing = true }.disabled(!canAttach)
-                        if projects.supportsModes {
-                            Toggle(isOn: Binding(get: { draft.planMode == true }, set: { draft.planMode = $0 ? true : nil })) {
-                                Label("Plan mode", systemImage: "list.bullet.clipboard")
-                            }.accessibilityIdentifier("new-chat-plan-mode")
-                        }
                     } label: { Image(systemName: "plus").font(.system(size: 22)).frame(width: 44, height: 44) }
                     .disabled(sending || draft.isSubmitted).accessibilityLabel("Message actions").accessibilityIdentifier("new-chat-attach")
                     DictationButton(controller: model.dictation, chat: draftChat,

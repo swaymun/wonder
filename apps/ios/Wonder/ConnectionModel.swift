@@ -267,7 +267,6 @@ struct ManagedBotListMutationState {
     }
     @Published private(set) var cameraContextID = UUID()
     @Published var searchFocus: SearchMessageFocus?
-    @Published private(set) var chatsReadPresentation = ReadPresentationFence()
     @Published var loadingChats = false
     /// Conversations with a history request in flight. Per conversation so a
     /// slow load cannot make a different chat look busy or empty.
@@ -284,17 +283,10 @@ struct ManagedBotListMutationState {
         didSet { if macConnected == true { hasConnectedThisLaunch = true }; noteListChange() }
     }
     var macName: String { connection?.hostName ?? (previewMode ? "Studio" : "Your computer") }
-    var macStatus: String {
-        if connection?.requiresPairing == true { return "Pair again" }
-        if accessEnded { return "Access ended" }
-        switch macConnected {
-        case true: return "Connected"
-        case false: return "Disconnected"
-        default: return "Connecting…"
-        }
-    }
-    var chatNotice: String? {
-        ["Connected to your computer", "Saved chats", "Computer unavailable. Showing saved chats.", "This device’s access has ended."].contains(chatsStatus) ? nil : chatsStatus
+    /// Keys this host and device's stored state so a replaced pairing never reuses it.
+    var assignmentScope: String {
+        guard let connection else { return "preview" }
+        return connection.credential.hostInstallationId + ":" + connection.credential.deviceId
     }
     @Published var composers: [String: ComposerIntent] = [:]
     @Published var composerErrors: [String: String] = [:]
@@ -370,7 +362,7 @@ struct ManagedBotListMutationState {
             let composerQueuedPreview = arguments.contains("-composer-queued-preview")
             let messageAttachmentsPreview = arguments.contains("-message-attachments-preview")
             var group: [String: Any] = [
-                "id": "preview-group", "conversationId": "preview", "name": ProcessInfo.processInfo.arguments.contains("-assignment-preview") ? "Wonder Developers" : (saved?.hostName == "Laptop" ? "Travel plans" : saved?.hostName == "Home" ? "Reading list" : "Weekend plans"), "isArchived": false,
+                "id": "preview-group", "conversationId": "preview", "name": saved?.hostName == "Laptop" ? "Travel plans" : saved?.hostName == "Home" ? "Reading list" : "Weekend plans", "isArchived": false,
                 "members": [["botId":"ada", "botName":"Ada", "role":"worker"]],
                 "messages": [
                     ["messageId": "1", "body": "Can you help me plan a relaxed Saturday?", "createdAt": "1700000000000", "authorKind": "user", "presentationKind": "message"],
@@ -631,17 +623,6 @@ struct ManagedBotListMutationState {
                 if let data = try? JSONSerialization.data(withJSONObject: fixture), let snapshot = try? JSONDecoder().decode(ConversationSnapshot.self, from: data),
                    let data = try? JSONSerialization.data(withJSONObject: summary), let chat = try? JSONDecoder().decode(ChatSummary.self, from: data) {
                     groups = [:]; snapshots = ["preview":snapshot]; chats = [chat]; composers["preview"] = ComposerIntent()
-                }
-            }
-            if ProcessInfo.processInfo.arguments.contains("-new-bot-preview") {
-                let fixture: [String: Any] = ["conversationId":"preview", "hostEpoch":"preview", "lastSequence":0, "messages":[], "assistantMessages":[], "thread":["hydrated":true]]
-                let summary: [String: Any] = ["conversationId":"preview", "botId":"ada", "title":"Luna", "messageCount":0, "hasUnread":false, "isArchived":false, "isPinned":false]
-                if let data = try? JSONSerialization.data(withJSONObject: fixture), let snapshot = try? JSONDecoder().decode(ConversationSnapshot.self, from: data),
-                   let data = try? JSONSerialization.data(withJSONObject: summary), let chat = try? JSONDecoder().decode(ChatSummary.self, from: data) {
-                    groups = [:]; snapshots = ["preview":snapshot]; chats = [chat]; composers["preview"] = ComposerIntent()
-                    asyncQuestions["preview"] = []
-                    let appearance = #"{"modelSelectionRevision":0,"id":"ada","name":"Luna","role":"Test","systemPrompt":"","workspacePath":"/preview","permissionProfile":":workspace","isArchived":false,"avatarShape":"luna","avatarPalette":"ocean"}"#
-                    if let bot = try? JSONDecoder().decode(ManagedBot.self, from: Data(appearance.utf8)) { managedBots = [bot] }
                 }
             }
             return
@@ -1360,18 +1341,6 @@ struct ManagedBotListMutationState {
         if let snapshot = snapshots[chat], snapshot.activeTurnID != nil || snapshot.hasUnassignedPreTurnWork { return true }
         guard let run = groups[chat]?.collaboration?.runs.last else { return false }
         return run.plan.finishedAt == nil && !run.plan.cancelled && run.plan.error == nil
-    }
-
-    func chatListStatus(_ chat: ChatSummary) -> ChatListStatus {
-        let working: Bool
-        if chat.botId == nil || (snapshots[chat.id] != nil && !cachedConversationIds.contains(chat.id)) {
-            working = botWorking(chat.id)
-        } else {
-            // The list must show live work before a conversation is opened.
-            // A refreshed summary also supersedes an invalidated cached turn.
-            working = ["accepted_by_wonder", "dispatching_to_codex", "accepted_by_codex", "streaming"].contains(chat.deliveryState ?? "")
-        }
-        return working ? .working : chat.hasUnread ? .unread : .read
     }
 
     func activeTurn(_ chat: String) -> String? {
@@ -2225,10 +2194,6 @@ struct ManagedBotListMutationState {
                 || descendants.contains { request.belongs(to: $0.id, isDirect: true, threadIDs: [$0.threadId]) }
         }
     }
-    var unmappedApprovalRequests: [AttentionRequest] {
-        let mapped = Set(chats.flatMap { requests(for: $0).map(\.id) })
-        return attention.filter { !$0.isQuestion && !mapped.contains($0.id) }
-    }
     func answerDraft(_ id: String) -> [String: String] {
         guard let data = try? store?.loadIntent(conversation: "answer-" + id) else { return [:] }
         return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
@@ -2246,7 +2211,7 @@ struct ManagedBotListMutationState {
         }
     }
     func resolve(_ request: AttentionRequest, decision: String, answers: [String: String] = [:],
-                 responseJSON: String? = nil, structuredDecision: TeachingJSONValue? = nil) async {
+                 responseJSON: String? = nil, structuredDecision: JSONValue? = nil) async {
         guard let saved = connection, !accessEnded, !resolving.contains(request.id), let store else { return }
         let key = partition
         resolving.insert(request.id); attentionErrors[request.id] = nil
@@ -2358,85 +2323,35 @@ struct ManagedBotListMutationState {
         timelineCache = (key, value)
         return value
     }
-    func setChatsModalPresented(_ presented: Bool) {
-        chatsReadPresentation.setCovered(presented)
-    }
-    var searchEpoch: String { projection.hostEpoch }
-    private var searchStoreMatchesConnection: Bool {
-        guard let connection else { return false }
-        return partition == connection.credential.hostInstallationId + ":" + connection.credential.deviceId
-    }
-    func cachedSearch(query: String) throws -> PersistedSearchPage? {
-        guard !accessEnded, searchStoreMatchesConnection, let data = try store?.loadIntent(conversation: "search-cache-v1") else { return nil }
-        return try JSONDecoder().decode(PersistedSearchCache.self, from: data).pages[query]
-    }
-    func saveSearch(_ page: PersistedSearchPage, query: String) throws {
-        guard !accessEnded, searchStoreMatchesConnection, let store else { throw ReadFailure.resync }
-        var cache = try store.loadIntent(conversation: "search-cache-v1").map { try JSONDecoder().decode(PersistedSearchCache.self, from: $0) } ?? PersistedSearchCache()
-        cache.remember(page, query: query)
-        try store.saveIntent(JSONEncoder().encode(cache), conversation: "search-cache-v1")
-    }
-    func fetchSearch(query: String, cursor: String?) async throws -> PersistedSearchPage {
-        guard !accessEnded, searchStoreMatchesConnection, let saved = connection, !query.isEmpty, query.utf8.count <= 256 else { throw ReadFailure.resync }
-        let scope = assignmentScope
-        var components = URLComponents(); components.path = "/api/v1/search"
-        components.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "limit", value: "30")]
-        if let cursor { components.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
-        let page: PersistedSearchPage = try await api.request(components.string!, origin: saved.origin, credential: saved.credential)
-        guard assignmentScope == scope, !accessEnded, !Task.isCancelled else { throw CancellationError() }
-        return page
-    }
-    func openSearchMessage(_ result: PersistedSearchResult) async throws {
-        guard !accessEnded, searchStoreMatchesConnection, let conversation = result.conversationId,
-            let chat = chats.first(where: { $0.id == conversation && !$0.isArchived }) else { throw SearchOpenFailure.unavailable }
-        let scope = assignmentScope
-        if macConnected == true {
-            await refreshConversation(chat)
-            guard scope == assignmentScope, !Task.isCancelled, !accessEnded else { throw CancellationError() }
-            if chat.botId != nil { try await loadQueue(chat) }
-        }
-        for pageNumber in 0...5 {
-            guard scope == assignmentScope, foreground, !accessEnded, !Task.isCancelled,
-                chats.contains(where: { $0.id == conversation }) else { throw CancellationError() }
-            if let row = result.rowID(snapshot: snapshots[conversation], group: groups[conversation]) {
-                guard let entry = ChatFeedEntry.grouping(feedRows(for: chat), focusedRowID: row).first(where: { $0.rows.contains(where: { $0.id == row }) }) else { throw SearchOpenFailure.queued }
-                savePosition(entry.id, chat: conversation)
-                searchFocus = SearchMessageFocus(conversationID: conversation, rowID: row, scrollID: entry.id)
-                selectedChat = chat
-                return
-            }
-            guard chat.botId != nil else { throw SearchOpenFailure.unavailable }
-            if pageNumber == 5 { throw SearchOpenFailure.moreHistory }
-            guard let saved = connection else { throw ReadFailure.resync }
-            let current = snapshots[conversation]
-            var path = "/api/v1/conversations/" + Self.escape(conversation)
-            if let current {
-                guard let cursor = current.thread.nextCursor else { throw SearchOpenFailure.unavailable }
-                path += "/history?before=" + Self.escape(cursor)
-            }
-            let older: ConversationSnapshot = try await api.request(path, origin: saved.origin, credential: saved.credential)
-            guard scope == assignmentScope, foreground, !accessEnded, !Task.isCancelled else { throw CancellationError() }
-            guard older.conversationId == conversation, projection.hostEpoch.isEmpty || projection.hostEpoch == older.hostEpoch else { throw ReadFailure.resync }
-            guard snapshots[conversation]?.lastSequence == current?.lastSequence else { continue }
-            var next = projection
-            if let latest = next.snapshots[conversation] { next.snapshots[conversation] = try latest.mergingOlder(older) }
-            else { next.install(older) }
-            try commit(next, publishing: .snapshots)
-        }
-    }
     func readReceipt(for conversation: String) -> VisibleReadReceipt? {
         if let group = groups[conversation] { return VisibleReadReceipt(group: group) }
         return snapshots[conversation].map(VisibleReadReceipt.init(snapshot:))
     }
     func acknowledgeVisibleRead(_ visible: VisibleReadReceipt) async {
-        guard !previewMode, foreground, !accessEnded, macConnected == true, !chatsReadPresentation.isCovered,
+        guard !previewMode, foreground, !accessEnded, macConnected == true,
             visibleChat?.id == visible.conversationId,
             let saved = connection, readReceipt(for: visible.conversationId) == visible,
             !projection.dirty.contains(visible.conversationId) else { return }
         let run = generation
         let cursor = projection.lastSequence
         let summary = projection.summaries.first { $0.id == visible.conversationId }
-        let presentationRevision = chatsReadPresentation.revision
+        if projectConversationIDs.contains(visible.conversationId) {
+            // Project threads keep read state in project metadata; the Mac
+            // confirms with an empty reply rather than a Bot summary.
+            guard projects.hasUnread(visible.conversationId) else { return }
+            struct Empty: Decodable, Sendable {}
+            do {
+                let _: Empty = try await api.request("/api/v1/conversations/" + Self.escape(visible.conversationId),
+                    origin: saved.origin, body: visible.requestBody(), credential: saved.credential, method: "PATCH")
+                guard !Task.isCancelled, run == generation, visibleChat?.id == visible.conversationId,
+                    connection?.credential.hostInstallationId == saved.credential.hostInstallationId,
+                    connection?.credential.deviceId == saved.credential.deviceId, !accessEnded else { return }
+                projects.markRead(visible.conversationId)
+            } catch {
+                if case PairingFailure.response(401) = error { readFailed(error, run: run) }
+            }
+            return
+        }
         do {
             let group = groups[visible.conversationId]
             let groupReply: GroupRead?
@@ -2452,7 +2367,6 @@ struct ManagedBotListMutationState {
             }
             guard !Task.isCancelled, foreground, run == generation,
                 projection.summaries.first(where: { $0.id == visible.conversationId }) == summary,
-                chatsReadPresentation.acceptsReply(startedAt: presentationRevision),
                 visibleChat?.id == visible.conversationId,
                 connection?.credential.hostInstallationId == saved.credential.hostInstallationId,
                 connection?.credential.deviceId == saved.credential.deviceId, !accessEnded else { return }

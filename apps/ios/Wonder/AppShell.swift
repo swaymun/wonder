@@ -101,6 +101,14 @@ struct ChatShell: View {
         .task(id: library.saved.connections.isEmpty) {
             if library.loaded, library.saved.connections.isEmpty, !library.isPreview { pairing = true }
         }
+        #if WONDER_DIAGNOSTICS
+        .task {
+            // The layout fixture opens its synthetic conversation as a notification would.
+            if DiagnosticSubagentFixture.chatLayoutFixture {
+                shell.open(host: DiagnosticSubagentFixture.hostID, conversation: DiagnosticSubagentFixture.parentID)
+            }
+        }
+        #endif
         .onChange(of: library.saved.connections.map { $0.credential.deviceId }) { _, _ in PushNotifications.shared.refresh() }
         .background {
             ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
@@ -256,6 +264,8 @@ struct ConnectionLifecycle: View {
                 guard !Task.isCancelled else { return }
                 model.setForeground(true)
                 await model.projects.refresh()
+                // After renewal: a composer that loaded before it may have no models.
+                await model.projects.loadOptions()
                 while !Task.isCancelled {
                     do { try await Task.sleep(for: .seconds(30)) } catch { return }
                     await model.loadChats(force: true)

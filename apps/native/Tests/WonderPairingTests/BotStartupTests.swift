@@ -39,11 +39,9 @@ final class BotStartupTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(ProjectionState.self, from: JSONEncoder().encode(state)).managedBots?.first?.modelSelectionRevision, 3)
     }
 
-    func testNewBotDefaultsVaryAndRemainStable() {
+    func testStableAvatarIdentitiesVaryAndRemainStable() {
         let identities = (0..<100).map { "bot-\($0)" }
         XCTAssertEqual(Set(identities.map(ScienceAvatarCatalog.stableShape)).count, 7)
-        XCTAssertEqual(Set(identities.map(ScienceAvatarCatalog.stablePalette)).count, 12)
         XCTAssertEqual(ScienceAvatarCatalog.stableShape(for: "bot-id"), .luna)
-        XCTAssertEqual(ScienceAvatarCatalog.stablePalette(for: "bot-id"), "violet")
     }
 }

@@ -21,12 +21,10 @@ private struct WonderRoot: View {
 
     var body: some View {
         #if WONDER_DIAGNOSTICS
-        if ProcessInfo.processInfo.arguments.contains("-diagnostics-avatar-fixture") { ScienceAvatarDiagnosticFixtureView() }
-        else if ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps") { DiagnosticConnectedAppsFixtureView() }
+        if ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps") { DiagnosticConnectedAppsFixtureView() }
         else if DiagnosticSubagentFixture.chatLayoutFixture { DiagnosticChatLayoutFixtureView() }
         else if ProcessInfo.processInfo.arguments.contains("-diagnostics-subagent-fixture") { DiagnosticSubagentFixtureView() }
         else if ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-session-fixture") { ComputerSessionDiagnosticFixtureView() }
-        else if ProcessInfo.processInfo.arguments.contains("-diagnostics-teaching-fixture") { TeachingDiagnosticFixtureView() }
         else if ProcessInfo.processInfo.arguments.contains("-diagnostics-fixtures") { DiagnosticFixtureView() }
         else if DiagnosticScenarioLaunch.requested { DiagnosticLaunchView(library: library) }
         else { normalRoot }
@@ -35,10 +33,28 @@ private struct WonderRoot: View {
         #endif
     }
     @ViewBuilder private var normalRoot: some View {
-        if preview.previewMode && !library.isPreview { ChatsView(model: preview) }
+        #if DEBUG || WONDER_DIAGNOSTICS
+        if preview.previewMode && !library.isPreview { PreviewConversationRoot(model: preview) }
         else { ChatShell(library: library) }
+        #else
+        ChatShell(library: library)
+        #endif
     }
 }
+
+#if DEBUG || WONDER_DIAGNOSTICS
+/// The synthetic `-read-preview` fixture: its one conversation, shown directly
+/// so the shared timeline and composer can be exercised without pairing.
+private struct PreviewConversationRoot: View {
+    @ObservedObject var model: ConnectionModel
+    var body: some View {
+        NavigationStack {
+            if let chat = model.chats.first { ConversationView(model: model, chat: chat).id(chat.id) }
+            else { ProgressView() }
+        }
+    }
+}
+#endif
 
 /// Settings. It is pushed onto the main navigation stack with a Back button;
 /// only first-launch pairing presents it as a sheet, which needs its own Done.
