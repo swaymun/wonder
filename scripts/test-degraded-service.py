@@ -27,6 +27,10 @@ with tempfile.TemporaryDirectory(prefix='wonder-degraded-') as tmp:
                 identity=current
                 assert json.load(get('/healthz'))['status']=='ok'
                 assert get('/api/v1/conversations').status==200
+                # A project-only installation must not create private Bot storage,
+                # including when the provider is missing or after a restart.
+                for name in ['runtime', 'runtime-bootstrap', 'bots']:
+                    assert not (root/name).exists(), name
                 try: get('/api/v1/conversations',False);raise AssertionError('unauthenticated access')
                 except urllib.error.HTTPError as error: assert error.code in (401,403,503)
                 started=time.monotonic();process.send_signal(signal.SIGTERM)

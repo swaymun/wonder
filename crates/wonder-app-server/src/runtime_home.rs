@@ -1,8 +1,8 @@
 //! Keep Wonder's runtime history out of the desktop client's task index.
 //! Reuse configuration/authentication, but never share session or SQLite storage.
-use std::{fs, path::Path};
+use std::{fs, io, path::Path};
 
-pub fn prepare(root: &Path, legacy: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn prepare(root: &Path, legacy: &Path) -> io::Result<()> {
     fs::create_dir_all(root)?;
     #[cfg(unix)]
     {

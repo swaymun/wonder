@@ -38,8 +38,7 @@ const MAX_CURSORS: usize = 128;
 const ACCESS_MODES: [&str; 3] = ["read_only", "workspace", "full_access"];
 const CLAUDE_APPROVALS: [&str; 3] = ["ask", "accept_edits", "auto"];
 
-/// The normal-home Codex client for project threads. It starts on first use so
-/// a Mac that never opens Projects runs no additional provider process.
+/// The normal-home Codex client serves project threads and shared discovery.
 pub struct ProjectRuntime {
     codex: Arc<Mutex<AppServerClient>>,
     config: LaunchConfig,
@@ -95,7 +94,7 @@ fn store_key(family: &str, home: &FsPath) -> String {
     format!("{family}:{}", &digest[..16])
 }
 
-pub(crate) async fn codex_rpc(state: &AppState) -> Result<RpcClient, String> {
+pub async fn codex_rpc(state: &AppState) -> Result<RpcClient, String> {
     let runtime = &state.projects;
     let _start = runtime.start.lock().await;
     let mut client = runtime.codex.lock().await;
@@ -104,6 +103,10 @@ pub(crate) async fn codex_rpc(state: &AppState) -> Result<RpcClient, String> {
             "Codex could not start on your Mac. Check that ChatGPT is installed and signed in."
                 .to_owned()
         })?;
+        if let Err(error) = crate::rediscover_runtime(state, &mut client, false).await {
+            let _ = client.shutdown().await;
+            return Err(error);
+        }
         state
             .ingestion
             .register_project_runtime(&runtime.codex, client.health());

@@ -1,5 +1,4 @@
 mod data_home;
-mod runtime_home;
 use std::sync::Arc;
 use std::{
     net::SocketAddr,
@@ -71,7 +70,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let codex_bin = resolve_codex().await?;
     let codex_state = effective_codex_home()?;
     let private_runtime = data_dir.join("runtime");
-    runtime_home::prepare(&private_runtime, &codex_state)?;
     let sensitive_root_paths = sensitive_roots(&codex_state)?;
     let sensitive_roots = sensitive_root_paths
         .iter()
@@ -79,8 +77,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<Vec<_>, _>>()?;
     let bootstrap_home = data_dir.join("runtime-bootstrap");
     let bot_home = data_dir.join("bots");
-    tokio::fs::create_dir_all(&bootstrap_home).await?;
-    tokio::fs::create_dir_all(&bot_home).await?;
     let data_root = data_dir.to_str().ok_or("non-UTF-8 data path")?;
     let log_root = log_dir.to_str().ok_or("non-UTF-8 log path")?;
     let legacy_root = std::env::var("HOME")
@@ -262,12 +258,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::json!({ "listenAddress": listen_addr, "elapsedMs": startup_started.elapsed().as_millis() }),
     )?;
     let deferred_readiness_task = {
-        let app_server = Arc::clone(&app_server);
+        let probe_state = state.clone();
         let log_dir = log_dir.clone();
-        let skills_cwd = bootstrap_home.to_string_lossy().into_owned();
+        let skills_cwd = codex_state.to_string_lossy().into_owned();
         tokio::spawn(async move {
             let Ok(logger) = JsonlLogger::new(&log_dir, "wonderd.jsonl") else {
                 return;
+            };
+            let rpc = match wonderd::projects::codex_rpc(&probe_state).await {
+                Ok(rpc) => rpc,
+                Err(error) => {
+                    let _ = logger.record(
+                        "warn",
+                        "project_runtime_start_failed",
+                        serde_json::json!({"error":error}),
+                    );
+                    return;
+                }
             };
             for (method, params) in [
                 ("app/list", serde_json::json!({ "limit": 1 })),
@@ -284,7 +291,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ),
             ] {
                 let probe_started = std::time::Instant::now();
-                let outcome = match app_server.lock().await.request(method, params).await {
+                let outcome = match rpc.request(method, params).await {
                     Ok(response) if response.error.is_none() && response.result.is_some() => "ok",
                     Ok(response) => {
                         let error = response

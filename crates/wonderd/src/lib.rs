@@ -10559,7 +10559,10 @@ async fn restart_and_reconcile(
     {
         return None;
     }
-    if rediscover_runtime(state, &mut app_server).await.is_err() {
+    if rediscover_runtime(state, &mut app_server, true)
+        .await
+        .is_err()
+    {
         return None;
     }
     let rpc = app_server.rpc();
@@ -10668,6 +10671,7 @@ async fn restart_and_reconcile(
 async fn rediscover_runtime(
     state: &AppState,
     app_server: &mut AppServerClient,
+    verify_bot_profiles: bool,
 ) -> Result<(), String> {
     for method in ["account/read", "account/rateLimits/read"] {
         let response = app_server
@@ -10714,7 +10718,7 @@ async fn rediscover_runtime(
         .permission_overrides
         .iter()
         .any(|value| value.contains("permissions.wonder_runtime_bootstrap="));
-    if has_bootstrap {
+    if verify_bot_profiles && has_bootstrap {
         let workspace = std::path::Path::new(&state.bot_home)
             .parent()
             .ok_or("Missing data root")?
@@ -10760,11 +10764,15 @@ async fn rediscover_runtime(
     // Profiles are resolved relative to cwd. Checking every Bot against a
     // fixed profile listing silently breaks multi-Bot restarts, so each
     // workspace gets its own post-restart verification and catalog entry.
-    let bots = state
-        .store
-        .list_bots()
-        .await
-        .map_err(|error| error.to_string())?;
+    let bots = if verify_bot_profiles {
+        state
+            .store
+            .list_bots()
+            .await
+            .map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
     for bot in bots {
         if bot.agent_family != AgentFamily::Codex {
             continue;
@@ -10801,6 +10809,9 @@ async fn rediscover_runtime(
         catalog.apply_permission_profiles(&bot.workspace_path, &result);
     }
     let mut current = state.runtime_catalog.write().await;
+    if !verify_bot_profiles {
+        catalog.permission_profiles_by_cwd = current.permission_profiles_by_cwd.clone();
+    }
     catalog.models.extend(
         current
             .models

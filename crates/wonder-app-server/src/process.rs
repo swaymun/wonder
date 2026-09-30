@@ -359,6 +359,23 @@ impl AppServerClient {
         notification_sink: Option<NotificationSink>,
     ) -> Result<Self, RuntimeError> {
         let canonical_bin = verify_runtime(&config.codex_bin).await?;
+        if let Some(home) = &config.runtime_home {
+            let desktop_home = std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".codex")))
+                .ok_or_else(|| std::io::Error::other("Codex home is unavailable"))?;
+            crate::runtime_home::prepare(home, &desktop_home)?;
+            if config
+                .permission_overrides
+                .iter()
+                .any(|value| value.contains("permissions.wonder_runtime_bootstrap="))
+            {
+                let data = home
+                    .parent()
+                    .ok_or_else(|| std::io::Error::other("Bot data root is unavailable"))?;
+                tokio::fs::create_dir_all(data.join("runtime-bootstrap")).await?;
+            }
+        }
 
         let mut command = Command::new(canonical_bin);
         command

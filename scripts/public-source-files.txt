@@ -261,6 +261,7 @@ crates/wonder-api/src/pairing_protocol.rs
 crates/wonder-app-server/Cargo.toml
 crates/wonder-app-server/src/lib.rs
 crates/wonder-app-server/src/process.rs
+crates/wonder-app-server/src/runtime_home.rs
 crates/wonder-app-server/src/schema_compat.rs
 crates/wonder-asr/Cargo.toml
 crates/wonder-asr/src/lib.rs
@@ -420,7 +421,6 @@ crates/wonderd/src/push.rs
 crates/wonderd/src/questions.rs
 crates/wonderd/src/queue.rs
 crates/wonderd/src/relay.rs
-crates/wonderd/src/runtime_home.rs
 crates/wonderd/src/search_tests.rs
 crates/wonderd/src/subagents.rs
 crates/wonderd/src/sync.rs

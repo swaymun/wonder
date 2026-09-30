@@ -316,17 +316,22 @@ impl Ingestion {
     async fn provider_readiness(&self, store: &Store, family: Option<AgentFamily>) -> Readiness {
         let detail = {
             let status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let available = status.providers.iter().any(|(id, p)| {
-                family.is_none_or(|family| family == *id)
-                    && !p.recovering
-                    && p.health.as_ref().is_some_and(RuntimeHealth::is_alive)
-                    && !status.runtimes.values().any(|r| {
-                        r.family == *id
-                            && !r.project
-                            && r.message_id.is_some()
-                            && (!r.health.is_alive() || r.health.storage_blocked())
-                    })
-            });
+            let available = (family.is_none()
+                && status
+                    .runtimes
+                    .values()
+                    .any(|r| r.project && r.health.is_alive() && !r.health.storage_blocked()))
+                || status.providers.iter().any(|(id, p)| {
+                    family.is_none_or(|family| family == *id)
+                        && !p.recovering
+                        && p.health.as_ref().is_some_and(RuntimeHealth::is_alive)
+                        && !status.runtimes.values().any(|r| {
+                            r.family == *id
+                                && !r.project
+                                && r.message_id.is_some()
+                                && (!r.health.is_alive() || r.health.storage_blocked())
+                        })
+                });
             if status.error.is_some()
                 || status.runtimes.values().any(|r| r.health.storage_blocked())
             {
@@ -471,6 +476,27 @@ pub async fn spawn(state: AppState) -> NotificationService {
             let mut delay = Duration::from_secs(1);
             let mut last_discovery = std::time::Instant::now();
             loop {
+                if family == AgentFamily::Codex {
+                    match state.store.list_bots().await {
+                        Ok(bots) if !bots.iter().any(|bot| bot.agent_family == family) => {
+                            if let Ok(client) = crate::claude::client(&state, family) {
+                                let mut runtime = client.lock().await;
+                                if runtime.health().is_alive() {
+                                    let _ = runtime.shutdown().await;
+                                }
+                            }
+                            needs_recovery = true;
+                            recover_all = true;
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                        Err(_) => {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                        Ok(_) => {}
+                    }
+                }
                 // The sidecar can activate an SDK patch or observe a new login
                 // without restarting Wonder. Refresh its model contract on a
                 // bounded cadence, independently of Codex recovery.
@@ -715,7 +741,7 @@ async fn recover(state: &AppState, family: AgentFamily, recover_all: bool) -> Re
             .needs_validation;
         if needs_validation {
             match family {
-                AgentFamily::Codex => crate::rediscover_runtime(state, &mut runtime).await?,
+                AgentFamily::Codex => crate::rediscover_runtime(state, &mut runtime, true).await?,
                 AgentFamily::Claude => crate::claude::discover(state, &mut runtime).await?,
             }
             state
@@ -1067,6 +1093,7 @@ for line in sys.stdin:
     with open(root + '/requests-jsonl', 'a') as log: log.write(json.dumps(r) + '\n')
     result = {}
     if method == 'initialize': result = {'capabilities': {'experimentalApi': True}}
+    elif method == 'model/list' and os.path.exists(root + '/models.json'): result = json.load(open(root + '/models.json'))
     elif method == 'permissionProfile/list': result = {'data': [{'name': 'test', 'allowed': True}, {'name': ':read-only', 'allowed': True}, {'name': ':workspace', 'allowed': True}, {'name': ':danger-full-access', 'allowed': True}]}
     elif method == 'thread/goal/get':
         result = {'goal':json.load(open(root + '/goal.json')) if os.path.exists(root + '/goal.json') else None}
@@ -1221,6 +1248,76 @@ for line in sys.stdin:
             ),
         };
         (dir, state)
+    }
+
+    // Contract: project discovery/readiness does not create private Bot storage;
+    // a later Bot still starts its isolated runtime through the same transport.
+    #[tokio::test]
+    async fn project_only_startup_leaves_bot_runtime_absent_until_a_bot_is_created() {
+        let (dir, mut state) = fixture().await;
+        fs::write(
+            dir.path().join("models.json"),
+            r#"{"data":[{"id":"test-model","displayName":"Test model"}]}"#,
+        )
+        .unwrap();
+        assert!(state.store.delete_bot("bot").await.unwrap());
+        state.app_server.lock().await.shutdown().await.unwrap();
+        let private = dir.path().join("private-runtime");
+        let bin = state.launch_config.lock().await.codex_bin.clone();
+        state.launch_config.lock().await.runtime_home = Some(private.clone());
+        state.projects = crate::projects::ProjectRuntime::configured(
+            bin,
+            "test".into(),
+            dir.path(),
+            dir.path(),
+            notification_sink(state.store.clone()),
+        );
+        let service = spawn(state.clone()).await;
+        let project = crate::projects::codex_rpc(&state).await.unwrap();
+        ready(&state).await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(project.health().is_alive());
+        assert!(!state.app_server.lock().await.health().is_alive());
+        assert!(!private.exists());
+        assert!(!state.runtime_catalog.read().await.models.is_empty());
+        assert!(!fs::read_to_string(dir.path().join("requests"))
+            .unwrap()
+            .contains("permissionProfile/list"));
+
+        state
+            .store
+            .upsert_bot(
+                "later-bot",
+                "Later Bot",
+                "Assistant",
+                "Help",
+                &state.bot_home,
+                "test",
+                None,
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !state
+            .ingestion
+            .readiness_for(&state.store, AgentFamily::Codex)
+            .await
+            .ready
+        {
+            assert!(
+                Instant::now() < deadline,
+                "Private Bot runtime did not start"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(private.is_dir());
+        assert!(state.app_server.lock().await.health().is_alive());
+        assert!(project.health().is_alive());
+        drop(service);
+        state.app_server.lock().await.shutdown().await.unwrap();
+        state.projects.shutdown().await;
     }
 
     // Contract: one unavailable provider cannot block the other, and receipt,

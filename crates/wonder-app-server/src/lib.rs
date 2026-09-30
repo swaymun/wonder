@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 mod process;
+mod runtime_home;
 mod schema_compat;
 
 pub use process::verify_runtime;
