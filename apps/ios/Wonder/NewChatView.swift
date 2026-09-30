@@ -491,14 +491,23 @@ private struct NewChatContent: View {
 
     private var computerMenu: some View {
         Menu {
-            ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
-                let candidate = library.model(for: saved)
-                Button { choose(host: saved.credential.hostInstallationId) } label: {
-                    let detail = candidate.accessEnded ? "Access ended" : candidate.macConnected == true ? "Connected" : candidate.macConnected == false ? "Offline" : "Connecting"
-                    if saved.credential.hostInstallationId == hostID { Label("\(candidate.macName) · \(detail)", systemImage: "checkmark") }
-                    else { Text("\(candidate.macName) · \(detail)") }
+            Picker("Computer", selection: Binding(get: { hostID }, set: { if let host = $0 { choose(host: host) } })) {
+                ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
+                    let candidate = library.model(for: saved)
+                    let connected = !candidate.accessEnded && candidate.macConnected == true
+                    let detail = candidate.accessEnded ? "Access ended" : connected ? "Connected" : candidate.macConnected == false ? "Offline" : "Connecting"
+                    Label {
+                        Text(candidate.macName)
+                    } icon: {
+                        // Native menus need an original-color image to preserve the status tint.
+                        Image(uiImage: UIImage(systemName: "circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 10))?
+                            .withTintColor(connected ? .systemGreen : .systemRed, renderingMode: .alwaysOriginal) ?? UIImage())
+                    }
+                    .accessibilityLabel("\(candidate.macName), \(detail)")
+                    .tag(Optional(saved.credential.hostInstallationId))
                 }
             }
+            .pickerStyle(.inline)
             Section { Button("Add computer", systemImage: "plus") { pairing = true } }
         } label: {
             PickerRow(systemImage: "laptopcomputer", title: model.macName)
