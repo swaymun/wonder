@@ -15,7 +15,7 @@ Keep the Mac awake and online while using it remotely.
 | Component | Status |
 | --- | --- |
 | iPhone and iPad | Production Release 1.0 (69) is the Projects-only shell: pinned threads, provider icons, model/Plan settings, read-state and model-list fixes, and no Bot or Group management screens. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation of this build through TestFlight remains unverified. |
-| Wonder Testing | The separate blue app, Release 1.0 (4), replaces connection status text in the composer computer menu with green/red dots. It is `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Its private internal testing group has one invited tester and access to build 4. It keeps its own pairing, drafts, and Keychain access. Installation through TestFlight remains unverified. |
+| Wonder Testing | The separate blue app, Release 1.0 (5), shows smaller 7-point green/red dots at the right edge of the composer computer picker. It is `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Its private internal testing group has one invited tester and access to build 5. It keeps its own pairing, drafts, and Keychain access. Installation through TestFlight remains unverified. |
 | Mac companion | [Version 1.0.99](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.99-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and packaged verification against the installed Codex 0.159.0 runtime. |
 | Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The Projects-first shell and compact connection-menu update are published on `main`. Third-party components retain their own licenses. |
 
@@ -27,12 +27,15 @@ The [landing page, setup guide and privacy information](https://wonder-launch-pr
 
 ## Qualification still in progress
 
-Testing build 4 passed its optimized Simulator build and two existing checks for
-connection-scoped drafts and shared connection ownership. Its signed Release
-export passed identity, entitlement, Keychain-isolation and Diagnostics-exclusion
-checks. Visual and physical acceptance of the connection-menu dots, and actual
-TestFlight installation of this candidate, remain unverified. Production
-promotion awaits owner approval.
+Testing build 5 passed optimized iPhone and iPad Simulator UI checks. Each check
+switched between Macs ten times in both directions, verified draft restoration,
+and opened and canceled Add computer. Screenshots confirm the smaller trailing
+dots with and without the keyboard. Its signed Release export passed identity,
+entitlement, Keychain-isolation and Diagnostics-exclusion checks. A physical-device
+build passed, but the UI runner could not initialize because authentication was
+canceled; no physical interaction acceptance was recorded. Actual TestFlight
+installation of this candidate remains unverified. Production promotion awaits
+owner approval.
 
 The current shell passed 30 iPhone and 15 iPad Simulator navigation cycles,
 including saved drafts, Settings navigation and pin toggle/reopen/restoration.
