@@ -5,8 +5,15 @@ Use a managed Ruby (3.3 or newer) with Bundler. From the repository root:
 ```sh
 bundle install
 bundle exec fastlane ios validate
-bundle exec fastlane ios beta
+bundle exec fastlane ios beta channel:testing profile:release
 ```
+
+The default channel is **testing** (`com.swaymun.wonder.testing`), displayed as
+**Wonder Testing** with a blue icon. It installs beside orange Wonder and needs
+its own pairing. The Mac host and conversations can be shared. After the owner
+approves a tested candidate, use `channel:production` for orange Wonder; never
+promote merely because tests passed. The profile (`release` or `diagnostics`) is
+independent of the channel. Diagnostics uses the same identity within its channel.
 
 `validate` checks the local private key and release inputs without contacting
 Apple. `beta` installs the encrypted Match signing assets into Wonder's
@@ -18,6 +25,8 @@ Run one upload at a time.
 Credentials default to `~/.config/wonder/app-store-connect/upload.json`.
 `WONDER_ASC_CONFIG` can override that location. The JSON fields are `keyId`,
 `issuerId`, `privateKeyPath`, and `appBundleId` (`com.swaymun.wonder`). Keep the
+lane reuses the credential but selects the exact app ID from the requested
+channel; the Testing app record and its own profiles must already exist. Keep the
 key and configuration private and outside Git. No Apple ID session is used.
 Signing assets come from the private `swaymun/wonder-signing` Match repository.
 Only encrypted Match files belong there. The encryption password is read from
@@ -33,7 +42,8 @@ creation and renewal are separate operator actions so a release cannot silently
 replace signing credentials. Bootstrap or renew with a reviewed Apple
 Distribution certificate and App Store profile, import both into Match, then
 verify the readonly lane before releasing. Never use `match nuke` for routine
-renewal.
+renewal. For each channel the app, `.NotificationService` and `.Share` extensions each need an
+App ID and App Store profile in Match; the upload key cannot register them.
 
 This lane supports an upload-only Developer key. It does not edit release
 notes, tester groups, review submissions, or notification preferences. The

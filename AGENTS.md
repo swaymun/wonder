@@ -233,15 +233,19 @@ another Wonder checkout for profiling.
 
 ## iOS changes and TestFlight
 
-- After completing any iOS app change, including shared native code that affects
-  iPhone or iPad behavior, run the relevant checks and upload a new TestFlight
-  build as part of the task. This is standing user authorization; do not ask
-  again unless the user explicitly excludes uploading for that task.
-- Use `bundle exec fastlane ios beta` from the repository root. It reuses the
-  archive script, selects a build number above the latest uploaded build,
-  exports with API-key authentication, uploads, and waits for processing.
-  The default profile is Release. Use `profile:diagnostics` for a requested
-  diagnostics build and `profile:release` for regular beta/production behavior.
+- After completing an iOS app change, run the relevant checks and upload the
+  candidate to the separate **Wonder Testing** app. This is standing authorization
+  for testing uploads. Its blue icon and `com.swaymun.wonder.testing` identity
+  must coexist with the orange production app and keep local pairing, drafts and
+  Keychain access separate. Both may access the same paired Mac's conversations.
+- Build/upload production Wonder only after the user explicitly approves the
+  candidate. Do not install development or Diagnostics builds over production
+  Wonder while testing. The Mac app is not a separate testing variant.
+- Use `bundle exec fastlane ios beta channel:testing profile:release` from the
+  repository root; Testing is the default channel. After explicit approval,
+  `channel:production` selects orange Wonder. `profile:diagnostics` enables the
+  bounded recorder for a specifically requested Diagnostics build. Normal beta
+  builds use Release behavior. Each app has its own increasing build numbers.
 - Load credentials from `~/.config/wonder/app-store-connect/upload.json`, or the
   `WONDER_ASC_CONFIG` override. Keep the private key outside the repository;
   never print it or fall back silently to interactive Apple ID authentication.

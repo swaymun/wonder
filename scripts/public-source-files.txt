@@ -50,13 +50,17 @@ apps/ios/DIAGNOSTICS.md
 apps/ios/ExportOptions.plist
 apps/ios/PushShared/PushPreview.swift
 apps/ios/README.md
+apps/ios/TESTING.md
 apps/ios/Wonder.xcodeproj/project.pbxproj
 apps/ios/Wonder.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 apps/ios/Wonder.xcodeproj/xcshareddata/xcschemes/Diagnostics.xcscheme
 apps/ios/Wonder.xcodeproj/xcshareddata/xcschemes/Wonder.xcscheme
+apps/ios/Wonder.xcodeproj/xcshareddata/xcschemes/WonderTesting.xcscheme
 apps/ios/Wonder/AppShell.swift
 apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/AppIcon.png
 apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/Contents.json
+apps/ios/Wonder/Assets.xcassets/AppIconTesting.appiconset/AppIcon.png
+apps/ios/Wonder/Assets.xcassets/AppIconTesting.appiconset/Contents.json
 apps/ios/Wonder/Assets.xcassets/ConnectorAdobeAcrobat.imageset/Contents.json
 apps/ios/Wonder/Assets.xcassets/ConnectorAdobeAcrobat.imageset/icon.svg
 apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/Contents.json
@@ -97,6 +101,7 @@ apps/ios/Wonder/MacFileAccess.swift
 apps/ios/Wonder/ManagementViews.swift
 apps/ios/Wonder/NativeChats.swift
 apps/ios/Wonder/NewChatView.swift
+apps/ios/Wonder/PhoneIdentity.swift
 apps/ios/Wonder/ProjectViews.swift
 apps/ios/Wonder/ProjectsModel.swift
 apps/ios/Wonder/PushNotifications.swift
@@ -111,6 +116,9 @@ apps/ios/WonderDiagnosticsTests/WonderDiagnosticsTests.swift
 apps/ios/WonderNotificationService/Info.plist
 apps/ios/WonderNotificationService/NotificationService.swift
 apps/ios/WonderNotificationService/WonderNotificationService.entitlements
+apps/ios/WonderShare/Info.plist
+apps/ios/WonderShare/ShareViewController.swift
+apps/ios/WonderShare/WonderShare.entitlements
 apps/ios/WonderUITests/WonderUITests.swift
 apps/menubar/Launcher/main.swift
 apps/menubar/Package.resolved

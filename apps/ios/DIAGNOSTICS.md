@@ -17,7 +17,10 @@ and a failed Create retries identical bytes. It creates no real Bots or group
 and starts no model work. Run on iPhone and iPad alongside the durable creation
 outbox, draft restoration, and shared scene ownership diagnostics tests.
 
-Wonder has one bundle identity and two optimized distribution profiles. Installing either profile preserves the existing pairing and app data.
+Wonder has separate Production and Testing identities, each with two optimized
+distribution profiles. Testing is the default for development acceptance and
+installs beside production. Changing profiles within one channel preserves its
+pairing and local data; pairing and drafts are isolated between channels.
 
 | Profile | Scheme/configuration | Included behavior |
 | --- | --- | --- |
@@ -31,11 +34,11 @@ Wonder has one bundle identity and two optimized distribution profiles. Installi
 From the repository root:
 
 ```sh
-bundle exec fastlane ios beta profile:diagnostics
-bundle exec fastlane ios beta profile:release
+bundle exec fastlane ios beta channel:testing profile:diagnostics
+bundle exec fastlane ios beta channel:testing profile:release
 ```
 
-Omitting `profile` selects Release. Credentials use the existing owner-only App Store Connect configuration. If the API key cannot perform distribution signing, `xcode_signing:true` explicitly selects the existing Xcode account for export signing; uploading still uses the API key.
+Omitting `profile` selects Release. Credentials use the existing owner-only App Store Connect configuration. Use existing Match/manual signing; do not fall back to an Xcode account or create profiles without explicit approval.
 
 Use the Diagnostics scheme for optimized simulator and development-signed device builds. `scripts/build-ios-performance.sh` builds the normal live app. It does not replace pairing with fixtures. The lane retains source revision, dirty source evidence, selected profile, dSYMs, symbol UUIDs, export, and processing results under `.local/`. Upload, Apple processing, and tester availability are separate outcomes.
 

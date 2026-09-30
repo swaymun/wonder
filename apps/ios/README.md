@@ -21,7 +21,7 @@ A local compilation/archive check without provisioning changes is:
 xcodebuild -project apps/ios/Wonder.xcodeproj -scheme Wonder -configuration Release -destination 'generic/platform=iOS' -archivePath /tmp/Wonder-release-check.xcarchive CODE_SIGNING_ALLOWED=NO archive
 ```
 
-This unsigned archive cannot be installed or uploaded. Distribution still requires matching signing/provisioning, a signed archive/export, fresh pairing and device acceptance. The app record alone does not establish TestFlight readiness. Push registration/APNs delivery and the share extension are separate implementation gates; this identifier change does not enable them.
+This unsigned archive cannot be installed or uploaded. Distribution still requires matching signing/provisioning, a signed archive/export, fresh pairing and device acceptance. The app record alone does not establish TestFlight readiness. Push registration/APNs delivery and Share to Wonder have separate acceptance gates. See [Wonder Testing](TESTING.md) for the separate blue testing app, Share signing setup and current limitations.
 
 Use normal simulator signing: disabling signing prevents Keychain access. Physical devices require Developer Mode, an unlocked device, and a development provisioning profile. The checked-in development team is the existing owner's team; choose your own team for another installation.
 

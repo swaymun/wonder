@@ -64,7 +64,8 @@ def read_inventory(root):
 
 
 def reviewed_binary(name):
-    return (name == 'apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/AppIcon.png'
+    return (name in {'apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/AppIcon.png',
+                     'apps/ios/Wonder/Assets.xcassets/AppIconTesting.appiconset/AppIcon.png'}
             or name in {
                 'apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/claude-docs.png',
                 'apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/claude-docs-dark.png',

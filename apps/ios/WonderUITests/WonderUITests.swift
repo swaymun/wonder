@@ -2,6 +2,14 @@ import XCTest
 import UIKit
 
 @MainActor final class WonderUITests: XCTestCase {
+    private var appBundleIdentifier: String {
+        #if WONDER_TESTING
+        "com.swaymun.wonder.testing"
+        #else
+        "com.swaymun.wonder"
+        #endif
+    }
+    private var appDisplayName: String { appBundleIdentifier.hasSuffix(".testing") ? "Wonder Testing" : "Wonder" }
     // This optional private replay uses the production conversation controls.
     // Supply the projected snapshot in the app's Documents directory; never
     // check real session contents into source or initiate model work here.
@@ -10,7 +18,7 @@ import UIKit
             throw XCTSkip("Explicit private offline history fixture required")
         }
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved", "-diagnostics-history-replay"]
         app.launch()
         openSidebarIfNeeded(app)
@@ -45,7 +53,7 @@ import UIKit
 
     func testNativeMarketingConversationCapture() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-marketing", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         let chat = app.buttons["chat-row:fixture-parent-conversation"]
@@ -83,7 +91,7 @@ import UIKit
 
     private func checkInitialChatLayout(extra: [String], contentSize: String = "UICTContentSizeCategoryL") throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout", "-UIPreferredContentSizeCategoryName", contentSize] + extra
         app.launch()
         openSidebarIfNeeded(app)
@@ -166,7 +174,7 @@ import UIKit
 
     func testChatRestoresOlderReadingPositionAndReturnsToBottom() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-older", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         openSidebarIfNeeded(app)
@@ -220,7 +228,7 @@ import UIKit
 
     func testActivityDisclosureKeepsVisibleReadingAnchorAtLargeText() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-older",
                                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXXXL"]
         app.launch()
@@ -273,7 +281,7 @@ import UIKit
 
     func testChatStatusesAndVisibleReadRetryClearUnreadWithoutScrolling() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-read-status"]
         app.launch()
         let unread = app.buttons["chat-row:fixture-parent-conversation"]
@@ -306,7 +314,7 @@ import UIKit
 
     func testWorkingImagesFollowActivityExpansion() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         for extra in [[], ["-activity-running-preview"], ["-activity-final-image-preview"]] {
             app.launchArguments = ["-read-preview", "-send-preview", "-activity-preview", "-activity-mixed-preview"] + extra
             app.launch()
@@ -365,7 +373,7 @@ import UIKit
 
     func testComputerApprovalShowsExactActionAndPhoneControls() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         for size in ["UICTContentSizeCategoryL", "UICTContentSizeCategoryAccessibilityXXXL"] {
             app.launchArguments = ["-read-preview", "-send-preview", "-computer-approval-preview", "-UIPreferredContentSizeCategoryName", size]
             app.launch()
@@ -383,7 +391,7 @@ import UIKit
 
     func testEveryApprovalFamilyHasPhoneControls() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let cases = [
             ("command", "acceptForSession", "convert original.png output.png"),
             ("network", "accept", "example.com"),
@@ -418,7 +426,7 @@ import UIKit
 
     func testChatContextMenuPreview() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         // Synthetic, offline Bot and Group rows exercise the real menu. Network
         // mutations stay disabled, while Copy ID remains available.
         for arguments in [["-read-preview", "-send-preview", "-chats-preview"], ["-read-preview", "-chats-preview"], ["-connections-preview"]] {
@@ -460,7 +468,7 @@ import UIKit
 
     private func checkOptimisticApprovals(minimumDuration: TimeInterval, minimumChanges: Int) throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let arguments = ["-diagnostics-subagent-fixture", "-diagnostics-optimistic-approval", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launchArguments = arguments + ["-diagnostics-approval-reset"]
         app.launch()
@@ -524,7 +532,7 @@ import UIKit
 
     func testDiagnosticsGoalPillStatusIconsKeepDetailsAccessible() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         for (status, label, detail) in [
             ("paused", "paused", "Paused"), ("complete", "complete", "Complete"),
             ("blocked", "needs attention", "Needs attention"),
@@ -562,7 +570,7 @@ import UIKit
 
     private func checkGoalSheet(contentSize: String) throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-goal-fixture",
                                "-UIPreferredContentSizeCategoryName", contentSize]
         app.launch()
@@ -677,7 +685,7 @@ import UIKit
 
     private func checkSubagentSheet(contentSize: String) throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-UIPreferredContentSizeCategoryName", contentSize]
         app.launch()
         let parent = app.buttons["chat-row:fixture-parent-conversation"]
@@ -736,7 +744,7 @@ import UIKit
 
     func testDiagnosticsComputerSessionUnavailableFixture() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-computer-session-fixture"]
         app.launch()
 
@@ -776,7 +784,7 @@ import UIKit
 
     func testDiagnosticsComputerSessionAvailableFixtureTakesControlAndReleasesIt() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
         app.launch()
 
@@ -820,7 +828,7 @@ import UIKit
 
     func testDiagnosticsComputerControlsStayOnOneRowAtAccessibilitySize() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture",
                                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
         app.launch()
@@ -840,7 +848,7 @@ import UIKit
 
     func testDiagnosticsComputerPointerModeMenuDoesNotOpenKeyboard() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture",
                                "-diagnostics-computer-live-updates"]
         app.launch()
@@ -944,7 +952,7 @@ import UIKit
 
     func testDiagnosticsComputerMenuExcludesTeachingAndKeepsKeyboardAvailable() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
         app.launch()
         let takeControl = app.buttons["computer-session-take-control"]
@@ -973,7 +981,7 @@ import UIKit
 
     func testDiagnosticsComputerCloseWhileControllingDismissesKeyboard() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
         app.launch()
         let takeControl = app.buttons["computer-session-take-control"]
@@ -996,7 +1004,7 @@ import UIKit
 
     func testDiagnosticsComputerBackgroundEndsControlAndDismissesViewer() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
         app.launch()
         let takeControl = app.buttons["computer-session-take-control"]
@@ -1031,7 +1039,7 @@ import UIKit
 
     private func checkPhysicalComputerView(chatName: String? = nil) throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
         defer { removeUIInterruptionMonitor(localNetworkMonitor) }
         app.launch()
@@ -1160,7 +1168,7 @@ import UIKit
 
     func testPhysicalComputerControlAcceptsInputAndReleases() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
         defer { removeUIInterruptionMonitor(localNetworkMonitor) }
         app.launch()
@@ -1254,7 +1262,7 @@ import UIKit
               qaRowID.hasPrefix("chat-row:"), qaRowID.count > "chat-row:".count else {
             throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA chat-row accessibility identifier.")
         }
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
         defer { removeUIInterruptionMonitor(localNetworkMonitor) }
         app.launch()
@@ -1520,7 +1528,7 @@ import UIKit
               qaRowID.hasPrefix("chat-row:"), qaRowID.count > "chat-row:".count else {
             throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA chat-row accessibility identifier.")
         }
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
         defer { removeUIInterruptionMonitor(localNetworkMonitor) }
         app.launch()
@@ -1592,7 +1600,7 @@ import UIKit
               qaRowID.hasPrefix("chat-row:"), qaRowID.count > "chat-row:".count else {
             throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA chat-row accessibility identifier.")
         }
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let localNetworkMonitor = installWonderLocalNetworkPermissionMonitor()
         defer { removeUIInterruptionMonitor(localNetworkMonitor) }
         app.launch()
@@ -1699,7 +1707,7 @@ import UIKit
 
     func testDiagnosticsTeachingUnavailableFixture() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-teaching-fixture"]
         app.launch()
 
@@ -1732,7 +1740,7 @@ import UIKit
 
     func testDiagnosticsTeachingAvailableFixtureRecordsReviewsAndSaves() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-teaching-fixture", "-diagnostics-teaching-flow-fixture"]
         app.launch()
 
@@ -1838,7 +1846,7 @@ import UIKit
 
     func testDiagnosticsTeachingCancelLeavesNoDemonstration() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-teaching-fixture", "-diagnostics-teaching-flow-fixture"]
         app.launch()
 
@@ -1854,7 +1862,7 @@ import UIKit
 
     func testLiveChatContextMenuCancellation() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launch()
         let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:"))
         guard rows.firstMatch.waitForExistence(timeout: 15) else { throw XCTSkip("Requires a paired device with a chat in the list.") }
@@ -1935,7 +1943,7 @@ import UIKit
 
     func testLiveWorkingImageDisclosure() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launch()
         let chat = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Wonder iOS")).firstMatch
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation.") }
@@ -1985,7 +1993,7 @@ import UIKit
 
     func testLiveInlineImageScrolling() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launch()
         let chat = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Wonder iOS")).firstMatch
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation with a generated image.") }
@@ -2033,7 +2041,7 @@ import UIKit
         let ids = (ProcessInfo.processInfo.environment["WONDER_PERF_CONVERSATION_IDS"] ?? "")
             .split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         guard !ids.isEmpty else { throw XCTSkip("Supply WONDER_PERF_CONVERSATION_IDS with already-read conversation IDs.") }
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchEnvironment["WONDER_DIAGNOSTICS_CAPTURE"] = "1"
         let launchStart = Date()
         app.launch()
@@ -2081,9 +2089,64 @@ import UIKit
         XCTAssertEqual(app.state, .runningForeground)
     }
 
+    /// Share to Wonder from Photos reads the paired Mac's chats with the app's
+    /// saved session and stages the photo. It cancels before Send.
+    func testLiveShareExtensionStagesPhotoAndListsChatsWithoutSending() throws {
+        continueAfterFailure = false
+        let photos = XCUIApplication(bundleIdentifier: "com.apple.mobileslideshow")
+        photos.launch()
+        addUIInterruptionMonitor(withDescription: "Photos prompts") { alert in
+            for label in ["Don’t Allow", "Continue", "Not Now"] where alert.buttons[label].exists {
+                alert.buttons[label].tap(); return true
+            }
+            return false
+        }
+        if photos.buttons["Continue"].waitForExistence(timeout: 3) { photos.buttons["Continue"].tap() }
+        let photo = photos.images.matching(NSPredicate(format: "identifier == %@ AND label BEGINSWITH %@", "PXGGridLayout-Info", "Photo")).firstMatch
+        guard photo.waitForExistence(timeout: 15) else {
+            let tree = XCTAttachment(string: photos.debugDescription); tree.name = "Photos hierarchy"; tree.lifetime = .keepAlways; add(tree)
+            throw XCTSkip("The simulator Photos library has no images.")
+        }
+        let share = photos.buttons["Share"]
+        for _ in 0..<3 where !share.isHittable {
+            photo.exists ? photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() : photos.tap()
+            _ = share.waitForExistence(timeout: 3)
+        }
+        retainMenuScreenshot(photos, name: "Photos before sharing")
+        XCTAssertTrue(share.isHittable, "Photos did not show its Share button.")
+        share.tap()
+        let wonder = photos.cells.matching(NSPredicate(format: "label == %@", appDisplayName)).firstMatch
+        XCTAssertTrue(wonder.waitForExistence(timeout: 15), "Wonder is not offered in the share sheet.")
+        wonder.tap()
+
+        let send = photos.buttons["share-send"]
+        XCTAssertTrue(send.waitForExistence(timeout: 20), "The Wonder share sheet did not open.")
+        // The extension is a remote view: typed button and text queries reach it.
+        let note = photos.textViews["share-note"].exists ? photos.textViews["share-note"] : photos.textFields["share-note"]
+        if !photos.buttons["share-attachment-remove"].waitForExistence(timeout: 20) {
+            let dump = XCTAttachment(string: photos.buttons.debugDescription + "\n\n" + photos.textViews.debugDescription)
+            dump.name = "Share buttons"; dump.lifetime = .keepAlways; add(dump)
+            retainMenuScreenshot(photos, name: "Share extension staging")
+            XCTFail("The shared photo was not staged.")
+        }
+        let destination = photos.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "share-destination:")).firstMatch
+        guard destination.waitForExistence(timeout: 30) else {
+            retainMenuScreenshot(photos, name: "Share extension without chats")
+            throw XCTSkip("Requires a simulator paired with a reachable Mac that has at least one chat.")
+        }
+        XCTAssertFalse(send.isEnabled, "Send must wait for a chosen chat.")
+        if note.exists { note.tap(); note.typeText("Share extension check") }
+        destination.tap()
+        XCTAssertTrue(destination.isSelected)
+        XCTAssertTrue(send.isEnabled)
+        retainMenuScreenshot(photos, name: "Share to Wonder ready without sending")
+        photos.buttons["Cancel"].tap()
+        XCTAssertTrue(waitUntilGone(send, timeout: 10), "Cancel did not close the share sheet.")
+    }
+
     func testLiveImagePreview() throws {
         continueAfterFailure=false
-        let app=XCUIApplication(bundleIdentifier:"com.swaymun.wonder")
+        let app=XCUIApplication(bundleIdentifier:appBundleIdentifier)
         app.launch()
         let chat=app.buttons.matching(NSPredicate(format:"label BEGINSWITH %@", "Diagnostics image preview")).firstMatch
         guard chat.waitForExistence(timeout:15) else { throw XCTSkip("Prepare the dedicated image test Bot with Preview fixture 4000x3000.png first.") }
@@ -2117,7 +2180,7 @@ import UIKit
 
     func testLiveWorkspaceBrowserIsReadOnlyAndNavigable() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launch()
         let chat = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Wonder iOS")).firstMatch
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation.") }
@@ -2171,7 +2234,7 @@ import UIKit
 
     func testDiagnosticsPhotoViewerRoutesImagesDocumentsAndFailures() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-preview-malformed-image"]
         app.launch()
 
@@ -2259,7 +2322,7 @@ import UIKit
 
     func testDiagnosticsWorkspaceBrowserViewsNavigationAndGitDiff() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-files-preview"]
         app.launch()
 
@@ -2297,7 +2360,7 @@ import UIKit
     }
 
     func testLargeActivityDetails() throws {
-        let app=XCUIApplication(bundleIdentifier:"com.swaymun.wonder")
+        let app=XCUIApplication(bundleIdentifier:appBundleIdentifier)
         app.launchArguments=["-diagnostics-fixtures"]; app.launch()
         for title in ["Command","Diff"] {
             selectDiagnosticFixture(title, in: app)
@@ -2320,7 +2383,7 @@ import UIKit
 
     func testDiagnosticsLongFilenameKeepsChangeCountsOnTheSameLine() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-read-preview", "-diagnostics-file-long", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
         selectDiagnosticFixture("Diff", in: app)
@@ -2338,7 +2401,7 @@ import UIKit
 
     func testDiagnosticsCancelledQueueKeepsGuideAndWorkingState() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-cancelled-queue", "-read-preview", "-send-preview"]
         app.launch()
         let working = app.buttons["activity-group:runtime/command-0"]
@@ -2365,7 +2428,7 @@ import UIKit
     func testDiagnosticsFileChangeSummaryShowsFilenameCountsAndRetainsDiff() throws {
         continueAfterFailure = false
         for large in [false, true] {
-            let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+            let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
             app.launchArguments = ["-diagnostics-fixtures", "-read-preview"]
             if large { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
             app.launch()
@@ -2408,7 +2471,7 @@ import UIKit
 
     func testDiagnosticsCommandSummaryKeepsDurationOnlyWhenTheFullCommandFits() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-command-narrow", "-diagnostics-command-short"]
         app.launch()
         selectDiagnosticFixture("Command", in: app)
@@ -2443,7 +2506,7 @@ import UIKit
 
     func testDiagnosticsCommandSummaryOmitsDurationWhenTheCommandTruncatesOrAtMaximumText() throws {
         continueAfterFailure = false
-        let constrained = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let constrained = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         constrained.launchArguments = ["-diagnostics-fixtures", "-diagnostics-command-narrow"]
         constrained.launch()
         selectDiagnosticFixture("Command", in: constrained)
@@ -2454,7 +2517,7 @@ import UIKit
         retainMenuScreenshot(constrained, name: "Truncated command at 220pt omits visual duration")
         constrained.terminate()
 
-        let largeText = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let largeText = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         largeText.launchArguments = ["-diagnostics-fixtures", "-diagnostics-command-narrow",
                                      "-diagnostics-command-short",
                                      "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
@@ -2470,7 +2533,7 @@ import UIKit
 
     func testDiagnosticsWorkspaceRequestLeavesChatAfterApproval() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-working-folder"]
         app.launch()
 
@@ -2488,7 +2551,7 @@ import UIKit
 
     func testDiagnosticsWorkspaceRequestFitsAtMaximumTextSize() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = [
             "-diagnostics-fixtures", "-diagnostics-working-folder",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"
@@ -2515,7 +2578,7 @@ import UIKit
         continueAfterFailure = false
         // This fixture is intentionally launched with the optimized
         // Diagnostics product identity, not the legacy DEBUG preview target.
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures"]
         app.launch()
 
@@ -2582,7 +2645,7 @@ import UIKit
 
     func testDiagnosticsCompletedRefreshDoesNotShowStaleStopResponse() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-stale-active"]
         app.launch()
 
@@ -2609,7 +2672,7 @@ import UIKit
 
     func testDiagnosticsCompactionMarkersRemainVisibleAroundCollapsedActivity() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures"]
         app.launch()
         selectDiagnosticFixture("Turn lifecycle", in: app)
@@ -2663,7 +2726,7 @@ import UIKit
 
     func testComposerImagePasteFromLongPressMenuPreservesDraftAndReloads() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-composer-paste"]
         app.launch()
         let editor = app.textViews["message-draft"]
@@ -2700,7 +2763,7 @@ import UIKit
 
     func testComposerAttachmentPreviewLoadsAndRemovesOnlyTheSelectedImage() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-composer-attachments-preview"]
         app.launch()
 
@@ -2751,7 +2814,7 @@ import UIKit
 
     func testSentMessageAttachmentsShowAboveTextAndSwipeConversationImages() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-message-attachments-preview"]
         app.launch()
 
@@ -2800,7 +2863,7 @@ import UIKit
 
     func testRestoredComposerAttachmentsShowLoadedAndMissingStatesAndCanBeRemoved() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-composer-restored-attachments-preview"]
         app.launch()
 
@@ -2842,7 +2905,7 @@ import UIKit
 
     func testDiagnosticsAttachmentFixtureUsesStripAndKeepsFileAfterPhotoRemoval() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures"]
         app.launch()
         selectDiagnosticFixture("Attachments", in: app)
@@ -2881,7 +2944,7 @@ import UIKit
             ["-read-preview", "-send-preview", "-composer-queued-preview"]
         ]
         for arguments in cases {
-            let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+            let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
             app.launchArguments = arguments
             app.launch()
             if arguments.contains("-composer-running-preview") {
@@ -2992,7 +3055,7 @@ import UIKit
 
     func testNewBotOpensComposerWithoutSetupQuestion() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-new-bot-preview"]
         app.launch()
         let chat = app.staticTexts["Luna"].firstMatch
@@ -3014,7 +3077,7 @@ import UIKit
     func testGroupCreationUsesExistingMembersAndRecoversFrozenSuggestedEdits() throws {
         continueAfterFailure = false
         for frozen in [false, true] {
-            let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+            let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
             app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-group-creation"] + (frozen ? ["-diagnostics-group-frozen"] : [])
             app.launch()
             defer { app.terminate() }
@@ -3065,7 +3128,7 @@ import UIKit
 
     func testBotSettingsUsesCompactAvatarSection() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-read-status"]
         app.launch()
         let chat = app.buttons["chat-row:fixture-parent-conversation"]
@@ -3093,7 +3156,7 @@ import UIKit
 
     func testBotAvatarSettingsMatchSavedIdentityAndSaveAcrossRelaunch() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         let arguments = ["-diagnostics-subagent-fixture", "-diagnostics-avatar-settings"]
         app.launchArguments = arguments + ["-diagnostics-avatar-settings-reset"]
 
@@ -3177,7 +3240,7 @@ import UIKit
 
     func testDiagnosticsScienceAvatarsSelectPersistAndExposeMotionStates() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-avatar-fixture", "-diagnostics-avatar-reset"]
         app.launch()
 
@@ -3247,7 +3310,7 @@ import UIKit
         XCTAssertFalse(payload.label.contains("avatarColor"))
         app.terminate()
 
-        let relaunched = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let relaunched = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         relaunched.launchArguments = ["-diagnostics-avatar-fixture"]
         relaunched.launch()
         XCTAssertTrue(relaunched.buttons["science-avatar-shape-luna"].waitForExistence(timeout: 10))
@@ -3259,7 +3322,7 @@ import UIKit
 
     func testDiagnosticsApprovalPickerUsesThreeChoicesPersistsAndShowsOldHostState() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-permission-fixture", "-diagnostics-permission-reset"]
         app.launch()
         let picker = app.buttons["diagnostic-approval-picker"]
@@ -3277,14 +3340,14 @@ import UIKit
         XCTAssertEqual(app.staticTexts["diagnostic-approval-saved"].label, "Full access")
         app.terminate()
 
-        let relaunched = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let relaunched = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         relaunched.launchArguments = ["-diagnostics-fixtures", "-diagnostics-permission-fixture"]
         relaunched.launch()
         XCTAssertTrue(relaunched.buttons["diagnostic-approval-picker"].waitForExistence(timeout: 10))
         XCTAssertEqual(relaunched.buttons["diagnostic-approval-picker"].value as? String, "Full access")
         relaunched.terminate()
 
-        let oldHost = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let oldHost = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         oldHost.launchArguments = ["-diagnostics-fixtures", "-diagnostics-permission-fixture", "-diagnostics-permission-old-host", "-diagnostics-permission-reset"]
         oldHost.launch()
         XCTAssertTrue(oldHost.staticTexts["Update Wonder on your Mac to change approval settings."].waitForExistence(timeout: 10))
@@ -3294,7 +3357,7 @@ import UIKit
 
     func testDiagnosticsAllApprovalChoicesSaveAndReload() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-permission-fixture", "-diagnostics-permission-auto-available", "-diagnostics-permission-reset"]
         app.launch()
         let picker = app.buttons["diagnostic-approval-picker"]
@@ -3405,7 +3468,7 @@ import UIKit
         let environment = ProcessInfo.processInfo.environment
         let project = try XCTUnwrap(environment["WONDER_PROJECT_ID"], "Supply an owned test project")
         let name = try XCTUnwrap(environment["WONDER_PROJECT_NAME"])
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launch()
         if app.buttons["settings-done"].waitForExistence(timeout: 2) { app.buttons["settings-done"].tap() }
         openSidebarIfNeeded(app)
@@ -3499,7 +3562,7 @@ import UIKit
     // refinements that omit the owner's edits. No model or real Bot runs.
     func testGroupReviewRetainsEditsAndRetriesExactAcceptedRoster() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-group-creation", "-diagnostics-group-review"]
         app.launch()
         let review = app.buttons["Review team"]
@@ -3530,7 +3593,7 @@ import UIKit
     func testPairForLiveRun() throws {
         continueAfterFailure = false
         guard let link = ProcessInfo.processInfo.environment["WONDER_PAIRING_LINK"] else { throw XCTSkip("No explicit pairing offer supplied.") }
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-show-connections"]
         app.launch()
         app.buttons["settings-add-computer"].tap()
@@ -3550,7 +3613,7 @@ import UIKit
     // catch a root builder invoked by SwiftUI's asynchronous renderer.
     func testRootSceneSurvivesRepeatedLaunchAndForeground() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-connections-preview", "-show-connections"]
         for _ in 0..<10 {
             app.launch()
@@ -3574,7 +3637,7 @@ import UIKit
         guard let host = ProcessInfo.processInfo.environment["WONDER_PAIRING_HOST_NAME"] else {
             throw XCTSkip("An explicit paired host is required.")
         }
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-show-connections"]
         for pass in 0..<10 {
             app.launch()
@@ -3609,7 +3672,7 @@ import UIKit
               qaRowID.hasPrefix("chat-row:"), qaRowID.count > "chat-row:".count else {
             throw XCTSkip("Supply WONDER_PAIRING_QA_CONVERSATION_ID with the exact dedicated QA chat-row accessibility identifier.")
         }
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-show-connections"]
         for pass in 0..<2 {
             app.launch()
@@ -3636,7 +3699,7 @@ import UIKit
 
     func testComposerBlocksExhaustedUsageWithoutPhantomFolderError() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
             "-diagnostics-folder-poll-offline", "-diagnostics-usage-fixture", "-diagnostics-usage-exhausted"]
         app.launch()
@@ -3665,7 +3728,7 @@ import UIKit
 
     func testConnectedAppsKeepNamesAndIconsAcrossFamilies() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         for (style, size) in [("Light", "UICTContentSizeCategoryL"), ("Dark", "UICTContentSizeCategoryAccessibilityXXL")] {
             app.launchArguments = ["-diagnostics-connected-apps", "-AppleInterfaceStyle", style,
                                    "-UIPreferredContentSizeCategoryName", size]
@@ -3709,7 +3772,7 @@ import UIKit
     // percentages, and both providers stay in the existing connection settings.
     func testDiagnosticsCodexUsageIsInlineInConnectionSettings() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-connections-preview", "-diagnostics-usage-fixture", "-show-connections"]
         app.launch()
 
@@ -3744,7 +3807,7 @@ import UIKit
 
     func testQuestionMultipleChoicesSurviveQuestionNavigation() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         for size in ["UICTContentSizeCategoryL", "UICTContentSizeCategoryAccessibilityXXL"] {
             app.launchArguments = ["-read-preview", "-send-preview", "-question-preview", "-UIPreferredContentSizeCategoryName", size]
             app.launch()
@@ -3774,7 +3837,7 @@ import UIKit
 
     func testPhysicalNewBotCreationOpensAndArchivesExactChat() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = []
         app.launch()
         var createdRowID: String?
@@ -3976,7 +4039,7 @@ import UIKit
     }
     func testLiveActivityAndScrolling() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures"]
         app.launch()
 
@@ -4075,7 +4138,7 @@ import UIKit
     }
 
     func testDiagnosticsCameraPermissionAndHardwareFailureAreDismissible() throws {
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         for argument in ["-diagnostics-camera-denied", "-diagnostics-camera-unavailable"] {
             app.launchArguments = ["-diagnostics-fixtures", argument]
             app.launch()
@@ -4089,7 +4152,7 @@ import UIKit
     }
 
     func testDiagnosticsCameraOptionsExposeNativeControls() throws {
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-camera-options"]
         app.launch()
         let options = app.buttons["camera-options"]
@@ -4193,7 +4256,7 @@ import UIKit
     private func launchCameraFixture(_ mode: String) -> XCUIApplication {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
-        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         if mode == "physical" {
             // The interruption monitor handles a prompt that arrives during an
             // XCTest action; Springboard handles the first-launch system alert.

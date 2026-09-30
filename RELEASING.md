@@ -60,8 +60,12 @@ is independent of updates.
 Run relevant native/model/UI/device checks, then serialize uploads using:
 
 ```sh
-bundle exec fastlane ios beta profile:release
+bundle exec fastlane ios beta channel:testing profile:release
 ```
+
+Testing candidates install beside production. Only after the owner approves the
+candidate, use `channel:production` to publish orange Wonder. See
+[the Testing setup](apps/ios/TESTING.md).
 
 Use `~/.config/wonder/app-store-connect/upload.json` or `WONDER_ASC_CONFIG`.
 Prefer the encrypted Match/manual-signing path. Never fall back silently to

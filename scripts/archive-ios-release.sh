@@ -11,6 +11,16 @@ case "$PROFILE" in
   diagnostics) CONFIGURATION=Diagnostics; SCHEME=Diagnostics ;;
   *) echo 'Profile must be release or diagnostics' >&2; exit 2 ;;
 esac
+CHANNEL="${WONDER_IOS_CHANNEL:-testing}"
+case "$CHANNEL" in
+  production) BUNDLE_ID=com.swaymun.wonder ;;
+  testing)
+    BUNDLE_ID=com.swaymun.wonder.testing
+    SCHEME=WonderTesting
+    if [[ "$PROFILE" == diagnostics ]]; then CONFIGURATION=TestingDiagnostics; else CONFIGURATION=Testing; fi
+    ;;
+  *) echo 'Channel must be testing or production' >&2; exit 2 ;;
+esac
 [[ "$BUILD" =~ ^[1-9][0-9]*$ ]] || { echo 'Use a positive integer build number' >&2; exit 2; }
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
@@ -57,23 +67,24 @@ if find "$APP/Frameworks" -maxdepth 1 -type d -name '*.framework' -print -quit 2
   }
 fi
 xcrun dwarfdump --uuid "$OUT/Wonder.xcarchive/dSYMs/Wonder.app.dSYM" > "$OUT/symbol-uuids.txt"
-python3 - "$APP/Info.plist" "$BUILD" "$OUT/build.json" "$PROFILE" "$OUT" <<'PY'
+python3 - "$APP/Info.plist" "$BUILD" "$OUT/build.json" "$PROFILE" "$OUT" "$BUNDLE_ID" "$CHANNEL" <<'PY'
 import json, plistlib, sys
 from pathlib import Path
 info = plistlib.loads(Path(sys.argv[1]).read_bytes())
-if info.get('CFBundleIdentifier') != 'com.swaymun.wonder' or info.get('CFBundleVersion') != sys.argv[2]:
+if info.get('CFBundleIdentifier') != sys.argv[6] or info.get('CFBundleVersion') != sys.argv[2]:
     raise SystemExit('Archive identity/build does not match the requested Release build')
-extension_info_path = Path(sys.argv[1]).parent / 'PlugIns/WonderNotificationService.appex/Info.plist'
-extension_info = plistlib.loads(extension_info_path.read_bytes())
-if (not extension_info.get('CFBundleDisplayName')
-    or extension_info.get('CFBundleIdentifier') != info['CFBundleIdentifier'] + '.NotificationService'
-    or extension_info.get('CFBundleVersion') != info['CFBundleVersion']
-    or extension_info.get('CFBundleShortVersionString') != info['CFBundleShortVersionString']):
-    raise SystemExit('Notification extension display name, identity or version is invalid')
+for bundle, suffix in [('WonderNotificationService', '.NotificationService'), ('WonderShare', '.Share')]:
+    extension_info = plistlib.loads((Path(sys.argv[1]).parent / f'PlugIns/{bundle}.appex/Info.plist').read_bytes())
+    if (not extension_info.get('CFBundleDisplayName')
+        or extension_info.get('CFBundleIdentifier') != info['CFBundleIdentifier'] + suffix
+        or extension_info.get('CFBundleVersion') != info['CFBundleVersion']
+        or extension_info.get('CFBundleShortVersionString') != info['CFBundleShortVersionString']):
+        raise SystemExit(f'{bundle} display name, identity or version is invalid')
 if info.get('ITSAppUsesNonExemptEncryption') is not False:
     raise SystemExit('Archive must declare its encryption exemption; review encryption use before changing this check')
 Path(sys.argv[3]).write_text(json.dumps({
     'profile': sys.argv[4],
+    'channel': sys.argv[7],
     'sourceCommit': (Path(sys.argv[5]) / 'source-commit.txt').read_text().strip(),
     'sourceDirty': bool((Path(sys.argv[5]) / 'source-status.txt').read_text().strip()),
     'symbolUUIDs': (Path(sys.argv[5]) / 'symbol-uuids.txt').read_text().strip(),
