@@ -241,6 +241,8 @@ private struct NewChatContent: View {
     @State private var cameraScope: String?
     @State private var showingModel = false
     @State private var showingComputer = false
+    @State private var showingConnectionPicker = false
+    @State private var pairAfterConnectionPicker = false
 
     private var draftChat: ChatSummary {
         ChatSummary(conversationId: "new-chat:" + draft.requestID, botId: nil, title: "New chat",
@@ -490,34 +492,60 @@ private struct NewChatContent: View {
     }
 
     private var computerMenu: some View {
-        Menu {
-            Picker("Computer", selection: Binding(get: { hostID }, set: { if let host = $0 { choose(host: host) } })) {
-                ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
-                    let candidate = library.model(for: saved)
-                    let connected = !candidate.accessEnded && candidate.macConnected == true
-                    let detail = candidate.accessEnded ? "Access ended" : connected ? "Connected" : candidate.macConnected == false ? "Offline" : "Connecting"
-                    Label {
-                        Text(candidate.macName)
-                    } icon: {
-                        // Native menus need an original-color image to preserve the status tint.
-                        Image(uiImage: UIImage(systemName: "circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 10))?
-                            .withTintColor(connected ? .systemGreen : .systemRed, renderingMode: .alwaysOriginal) ?? UIImage())
-                    }
-                    .accessibilityLabel("\(candidate.macName), \(detail)")
-                    .tag(Optional(saved.credential.hostInstallationId))
-                }
-            }
-            .pickerStyle(.inline)
-            Section { Button("Add computer", systemImage: "plus") { pairing = true } }
-        } label: {
+        Button { showingConnectionPicker = true } label: {
             PickerRow(systemImage: "laptopcomputer", title: model.macName)
         }
-        .menuOrder(.fixed)
-        // Menu labels otherwise take the accent tint; these read as plain text.
         .buttonStyle(.plain).tint(.primary)
         .accessibilityLabel("Computer")
         .accessibilityValue(model.macName)
         .accessibilityIdentifier("connection-picker")
+        .popover(isPresented: $showingConnectionPicker, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
+                    let candidate = library.model(for: saved)
+                    let connected = !candidate.accessEnded && candidate.macConnected == true
+                    let detail = candidate.accessEnded ? "Access ended" : connected ? "Connected" : candidate.macConnected == false ? "Offline" : "Connecting"
+                    let selected = saved.credential.hostInstallationId == hostID
+                    Button {
+                        showingConnectionPicker = false
+                        choose(host: saved.credential.hostInstallationId)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "checkmark")
+                                .opacity(selected ? 1 : 0).frame(width: 16)
+                            Text(candidate.macName).lineLimit(2)
+                            Spacer(minLength: 12)
+                            Circle().fill(connected ? Color.green : Color.red)
+                                .frame(width: 7, height: 7).accessibilityHidden(true)
+                        }
+                        .frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                    .accessibilityLabel(candidate.macName)
+                    .accessibilityValue(selected ? "\(detail), Selected" : detail)
+                    .accessibilityIdentifier("connection-option:" + saved.credential.hostInstallationId)
+                }
+                Divider().padding(.vertical, 4)
+                Button {
+                    pairAfterConnectionPicker = true
+                    showingConnectionPicker = false
+                } label: {
+                    Label("Add computer", systemImage: "plus")
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityIdentifier("connection-add-computer")
+            }
+            .font(.body).foregroundStyle(.primary).buttonStyle(.plain)
+            .padding(.horizontal, 14).padding(.vertical, 6)
+            .frame(idealWidth: 280, maxWidth: 320)
+            .presentationCompactAdaptation(.popover)
+            .onDisappear {
+                if pairAfterConnectionPicker {
+                    pairAfterConnectionPicker = false
+                    pairing = true
+                }
+            }
+        }
     }
 
     private var projectMenu: some View {

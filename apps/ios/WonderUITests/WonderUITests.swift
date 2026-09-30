@@ -3038,6 +3038,46 @@ import UIKit
         retainMenuScreenshot(app, name: "Physical pairing completed")
     }
 
+    // The anchored computer picker must dismiss before changing hosts or opening
+    // pairing, while the real new-chat composer restores each Mac's own draft.
+    func testConnectionPickerChoosesMacAndOpensPairing() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview"]
+        app.launch()
+        let picker = app.buttons["connection-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 15))
+        picker.tap()
+        let studio = app.buttons["connection-option:studio"]
+        XCTAssertTrue(studio.waitForExistence(timeout: 5))
+        retainMenuScreenshot(app, name: "Small trailing connection status dots")
+        studio.tap()
+        XCTAssertEqual(picker.value as? String, "Studio")
+        let draft = app.textViews["new-chat-draft"]
+        draft.tap()
+        draft.typeText(" Picker check " + UUID().uuidString)
+        let text = try XCTUnwrap(draft.value as? String)
+        for _ in 0..<10 {
+            picker.tap()
+            app.buttons["connection-option:macbook"].tap()
+            XCTAssertEqual(picker.value as? String, "Laptop")
+            XCTAssertFalse(app.buttons["connection-option:studio"].exists)
+            picker.tap()
+            XCTAssertEqual(app.buttons["connection-option:macbook"].value as? String, "Connected, Selected")
+            studio.tap()
+            XCTAssertEqual(picker.value as? String, "Studio")
+            XCTAssertEqual(draft.value as? String, text)
+        }
+        picker.tap()
+        retainMenuScreenshot(app, name: "Connection picker with keyboard and restored draft")
+        app.buttons["connection-add-computer"].tap()
+        XCTAssertTrue(app.navigationBars["Add computer"].waitForExistence(timeout: 10))
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, text)
+        app.terminate()
+    }
+
     // Exercise the real App/WindowGroup boundary. A view-only fixture cannot
     // catch a root builder invoked by SwiftUI's asynchronous renderer.
     func testRootSceneSurvivesRepeatedLaunchAndForeground() throws {
