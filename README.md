@@ -6,7 +6,7 @@
 <p align="center"><strong>Your Mac’s agents, on your iPhone and iPad.</strong></p>
 <p align="center">Keep a conversation going, review a request, or check your Mac from your phone.</p>
 
-<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.99-beta.1/Wonder-1.0.99.dmg">Download the signed Mac beta</a> · <strong>TestFlight — public invite pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
+<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.100-beta.1/Wonder-1.0.100.dmg">Download the signed Mac beta</a> · <strong>TestFlight — public invite pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
 
 <p align="center"><img src="assets/screenshots/conversation.png" width="280" alt="Wonder’s native conversation and grouped moon helper icon, shown with sample content"></p>
 
@@ -15,9 +15,10 @@ Organize work into projects and return to the same conversations, files, and
 decisions later. Your Mac hosts Wonder; your devices
 connect through your own Tailscale network.
 
-**The signed Mac beta is available.** iOS Release build 69 has processed and is
+**The signed Mac beta is available.** iOS Release build 71 has processed and is
 available for internal testing. External review and public enrollment remain
-pending. The separate blue Wonder Testing app has processed Release build 3.
+pending. The separate blue Wonder Testing app has processed Release build 7 and
+is ready for internal test distribution.
 Source builds are available from this repository. [Release qualification](RELEASING.md).
 
 ## Keep your work with you

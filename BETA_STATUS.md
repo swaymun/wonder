@@ -1,6 +1,6 @@
 # Wonder beta status
 
-The signed Mac beta is available. Release iOS build 1.0 (70) is uploaded,
+The signed Mac beta is available. Release iOS build 1.0 (71) is uploaded,
 processed, and available for internal testing. Apple reports it as ready for
 external beta submission; external review and public enrollment have not been
 opened for this build. Existing production tester-group settings were preserved.
@@ -14,20 +14,33 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (70) is the Projects-only shell: pinned threads, provider icons, model/Plan settings, read-state and model-list fixes, and no Bot or Group management screens. The composer computer picker shows 7-point green/red dots directly after Mac names and scrolls when space is limited. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation of this build through TestFlight remains unverified. |
-| Wonder Testing | The separate blue app, Release 1.0 (6), has the same updated composer computer picker. It is `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Its private internal testing group has one invited tester and access to build 6. It keeps its own pairing, drafts, and Keychain access. Installation through TestFlight remains unverified. |
-| Mac companion | [Version 1.0.99](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.99-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and packaged verification against the installed Codex 0.159.0 runtime. |
-| Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The Projects-first shell and compact connection-menu update are published on `main`. Third-party components retain their own licenses. |
+| iPhone and iPad | Production Release 1.0 (71) fixes stale Queued labels, saved native question-and-answer forms, desktop project association on reopen, and trackpad input in the black screen area. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation through TestFlight remains unverified. |
+| Wonder Testing | The separate blue app, Release 1.0 (7), contains the same fixes. It is `VALID` and `READY_FOR_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Internal distribution of this build and installation through TestFlight remain unverified. Existing tester-group settings were preserved. Pairing, drafts and Keychain access remain separate from production. |
+| Mac companion | [Version 1.0.100](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.100-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and packaged verification against the installed Codex 0.159.0 runtime. |
+| Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The current chat, project-association and trackpad fixes are published on `main`. Third-party components retain their own licenses. |
 
-The 1.0.99 update preserves the installed Mac's pairing and history. A signed
-1.0.78→1.0.79 automatic upgrade previously completed on this Mac; version 1.0.99
+The 1.0.100 update preserves the installed Mac's pairing and history. A signed
+1.0.78→1.0.79 automatic upgrade previously completed on this Mac; version 1.0.100
 was installed through the signed local installer. Fresh-Mac setup remains unverified.
 
 The [landing page, setup guide and privacy information](https://wonder-launch-preview.saimun-h-shahee.chatgpt.site) are public.
 
 ## Qualification still in progress
 
-Testing build 6 and production build 70 share the updated picker. Optimized
+Testing build 7 and production build 71 passed six focused iPhone Simulator
+checks and three iPad Simulator checks, with no failures or skips. These cover
+queue retirement, reopen/reattach behavior, black-area hit testing and pointer
+mode, plus question-form expansion and saved answers at normal and accessibility
+text sizes. The shared native suites passed 57 tests; the daemon project suite
+passed nine, the store repair regression passed one, and strict Clippy passed.
+An older imported Wonder chat gained its existing desktop project assignment
+through the installed Mac API without changing its conversation or starting a
+model turn. Both exported Release packages passed signature, identity,
+entitlement, Keychain-isolation and Diagnostics-exclusion checks. Physical touch
+acceptance and installation through TestFlight were not repeated; this update
+was qualified using simulators at the owner's request.
+
+Earlier Testing build 6 and production build 70 share the updated picker. Optimized
 iPhone and iPad Simulator UI checks each switched between Macs ten times in both
 directions, verified draft restoration, and opened and canceled Add computer.
 They also verified the selected computer remains fully visible above the keyboard
@@ -39,7 +52,7 @@ authentication was canceled; this revision's physical interaction and actual
 TestFlight installation remain unverified. The owner authorized uploads to both
 app identities.
 
-The current shell passed 30 iPhone and 15 iPad Simulator navigation cycles,
+An earlier shell revision passed 30 iPhone and 15 iPad Simulator navigation cycles,
 including saved drafts, Settings navigation and pin toggle/reopen/restoration.
 The app launch check passed 10 launches and 20 foreground/Settings cycles.
 Four focused client state tests and 14 shared native tests passed.
@@ -105,7 +118,7 @@ outside the beta scope.
 - Initial setup requires both devices, Tailscale and access to the supported model provider.
 - Model requests are sent to your provider. Wonder does not include a model subscription or credits.
 - Remote access depends on the Mac being reachable. Tailscale may relay encrypted traffic when a direct connection is unavailable.
-- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. One signed automatic upgrade passed on this Mac; use the [signed Mac DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.99-beta.1) if an update does not complete.
+- Signed automatic Mac updates are implemented, including saved preferences and installation after work finishes. One signed automatic upgrade passed on this Mac; use the [signed Mac DMG](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.100-beta.1) if an update does not complete.
 - Teaching a task and replaying taught tasks are unavailable in this beta.
 - Notifications require permission and network access. Disabling notifications does not stop work on the Mac.
 - Supported OS versions and verification evidence are different: simulator checks do not establish physical-device behavior on every supported model.
