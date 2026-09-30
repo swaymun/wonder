@@ -816,7 +816,7 @@ struct SidebarView: View {
         .listRowBackground(selectionFill(isSelected))
         .accessibilityLabel(thread.title)
         .accessibilityValue([thread.family.title, subtitle,
-                             busyThread == thread.reference ? "Opening" : thread.isWorking ? "Working" : thread.hasUnread ? "Unread" : nil]
+                             busyThread == thread.reference ? "Updating" : thread.isWorking ? "Working" : thread.hasUnread ? "Unread" : nil]
             .compactMap { $0 }.joined(separator: ", "))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityIdentifier(prefix + thread.reference)
