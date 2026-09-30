@@ -3069,8 +3069,15 @@ import UIKit
             XCTAssertEqual(draft.value as? String, text)
         }
         picker.tap()
+        let options = app.scrollViews["connection-options"]
+        XCTAssertTrue(options.waitForExistence(timeout: 5))
+        XCTAssertTrue(options.frame.contains(studio.frame), "The selected computer must remain fully visible above the keyboard.")
         retainMenuScreenshot(app, name: "Connection picker with keyboard and restored draft")
-        app.buttons["connection-add-computer"].tap()
+        options.swipeUp()
+        let addComputer = app.buttons["connection-add-computer"]
+        XCTAssertTrue(options.frame.contains(addComputer.frame), "Add computer must scroll fully into view.")
+        retainMenuScreenshot(app, name: "Connection picker scrolled to Add computer")
+        addComputer.tap()
         XCTAssertTrue(app.navigationBars["Add computer"].waitForExistence(timeout: 10))
         app.buttons["Cancel"].tap()
         XCTAssertTrue(picker.waitForExistence(timeout: 5))

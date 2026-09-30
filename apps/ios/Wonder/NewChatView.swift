@@ -500,44 +500,49 @@ private struct NewChatContent: View {
         .accessibilityValue(model.macName)
         .accessibilityIdentifier("connection-picker")
         .popover(isPresented: $showingConnectionPicker, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
-                    let candidate = library.model(for: saved)
-                    let connected = !candidate.accessEnded && candidate.macConnected == true
-                    let detail = candidate.accessEnded ? "Access ended" : connected ? "Connected" : candidate.macConnected == false ? "Offline" : "Connecting"
-                    let selected = saved.credential.hostInstallationId == hostID
-                    Button {
-                        showingConnectionPicker = false
-                        choose(host: saved.credential.hostInstallationId)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "checkmark")
-                                .opacity(selected ? 1 : 0).frame(width: 16)
-                            Text(candidate.macName).lineLimit(2)
-                            Spacer(minLength: 12)
-                            Circle().fill(connected ? Color.green : Color.red)
-                                .frame(width: 7, height: 7).accessibilityHidden(true)
+            let preferredHeight = CGFloat(library.saved.connections.count + 1) * 44 + 21
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
+                        let candidate = library.model(for: saved)
+                        let connected = !candidate.accessEnded && candidate.macConnected == true
+                        let detail = candidate.accessEnded ? "Access ended" : connected ? "Connected" : candidate.macConnected == false ? "Offline" : "Connecting"
+                        let selected = saved.credential.hostInstallationId == hostID
+                        Button {
+                            showingConnectionPicker = false
+                            choose(host: saved.credential.hostInstallationId)
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "checkmark")
+                                    .opacity(selected ? 1 : 0).frame(width: 16)
+                                Text(candidate.macName).lineLimit(2)
+                                Circle().fill(connected ? Color.green : Color.red)
+                                    .frame(width: 7, height: 7).accessibilityHidden(true)
+                                Spacer(minLength: 12)
+                            }
+                            .frame(minHeight: 44).contentShape(Rectangle())
                         }
-                        .frame(minHeight: 44).contentShape(Rectangle())
+                        .accessibilityLabel(candidate.macName)
+                        .accessibilityValue(selected ? "\(detail), Selected" : detail)
+                        .accessibilityIdentifier("connection-option:" + saved.credential.hostInstallationId)
                     }
-                    .accessibilityLabel(candidate.macName)
-                    .accessibilityValue(selected ? "\(detail), Selected" : detail)
-                    .accessibilityIdentifier("connection-option:" + saved.credential.hostInstallationId)
+                    Divider().padding(.vertical, 4)
+                    Button {
+                        pairAfterConnectionPicker = true
+                        showingConnectionPicker = false
+                    } label: {
+                        Label("Add computer", systemImage: "plus")
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityIdentifier("connection-add-computer")
                 }
-                Divider().padding(.vertical, 4)
-                Button {
-                    pairAfterConnectionPicker = true
-                    showingConnectionPicker = false
-                } label: {
-                    Label("Add computer", systemImage: "plus")
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .accessibilityIdentifier("connection-add-computer")
+                .font(.body).foregroundStyle(.primary).buttonStyle(.plain)
+                .padding(.horizontal, 14).padding(.vertical, 6)
             }
-            .font(.body).foregroundStyle(.primary).buttonStyle(.plain)
-            .padding(.horizontal, 14).padding(.vertical, 6)
-            .frame(idealWidth: 280, maxWidth: 320)
+            .scrollBounceBehavior(.basedOnSize)
+            .accessibilityIdentifier("connection-options")
+            .frame(idealWidth: 280, maxWidth: 320, idealHeight: preferredHeight, maxHeight: preferredHeight)
             .presentationCompactAdaptation(.popover)
             .onDisappear {
                 if pairAfterConnectionPicker {
