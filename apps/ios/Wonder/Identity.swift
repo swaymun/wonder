@@ -61,6 +61,8 @@ struct PhoneIdentity: Sendable {
     @Published private(set) var saved = SavedConnections()
     @Published var error: String?
     @Published private(set) var loaded = false
+    @Published private(set) var foregroundOwner: UUID?
+    private var activeScenes: Set<UUID> = []
     private let identity = PhoneIdentity()
     private var models: [String: ConnectionModel] = [:]
     private var leases: [String: UUID] = [:]
@@ -191,6 +193,15 @@ struct PhoneIdentity: Sendable {
     }
 
     func suspendAll() { for model in models.values { model.setForeground(false) } }
+
+    /// Exactly one visible scene runs shared transport/catalog maintenance.
+    /// Closing another iPad window cannot suspend the surviving window.
+    func setScene(_ scene: UUID, active: Bool) {
+        if active { activeScenes.insert(scene) } else { activeScenes.remove(scene) }
+        if let foregroundOwner, activeScenes.contains(foregroundOwner) { return }
+        foregroundOwner = activeScenes.sorted { $0.uuidString < $1.uuidString }.first
+        if foregroundOwner == nil { suspendAll() }
+    }
 
     private func commit(_ next: SavedConnections) throws {
         if !isPreview { try identity.save(JSONEncoder().encode(next), account: "connections-v1") }

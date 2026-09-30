@@ -29,14 +29,14 @@ async function canonicalTarget(path) {
 }
 
 export class ToolPolicy {
-  constructor({ cwd, workspace = cwd, mode, approvalMode, readRoots, writeRoots, deniedRoots, internal = false, structuredOutput = false, tools = [] }) {
+  constructor({ cwd, workspace = cwd, mode, approvalMode, readRoots, writeRoots, deniedRoots, internal = false, structuredOutput = false, tools = [], project = false }) {
     if (!isAbsolute(cwd ?? "") || !["read_only", "workspace", "full_access"].includes(mode)
       || !["ask", "full_access"].includes(approvalMode)) throw new Error("Claude permission scope is missing or unsupported");
     for (const roots of [readRoots, writeRoots, deniedRoots]) {
       if (!Array.isArray(roots) || roots.some(root => typeof root !== "string" || !isAbsolute(root))) throw new Error("Invalid Claude file scope");
     }
     if (!isAbsolute(workspace)) throw new Error("Invalid Claude workspace");
-    Object.assign(this, { cwd, workspace, mode, approvalMode, readRoots, writeRoots, deniedRoots, internal, structuredOutput });
+    Object.assign(this, { cwd, workspace, mode, approvalMode, readRoots, writeRoots, deniedRoots, internal, structuredOutput, project });
     this.tools = new Set(tools);
   }
   async permits(path, write = false) {
@@ -79,7 +79,7 @@ export class ToolPolicy {
     // Recursive built-ins execute outside the Bash sandbox and can traverse a
     // protected descendant of an otherwise readable folder. Use scoped Bash
     // for searches; Read checks each concrete file, including symlink targets.
-    if (["Glob", "Grep"].includes(name)) return "deny";
+    if (["Glob", "Grep"].includes(name)) return this.project && await this.searchable(input.path ?? this.cwd) ? "allow" : "deny";
     if (name === "Read")
       return await this.permits(input.file_path ?? input.path ?? this.cwd) ? "allow" : "deny";
     if (["Edit", "Write", "NotebookEdit"].includes(name)) {
@@ -91,6 +91,19 @@ export class ToolPolicy {
     if (name === "Bash") return input.dangerouslyDisableSandbox ? "deny" : (this.approvalMode === "full_access" ? "allow" : "ask");
     if (["WebFetch", "WebSearch"].includes(name)) return this.approvalMode === "full_access" ? "allow" : "ask";
     return "deny";
+  }
+  // Project code search is allowed only where no protected folder can be
+  // traversed below the search root, because Glob/Grep run outside the sandbox.
+  async searchable(path) {
+    if (!await this.permits(path)) return false;
+    let base;
+    try { base = await canonicalTarget(resolve(this.cwd, path)); } catch { return false; }
+    for (const root of this.deniedRoots) {
+      let target;
+      try { target = await canonicalTarget(root); } catch { return false; }
+      if (within(target, base) || within(base, target)) return false;
+    }
+    return true;
   }
   async beforeTool(event) {
     const decision = await this.decision(event.tool_name, event.tool_input ?? {});

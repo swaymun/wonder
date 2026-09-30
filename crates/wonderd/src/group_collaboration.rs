@@ -86,12 +86,21 @@ pub(super) struct Proposal {
     pub purpose: String,
     pub member_bot_ids: Vec<String>,
     pub new_bots: Vec<NewMember>,
+    /// One short sentence from Wonder setup describing the team or change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Propose {
     description: String,
     settings: ModelSettings,
+    /// The owner's current, possibly hand-edited roster to refine.
+    #[serde(default)]
+    current: Option<Proposal>,
+    /// A conversational change request for `current`.
+    #[serde(default)]
+    refinement: Option<String>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -371,21 +380,75 @@ pub(super) async fn propose(State(state): State<AppState>, Json(input): Json<Pro
         .filter(|b| !b.is_archived)
         .map(|b| json!({"id":b.id,"name":b.name,"purpose":b.role}))
         .collect();
+    // A refinement revises the owner's edited roster; it never invents
+    // members, starts work or creates Bots.
+    let refining = match (&input.current, input.refinement.as_deref().map(str::trim)) {
+        (Some(current), Some(change)) if !change.is_empty() => {
+            if change.chars().count() > 2000
+                || current.name.len() > 80
+                || current.purpose.chars().count() > 500
+                || current
+                    .member_bot_ids
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != current.member_bot_ids.len()
+                || !valid_channel_member_count(
+                    current.member_bot_ids.len() + current.new_bots.len(),
+                )
+                || !current
+                    .member_bot_ids
+                    .iter()
+                    .all(|id| bots.iter().any(|b| &b.id == id && !b.is_archived))
+                || current.new_bots.iter().any(|b| {
+                    b.name.len() > 80 || b.purpose.len() > 160 || b.instructions.len() > 8000
+                })
+            {
+                return proposal_error("The team to adjust is invalid. Review it and try again.");
+            }
+            Some((current, change))
+        }
+        (None, None) => None,
+        _ => return proposal_error("Describe the change to make to your team."),
+    };
     let schema = object(
-        json!({"name":{"type":"string"},"purpose":{"type":"string"},"memberBotIds":strings(),"newBots":{"type":"array","items":object(json!({"name":{"type":"string"},"purpose":{"type":"string"},"instructions":{"type":"string"}}),&["name","purpose","instructions"])}}),
-        &["name", "purpose", "memberBotIds", "newBots"],
+        json!({"name":{"type":"string"},"purpose":{"type":"string"},"memberBotIds":strings(),"newBots":{"type":"array","items":object(json!({"name":{"type":"string"},"purpose":{"type":"string"},"instructions":{"type":"string"}}),&["name","purpose","instructions"])},"summary":{"type":"string"}}),
+        &["name", "purpose", "memberBotIds", "newBots", "summary"],
     );
     // Keep generated standing instructions compact and easy to review.
     let brevity = " Keep each new Bot's standing instructions to at most five short sentences (under 800 characters); the user can expand them later.";
-    let prompt=format!("Propose a small useful team for this group. Reuse relevant existing Bots; propose new ones only for missing roles. Name <=80 bytes, purpose <=500 characters. New Bot purposes <=160 bytes and standing instructions <=8000 bytes.{brevity} No duplicate roles or invented existing IDs. This is only a proposal for user review.\nDescription: {}\nExisting Bots: {}",input.description,json!(roster));
+    let limits = format!("Name <=80 bytes, purpose <=500 characters. New Bot purposes <=160 bytes and standing instructions <=8000 bytes.{brevity} No duplicate roles or invented existing IDs. summary is one short friendly sentence (<=160 characters) telling the owner what you proposed or changed. This is only a proposal for user review.");
+    let prompt = match refining {
+        Some((current, change)) => format!("Revise this proposed team for the owner's change request. Keep everything the request does not ask to change, including the owner's own edits to names, purposes and instructions. Reuse relevant existing Bots; propose new ones only for missing roles. {limits}\nOriginal description: {}\nCurrent team: {}\nChange request: {change}\nExisting Bots: {}", input.description, json!(current), json!(roster)),
+        None => format!("Propose a small useful team for this group. Reuse relevant existing Bots; propose new ones only for missing roles. {limits}\nDescription: {}\nExisting Bots: {}", input.description, json!(roster)),
+    };
     match structured(&state, &input.settings, prompt, schema, None).await {
         Ok(v) => match serde_json::from_value::<Proposal>(v) {
-            Ok(p)
+            Ok(mut p)
                 if valid_channel_member_count(p.member_bot_ids.len() + p.new_bots.len())
+                    && p.name.len() <= 80
+                    && p.purpose.chars().count() <= 500
+                    && p.member_bot_ids
+                        .iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                        == p.member_bot_ids.len()
+                    && p.new_bots.iter().all(|b| {
+                        !b.name.trim().is_empty()
+                            && b.name.len() <= 80
+                            && !b.purpose.trim().is_empty()
+                            && b.purpose.len() <= 160
+                            && !b.instructions.trim().is_empty()
+                            && b.instructions.len() <= 8000
+                    })
                     && p.member_bot_ids
                         .iter()
                         .all(|id| bots.iter().any(|b| &b.id == id && !b.is_archived)) =>
             {
+                p.summary = p
+                    .summary
+                    .map(|s| s.trim().chars().take(160).collect::<String>())
+                    .filter(|s| !s.is_empty());
                 Json(p).into_response()
             }
             _ => proposal_error("The proposed team is invalid. Try again."),
@@ -1803,6 +1866,7 @@ mod tests {
         )).await.expect("A completed planning result must not wait for runtime history");
         assert_eq!(response.0, StatusCode::OK, "{}", response.1);
         assert_eq!(response.1["name"], "Test team");
+        crate::tests::validate_http_contract("groupProposal", &response.1);
         assert!(!dir.path().join("runtime.py.history-reads").exists());
         let runtime_id = state.app_server.lock().await.rpc().health().id().to_owned();
         assert_eq!(
@@ -1836,6 +1900,21 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+        // A refinement revises only a valid owner-edited roster: invented or
+        // archived members and a change without a roster start no planning.
+        let settings = json!({"model":"fake","reasoningEffort":"","serviceTier":null});
+        for body in [
+            json!({"description":"Suggest a test team","settings":settings,"refinement":"Add a designer"}),
+            json!({"description":"Suggest a test team","settings":settings,"refinement":"Add a designer",
+                "current":{"name":"T","purpose":"P","memberBotIds":["invented"],"newBots":[]}}),
+            json!({"description":"Suggest a test team","settings":settings,"refinement":"Change it",
+                "current":{"name":"T","purpose":"x".repeat(501),"memberBotIds":["bot"],"newBots":[]}}),
+            json!({"description":"Suggest a test team","settings":settings,"refinement":"Change it",
+                "current":{"name":"T","purpose":"P","memberBotIds":["bot","bot"],"newBots":[]}}),
+        ] {
+            let rejected = call(&state, "POST", "/api/v1/group-chats/propose", body).await;
+            assert_eq!(rejected.0, StatusCode::BAD_REQUEST, "{}", rejected.1);
+        }
         state.app_server.lock().await.shutdown().await.unwrap();
     }
 

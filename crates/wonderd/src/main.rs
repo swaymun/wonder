@@ -123,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         permission_overrides.push(value);
     }
     let launch_config = LaunchConfig {
+        project_scope: false,
         runtime_home: Some(private_runtime),
         codex_bin,
         wonder_version: env!("CARGO_PKG_VERSION").into(),
@@ -172,8 +173,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|paths| std::env::split_paths(&paths).collect())
         .unwrap_or_default();
     let claude = wonderd::claude::Runtime::configured(&data_dir, &store);
+    let projects = wonderd::projects::ProjectRuntime::configured(
+        resolve_codex().await?,
+        env!("CARGO_PKG_VERSION").into(),
+        &codex_state,
+        &claude_config_home()?,
+        wonderd::ingestion::notification_sink(store.clone()),
+    );
     let state = AppState {
         claude,
+        projects,
         ingestion: wonderd::ingestion::Ingestion::default(),
         store,
         logger: Arc::clone(&logger),
@@ -348,6 +357,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(claude) = &state.claude {
         claude.client.lock().await.shutdown().await?;
     }
+    state.projects.shutdown().await;
     logger.record("info", "daemon_stopped", serde_json::json!({}))?;
     Ok(())
 }
@@ -434,6 +444,14 @@ fn sensitive_roots(codex_state: &Path) -> Result<Vec<PathBuf>, Box<dyn std::erro
     ];
     roots.sort_unstable();
     Ok(roots)
+}
+
+fn claude_config_home() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    let home = std::env::var("HOME")?;
+    Ok(PathBuf::from(home).join(".claude"))
 }
 
 fn effective_codex_home() -> Result<PathBuf, Box<dyn std::error::Error>> {

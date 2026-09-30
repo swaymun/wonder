@@ -89,6 +89,7 @@ pub(super) async fn answer(
         .ok()
         .flatten()
         .is_none()
+        && !crate::projects::is_project(&state, &question.runtime_conversation_id).await
     {
         return StatusCode::NOT_FOUND.into_response();
     }

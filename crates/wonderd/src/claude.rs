@@ -67,16 +67,29 @@ pub(crate) fn client(
 }
 
 pub(crate) async fn for_thread(state: &AppState, thread: &str) -> Result<RpcClient, String> {
-    let family = state
+    let (family, scope) = state
         .store
-        .runtime_family_for_thread(thread)
+        .runtime_route_for_thread(thread)
         .await
         .map_err(|e| e.to_string())?
         .ok_or("The conversation has no runtime binding. Reopen it and try again.")?;
+    // Project threads live in the owner's normal provider store; never send
+    // their requests, approvals or Stop to the private Bot runtime.
+    if scope == wonder_store::EXECUTION_SCOPE_PROJECTS {
+        return crate::projects::rpc_for(state, family).await;
+    }
     Ok(client(state, family)?.lock().await.rpc())
 }
 
 pub(crate) async fn conversation_family(state: &AppState, id: &str) -> Result<AgentFamily, String> {
+    if let Some(project) = state
+        .store
+        .project_conversation(id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(project.family);
+    }
     if let Some(binding) = state
         .store
         .runtime_binding(id)

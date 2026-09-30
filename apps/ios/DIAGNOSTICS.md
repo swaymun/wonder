@@ -1,5 +1,22 @@
 # iOS diagnostics
 
+## Projects and creation
+
+`testLiveProjectsSidebarAndDraftsStayReadOnly` uses an explicitly owned project
+selected with `WONDER_PROJECT_ID` and `WONDER_PROJECT_NAME`. It checks search,
+disclosure state, native conversation reopening, independent destination drafts,
+and restoration after relaunch. `WONDER_PROJECT_CYCLES=30` exercises repeated
+navigation; `WONDER_PROJECT_CAPTURE=1` starts the existing bounded two-minute
+resource capture. Neither selection nor navigation sends a message. Retain the
+actual observation window separately from the capture window.
+
+`testGroupReviewRetainsEditsAndRetriesExactAcceptedRoster` uses the existing
+isolated Group API fixture with `-diagnostics-group-review`. It checks that
+refinement includes the owner's edits, closing restores the reviewed roster,
+and a failed Create retries identical bytes. It creates no real Bots or group
+and starts no model work. Run on iPhone and iPad alongside the durable creation
+outbox, draft restoration, and shared scene ownership diagnostics tests.
+
 Wonder has one bundle identity and two optimized distribution profiles. Installing either profile preserves the existing pairing and app data.
 
 | Profile | Scheme/configuration | Included behavior |

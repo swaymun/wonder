@@ -35,9 +35,10 @@ export class Sessions {
     if (!session) throw new Error("This Claude conversation is unavailable. Its saved messages are still in Wonder.");
     return session;
   }
-  async create(options, parent = null) {
-    const session = { schemaVersion: 1, id: `claude-${randomUUID()}`, sdkSessionId: randomUUID(),
-      sdkStarted: false, createdAt: Math.floor(Date.now() / 1000), options, parent, turns: [], receipts: {} };
+  async create(options, parent = null, native = null) {
+    // Attaching an existing native session keeps its exact provider UUID.
+    const session = { schemaVersion: 1, id: `claude-${randomUUID()}`, sdkSessionId: native?.sdkSessionId ?? randomUUID(),
+      sdkStarted: native?.sdkStarted === true, createdAt: Math.floor(Date.now() / 1000), options, parent, turns: [], receipts: {} };
     await this.save(session);
     this.values.set(session.id, session);
     return session;

@@ -6,7 +6,7 @@
 <p align="center"><strong>Your Mac’s agents, on your iPhone and iPad.</strong></p>
 <p align="center">Keep a conversation going, review a request, or check your Mac from your phone.</p>
 
-<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.92-beta.1/Wonder-1.0.92.dmg">Download the signed Mac beta</a> · <strong>TestFlight — public invite pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
+<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.97-beta.1/Wonder-1.0.97.dmg">Download the signed Mac beta</a> · <strong>TestFlight — public invite pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
 
 <p align="center"><img src="assets/screenshots/conversation.png" width="280" alt="Wonder’s native conversation and grouped moon helper icon, shown with sample content"></p>
 
@@ -15,9 +15,9 @@ work to a Bot, bring Bots together in a Group Chat, and return to the same
 conversations, files, and decisions later. Your Mac hosts Wonder; your devices
 connect through your own Tailscale network.
 
-**The signed Mac beta is available.** The iOS build is approved for external
-testing; enrollment opens after the remaining device checks. Source builds are available from this
-repository. [Release qualification](RELEASING.md).
+**The signed Mac beta is available.** iOS Release build 66 has processed and is
+available for internal testing. External review and public enrollment remain
+pending. Source builds are available from this repository. [Release qualification](RELEASING.md).
 
 ## Keep your work with you
 
@@ -29,10 +29,17 @@ repository. [Release qualification](RELEASING.md).
 Answer questions and review approval requests from your phone. Permission choices
 remain explicit, with server-confirmed settings applied before work starts.
 
-Source builds also support **Claude through the Claude Agent SDK**, using your
+Wonder also supports **Claude through the Claude Agent SDK**, using your
 Claude subscription. A Bot or Group keeps the agent family selected by its first
 model. Claude has its own permission choices, connected apps, and five-hour and
-weekly usage. This is newer than the Mac beta download linked above.
+weekly usage.
+
+Mac 1.0.97 and iOS build 66 include **Projects** alongside Bots and Group Chats in the native
+sidebar. A project groups source folders on one paired Mac; its Codex or Claude
+Code conversations keep their native session identity. Choose a connection and
+destination separately, then send to start work. Continue on Mac copies an
+exact-session terminal command. Finish work in one client before switching;
+simultaneous control and direct desktop-app opening are not supported.
 
 **Remote screen access:** view your Mac and, with permission, control it from Wonder. Screen/control recovery qualification remains part of the beta checks.
 

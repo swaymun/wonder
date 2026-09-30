@@ -13,6 +13,12 @@ public struct ChatSummary: Codable, Hashable, Identifiable, Sendable {
     public let isArchived: Bool
     public let isPinned: Bool
     public var id: String { conversationId }
+    public init(conversationId: String, botId: String?, title: String, lastMessagePreview: String?, lastMessageAt: String?,
+                messageCount: Int, deliveryState: String?, hasUnread: Bool, isArchived: Bool, isPinned: Bool) {
+        self.conversationId = conversationId; self.botId = botId; self.title = title
+        self.lastMessagePreview = lastMessagePreview; self.lastMessageAt = lastMessageAt; self.messageCount = messageCount
+        self.deliveryState = deliveryState; self.hasUnread = hasUnread; self.isArchived = isArchived; self.isPinned = isPinned
+    }
     public func matchesName(_ query: String) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return query.isEmpty || title.range(of: query, options: [.caseInsensitive, .diacriticInsensitive], locale: .current) != nil

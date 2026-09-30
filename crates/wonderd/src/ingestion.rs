@@ -62,6 +62,7 @@ struct RuntimeRegistration {
     health: RuntimeHealth,
     client: Weak<tokio::sync::Mutex<wonder_app_server::AppServerClient>>,
     message_id: Option<String>,
+    project: bool,
 }
 
 /// A snapshot of an existing runtime registration, not authority for an
@@ -165,8 +166,76 @@ impl Ingestion {
                 health,
                 client: Arc::downgrade(client),
                 message_id,
+                project: false,
             },
         );
+    }
+
+    /// The normal-home Projects client routes approvals by its generation,
+    /// without becoming the Codex provider used for Bot readiness/recovery.
+    pub(crate) fn register_project_runtime(
+        &self,
+        client: &Arc<tokio::sync::Mutex<wonder_app_server::AppServerClient>>,
+        health: RuntimeHealth,
+    ) {
+        let mut status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        status
+            .runtimes
+            .retain(|_, r| !r.project || r.health.is_alive());
+        status.runtimes.insert(
+            health.id().to_owned(),
+            RuntimeRegistration {
+                family: AgentFamily::Codex,
+                health,
+                client: Arc::downgrade(client),
+                message_id: None,
+                project: true,
+            },
+        );
+    }
+
+    /// Projects need durable ingestion, not a healthy private Bot runtime.
+    pub(crate) async fn project_readiness(&self, store: &Store) -> Readiness {
+        let detail = {
+            let status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if status.error.is_some()
+                || status.runtimes.values().any(|r| r.health.storage_blocked())
+            {
+                Some("Chat updates could not be saved. Wonder is retrying; check available disk space if this continues.")
+            } else if status
+                .consumer
+                .as_ref()
+                .is_none_or(tokio::task::AbortHandle::is_finished)
+                || status
+                    .heartbeat
+                    .is_none_or(|time| time.elapsed() > Duration::from_secs(5))
+            {
+                Some("Wonder is recovering chat updates. Please wait before sending again.")
+            } else {
+                None
+            }
+        };
+        if let Some(detail) = detail {
+            return Readiness {
+                ready: false,
+                detail,
+            };
+        }
+        match store.notification_backlog().await {
+            Ok(0..=256) => Readiness {
+                ready: true,
+                detail: "Ready",
+            },
+            Ok(_) => Readiness {
+                ready: false,
+                detail: "Wonder is catching up on chat updates. Please wait.",
+            },
+            Err(_) => Readiness {
+                ready: false,
+                detail:
+                    "Chat storage is unavailable. Wonder is retrying; check available disk space.",
+            },
+        }
     }
 
     fn runtime_alive(&self, id: &str) -> bool {
@@ -253,6 +322,7 @@ impl Ingestion {
                     && p.health.as_ref().is_some_and(RuntimeHealth::is_alive)
                     && !status.runtimes.values().any(|r| {
                         r.family == *id
+                            && !r.project
                             && r.message_id.is_some()
                             && (!r.health.is_alive() || r.health.storage_blocked())
                     })
@@ -460,9 +530,9 @@ pub async fn spawn(state: AppState) -> NotificationService {
                                 .inner
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner());
-                            status
-                                .runtimes
-                                .retain(|_, r| r.family != family || r.health.is_alive());
+                            status.runtimes.retain(|_, r| {
+                                r.family != family || r.project || r.health.is_alive()
+                            });
                             status.providers.entry(family).or_default().recovering = false;
                             let _ = state.logger.record(
                                 "info",
@@ -699,6 +769,10 @@ async fn recover(state: &AppState, family: AgentFamily, recover_all: bool) -> Re
         .await
         .map_err(|e| e.to_string())?;
     for message in messages {
+        // Project threads recover through their own normal-home runtime.
+        if crate::projects::is_project(state, &message.conversation_id).await {
+            continue;
+        }
         if crate::claude::conversation_family(state, &message.conversation_id).await? != family {
             continue;
         }
@@ -1068,6 +1142,7 @@ for line in sys.stdin:
         fs::write(&bin, script).unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         let config = LaunchConfig {
+            project_scope: false,
             runtime_home: None,
             codex_bin: bin,
             wonder_version: "test".into(),
@@ -1081,6 +1156,13 @@ for line in sys.stdin:
         .unwrap();
         store.start_event_epoch("epoch").await.expect("sync epoch");
         let state = AppState {
+            projects: crate::projects::ProjectRuntime::configured(
+                "/nonexistent/codex".into(),
+                "test".into(),
+                std::path::Path::new("/nonexistent/codex-home"),
+                std::path::Path::new("/nonexistent/claude-home"),
+                crate::ingestion::notification_sink(store.clone()),
+            ),
             claude: None,
             ingestion: Ingestion::default(),
             store,

@@ -270,6 +270,7 @@ enum DiagnosticSubagentFixture {
         if groupCreationFixture {
             let store = ManagementDraftStore(host: hostID)
             store.remove("group.new")
+            if ProcessInfo.processInfo.arguments.contains("-diagnostics-group-review") { store.remove("group.review.fixture-review") }
             if ProcessInfo.processInfo.arguments.contains("-diagnostics-group-frozen") {
                 var draft = ManagementDraft()
                 let payload: [String: Any] = ["clientRequestId": draft.requestId, "name": "Synthetic group", "purpose": "Supplied facts only",
@@ -443,18 +444,40 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
 
     private func respond(method: String, path: String, body: Data?) {
         if DiagnosticSubagentFixture.groupCreationFixture {
-            if path == "/api/v1/bot-options" {
-                let models = ModelDefaultPurpose.allCases.map { purpose -> [String: Any] in
-                    let defaults = purpose.load()
-                    return ["id": defaults.model.isEmpty ? "fixture-model" : defaults.model, "displayName": "Fixture", "hidden": false,
-                        "reasoningEfforts": defaults.reasoningEffort.isEmpty ? [] : [["id": defaults.reasoningEffort, "label": "Fixture"]],
-                        "serviceTiers": [["id": defaults.serviceTier ?? "default", "label": "Fixture"]]]
+            if method == "POST", path == "/api/v1/group-chats/propose" {
+                let payload = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any]
+                let current = payload?["current"] as? [String: Any]
+                if current != nil && current?["name"] as? String != "Edited team" {
+                    finish(status: 400, body: Data("{}".utf8)); return
                 }
-                finish(status: 200, body: json(["models": models, "groupCollaboration": true,
+                finish(status: 200, body: json(["name": current?["name"] as? String ?? "Suggested team", "purpose": "Review supplied facts",
+                    "memberBotIds": ["fixture-bot"], "newBots": [], "summary": current == nil ? "Review before creating." : "Kept your edits."])); return
+            }
+            if path == "/api/v1/bot-options" {
+                var models: [String: [String: Any]] = [:]
+                for purpose in ModelDefaultPurpose.allCases {
+                    let defaults = purpose.load()
+                    let id = defaults.model.isEmpty ? "fixture-model" : defaults.model
+                    var option = models[id] ?? ["id": id, "displayName": "Fixture", "hidden": false]
+                    var efforts = option["reasoningEfforts"] as? [[String: String]] ?? []
+                    if !defaults.reasoningEffort.isEmpty && !efforts.contains(where: { $0["id"] == defaults.reasoningEffort }) {
+                        efforts.append(["id": defaults.reasoningEffort, "label": "Fixture"])
+                    }
+                    var tiers = option["serviceTiers"] as? [[String: String]] ?? []
+                    let tier = defaults.serviceTier ?? "default"
+                    if !tiers.contains(where: { $0["id"] == tier }) { tiers.append(["id": tier, "label": "Fixture"]) }
+                    option["reasoningEfforts"] = efforts; option["serviceTiers"] = tiers
+                    models[id] = option
+                }
+                finish(status: 200, body: json(["models": models.keys.sorted().compactMap { models[$0] }, "groupCollaboration": true,
                     "approvalModes": BotApprovalMode.allCases.map { ["id": $0.rawValue, "allowed": true] as [String: Any] }, "allowedApprovalPolicies": []])); return
             }
             if method == "POST", path == "/api/v1/group-chats/new" {
                 let requests = Self.state.lock.withLock { Self.state.requests.filter { $0.method == "POST" && $0.path == path }.compactMap(\.body) }
+                if ProcessInfo.processInfo.arguments.contains("-diagnostics-group-review") {
+                    guard requests.first == requests.last else { finish(status: 409, body: Data("{}".utf8)); return }
+                    if requests.count == 1 { finish(status: 503, body: Data("{}".utf8)); return }
+                }
                 let frozen = ProcessInfo.processInfo.arguments.contains("-diagnostics-group-frozen")
                 if frozen && requests.count <= 2 {
                     finish(status: requests.first == requests.last ? 503 : 409, body: Data("{}".utf8)); return
@@ -705,10 +728,7 @@ struct DiagnosticChatLayoutFixtureView: View {
     var body: some View {
         Group {
             if prepared {
-                TabView {
-                    UnifiedChatsView(library: library).tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
-                    Text("Offline fixture").tabItem { Label("Settings", systemImage: "gearshape") }
-                }
+                ChatShell(library: library)
             } else { ProgressView() }
         }.task {
             guard !prepared, let saved = library.saved.connections.first else { return }
@@ -723,9 +743,22 @@ struct DiagnosticChatLayoutFixtureView: View {
 
 struct DiagnosticSubagentFixtureView: View {
     @StateObject private var model: ConnectionModel
+    @State private var reviewing = false
+    @State private var created = false
     init() { _model = StateObject(wrappedValue: DiagnosticSubagentFixture.model()) }
     var body: some View {
-        ChatsView(model: model)
+        Group {
+            if ProcessInfo.processInfo.arguments.contains("-diagnostics-group-review") {
+                VStack {
+                    Button("Review team") { reviewing = true }.disabled(model.managedBots.isEmpty)
+                    if created { Text("Verified group") }
+                }
+                .sheet(isPresented: $reviewing) {
+                    GroupReviewSheet(model: model, initialDescription: "Review supplied facts", draftID: "fixture-review",
+                        onCreated: { _ in created = true }, onCancel: {})
+                }
+            } else { ChatsView(model: model) }
+        }
             .task {
                 model.setForeground(true)
                 await model.loadChats(force: true)

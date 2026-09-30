@@ -533,8 +533,10 @@ struct DictationButton: View {
     @ObservedObject var controller: DictationController
     let chat: ChatSummary
     let unavailable: Bool
+    var prepare: () -> Bool = { true }
     var body: some View {
         Button {
+            guard prepare() else { return }
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             Task { await controller.start(chat: chat) }
         } label: {

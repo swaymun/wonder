@@ -38,6 +38,8 @@ pub struct RuntimeBinding {
     pub family: AgentFamily,
     pub thread_id: String,
     pub session_id: Option<String>,
+    /// `bots` (Wonder's private runtime) or `projects` (normal provider home).
+    pub execution_scope: String,
 }
 
 impl Store {
@@ -55,6 +57,7 @@ impl Store {
                 family: AgentFamily::from_storage(row.get("agent_family"))?,
                 thread_id: row.get("runtime_thread_id"),
                 session_id: row.get("session_id"),
+                execution_scope: row.get("execution_scope"),
             })
         })
         .transpose()

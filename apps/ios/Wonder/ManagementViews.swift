@@ -1521,11 +1521,12 @@ struct AutomationDetailView: View {
 
 extension ConnectionModel {
     /// A lost response retries the same creation rather than making a second Bot.
-    @MainActor func createConversationalBot() async throws -> String? {
-        let key = "bot.conversational-new"
+    @MainActor func createConversationalBot(requestID: String? = nil, defaults: NewBotDefaults? = nil) async throws -> String? {
+        let key = "bot.conversational-new" + (requestID.map { "." + $0 } ?? "")
         let scope = assignmentScope
         let drafts = managementDrafts
         var draft = drafts?.load(key) ?? ManagementDraft()
+        if let requestID { draft.requestId = requestID }
         try drafts?.save(draft, key: key)
         let options: BotOptions = try await manage("/api/v1/bot-options")
         guard scope == assignmentScope, !Task.isCancelled, !accessEnded else { throw CancellationError() }
@@ -1533,7 +1534,7 @@ extension ConnectionModel {
             throw NSError(domain: "Wonder", code: 0, userInfo: [NSLocalizedDescriptionKey: "Update Wonder on your Mac before creating a new Bot."])
         }
         if draft.values["_defaultsResolved"] == nil {
-            try draft.prepareNewBot(defaults: NewBotDefaults.load(), options: options)
+            try draft.prepareNewBot(defaults: defaults ?? NewBotDefaults.load(), options: options)
         }
         try drafts?.save(draft, key: key)
         var values = draft.values.filter { !$0.key.hasPrefix("_") }

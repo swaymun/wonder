@@ -26,6 +26,10 @@
 		A10000000000000000000006 /* AssignmentViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000005 /* AssignmentViews.swift */; };
 		A10000000000000000000008 /* DictationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000007 /* DictationViews.swift */; };
 		A10000000000000000000010 /* SearchViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000009 /* SearchViews.swift */; };
+		B20000000000000000000008 /* ProjectsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000007 /* ProjectsModel.swift */; };
+		B20000000000000000000006 /* ProjectViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000005 /* ProjectViews.swift */; };
+		B20000000000000000000004 /* NewChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003 /* NewChatView.swift */; };
+		B20000000000000000000002 /* AppShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* AppShell.swift */; };
 		A10000000000000000000012 /* GroupCollaborationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* GroupCollaborationViews.swift */; };
 		A10000000000000000000014 /* CameraCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* CameraCapture.swift */; };
 		A10000000000000000000015 /* ScienceAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* ScienceAvatar.swift */; };
@@ -101,6 +105,10 @@
 		A10000000000000000000005 /* AssignmentViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssignmentViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000007 /* DictationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000009 /* SearchViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchViews.swift; sourceTree = "<group>"; };
+		B20000000000000000000007 /* ProjectsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectsModel.swift; sourceTree = "<group>"; };
+		B20000000000000000000005 /* ProjectViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectViews.swift; sourceTree = "<group>"; };
+		B20000000000000000000003 /* NewChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewChatView.swift; sourceTree = "<group>"; };
+		B20000000000000000000001 /* AppShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShell.swift; sourceTree = "<group>"; };
 		A10000000000000000000011 /* GroupCollaborationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupCollaborationViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000013 /* CameraCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCapture.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* ScienceAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScienceAvatar.swift; sourceTree = "<group>"; };
@@ -186,6 +194,10 @@
 				A10000000000000000000005 /* AssignmentViews.swift */,
 				A10000000000000000000007 /* DictationViews.swift */,
 				A10000000000000000000009 /* SearchViews.swift */,
+				B20000000000000000000007 /* ProjectsModel.swift */,
+				B20000000000000000000005 /* ProjectViews.swift */,
+				B20000000000000000000003 /* NewChatView.swift */,
+				B20000000000000000000001 /* AppShell.swift */,
 				A10000000000000000000011 /* GroupCollaborationViews.swift */,
 				A10000000000000000000016 /* ScienceAvatar.swift */,
 				A10000000000000000000092 /* ScienceAvatarGeometry.swift */,
@@ -424,6 +436,10 @@
 				A10000000000000000000006 /* AssignmentViews.swift in Sources */,
 				A10000000000000000000008 /* DictationViews.swift in Sources */,
 				A10000000000000000000010 /* SearchViews.swift in Sources */,
+				B20000000000000000000008 /* ProjectsModel.swift in Sources */,
+				B20000000000000000000006 /* ProjectViews.swift in Sources */,
+				B20000000000000000000004 /* NewChatView.swift in Sources */,
+				B20000000000000000000002 /* AppShell.swift in Sources */,
 				A10000000000000000000012 /* GroupCollaborationViews.swift in Sources */,
 				A10000000000000000000015 /* ScienceAvatar.swift in Sources */,
 				A10000000000000000000091 /* ScienceAvatarGeometry.swift in Sources */,

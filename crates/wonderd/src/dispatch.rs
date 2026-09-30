@@ -12,8 +12,12 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
             while groups.try_join_next().is_some() {}
             let _ = crate::questions::expire_optional(&state).await;
             crate::goals::enforce_time_limits(&state).await;
-            if state.ingestion.readiness(&state.store).await.ready {
+            let bots_ready = state.ingestion.readiness(&state.store).await.ready;
+            if bots_ready {
                 let _ = crate::groups::tick(&state, &mut groups).await;
+            }
+            // Project sends need durable ingestion, not a healthy Bot runtime.
+            if bots_ready || crate::projects::ready(&state).await {
                 if let Err(error) = tick(&state).await {
                     let _ = state.logger.record(
                         "error",
@@ -28,6 +32,9 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
 }
 
 async fn message_ready(state: &AppState, message: &wonder_store::StoredMessage) -> bool {
+    if crate::projects::is_project(state, &message.conversation_id).await {
+        return crate::projects::ready(state).await;
+    }
     let Ok(family) = crate::claude::conversation_family(state, &message.conversation_id).await
     else {
         return false;
@@ -101,8 +108,13 @@ async fn tick(state: &AppState) -> Result<(), String> {
         if !message_ready(state, &message).await {
             continue;
         }
-        crate::dispatch_to_codex(state.clone(), message).await;
+        if crate::projects::is_project(state, &message.conversation_id).await {
+            crate::projects::dispatch(state.clone(), message).await;
+        } else {
+            crate::dispatch_to_codex(state.clone(), message).await;
+        }
     }
+    crate::projects::recover(state).await;
     Ok(())
 }
 
@@ -110,6 +122,9 @@ pub(crate) async fn find_accepted_turn(
     state: &AppState,
     message: &wonder_store::StoredMessage,
 ) -> Result<Option<String>, String> {
+    if crate::projects::is_project(state, &message.conversation_id).await {
+        return crate::projects::find_accepted_turn(state, message).await;
+    }
     let Some(thread_id) = message.codex_thread_id.as_deref() else {
         return Ok(None);
     };

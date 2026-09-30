@@ -159,6 +159,51 @@ struct ManagedBotListMutationState {
         imagePreviews.invalidate()
     }
     lazy var dictation = DictationController(model: self)
+    /// Owner-selected projects on this Mac, observed directly by the sidebar.
+    lazy var projects = ProjectLibrary(model: self)
+    /// Project threads opened on this device. They share the conversation
+    /// surface but are not Bot conversations.
+    @Published private(set) var projectConversationIDs: Set<String> = []
+    func registerProjectConversation(_ detail: ProjectConversationDetail) {
+        if !projectConversationIDs.contains(detail.conversationId) { projectConversationIDs.insert(detail.conversationId) }
+    }
+    func isProject(_ chat: ChatSummary) -> Bool { projectConversationIDs.contains(chat.id) }
+    /// Native provider history being re-read; Send waits so a new turn never
+    /// follows a stale view of work done on the Mac.
+    @Published private(set) var nativeHistoryRefreshing: Set<String> = []
+    @Published private(set) var nativeHistoryFailures: Set<String> = []
+    func reloadNativeHistory(_ chat: ChatSummary) async {
+        guard isProject(chat), !previewMode, !nativeHistoryRefreshing.contains(chat.id) else { return }
+        let scope = assignmentScope
+        nativeHistoryRefreshing.insert(chat.id)
+        guard await connectionReady(), let saved = connection, !accessEnded, scope == assignmentScope else {
+            nativeHistoryRefreshing.remove(chat.id)
+            nativeHistoryFailures.insert(chat.id)
+            return
+        }
+        defer { if scope == assignmentScope { nativeHistoryRefreshing.remove(chat.id) } }
+        struct Status: Decodable, Sendable { let state: String }
+        let path = "/api/v1/conversations/\(Self.escape(chat.id))/history/refresh"
+        do {
+            let detail = try await projects.loadDetail(chat.id)
+            guard detail.hasNativeSession else { nativeHistoryFailures.remove(chat.id); return }
+            var status: Status = try await api.request(path, origin: saved.origin, body: Data("{}".utf8), credential: saved.credential, decodingStatuses: [202])
+            // Bounded wait; saved history stays on screen meanwhile.
+            for _ in 0..<40 where status.state == "refreshing" {
+                try await Task.sleep(for: .milliseconds(250))
+                guard scope == assignmentScope, !Task.isCancelled else { return }
+                status = try await api.request(path, origin: saved.origin, credential: saved.credential)
+            }
+            guard scope == assignmentScope else { return }
+            guard status.state == "completed" else { throw PairingFailure.response(503) }
+            nativeHistoryFailures.remove(chat.id)
+            await refreshConversation(chat)
+        } catch is CancellationError {
+        } catch {
+            guard scope == assignmentScope else { return }
+            nativeHistoryFailures.insert(chat.id)
+        }
+    }
     @Published var status = "Connect to your computer to get started."
     @Published var busy = false
     @Published var verification: String?
@@ -1012,6 +1057,7 @@ struct ManagedBotListMutationState {
     }
 
     func agentFamily(_ chat: ChatSummary) -> AgentFamily {
+        if let detail = projects.details[chat.id] { return detail.family }
         if let group = groups[chat.id]?.collaboration { return AgentFamily(model: group.configuration.routing.model) }
         return managedBots.first(where: { $0.id == chat.botId })?.family ?? .codex
     }
@@ -1205,7 +1251,27 @@ struct ManagedBotListMutationState {
         }
     }
 
+    /// Creation and its first message share a durable request identity. Repeating
+    /// this after a crash cannot start a second message on the recovered Bot.
+    func prepareCreationMessage(_ chat: ChatSummary, body: String, requestID: String) throws {
+        guard let saved = connection, !accessEnded else { throw PairingFailure.response(401) }
+        loadComposer(chat.id)
+        guard !intentLoadFailures.contains(chat.id) else { throw ReadFailure.resync }
+        var intent = composers[chat.id] ?? ComposerIntent()
+        if let pending = intent.pending {
+            guard pending.request.clientMessageId == requestID, pending.request.body == body else { throw SendFailure.pending }
+            return
+        }
+        if snapshots[chat.id]?.messages.contains(where: { $0.clientMessageId == requestID }) == true { return }
+        guard intent.draft.isEmpty || intent.draft == body else { throw SendFailure.pending }
+        intent.draft = body
+        try intent.begin(device: saved.credential.deviceId, clientMessageID: requestID,
+                         modelSelectionRevision: managedBots.first(where: { $0.id == chat.botId })?.modelSelectionRevision)
+        try saveComposer(intent, chat: chat.id)
+    }
+
     func editDraft(_ text: String, chat: String) {
+        loadComposer(chat)
         guard !intentLoadFailures.contains(chat), !uploading.contains(chat), !preparingSends.contains(chat) else { return }
         var next = composers[chat] ?? ComposerIntent()
         next.draft = text
@@ -1213,6 +1279,36 @@ struct ManagedBotListMutationState {
         composers[chat] = next
         do { try saveComposer(next, chat: chat); composerErrors[chat] = nil }
         catch { composerErrors[chat] = "This draft could not be saved. Free some storage before sending." }
+    }
+
+    /// Draft navigation must inspect durable state before deciding the target
+    /// is empty; an unopened conversation may already have a saved draft.
+    func transferDraft(_ text: String, files: [StagedFile], to chat: ChatSummary) throws -> Bool {
+        loadComposer(chat.id)
+        guard !intentLoadFailures.contains(chat.id) else { throw ReadFailure.resync }
+        var intent = composers[chat.id] ?? ComposerIntent()
+        guard intent.pending == nil, intent.draft.isEmpty, intent.attachmentCount == 0 else { return false }
+        intent.draft = text; intent.stagedFiles = files
+        try saveComposer(intent, chat: chat.id)
+        return true
+    }
+
+    func prepareCreation(_ chat: ChatSummary, body: String, requestID: String, files: [StagedFile]) async throws {
+        loadComposer(chat.id)
+        guard !intentLoadFailures.contains(chat.id) else { throw ReadFailure.resync }
+        if composers[chat.id]?.pending != nil {
+            try prepareCreationMessage(chat, body: body, requestID: requestID)
+            return
+        }
+        var intent = composers[chat.id] ?? ComposerIntent()
+        guard intent.draft.isEmpty || intent.draft == body else { throw SendFailure.pending }
+        intent.draft = body
+        let existing = intent.stagedFiles ?? []
+        guard existing.allSatisfy({ item in files.contains { $0.id == item.id } }) else { throw SendFailure.pending }
+        intent.stagedFiles = files.map { file in existing.first { $0.id == file.id } ?? file }
+        try saveComposer(intent, chat: chat.id)
+        try await uploadStaged(chat)
+        try prepareCreationMessage(chat, body: body, requestID: requestID)
     }
 
     func savedDictationIntent() throws -> DictationIntent? {
@@ -1231,8 +1327,14 @@ struct ManagedBotListMutationState {
     func insertDictation(job: TranscriptionJob, intent: DictationIntent) throws {
         guard !intent.cancelled, intent.accepts(job), job.state == "completed", let text = job.transcriptText,
             intent.hostID == connection?.credential.hostInstallationId,
-            intent.deviceID == connection?.credential.deviceId, !accessEnded,
-            chats.contains(where: { $0.id == intent.conversationID }) else { throw PairingFailure.wrongHost }
+            intent.deviceID == connection?.credential.deviceId, !accessEnded else { throw PairingFailure.wrongHost }
+        if intent.conversationID.hasPrefix("new-chat:") {
+            try NewChatDraftStore.insertDictation(text, requestID: intent.requestID,
+                draftID: String(intent.conversationID.dropFirst("new-chat:".count)), host: intent.hostID)
+            NotificationCenter.default.post(name: .newChatDictationInserted, object: intent.hostID)
+            return
+        }
+        guard chats.contains(where: { $0.id == intent.conversationID }) || projectConversationIDs.contains(intent.conversationID) else { throw PairingFailure.wrongHost }
         loadComposer(intent.conversationID)
         guard !intentLoadFailures.contains(intent.conversationID) else { throw ReadFailure.resync }
         guard !preparingSends.contains(intent.conversationID) else { throw SendFailure.pending }
@@ -1310,7 +1412,7 @@ struct ManagedBotListMutationState {
     func stop(_ chat: ChatSummary) async {
         guard !isSubagent(chat) else { return }
         guard let turn = activeTurn(chat.id), let saved = connection, !accessEnded,
-              chat.botId != nil, !stopping.contains(chat.id) else { return }
+              chat.botId != nil || isProject(chat), !stopping.contains(chat.id) else { return }
         let key = partition
         stopping.insert(chat.id); controlErrors[chat.id] = nil
         defer { if key == partition { stopping.remove(chat.id) } }
@@ -1328,6 +1430,7 @@ struct ManagedBotListMutationState {
     }
 
     func usageModel(_ chat: ChatSummary) -> String {
+        if let detail = projects.details[chat.id] { return detail.model ?? (detail.family == .claude ? "claude:haiku" : "") }
         if groups[chat.id]?.collaboration != nil { return ModelDefaultPurpose.groupParticipation.load().model }
         return managedBots.first(where: { $0.id == chat.botId })?.model ?? (agentFamily(chat) == .claude ? "claude:haiku" : "")
     }
@@ -1359,7 +1462,7 @@ struct ManagedBotListMutationState {
 
     func canSend(_ chat: ChatSummary) -> Bool {
         let draft = composers[chat.id]?.draft ?? ""
-        return !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && (chat.botId != nil || groups[chat.id] != nil) && connection != nil && !accessEnded
+        return !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && (chat.botId != nil || groups[chat.id] != nil || isProject(chat)) && connection != nil && !accessEnded
             && !isSubagent(chat) && usageLimitMessage(chat) == nil
             // Both direct and Group sends have durable host-side acceptance.
             // Replay invalidation does not revoke permission to submit intent.
@@ -1371,6 +1474,7 @@ struct ManagedBotListMutationState {
             && (composers[chat.id]?.attachmentCount ?? 0) <= 4
             && (attachmentsSupported(chat) || ((composers[chat.id]?.stagedFiles ?? []).isEmpty && (composers[chat.id]?.draftAttachmentIds ?? []).isEmpty))
             && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id)
+            && !nativeHistoryRefreshing.contains(chat.id) && !nativeHistoryFailures.contains(chat.id)
     }
 
     func send(_ chat: ChatSummary) async {
@@ -1379,6 +1483,10 @@ struct ManagedBotListMutationState {
         preparingSends.insert(chat.id)
         controlErrors[chat.id] = nil
         defer { if scope == assignmentScope { preparingSends.remove(chat.id) } }
+        if isProject(chat) {
+            await reloadNativeHistory(chat)
+            guard scope == assignmentScope, !nativeHistoryFailures.contains(chat.id), !Task.isCancelled else { return }
+        }
         do { try await uploadStaged(chat) }
         catch {
             guard assignmentScope == scope else { return }
@@ -1505,7 +1613,7 @@ struct ManagedBotListMutationState {
             }
             guard run == generation else { return }
             guard page.conversationId == chat.id else { throw ReadFailure.wrongConversation }
-            guard projection.summaries.contains(where: { $0.id == chat.id }) || isSubagent(chat) else {
+            guard projection.summaries.contains(where: { $0.id == chat.id }) || isSubagent(chat) || isProject(chat) else {
                 if projection.snapshots[chat.id] == nil { conversationLoadFailures[chat.id] = "This chat is no longer available." }
                 return
             }
@@ -1640,14 +1748,15 @@ struct ManagedBotListMutationState {
     }
 
     func attachmentsSupported(_ chat: ChatSummary) -> Bool {
-        chat.botId != nil || groups[chat.id]?.canAttachFiles == true
+        if isProject(chat) { return true }
+        return chat.botId != nil || groups[chat.id]?.canAttachFiles == true
     }
     private func attachmentCount(_ chat: String) -> Int {
         composers[chat]?.attachmentCount ?? 0
     }
     func canAttach(_ chat: ChatSummary) -> Bool {
         attachmentsSupported(chat) && !chat.isArchived && !accessEnded && !previewMode
-            && connection != nil && (chats.contains(where: { $0.id == chat.id }) || isSubagent(chat))
+            && connection != nil && (chats.contains(where: { $0.id == chat.id }) || isProject(chat))
             && !isSubagent(chat)
             && !preparingSends.contains(chat.id) && !uploading.contains(chat.id) && composers[chat.id]?.pending == nil
             && attachmentCount(chat.id) < 4
@@ -1721,7 +1830,7 @@ struct ManagedBotListMutationState {
         }
     }
 
-    private static func prepareImageAttachment(_ data: Data) async throws -> StagedFile {
+    static func prepareImageAttachment(_ data: Data) async throws -> StagedFile {
         let worker = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             guard !data.isEmpty, data.count <= 8 * 1024 * 1024 else { throw FileFailure.tooLarge }
@@ -1749,7 +1858,7 @@ struct ManagedBotListMutationState {
             try Task.checkCancellation()
             guard contextID == cameraContextID, key == partition, scope == assignmentScope, visibleChat?.id == chat.id,
                   !accessEnded, !previewMode, connection != nil,
-                  (chats.contains(where: { $0.id == chat.id }) || isSubagent(chat)),
+                  (chats.contains(where: { $0.id == chat.id }) || isProject(chat)),
                   composers[chat.id]?.pending == nil, attachmentCount(chat.id) < 4 else { return .cancelled }
             let file = try StagedFile(
                 name: "Photo-\(UUID().uuidString.prefix(8)).\(prepared.fileExtension)",
@@ -2107,7 +2216,7 @@ struct ManagedBotListMutationState {
         if let threadID = subagentSummary(for: chat.id)?.threadId { threads.insert(threadID) }
         let descendants = subagents[chat.id] ?? []
         return attention.filter { request in
-            request.belongs(to: chat.id, isDirect: chat.botId != nil, threadIDs: threads)
+            request.belongs(to: chat.id, isDirect: chat.botId != nil || isProject(chat), threadIDs: threads)
                 || descendants.contains { request.belongs(to: $0.id, isDirect: true, threadIDs: [$0.threadId]) }
         }
     }
@@ -2617,6 +2726,8 @@ struct ManagedBotListMutationState {
             if let writer { try await writer.remove() }
             else if let target = store ?? connection.map(Self.readStore(for:)) { try await ProjectionWriter(store: target).remove() }
             if let saved = connection { ManagementDraftStore(host: saved.credential.hostInstallationId).removeAll() }
+            projects.forgetCache()
+            if let saved = connection { NewChatDraftStore.remove(host: saved.credential.hostInstallationId) }
             if let persistConnection { try persistConnection(nil) }
             else { try identity.forgetConnection() }
             partition = nil; store = nil; writer = nil; projection = ProjectionState(); publish(.everything)

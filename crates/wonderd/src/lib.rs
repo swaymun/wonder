@@ -41,6 +41,7 @@ mod permission_modes;
 mod phone_approval_tests;
 mod pm_tools;
 mod project_assignments;
+pub mod projects;
 pub mod push;
 mod questions;
 mod queue;
@@ -110,6 +111,8 @@ pub struct AppState {
     pub app_server: Arc<tokio::sync::Mutex<AppServerClient>>,
     pub launch_config: Arc<tokio::sync::Mutex<LaunchConfig>>,
     pub claude: Option<Arc<claude::Runtime>>,
+    /// Owner-selected folder projects in the normal provider homes.
+    pub projects: Arc<projects::ProjectRuntime>,
     pub denied_roots: Vec<String>,
     /// Host folders whose files may be copied into a conversation after the
     /// owner explicitly clicks a local link. Bot workspaces are always
@@ -744,6 +747,8 @@ pub struct HostStatus {
     pub started_at: String,
     pub public_origin: Option<String>,
     pub execution: ingestion::Readiness,
+    /// Additive capabilities so older clients and hosts degrade honestly.
+    pub features: Vec<&'static str>,
 }
 
 async fn no_store_signaling(request: Request<Body>, next: Next) -> Response {
@@ -871,6 +876,28 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/bots",
             get(list_bots).post(bot_management::create_with_avatar),
+        )
+        .route(
+            "/api/v1/projects",
+            get(projects::list).post(projects::create),
+        )
+        .route("/api/v1/projects/candidates", get(projects::candidates))
+        .route("/api/v1/projects/{project_id}", patch(projects::update))
+        .route(
+            "/api/v1/projects/{project_id}/threads",
+            get(projects::threads).post(projects::create_thread),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/threads/attach",
+            post(projects::attach),
+        )
+        .route(
+            "/api/v1/project-conversations/{conversation_id}",
+            get(projects::conversation).patch(projects::update_conversation),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/desktop-continuation",
+            get(projects::continuation),
         )
         .route("/api/v1/bots/new", post(bot_onboarding::create))
         .route(
@@ -2008,9 +2035,29 @@ async fn process_app_server_notification(
         );
     if assistant_completed {
         if let Some(conversation_id) = conversation_id.as_deref() {
-            let bot = match bot_for_conversation(state, conversation_id).await {
-                Ok(Some(bot)) => bot,
-                Ok(None) | Err(_) => {
+            // Project threads have no Bot inbox entry; mark the thread unread.
+            if projects::is_project(state, conversation_id).await {
+                let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+                if state
+                    .store
+                    .update_project_conversation(
+                        conversation_id,
+                        None,
+                        None,
+                        Some(true),
+                        None,
+                        None,
+                        None,
+                        &now,
+                    )
+                    .await
+                    .is_err()
+                    || state
+                        .store
+                        .touch_project_conversation(conversation_id, &now)
+                        .await
+                        .is_err()
+                {
                     return fail_app_server_notification(
                         state,
                         method,
@@ -2024,56 +2071,74 @@ async fn process_app_server_notification(
                     )
                     .await;
                 }
-            };
-            if state
-                .store
-                .ensure_conversation_metadata(
-                    conversation_id,
-                    &bot.id,
-                    &bot.name,
-                    &state.started_at,
-                )
-                .await
-                .is_err()
-            {
-                return fail_app_server_notification(
-                    state,
-                    method,
-                    &notification,
-                    &params,
-                    thread_id.as_deref(),
-                    turn_id.as_deref(),
-                    item_id.as_deref(),
-                    notification_key.as_deref(),
-                    queue_failed_assistant,
-                )
-                .await;
-            }
-            if state
-                .store
-                .update_conversation(
-                    conversation_id,
-                    None,
-                    None,
-                    None,
-                    Some(true),
-                    &now_ms().to_string(),
-                )
-                .await
-                .is_err()
-            {
-                return fail_app_server_notification(
-                    state,
-                    method,
-                    &notification,
-                    &params,
-                    thread_id.as_deref(),
-                    turn_id.as_deref(),
-                    item_id.as_deref(),
-                    notification_key.as_deref(),
-                    queue_failed_assistant,
-                )
-                .await;
+            } else {
+                let bot = match bot_for_conversation(state, conversation_id).await {
+                    Ok(Some(bot)) => bot,
+                    Ok(None) | Err(_) => {
+                        return fail_app_server_notification(
+                            state,
+                            method,
+                            &notification,
+                            &params,
+                            thread_id.as_deref(),
+                            turn_id.as_deref(),
+                            item_id.as_deref(),
+                            notification_key.as_deref(),
+                            queue_failed_assistant,
+                        )
+                        .await;
+                    }
+                };
+                if state
+                    .store
+                    .ensure_conversation_metadata(
+                        conversation_id,
+                        &bot.id,
+                        &bot.name,
+                        &state.started_at,
+                    )
+                    .await
+                    .is_err()
+                {
+                    return fail_app_server_notification(
+                        state,
+                        method,
+                        &notification,
+                        &params,
+                        thread_id.as_deref(),
+                        turn_id.as_deref(),
+                        item_id.as_deref(),
+                        notification_key.as_deref(),
+                        queue_failed_assistant,
+                    )
+                    .await;
+                }
+                if state
+                    .store
+                    .update_conversation(
+                        conversation_id,
+                        None,
+                        None,
+                        None,
+                        Some(true),
+                        &now_ms().to_string(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    return fail_app_server_notification(
+                        state,
+                        method,
+                        &notification,
+                        &params,
+                        thread_id.as_deref(),
+                        turn_id.as_deref(),
+                        item_id.as_deref(),
+                        notification_key.as_deref(),
+                        queue_failed_assistant,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -2411,6 +2476,11 @@ async fn record_file_changes(
     params: &serde_json::Value,
     item_id: Option<&str>,
 ) -> Result<Vec<WorkspaceArtifact>, sqlx::Error> {
+    // Project edits stay in the owner's folders; the diff remains in the
+    // thread item, but Wonder does not copy them into its artifact store.
+    if projects::is_project(state, conversation_id).await {
+        return Ok(Vec::new());
+    }
     let bot = bot_for_conversation(state, conversation_id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
@@ -3433,6 +3503,7 @@ async fn host_status(State(state): State<AppState>) -> impl IntoResponse {
             codex_transport: "stdio-jsonl",
             started_at: state.started_at.clone(),
             public_origin,
+            features: vec![projects::FEATURE],
         }),
     )
 }
@@ -6937,6 +7008,39 @@ async fn update_conversation(
             return response;
         }
     }
+    if projects::is_project(&state, &conversation_id).await {
+        // Project threads keep read/pin state in their own metadata.
+        if request.is_archived.is_some() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Hide the project instead.",
+            )
+                .into_response();
+        }
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        return match state
+            .store
+            .update_project_conversation(
+                &conversation_id,
+                request.title.as_deref(),
+                request.is_pinned,
+                request.mark_read.filter(|read| *read).map(|_| false),
+                None,
+                None,
+                None,
+                &now,
+            )
+            .await
+        {
+            Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
+            Ok(None) => StatusCode::NOT_FOUND.into_response(),
+            Err(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The conversation could not be saved.",
+            )
+                .into_response(),
+        };
+    }
     let Ok(Some(bot)) = bot_for_conversation(&state, &conversation_id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -8012,19 +8116,26 @@ async fn upload_conversation_file(
     if let Some(response) = subagents::reject_user_mutation(&state, &conversation_id).await {
         return response;
     }
-    let Ok(Some(bot)) = bot_for_conversation(&state, &conversation_id).await else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let workspace = match group_attachments::storage_workspace(
-        &state,
-        &conversation_id,
-        &bot.workspace_path,
-        true,
-    )
-    .await
-    {
-        Ok(workspace) => workspace,
-        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    let workspace = if projects::is_project(&state, &conversation_id).await {
+        let Some(workspace) = projects::media_workspace(&state, &conversation_id).await else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        workspace
+    } else {
+        let Ok(Some(bot)) = bot_for_conversation(&state, &conversation_id).await else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        match group_attachments::storage_workspace(
+            &state,
+            &conversation_id,
+            &bot.workspace_path,
+            true,
+        )
+        .await
+        {
+            Ok(workspace) => workspace,
+            Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+        }
     };
     let name = request.name.trim();
     if !valid_attachment_name(&request.name) {
@@ -8152,7 +8263,8 @@ async fn conversation_files(
     if !matches!(
         bot_for_conversation(&state, &conversation_id).await,
         Ok(Some(_))
-    ) {
+    ) && !projects::is_project(&state, &conversation_id).await
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     match state.store.list_conversation_files(&conversation_id).await {
@@ -8175,8 +8287,11 @@ async fn conversation_file(
     State(state): State<AppState>,
     Path((conversation_id, file_id)): Path<(String, String)>,
 ) -> Response {
-    let Ok(Some(bot)) = bot_for_conversation(&state, &conversation_id).await else {
-        return StatusCode::NOT_FOUND.into_response();
+    // Project threads only hold verified tool previews in Wonder storage.
+    let bot = match bot_for_conversation(&state, &conversation_id).await {
+        Ok(Some(bot)) => Some(bot),
+        Ok(None) if projects::is_project(&state, &conversation_id).await => None,
+        _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let file = match state.store.list_conversation_files(&conversation_id).await {
         Ok(files) => files.into_iter().find(|file| file.id == file_id),
@@ -8201,14 +8316,18 @@ async fn conversation_file(
         if relative_path != attachment_relative_path(&file.id) {
             return StatusCode::NOT_FOUND.into_response();
         }
-        let Ok(workspace) = group_attachments::storage_workspace(
-            &state,
-            &conversation_id,
-            &bot.workspace_path,
-            false,
-        )
-        .await
-        else {
+        let workspace = match &bot {
+            Some(bot) => group_attachments::storage_workspace(
+                &state,
+                &conversation_id,
+                &bot.workspace_path,
+                false,
+            )
+            .await
+            .ok(),
+            None => projects::media_workspace(&state, &conversation_id).await,
+        };
+        let Some(workspace) = workspace else {
             return StatusCode::NOT_FOUND.into_response();
         };
         let Some(path) = attachment_path(&workspace, &file.id, false).await else {
@@ -8216,6 +8335,9 @@ async fn conversation_file(
         };
         path
     } else {
+        let Some(bot) = &bot else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
         if sanitized_relative_path(relative_path, &bot.workspace_path).as_deref()
             != Some(relative_path)
         {
@@ -8934,9 +9056,11 @@ async fn send_message_inner(
                 .into_response()
         }
     };
-    let conversation_id = if channel_id.is_some() || child.is_some() {
-        // Groups and verified children own their exact durable conversation.
-        // Legacy Bot-ID normalization must not redirect a child to its parent.
+    let is_project = projects::is_project(&state, &conversation_id).await;
+    let conversation_id = if channel_id.is_some() || child.is_some() || is_project {
+        // Groups, verified children and project threads own their exact
+        // durable conversation. Legacy Bot-ID normalization must not redirect
+        // them to another conversation.
         conversation_id
     } else {
         match bot_for_conversation(&state, &conversation_id).await {
@@ -13945,6 +14069,7 @@ mod tests {
             .await
             .expect("bot");
         let launch_config = Arc::new(tokio::sync::Mutex::new(wonder_app_server::LaunchConfig {
+            project_scope: false,
             runtime_home: None,
             codex_bin: directory.path().join("codex"),
             wonder_version: "test".into(),
@@ -14215,6 +14340,7 @@ for line in sys.stdin:
             .expect("fake Codex permissions");
         let app_server = wonder_app_server::AppServerClient::spawn_with_notification_sink(
             wonder_app_server::LaunchConfig {
+                project_scope: false,
                 runtime_home: None,
                 codex_bin: fake_bin,
                 wonder_version: env!("CARGO_PKG_VERSION").into(),
@@ -14246,6 +14372,13 @@ for line in sys.stdin:
             .await
             .expect("sync epoch");
         let state = AppState {
+            projects: crate::projects::ProjectRuntime::configured(
+                "/nonexistent/codex".into(),
+                "test".into(),
+                std::path::Path::new("/nonexistent/codex-home"),
+                std::path::Path::new("/nonexistent/claude-home"),
+                crate::ingestion::notification_sink(store.clone()),
+            ),
             claude: None,
             ingestion: crate::ingestion::Ingestion::default(),
             store,
@@ -14263,6 +14396,7 @@ for line in sys.stdin:
             host_installation_id: "contract-installation".into(),
             app_server: Arc::new(tokio::sync::Mutex::new(app_server)),
             launch_config: Arc::new(tokio::sync::Mutex::new(wonder_app_server::LaunchConfig {
+                project_scope: false,
                 runtime_home: None,
                 codex_bin: directory.path().join("fake-codex"),
                 wonder_version: env!("CARGO_PKG_VERSION").into(),

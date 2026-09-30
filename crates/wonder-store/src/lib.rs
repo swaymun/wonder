@@ -11,6 +11,12 @@ mod questions;
 pub use questions::AsyncQuestion;
 mod runtime_bindings;
 pub use runtime_bindings::{AgentFamily, RuntimeBinding};
+mod projects;
+pub use projects::{
+    ProjectConversationCreate, ProjectConversationInsert, ProjectCreate, ProjectRootInput,
+    StoredProject, StoredProjectConversation, StoredProjectRoot, EXECUTION_SCOPE_BOTS,
+    EXECUTION_SCOPE_PROJECTS, MAX_PROJECT_ROOTS,
+};
 
 use std::{cmp::Ordering, collections::HashMap, time::Duration};
 

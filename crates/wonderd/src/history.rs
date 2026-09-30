@@ -944,6 +944,20 @@ pub(super) fn conversation_thread_projection_with_items(
                                     &mut turns, &mut order, turn_id, &timestamp, &timestamp,
                                 );
                                 if let Some(target) = turns.get_mut(turn_id) {
+                                    // Native project turns may have no Wonder
+                                    // receipt; hydration carries the provider
+                                    // outcome of turns run on the Mac.
+                                    if target.status == "unknown" {
+                                        if let Some(status) = detail
+                                            .get("turnStatus")
+                                            .and_then(serde_json::Value::as_str)
+                                            .filter(|s| {
+                                                matches!(*s, "completed" | "failed" | "interrupted")
+                                            })
+                                        {
+                                            target.status = status.to_owned();
+                                        }
+                                    }
                                     let entry = AppServerThreadItem {
                                         turn_id: turn_id.to_owned(),
                                         item: item.clone(),
@@ -1539,7 +1553,13 @@ async fn refresh_runtime_history(
         .conversation_execution_directory(conversation)
         .await
         .map_err(|e| e.to_string())?;
-    let runtime = state.app_server.lock().await.rpc();
+    // Bot and project threads live in different provider stores.
+    let runtime = crate::claude::for_thread(state, thread).await?;
+    let statuses = if crate::projects::is_project(state, conversation).await {
+        native_turn_statuses(&runtime, thread).await?
+    } else {
+        HashMap::new()
+    };
     let mut cursor = None;
     let mut seen = std::collections::HashSet::new();
     loop {
@@ -1575,6 +1595,9 @@ async fn refresh_runtime_history(
             let mut detail: serde_json::Value =
                 serde_json::from_str(&detail).map_err(|e| e.to_string())?;
             detail["historyRefresh"] = serde_json::Value::Bool(true);
+            if let Some(status) = statuses.get(turn) {
+                detail["turnStatus"] = serde_json::Value::String(status.clone());
+            }
             let detail = detail.to_string();
             publish_event_with_context(
                 state,
@@ -1621,6 +1644,46 @@ async fn refresh_runtime_history(
         }
         tokio::task::yield_now().await;
     }
+}
+
+/// Terminal outcomes of native turns, including turns run on the Mac.
+async fn native_turn_statuses(
+    runtime: &wonder_app_server::RpcClient,
+    thread: &str,
+) -> Result<HashMap<String, String>, String> {
+    let mut statuses = HashMap::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..100 {
+        let response = runtime
+            .request(
+                "thread/turns/list",
+                serde_json::json!({"threadId": thread, "limit": 100, "itemsView": "notLoaded", "cursor": cursor}),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let result = response.result.ok_or("Missing turn history")?;
+        for turn in result
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(id), Some(status)) = (
+                turn.get("id").and_then(serde_json::Value::as_str),
+                turn.get("status").and_then(serde_json::Value::as_str),
+            ) {
+                statuses.insert(id.to_owned(), status.to_owned());
+            }
+        }
+        cursor = result
+            .get("nextCursor")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(statuses)
 }
 
 #[cfg(test)]

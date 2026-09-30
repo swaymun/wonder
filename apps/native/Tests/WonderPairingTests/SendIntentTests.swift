@@ -17,7 +17,9 @@ final class SendIntentTests: XCTestCase {
         var intent = ComposerIntent(); intent.draft = "  Hello 🌍\nKeep my whitespace.  "
         try store.saveComposer(intent, conversation: "chat")
         XCTAssertEqual(try store.loadComposer(conversation: "chat").draft, intent.draft)
-        try intent.begin(device: "phone")
+        let creationID = UUID().uuidString
+        try intent.begin(device: "phone", clientMessageID: creationID)
+        XCTAssertEqual(intent.pending?.request.clientMessageId, creationID)
         let original = intent.pending!.request
         try store.saveComposer(intent, conversation: "chat")
         // The Mac accepts, but the response is lost and iOS exits.

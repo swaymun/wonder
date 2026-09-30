@@ -214,6 +214,22 @@ struct ChatStatusIndicator: View {
         let bot: ManagedBot = try await model.manage("/api/v1/bots/" + ConnectionModel.escape(id) + "/archive", method: "POST", values: [:])
         guard bot.isArchived else { throw PairingFailure.response(409) }
     }
+    /// Pinning changes ordering only; the Mac keeps the pin for every device.
+    func setPinned(_ target: Target, _ pinned: Bool) async {
+        guard canChange(target) else { return }
+        pending[target.key] = pinned ? "Pinning" : "Unpinning"
+        defer { pending.removeValue(forKey: target.key) }
+        do {
+            struct Summary: Decodable, Sendable {}
+            let _: Summary = try await target.model.manage("/api/v1/conversations/" + ConnectionModel.escape(target.chat.id),
+                method: "PATCH", body: Data("{\"isPinned\":\(pinned)}".utf8))
+            guard isCurrent(target) else { return }
+            await target.model.loadChats(force: true)
+        } catch {
+            guard isCurrent(target) else { return }
+            failure = "The pin couldn’t be saved. Try again."
+        }
+    }
     func archive(_ target: Target) async {
         guard canChange(target) else { return }
         pending[target.key] = "Archiving"
@@ -804,7 +820,7 @@ struct ConversationView: View {
                                 let pending = model.composers[chat.id]?.pending
                                 let speakerBot = row.authorId.flatMap { id in model.managedBots.first { $0.id == id } }
                                 let messageAttachments = messageAttachments(for: row, metadata: attachmentMetadata)
-                                MessageRow(row: row, isGroup: chat.botId == nil, showIdentity: SpeakerPresentation.showsIdentity(row: row, previous: previous[row.id], isGroup: chat.botId == nil),
+                                MessageRow(row: row, isGroup: chat.botId == nil && !model.isProject(chat), showIdentity: SpeakerPresentation.showsIdentity(row: row, previous: previous[row.id], isGroup: chat.botId == nil && !model.isProject(chat)),
                                     pending: row.id == pending.map({ "user-" + $0.request.clientMessageId }) ? pending : nil,
                                     recoveredBeforeReconnect: model.composers[chat.id]?.recoveredPending?.contains(where: { row.id == "user-" + $0.request.clientMessageId }) == true,
                                     isSending: model.sending.contains(chat.id),
@@ -1109,11 +1125,17 @@ struct ConversationView: View {
                     )
                 }
             }
+            if let detail = model.projectDetail(chat) {
+                ToolbarItem(placement: .principal) { ProjectConversationHeader(detail: detail) }
+            }
             if !readOnly { ToolbarItem(placement: .primaryAction) {
                 Button("Conversation details", systemImage: "ellipsis.circle") { showingDetails = true }
             } }
         }
-        .sheet(isPresented: $showingDetails) { ConversationDetails(model: model, chat: chat) }
+        .sheet(isPresented: $showingDetails) {
+            if model.isProject(chat) { ProjectConversationDetailsView(model: model, library: model.projects, chat: chat) }
+            else { ConversationDetails(model: model, chat: chat) }
+        }
         .fullScreenCover(isPresented: $showingComputer) {
             NavigationStack { ComputerSessionView(model: model, chat: chat) }
         }
@@ -1216,6 +1238,9 @@ struct ConversationView: View {
             if cameraScope != nil, cameraScope != next { showingCamera = false; cameraScope = nil }
         }
         .task(id: chat.id) {
+            // Project history is owned by the provider: re-read turns made on
+            // the Mac before the owner can send the next one.
+            if model.isProject(chat), !readOnly { await model.reloadNativeHistory(chat) }
             await model.open(chat, root: rootChat, readOnly: readOnly)
             if model.previewMode, ProcessInfo.processInfo.arguments.contains("-preview-document") { workspaceRequest = WorkspaceBrowserRequest() }
         }
@@ -1243,7 +1268,17 @@ struct ConversationView: View {
                     }.font(.subheadline).frame(minHeight: 44).accessibilityIdentifier("review-approval-request")
                 }
                 QuestionDock(model: model, chat: chat)
-                if (!chat.isArchived || model.isSubagent(chat)) && (chat.botId != nil || model.groups[chat.id] != nil) {
+                if (!chat.isArchived || model.isSubagent(chat)) && (chat.botId != nil || model.groups[chat.id] != nil || model.isProject(chat)) {
+                    if model.nativeHistoryRefreshing.contains(chat.id) {
+                        Label("Checking your Mac for new turns…", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("native-history-refreshing")
+                    }
+                    if model.nativeHistoryFailures.contains(chat.id) {
+                        Button("Couldn’t check for new turns. Try again") { Task { await model.reloadNativeHistory(chat) } }
+                            .font(.caption).frame(minHeight: 44)
+                            .accessibilityIdentifier("native-history-retry")
+                    }
                     if let error = model.controlErrors[chat.id] { FailureDetails(message: error) }
                     if let error = model.composerErrors[chat.id] {
                         FailureDetails("Message not saved", message: error)
@@ -1336,6 +1371,8 @@ struct ConversationView: View {
                                 .accessibilityIdentifier("subagent-settings-state")
                         } else if let botID = chat.botId {
                             ComposerSettings(model: model, chat: chat, botID: botID)
+                        } else if model.isProject(chat) {
+                            ProjectComposerSettings(model: model, library: model.projects, chat: chat)
                         } else { Spacer(minLength: 0) }
                         if model.activeTurn(chat.id) != nil {
                             Button { Task { await model.stop(chat) } } label: {

@@ -13,6 +13,7 @@ import UIKit
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved", "-diagnostics-history-replay"]
         app.launch()
+        openSidebarIfNeeded(app)
         let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
         XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 10))
@@ -85,6 +86,7 @@ import UIKit
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout", "-UIPreferredContentSizeCategoryName", contentSize] + extra
         app.launch()
+        openSidebarIfNeeded(app)
         let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.tap()
@@ -167,6 +169,7 @@ import UIKit
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
         app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-older", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL"]
         app.launch()
+        openSidebarIfNeeded(app)
         let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.tap()
@@ -221,6 +224,7 @@ import UIKit
         app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-older",
                                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXXXL"]
         app.launch()
+        openSidebarIfNeeded(app)
         let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.tap()
@@ -1255,7 +1259,8 @@ import UIKit
         defer { removeUIInterruptionMonitor(localNetworkMonitor) }
         app.launch()
 
-        let settings = app.tabBars.buttons["Settings"]
+        openSidebarIfNeeded(app)
+        let settings = app.buttons["sidebar-settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 15))
         settings.tap()
         app.buttons["diagnostics-settings"].tap()
@@ -1269,7 +1274,8 @@ import UIKit
         captureEvidence.name = "Bounded diagnostics capture window"
         captureEvidence.lifetime = .keepAlways
         add(captureEvidence)
-        app.tabBars.buttons["Chats"].tap()
+        app.buttons["settings-done"].tap()
+        openSidebarIfNeeded(app)
 
         let row = app.buttons.matching(identifier: qaRowID).firstMatch
         guard row.waitForExistence(timeout: 20) else {
@@ -3317,6 +3323,27 @@ import UIKit
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
+    private func openSidebarIfNeeded(_ app: XCUIApplication) {
+        let search = app.textFields["sidebar-search"]
+        if search.exists && search.isHittable && search.frame.minX >= app.frame.minX { return }
+        let open = app.buttons["open-sidebar"]
+        if open.waitForExistence(timeout: 2) {
+            for _ in 0..<2 {
+                let banner = XCUIApplication(bundleIdentifier: "com.apple.springboard").descendants(matching: .any)
+                    .matching(identifier: "NotificationShortLookView").firstMatch
+                if banner.exists { banner.swipeUp() }
+                let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: open)
+                XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed)
+                open.tap()
+                let visible = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    search.exists && search.isHittable && search.frame.minX >= app.frame.minX
+                }, object: nil)
+                if XCTWaiter.wait(for: [visible], timeout: 5) == .completed { return }
+            }
+            XCTFail("The sidebar did not become visible")
+        }
+    }
+
     private func liveChatRowIdentifiers(_ app: XCUIApplication) -> Set<String> {
         Set(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-row:")).allElementsBoundByIndex.map(\.identifier))
     }
@@ -3371,13 +3398,142 @@ import UIKit
         return !row.exists
     }
 
+    // Navigation is read-only: choosing a project, changing destination and
+    // reopening native history must preserve drafts without dispatching a turn.
+    func testLiveProjectsSidebarAndDraftsStayReadOnly() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        let project = try XCTUnwrap(environment["WONDER_PROJECT_ID"], "Supply an owned test project")
+        let name = try XCTUnwrap(environment["WONDER_PROJECT_NAME"])
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        app.launch()
+        if app.buttons["settings-done"].waitForExistence(timeout: 2) { app.buttons["settings-done"].tap() }
+        openSidebarIfNeeded(app)
+        if environment["WONDER_PROJECT_CAPTURE"] == "1" {
+            app.buttons["sidebar-settings"].tap()
+            app.buttons["diagnostics-settings"].tap()
+            let capture = app.buttons["diagnostics-capture"]
+            XCTAssertTrue(capture.waitForExistence(timeout: 5))
+            if !capture.isEnabled { app.switches["Record performance"].tap() }
+            if capture.label == "Record two minutes" { capture.tap() }
+            XCTAssertEqual(capture.label, "Stop capture")
+            app.navigationBars.buttons["Settings"].tap()
+            app.buttons["settings-done"].tap()
+            openSidebarIfNeeded(app)
+        }
+        let search = app.textFields["sidebar-search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10))
+        if app.buttons["Clear search"].exists { app.buttons["Clear search"].tap() }
+        search.tap(); search.typeText(name)
+        let row = app.buttons["project-row:" + project]
+        XCTAssertTrue(row.waitForExistence(timeout: 30))
+        row.tap()
+        let draft = app.textViews["new-chat-draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["connection-picker"].exists)
+        XCTAssertEqual(app.buttons["destination-picker"].value as? String, name)
+        let composer = app.otherElements["new-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        for id in ["new-chat-attach", "dictate-message", "new-chat-access", "project-agent-picker", "new-chat-send"] {
+            let control = app.buttons[id]
+            XCTAssertTrue(control.exists, "Preserve the existing composer control: " + id)
+            XCTAssertTrue(composer.frame.insetBy(dx: -1, dy: -1).contains(control.frame), "Keep controls inside the composer: " + id)
+        }
+        XCTAssertLessThanOrEqual(app.buttons["destination-picker"].frame.maxY, composer.frame.minY)
+        app.buttons["project-agent-picker"].tap()
+        XCTAssertTrue(app.navigationBars["Model"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
+        app.buttons["new-chat-attach"].tap()
+        XCTAssertTrue(app.buttons["Camera"].exists)
+        XCTAssertTrue(app.buttons["Add photo"].exists)
+        XCTAssertTrue(app.buttons["Attach file"].exists)
+        // On iPhone the native menu covers its anchor. Dismiss outside it;
+        // tapping the covered anchor is not a valid composer interaction.
+        app.navigationBars["New chat"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertFalse(app.buttons["Camera"].exists)
+        retainMenuScreenshot(app, name: "Original composer with connection and project pickers")
+        let addition = " Read-only navigation check " + UUID().uuidString
+        draft.tap(); draft.typeText(addition)
+        let text = try XCTUnwrap(draft.value as? String)
+        XCTAssertTrue(text.contains(addition))
+        // Switch destinations while retaining this project's independent draft.
+        app.buttons["destination-picker"].tap()
+        app.buttons["Add new Bot"].tap()
+        XCTAssertTrue(app.buttons["new-chat-access"].exists)
+        XCTAssertTrue(app.buttons["project-agent-picker"].exists)
+        XCTAssertNotEqual(draft.value as? String, text, "A different destination keeps its own draft")
+        app.buttons["destination-picker"].tap()
+        app.buttons[name].firstMatch.tap()
+        XCTAssertEqual(draft.value as? String, text)
+        var threadIdentifier: String?
+        for cycle in 0..<(Int(environment["WONDER_PROJECT_CYCLES"] ?? "3") ?? 3) {
+            openSidebarIfNeeded(app)
+            XCTAssertEqual(search.value as? String, name)
+            let disclosure = app.buttons["project-disclosure:" + project]
+            XCTAssertTrue(disclosure.waitForExistence(timeout: 10))
+            if disclosure.value as? String == "Expanded" { disclosure.tap() }
+            XCTAssertEqual(disclosure.value as? String, "Collapsed")
+            disclosure.tap()
+            XCTAssertEqual(disclosure.value as? String, "Expanded")
+            let thread = threadIdentifier.map { app.buttons[$0] } ?? app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "project-thread:")).firstMatch
+            XCTAssertTrue(thread.waitForExistence(timeout: 40))
+            threadIdentifier = thread.identifier
+            thread.tap()
+            let opened = app.descendants(matching: .any).matching(identifier: "project-conversation-header").firstMatch.waitForExistence(timeout: 15)
+            if !opened { retainMenuScreenshot(app, name: "Project navigation failure"); print(app.debugDescription) }
+            XCTAssertTrue(opened)
+            XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 15))
+            XCTAssertNil(app.textViews["message-draft"].label.range(of: #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#, options: .regularExpression), "The composer must use the project title, not its storage identity")
+            if cycle == 0 { retainMenuScreenshot(app, name: "Project native conversation") }
+            app.buttons["new-chat"].tap()
+            XCTAssertTrue(draft.waitForExistence(timeout: 10))
+            XCTAssertEqual(draft.value as? String, text)
+        }
+        retainMenuScreenshot(app, name: "Project draft after navigation")
+        app.terminate(); app.launch()
+        XCTAssertTrue(draft.waitForExistence(timeout: 15))
+        XCTAssertEqual(draft.value as? String, text)
+    }
+
+    // The existing isolated Group API fixture rejects a changed retry and
+    // refinements that omit the owner's edits. No model or real Bot runs.
+    func testGroupReviewRetainsEditsAndRetriesExactAcceptedRoster() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-group-creation", "-diagnostics-group-review"]
+        app.launch()
+        let review = app.buttons["Review team"]
+        XCTAssertTrue(review.waitForExistence(timeout: 10)); review.tap()
+        let name = app.textFields["group-review-name"]
+        if !name.waitForExistence(timeout: 10) {
+            if app.buttons["Action failed"].exists { app.buttons["Action failed"].tap() }
+            XCTFail(app.debugDescription)
+            return
+        }
+        name.tap()
+        name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Suggested team".count) + "Edited team")
+        let refine = app.textFields["group-review-refine"]
+        refine.tap(); refine.typeText("Keep the existing Bot")
+        app.buttons["Send change"].tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Kept your edits.")).firstMatch.waitForExistence(timeout: 10))
+        app.buttons["Close"].tap(); review.tap()
+        XCTAssertTrue(name.waitForExistence(timeout: 10))
+        XCTAssertEqual(name.value as? String, "Edited team")
+        retainMenuScreenshot(app, name: "Group review restores owner edits")
+        app.buttons["group-review-create"].tap()
+        XCTAssertTrue(app.buttons["Retry create"].waitForExistence(timeout: 10))
+        XCTAssertFalse(name.isEnabled)
+        app.buttons["group-review-create"].tap()
+        XCTAssertTrue(app.staticTexts["Verified group"].waitForExistence(timeout: 10))
+    }
+
     func testPairForLiveRun() throws {
         continueAfterFailure = false
         guard let link = ProcessInfo.processInfo.environment["WONDER_PAIRING_LINK"] else { throw XCTSkip("No explicit pairing offer supplied.") }
         let app = XCUIApplication(bundleIdentifier: "com.swaymun.wonder")
         app.launchArguments = ["-show-connections"]
         app.launch()
-        app.buttons["Add computer"].tap()
+        app.buttons["settings-add-computer"].tap()
         let field = app.textFields["Or paste pairing link"]
         XCTAssertTrue(field.waitForExistence(timeout: 5)); field.tap(); field.typeText(link)
         app.buttons["Connect to computer"].tap()
@@ -3386,7 +3542,7 @@ import UIKit
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             !app.buttons["Stop pairing"].exists && !field.exists
         }, object: nil)], timeout: 60), .completed)
-        XCTAssertTrue(app.buttons["Add computer"].isHittable)
+        XCTAssertTrue(app.buttons["settings-add-computer"].isHittable)
         retainMenuScreenshot(app, name: "Physical pairing completed")
     }
 
@@ -3398,15 +3554,15 @@ import UIKit
         app.launchArguments = ["-connections-preview", "-show-connections"]
         for _ in 0..<10 {
             app.launch()
-            XCTAssertTrue(app.buttons["Add computer"].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.buttons["settings-add-computer"].waitForExistence(timeout: 15))
             for _ in 0..<2 {
-                // iPad exposes its top tabs as buttons outside a TabBar.
-                app.buttons["Chats"].firstMatch.tap()
+                app.buttons["settings-done"].tap()
                 XCUIDevice.shared.press(.home)
                 app.activate()
-                XCTAssertTrue(app.buttons["Settings"].firstMatch.waitForExistence(timeout: 10))
-                app.buttons["Settings"].firstMatch.tap()
-                XCTAssertTrue(app.buttons["Add computer"].waitForExistence(timeout: 10))
+                openSidebarIfNeeded(app)
+                XCTAssertTrue(app.buttons["sidebar-settings"].waitForExistence(timeout: 10))
+                app.buttons["sidebar-settings"].tap()
+                XCTAssertTrue(app.buttons["settings-add-computer"].waitForExistence(timeout: 10))
                 XCTAssertEqual(app.state, .runningForeground)
             }
             app.terminate()
@@ -3466,7 +3622,8 @@ import UIKit
             let connected = app.staticTexts["Connected to your computer."]
             XCTAssertTrue(connected.waitForExistence(timeout: 20))
             XCTAssertFalse(app.buttons["Pair again"].exists)
-            app.tabBars.buttons["Chats"].tap()
+            app.buttons["settings-done"].tap()
+        openSidebarIfNeeded(app)
             let chat = app.buttons.matching(identifier: qaRowID).firstMatch
             XCTAssertTrue(chat.waitForExistence(timeout: 20))
             chat.tap()
@@ -3483,6 +3640,7 @@ import UIKit
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
             "-diagnostics-folder-poll-offline", "-diagnostics-usage-fixture", "-diagnostics-usage-exhausted"]
         app.launch()
+        openSidebarIfNeeded(app)
         let row = app.buttons["chat-row:diagnostic-host:fixture-parent-conversation"]
         XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         let draft = app.textViews["message-draft"]
@@ -3647,7 +3805,7 @@ import UIKit
 
         let newChatMenu = app.buttons.matching(NSPredicate(format: "label == %@", "New chat and requests")).firstMatch
         guard newChatMenu.waitForExistence(timeout: 20) else {
-            if app.buttons["Add computer"].waitForExistence(timeout: 3) || app.staticTexts["Add a computer in Settings"].exists {
+            if app.buttons["settings-add-computer"].waitForExistence(timeout: 3) || app.staticTexts["Add a computer in Settings"].exists {
                 throw XCTSkip("Requires an existing paired Mac connection.")
             }
             XCTFail("The paired Diagnostics Chats UI did not appear.")

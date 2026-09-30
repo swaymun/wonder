@@ -188,6 +188,8 @@ fn admits_work(method: &Method, path: &str) -> bool {
                 | "/api/v1/group-chats/propose"
         )
         || (path.starts_with("/api/v1/group-chats/") && path.ends_with("/retry"))
+        // A project thread's first message starts native provider work.
+        || (path.starts_with("/api/v1/projects/") && path.ends_with("/threads"))
         || (path.starts_with("/api/v1/bots/")
             && (path.ends_with("/teaching/sessions") || path.ends_with("/fixture-tests")))
         || path == "/api/v1/computer/sessions"
@@ -236,6 +238,7 @@ mod tests {
             "/api/v1/computer/sessions",
             "/api/v1/computer/sessions/id/admission",
             "/api/v1/computer/sessions/id/control/acquire",
+            "/api/v1/projects/id/threads",
         ] {
             assert!(admits_work(&Method::POST, path), "{path}");
         }

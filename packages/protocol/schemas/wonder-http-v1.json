@@ -75,6 +75,9 @@
     "updateConversationRequest": { "$ref": "#/$defs/updateConversationRequest" }
   },
   "paths": {
+    "/api/v1/group-chats/propose": {
+      "post": { "request": { "$ref": "#/$defs/groupProposalRequest" }, "response": { "$ref": "#/$defs/groupProposal" } }
+    },
     "/api/v1/push/presence": { "post": { "request": { "$ref": "#/$defs/pushPresence" }, "response": { "type": "object", "required": ["updated"], "properties": {"updated": {"const": true}}, "additionalProperties": false } } },
     "/api/v1/push/config": { "get": { "response": { "$ref": "#/$defs/pushConfiguration" } } },
     "/api/v1/push/registration": { "post": { "request": { "$ref": "#/$defs/pushRegistration" }, "response": { "type": "object", "required": ["registered"], "properties": { "registered": { "const": true } }, "additionalProperties": false } } },
@@ -227,9 +230,177 @@
     },
     "/api/v1/devices/{deviceId}/revoke": {
       "post": { "request": { "$ref": "#/$defs/signedActionFields" } }
-    }
+    },
+    "/api/v1/projects": {
+      "get": { "response": { "$ref": "#/$defs/projectsResponse" } },
+      "post": {
+        "request": { "$ref": "#/$defs/createProjectRequest" },
+        "response": { "$ref": "#/$defs/projectSummary" },
+        "successStatus": 201
+      }
+    },
+    "/api/v1/projects/candidates": { "get": { "response": { "$ref": "#/$defs/projectCandidatesResponse" } } },
+    "/api/v1/projects/{projectId}": {
+      "patch": {
+        "request": { "$ref": "#/$defs/updateProjectRequest" },
+        "response": { "$ref": "#/$defs/projectSummary" }
+      }
+    },
+    "/api/v1/projects/{projectId}/threads": {
+      "get": { "response": { "$ref": "#/$defs/projectThreadsPage" } },
+      "post": {
+        "request": { "$ref": "#/$defs/createProjectThreadRequest" },
+        "response": { "$ref": "#/$defs/createProjectThreadResponse" },
+        "successStatus": 202
+      }
+    },
+    "/api/v1/projects/{projectId}/threads/attach": {
+      "post": {
+        "request": { "$ref": "#/$defs/attachProjectThreadRequest" },
+        "response": { "$ref": "#/$defs/projectThreadSummary" }
+      }
+    },
+    "/api/v1/project-conversations/{conversationId}": {
+      "get": { "response": { "$ref": "#/$defs/projectConversationDetail" } },
+      "patch": {
+        "request": { "$ref": "#/$defs/updateProjectConversationRequest" },
+        "response": { "$ref": "#/$defs/projectConversationDetail" }
+      }
+    },
+    "/api/v1/conversations/{conversationId}/desktop-continuation": { "get": { "response": { "$ref": "#/$defs/desktopContinuation" } } }
   },
   "$defs": {
+    "groupModelSettings": {
+      "type": "object",
+      "required": [
+        "model"
+      ],
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": "string"
+        },
+        "serviceTier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approvalMode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/approvalMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "groupProposedBot": {
+      "type": "object",
+      "required": [
+        "name",
+        "purpose",
+        "instructions"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "purpose": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "instructions": {
+          "type": "string",
+          "maxLength": 8000
+        }
+      },
+      "additionalProperties": false
+    },
+    "groupProposal": {
+      "type": "object",
+      "required": [
+        "name",
+        "purpose",
+        "memberBotIds",
+        "newBots"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "purpose": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "memberBotIds": {
+          "type": "array",
+          "maxItems": 17,
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "newBots": {
+          "type": "array",
+          "maxItems": 17,
+          "items": {
+            "$ref": "#/$defs/groupProposedBot"
+          }
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 160
+        }
+      },
+      "additionalProperties": false
+    },
+    "groupProposalRequest": {
+      "type": "object",
+      "required": [
+        "description",
+        "settings"
+      ],
+      "properties": {
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "settings": {
+          "$ref": "#/$defs/groupModelSettings"
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/groupProposal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refinement": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2000
+        }
+      },
+      "additionalProperties": false
+    },
     "pushConfiguration": {"type": "object", "required": ["endpoint", "topic", "environment"], "properties": {"endpoint": {"type": ["string", "null"]}, "topic": {"type": "string"}, "environment": {"enum": ["production", "sandbox"]}, "previewVersion": {"const": 1}}, "additionalProperties": false},
     "pushSignedAction": {"type": "object", "required": ["actionNonce", "issuedAtMs", "signature"], "properties": {"actionNonce": {"type": "string", "minLength": 1}, "issuedAtMs": {"type": "integer", "minimum": 0}, "signature": {"type": "string", "minLength": 1}}, "additionalProperties": false},
     "pushPresence": {"type": "object", "required": ["state", "actionNonce", "issuedAtMs", "signature"], "properties": {"state": {"enum": ["foreground", "background"]}, "actionNonce": {"type": "string", "minLength": 1}, "issuedAtMs": {"type": "integer", "minimum": 0}, "signature": {"type": "string", "minLength": 1}}, "additionalProperties": false},
@@ -426,7 +597,8 @@
         "codexTransport": { "const": "stdio-jsonl" },
         "startedAt": { "type": "string" },
         "publicOrigin": { "type": ["string", "null"] },
-        "execution": { "$ref": "#/$defs/executionReadiness" }
+        "execution": { "$ref": "#/$defs/executionReadiness" },
+        "features": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
       },
       "additionalProperties": false
     },
@@ -1892,6 +2064,250 @@
       },
       "if": { "properties": { "markRead": { "const": true } }, "required": ["markRead"] },
       "then": { "required": ["hostEpoch", "readThroughSequence"] },
+      "additionalProperties": false
+    },
+    "agentFamily": { "enum": ["codex", "claude"] },
+    "projectAccessMode": { "enum": ["read_only", "workspace", "full_access"] },
+    "projectFolder": {
+      "type": "object",
+      "required": ["id", "path", "name", "isPrimary", "isAvailable"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "isPrimary": { "type": "boolean" },
+        "isAvailable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "projectSummary": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "isIncluded",
+        "isPinned",
+        "rootsRevision",
+        "folders",
+        "lastFamily",
+        "lastUsedAt",
+        "createdAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "isIncluded": { "type": "boolean" },
+        "isPinned": { "type": "boolean" },
+        "rootsRevision": { "type": "integer", "minimum": 1 },
+        "folders": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/projectFolder" } },
+        "lastFamily": { "anyOf": [{ "$ref": "#/$defs/agentFamily" }, { "type": "null" }] },
+        "lastUsedAt": { "type": ["string", "null"] },
+        "createdAt": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "projectsResponse": {
+      "type": "object",
+      "required": ["projects", "families"],
+      "properties": {
+        "projects": { "type": "array", "items": { "$ref": "#/$defs/projectSummary" } },
+        "families": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["family", "available"],
+            "properties": { "family": { "$ref": "#/$defs/agentFamily" }, "available": { "type": "boolean" } },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "projectPartialFailures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["family", "detail"],
+        "properties": { "family": { "$ref": "#/$defs/agentFamily" }, "detail": { "type": "string" } },
+        "additionalProperties": false
+      }
+    },
+    "projectCandidatesResponse": {
+      "type": "object",
+      "required": ["candidates", "partial"],
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "object",
+            "required": ["name", "folders", "sources", "updatedAt", "isIncluded"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "folders": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+              "sources": { "type": "array", "items": { "$ref": "#/$defs/agentFamily" } },
+              "updatedAt": { "type": ["integer", "null"] },
+              "isIncluded": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "partial": { "$ref": "#/$defs/projectPartialFailures" }
+      },
+      "additionalProperties": false
+    },
+    "createProjectRequest": {
+      "type": "object",
+      "required": ["requestId", "name", "folders"],
+      "properties": {
+        "requestId": { "type": "string", "format": "uuid" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "folders": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "minLength": 1 } },
+        "primaryIndex": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "updateProjectRequest": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "isIncluded": { "type": "boolean" },
+        "isPinned": { "type": "boolean" },
+        "folders": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "minLength": 1 } },
+        "primaryIndex": { "type": "integer", "minimum": 0 },
+        "rootsRevision": { "type": "integer", "minimum": 1 }
+      },
+      "dependentRequired": { "folders": ["rootsRevision"] },
+      "additionalProperties": false
+    },
+    "projectThreadSummary": {
+      "type": "object",
+      "required": ["reference", "conversationId", "title", "family", "updatedAt", "isPinned", "hasUnread", "isWorking"],
+      "properties": {
+        "reference": { "type": "string", "minLength": 1 },
+        "conversationId": { "type": ["string", "null"] },
+        "title": { "type": "string" },
+        "family": { "$ref": "#/$defs/agentFamily" },
+        "updatedAt": { "type": "integer" },
+        "isPinned": { "type": "boolean" },
+        "hasUnread": { "type": "boolean" },
+        "isWorking": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "projectThreadsPage": {
+      "type": "object",
+      "required": ["threads", "nextCursor", "partial"],
+      "properties": {
+        "threads": { "type": "array", "items": { "$ref": "#/$defs/projectThreadSummary" } },
+        "nextCursor": { "type": ["string", "null"] },
+        "partial": { "$ref": "#/$defs/projectPartialFailures" }
+      },
+      "additionalProperties": false
+    },
+    "attachProjectThreadRequest": {
+      "type": "object",
+      "required": ["reference"],
+      "properties": { "reference": { "type": "string", "minLength": 1, "maxLength": 140 } },
+      "additionalProperties": false
+    },
+    "createProjectThreadRequest": {
+      "type": "object",
+      "required": ["deviceId", "clientMessageId", "family", "model", "body"],
+      "properties": {
+        "deviceId": { "type": "string", "minLength": 1 },
+        "clientMessageId": { "type": "string", "format": "uuid" },
+        "family": { "$ref": "#/$defs/agentFamily" },
+        "model": { "type": "string", "minLength": 1 },
+        "effort": { "type": ["string", "null"] },
+        "accessMode": { "$ref": "#/$defs/projectAccessMode" },
+        "folderId": { "type": ["string", "null"] },
+        "body": { "type": "string", "maxLength": 65536 },
+        "attachmentIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 32, "uniqueItems": true },
+        "prepareOnly": { "type": "boolean" },
+        "rootsRevision": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "createProjectThreadResponse": {
+      "type": "object",
+      "required": ["conversation", "receipt"],
+      "properties": {
+        "conversation": { "$ref": "#/$defs/projectThreadSummary" },
+        "receipt": { "anyOf": [{ "$ref": "#/$defs/messageReceipt" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "projectConversationDetail": {
+      "type": "object",
+      "required": [
+        "conversationId",
+        "projectId",
+        "projectName",
+        "title",
+        "family",
+        "model",
+        "effort",
+        "accessMode",
+        "workingFolder",
+        "workingFolderName",
+        "isPinned",
+        "hasUnread",
+        "hasNativeSession",
+        "folderInProject",
+        "notice"
+      ],
+      "properties": {
+        "conversationId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "projectName": { "type": "string" },
+        "title": { "type": "string" },
+        "family": { "$ref": "#/$defs/agentFamily" },
+        "model": { "type": ["string", "null"] },
+        "effort": { "type": ["string", "null"] },
+        "accessMode": { "$ref": "#/$defs/projectAccessMode" },
+        "workingFolder": { "type": "string" },
+        "workingFolderName": { "type": "string" },
+        "isPinned": { "type": "boolean" },
+        "hasUnread": { "type": "boolean" },
+        "hasNativeSession": { "type": "boolean" },
+        "folderInProject": { "type": "boolean" },
+        "notice": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "updateProjectConversationRequest": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "isPinned": { "type": "boolean" },
+        "hasUnread": { "type": "boolean" },
+        "model": { "type": "string", "minLength": 1 },
+        "effort": { "type": "string", "minLength": 1 },
+        "accessMode": { "$ref": "#/$defs/projectAccessMode" }
+      },
+      "additionalProperties": false
+    },
+    "desktopContinuation": {
+      "type": "object",
+      "required": ["options", "notes"],
+      "properties": {
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "detail", "command"],
+            "properties": {
+              "id": { "enum": ["codex-cli", "claude-code"] },
+              "title": { "type": "string" },
+              "detail": { "type": "string" },
+              "command": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      },
       "additionalProperties": false
     }
   },

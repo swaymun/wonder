@@ -56,26 +56,12 @@ pub(super) async fn normalize(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        let bot = bot_for_conversation(state, conversation)
-            .await
-            .map_err(|e| e.to_string())?
+        let (_, roots, own) = media_scope(state, conversation)
+            .await?
             .ok_or("Image has no conversation workspace")?;
-        let access = state
-            .store
-            .bot_file_access(&bot.id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut roots = vec![
-            bot.workspace_path.clone(),
-            bot.execution_directory().to_owned(),
-            std::env::temp_dir().to_string_lossy().into_owned(),
-            "/tmp".into(),
-        ];
-        roots.extend(access.read_roots);
-        roots.extend(access.write_roots);
         let denies = state.denied_roots.clone();
         let loaded = tokio::task::spawn_blocking(move || {
-            local_image(&source, &roots, &denies, Some(&bot.workspace_path))
+            local_image(&source, &roots, &denies, own.as_deref())
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -94,9 +80,8 @@ pub(super) async fn normalize(
     if paths.is_empty() {
         return Ok(item);
     }
-    let bot = bot_for_conversation(state, conversation)
-        .await
-        .map_err(|e| e.to_string())?
+    let (storage, _, _) = media_scope(state, conversation)
+        .await?
         .ok_or("Tool result has no conversation workspace")?;
     let mut total = 0;
     for (index, path) in paths.iter().enumerate() {
@@ -136,7 +121,7 @@ pub(super) async fn normalize(
         let id = deterministic_uuid(&format!(
             "tool-media:{conversation}:{turn}:{item_id}:{index}:{mime}:{digest}"
         ));
-        let target = attachment_path(&bot.workspace_path, &id, true)
+        let target = attachment_path(&storage, &id, true)
             .await
             .ok_or("Preview storage unavailable")?;
         if target.exists() {
@@ -188,6 +173,65 @@ pub(super) async fn normalize(
     }
     Ok(item)
 }
+/// Where verified previews are stored and which folders a tool image may be
+/// read from. Project previews use Wonder storage, never the project folder.
+async fn media_scope(
+    state: &AppState,
+    conversation: &str,
+) -> Result<Option<(String, Vec<String>, Option<String>)>, String> {
+    let temp = [
+        std::env::temp_dir().to_string_lossy().into_owned(),
+        "/tmp".to_owned(),
+    ];
+    if let Some(project) = state
+        .store
+        .project_conversation(conversation)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        let storage = crate::projects::media_workspace(state, conversation)
+            .await
+            .ok_or("Preview storage unavailable")?;
+        let mut roots = state
+            .store
+            .project(&project.project_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|p| {
+                p.roots
+                    .into_iter()
+                    .map(|r| r.canonical_path)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        roots.extend(temp);
+        return Ok(Some((storage, roots, None)));
+    }
+    let Some(bot) = bot_for_conversation(state, conversation)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let access = state
+        .store
+        .bot_file_access(&bot.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut roots = vec![
+        bot.workspace_path.clone(),
+        bot.execution_directory().to_owned(),
+    ];
+    roots.extend(temp);
+    roots.extend(access.read_roots);
+    roots.extend(access.write_roots);
+    Ok(Some((
+        bot.workspace_path.clone(),
+        roots,
+        Some(bot.workspace_path),
+    )))
+}
+
 fn local_image(
     path: &str,
     roots: &[String],

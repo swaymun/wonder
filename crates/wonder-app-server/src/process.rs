@@ -85,6 +85,9 @@ impl From<serde_json::Error> for RuntimeError {
 
 #[derive(Clone, Debug)]
 pub struct LaunchConfig {
+    /// Projects use the owner's normal provider home and configuration: no
+    /// Wonder Bot overrides, and optional native project methods.
+    pub project_scope: bool,
     pub codex_bin: PathBuf,
     pub runtime_home: Option<PathBuf>,
     pub wonder_version: String,
@@ -111,6 +114,12 @@ impl LaunchConfig {
                 "sqlite_home={}",
                 serde_json::to_string(home).expect("UTF-8 runtime home")
             ));
+        }
+        if self.project_scope {
+            // Project threads continue in the Codex app/CLI with the owner's
+            // own configuration; Bot-specific overrides must not persist there.
+            args.push("--stdio".into());
+            return args;
         }
         // Desktop control is enabled per conversation using the installed
         // native provider manifest. Bootstrap/planning sessions have none.
@@ -167,6 +176,7 @@ impl Drop for ReaderGuard {
 }
 
 pub struct AppServerClient {
+    project_scope: bool,
     child: Option<Child>,
     health: RuntimeHealth,
     reader_task: tokio::task::JoinHandle<()>,
@@ -183,6 +193,7 @@ pub struct AppServerClient {
 /// the child process; restart closes old handles instead of retargeting them.
 #[derive(Clone)]
 pub struct RpcClient {
+    project_scope: bool,
     stdin: Arc<AsyncMutex<Option<ChildStdin>>>,
     pending: PendingRequests,
     next_id: Arc<AtomicU64>,
@@ -210,7 +221,7 @@ impl RpcClient {
         if !self.health.is_alive() {
             return Err(RuntimeError::Protocol("App Server transport closed".into()));
         }
-        if !is_allowed_method(method) {
+        if !is_allowed_method(method) && !(self.project_scope && crate::is_project_method(method)) {
             return Err(RuntimeError::Protocol(format!(
                 "App Server method is not allowlisted: {method}"
             )));
@@ -301,6 +312,7 @@ impl AppServerClient {
     pub fn unavailable(wonder_version: String, sink: NotificationSink) -> Self {
         let (notification_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
+            project_scope: false,
             child: None,
             health: RuntimeHealth::default(),
             reader_task: tokio::spawn(async {}),
@@ -369,6 +381,7 @@ impl AppServerClient {
             notification_tx,
             notification_sink,
             false,
+            config.project_scope,
         )
         .await
     }
@@ -406,11 +419,13 @@ impl AppServerClient {
         if let Some(npm) = config.npm_cli {
             command.arg("--npm-cli").arg(npm);
         }
+        // The Wonder-owned bridge also serves project session metadata.
         Self::spawn_transport(
             command,
             config.wonder_version,
             notification_tx,
             notification_sink,
+            true,
             true,
         )
         .await
@@ -422,6 +437,7 @@ impl AppServerClient {
         notification_tx: tokio::sync::broadcast::Sender<Value>,
         notification_sink: Option<NotificationSink>,
         bridge: bool,
+        project_scope: bool,
     ) -> Result<Self, RuntimeError> {
         let mut child = command.spawn()?;
         if let Some(mut stderr) = child.stderr.take() {
@@ -526,6 +542,7 @@ impl AppServerClient {
             }
         });
         let mut client = Self {
+            project_scope,
             child: Some(child),
             health,
             reader_task,
@@ -583,6 +600,7 @@ impl AppServerClient {
     /// Capture one transport generation while holding only the lifecycle lock.
     pub fn rpc(&self) -> RpcClient {
         RpcClient {
+            project_scope: self.project_scope,
             stdin: self.stdin.clone(),
             pending: self.pending.clone(),
             next_id: self.next_id.clone(),
@@ -1133,6 +1151,7 @@ mod tests {
     #[test]
     fn launch_is_direct_stdio_and_does_not_expose_a_listener() {
         let config = LaunchConfig {
+            project_scope: false,
             runtime_home: None,
             codex_bin: "/usr/local/bin/codex".into(),
             wonder_version: "0.1.0".into(),
@@ -1163,6 +1182,13 @@ mod tests {
             .args()
             .iter()
             .any(|argument| argument.contains("--listen")));
+        // Projects continue in the Codex app/CLI: no private home, Bot tool
+        // overrides or generated permission profiles may reach that launch.
+        let project = LaunchConfig {
+            project_scope: true,
+            ..config
+        };
+        assert_eq!(project.args(), vec!["app-server", "--stdio"]);
     }
 
     // The bridge shares durable ingestion, but must not be accepted on a
@@ -1225,6 +1251,7 @@ for line in sys.stdin:
     #[test]
     fn private_runtime_overrides_sqlite_storage() {
         let config = LaunchConfig {
+            project_scope: false,
             runtime_home: Some("/tmp/Wonder runtime".into()),
             codex_bin: "codex".into(),
             wonder_version: "test".into(),

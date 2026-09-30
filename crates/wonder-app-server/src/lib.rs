@@ -60,6 +60,23 @@ pub fn is_allowed_method(method: &str) -> bool {
             .any(|candidate| candidate.as_str() == method)
 }
 
+/// Native project metadata, allowed only on the normal-home Projects client.
+/// Older runtimes without these methods remain compatible; callers treat an
+/// unknown-method response as an unsupported capability.
+pub const PROJECT_METHODS: [&str; 6] = [
+    "project/list",
+    "project/read",
+    "project/create",
+    // Wonder's Claude bridge: native Claude Code session metadata and attach.
+    "project/sessions/list",
+    "project/session/attach",
+    "project/folders/list",
+];
+
+pub fn is_project_method(method: &str) -> bool {
+    PROJECT_METHODS.contains(&method)
+}
+
 pub fn is_allowed_server_request(method: &str) -> bool {
     ALLOWED_SERVER_REQUESTS.contains(&method)
 }
@@ -463,6 +480,12 @@ mod tests {
         assert!(is_allowed_method("thread/goal/set"));
         assert!(is_allowed_method("thread/goal/clear"));
         assert!(!is_allowed_method("thread/fork"));
+        // Project creation is never reachable through the Bot runtime allowlist.
+        for method in PROJECT_METHODS {
+            assert!(!is_allowed_method(method));
+            assert!(is_project_method(method));
+        }
+        assert!(!is_project_method("project/delete"));
     }
 
     #[test]

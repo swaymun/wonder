@@ -1125,6 +1125,86 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/bots/new").isEmpty)
     }
 
+    @MainActor func testSharedConnectionMaintenanceSurvivesAnotherWindowClosing() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let library = ConnectionLibrary(diagnosticModel: recoveryModel(root: root))
+        let first = UUID(), second = UUID()
+        library.setScene(first, active: true)
+        library.setScene(second, active: true)
+        XCTAssertEqual(library.foregroundOwner, first)
+        library.setScene(second, active: false)
+        XCTAssertEqual(library.foregroundOwner, first)
+        library.setScene(second, active: true)
+        library.setScene(first, active: false)
+        XCTAssertEqual(library.foregroundOwner, second)
+        library.setScene(second, active: false)
+        XCTAssertNil(library.foregroundOwner)
+    }
+
+    // Creation handoff owns one first-message identity across restart. A lost
+    // creation response must not replace another saved composer or send twice.
+    @MainActor func testCreationMessageTransfersToDurableOutboxOnce() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let chat = try Self.cameraChat(id: "creation-outbox")
+        let requestID = UUID().uuidString
+        let model = recoveryModel(root: root)
+        try model.prepareCreationMessage(chat, body: "Help with testing", requestID: requestID)
+        let restarted = recoveryModel(root: root)
+        try restarted.prepareCreationMessage(chat, body: "Help with testing", requestID: requestID)
+        XCTAssertEqual(restarted.composers[chat.id]?.pending?.request.clientMessageId, requestID)
+        XCTAssertEqual(restarted.composers[chat.id]?.pending?.request.body, "Help with testing")
+        XCTAssertThrowsError(try restarted.prepareCreationMessage(chat, body: "Different message", requestID: UUID().uuidString))
+        XCTAssertEqual(restarted.composers[chat.id]?.pending?.request.body, "Help with testing")
+    }
+
+    // Choosing another destination retains both drafts and any uncertain
+    // request. Connection removal clears only the selected Mac's drafts.
+    @MainActor func testNewChatDraftsRestorePerDestinationAndStayConnectionScoped() throws {
+        let host = "draft-test-" + UUID().uuidString
+        let otherHost = "other-" + host
+        defer { NewChatDraftStore.remove(host: host); NewChatDraftStore.remove(host: otherHost) }
+        var bot = NewChatDraft(destination: .newBot, text: "Bot purpose")
+        let file = try StagedFile(name: "draft.txt", mimeType: "text/plain", data: Data("Owned bytes".utf8))
+        let descriptor = try NewChatDraftStore.stage(file)
+        let storedFile = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("NewChatAttachments").appendingPathComponent(file.id)
+        defer { try? FileManager.default.removeItem(at: storedFile) }
+        bot.attachments = [descriptor]
+        let group = NewChatDraftStore.selecting(.newGroup, from: bot, host: host)
+        XCTAssertTrue(group.text.isEmpty)
+        var edited = group; edited.text = "Group purpose"
+        let recovered = NewChatDraftStore.selecting(.newBot, from: edited, host: host)
+        XCTAssertEqual(recovered.text, "Bot purpose")
+        let staged = try NewChatDraftStore.files(try XCTUnwrap(recovered.attachments))
+        XCTAssertEqual(staged.first?.data, file.data)
+        XCTAssertNil(staged.first?.uploaded, "A new destination must upload local bytes through its own authenticated route")
+        let moved = NewChatDraft.switching(from: recovered, toSaved: nil)
+        XCTAssertNil(moved.destination)
+        XCTAssertEqual(moved.attachments, recovered.attachments)
+        try Data("Changed bytes".utf8).write(to: storedFile)
+        XCTAssertThrowsError(try NewChatDraftStore.files(try XCTUnwrap(moved.attachments)))
+        XCTAssertEqual(NewChatDraftStore.load(host: host, destination: .newGroup)?.text, "Group purpose")
+        bot.freeze()
+        XCTAssertEqual(NewChatDraftStore.selecting(.newGroup, from: bot, host: host), bot)
+        NewChatDraftStore.save(edited, host: otherHost)
+        // A late dictation result belongs to the original destination, is
+        // idempotent, and must not overwrite the currently selected draft.
+        try NewChatDraftStore.insertDictation("spoken words", requestID: "recording", draftID: recovered.requestID, host: host)
+        try NewChatDraftStore.insertDictation("spoken words", requestID: "recording", draftID: recovered.requestID, host: host)
+        XCTAssertEqual(NewChatDraftStore.load(host: host, destination: .newBot)?.text, "Bot purpose spoken words")
+        XCTAssertEqual(NewChatDraftStore.load(host: host)?.text, "Group purpose")
+        XCTAssertThrowsError(try NewChatDraftStore.insertDictation("wrong host", requestID: "other", draftID: recovered.requestID, host: otherHost))
+        var submitted = try XCTUnwrap(NewChatDraftStore.load(host: host, destination: .newBot))
+        submitted.freeze()
+        NewChatDraftStore.save(submitted, host: host)
+        XCTAssertThrowsError(try NewChatDraftStore.insertDictation("too late", requestID: "late", draftID: submitted.requestID, host: host))
+        NewChatDraftStore.remove(host: host)
+        XCTAssertNil(NewChatDraftStore.load(host: host, destination: .newBot))
+        XCTAssertEqual(NewChatDraftStore.load(host: otherHost)?.text, "Group purpose")
+    }
+
     @MainActor private func recoveryModel(root: URL) -> ConnectionModel {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MessageRecoveryURLProtocol.self]

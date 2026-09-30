@@ -990,3 +990,110 @@ export interface HistoryQuery {
   /** 1..100, default 100. */
   limit?: number;
 }
+
+/** Additive host capabilities from GET /api/v1/host/status. */
+export type HostFeature = "projects-v1" | (string & {});
+
+export type AgentFamily = "codex" | "claude";
+export type ProjectAccessMode = "read_only" | "workspace" | "full_access";
+
+/** A named group of source folders on one paired Mac. */
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  isIncluded: boolean;
+  isPinned: boolean;
+  rootsRevision: number;
+  folders: Array<{ id: string; path: string; name: string; isPrimary: boolean; isAvailable: boolean }>;
+  lastFamily: AgentFamily | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+}
+export interface ProjectsResponse {
+  projects: ProjectSummary[];
+  families: Array<{ family: AgentFamily; available: boolean }>;
+}
+export interface ProjectPartialFailure { family: AgentFamily; detail: string }
+/** Suggestions only; nothing is included until the owner creates a project. */
+export interface ProjectCandidatesResponse {
+  candidates: Array<{ name: string; folders: string[]; sources: AgentFamily[]; updatedAt: number | null; isIncluded: boolean }>;
+  partial: ProjectPartialFailure[];
+}
+export interface CreateProjectRequest { requestId: string; name: string; folders: string[]; primaryIndex?: number }
+export interface UpdateProjectRequest {
+  name?: string;
+  isIncluded?: boolean;
+  isPinned?: boolean;
+  /** Replacing folders requires the revision the editor saw. */
+  folders?: string[];
+  primaryIndex?: number;
+  rootsRevision?: number;
+}
+/** A native Codex or Claude Code thread. `conversationId` is null until attached. */
+export interface ProjectThreadSummary {
+  reference: string;
+  conversationId: string | null;
+  title: string;
+  family: AgentFamily;
+  updatedAt: number;
+  isPinned: boolean;
+  hasUnread: boolean;
+  isWorking: boolean;
+}
+export interface ProjectThreadsPage { threads: ProjectThreadSummary[]; nextCursor: string | null; partial: ProjectPartialFailure[] }
+export interface AttachProjectThreadRequest { reference: string }
+/** The first message is the only request that starts provider work. */
+export interface CreateProjectThreadRequest {
+  deviceId: string;
+  clientMessageId: string;
+  family: AgentFamily;
+  model: string;
+  effort?: string | null;
+  accessMode?: ProjectAccessMode;
+  folderId?: string | null;
+  body: string;
+  attachmentIds?: string[];
+  prepareOnly?: boolean;
+  rootsRevision?: number;
+}
+export interface CreateProjectThreadResponse { conversation: ProjectThreadSummary; receipt: ClientMessageReceipt | null }
+export interface ProjectConversationDetail {
+  conversationId: string;
+  projectId: string;
+  projectName: string;
+  title: string;
+  family: AgentFamily;
+  model: string | null;
+  effort: string | null;
+  accessMode: ProjectAccessMode;
+  workingFolder: string;
+  workingFolderName: string;
+  isPinned: boolean;
+  hasUnread: boolean;
+  hasNativeSession: boolean;
+  folderInProject: boolean;
+  notice: string | null;
+}
+export interface UpdateProjectConversationRequest {
+  title?: string;
+  isPinned?: boolean;
+  hasUnread?: boolean;
+  model?: string;
+  effort?: string;
+  accessMode?: ProjectAccessMode;
+}
+/** Exact-ID terminal commands; copying never executes anything. */
+export interface DesktopContinuation {
+  options: Array<{ id: "codex-cli" | "claude-code"; title: string; detail: string; command: string }>;
+  notes: string[];
+}
+
+/** Proposed team only: no members are created until the owner accepts. */
+export interface GroupProposedBot { name: string; purpose: string; instructions: string }
+export interface GroupProposal { name: string; purpose: string; memberBotIds: string[]; newBots: GroupProposedBot[]; summary?: string | null }
+export interface GroupProposalRequest {
+  description: string;
+  settings: { model: string; reasoningEffort?: string; serviceTier?: string | null; approvalMode?: "ask-for-approval" | "approve-for-me" | "full-access" | null };
+  current?: GroupProposal | null;
+  refinement?: string | null;
+}

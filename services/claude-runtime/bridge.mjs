@@ -5,9 +5,27 @@ import { BRIDGE_PROTOCOL, HAIKU_MODEL, TurnProjection, questionRequest, question
 import { baseOptions, inspectSdk, isSubscription } from "./sdk-runtime.mjs";
 import { ToolPolicy, closeCommandSandbox, toolCallKey } from "./permissions.mjs";
 import { createNativeCua } from "./native-cua.mjs";
+import { nativeTurns, sessionSummary } from "./project-history.mjs";
+import { stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 
 const BUILTINS = ["Read", "Write", "Edit", "NotebookEdit", "Bash", "WebFetch", "WebSearch",
   "AskUserQuestion", "Agent", "ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop"];
+
+// A project conversation is an owner's normal Claude Code session in one of
+// their folders. It never receives Bot instructions, tools or connectors.
+async function projectContext(value) {
+  if (!value || typeof value !== "object") return null;
+  const { cwd, additionalDirectories = [] } = value;
+  if (!isAbsolute(cwd ?? "") || !Array.isArray(additionalDirectories) || additionalDirectories.length > 15
+    || additionalDirectories.some(d => typeof d !== "string" || !isAbsolute(d) || d === cwd))
+    throw new Error("The project folders are invalid. Edit the project in Wonder.");
+  for (const dir of [cwd, ...additionalDirectories]) {
+    const info = await stat(dir).catch(() => null);
+    if (!info?.isDirectory()) throw new Error("A project folder is missing on this Mac. Edit the project in Wonder.");
+  }
+  return { cwd, additionalDirectories: [...new Set(additionalDirectories)] };
+}
 
 function page(data, params) {
   const fingerprint = createHash("sha256").update(JSON.stringify(data)).digest("hex").slice(0, 16);
@@ -142,8 +160,12 @@ export class ClaudeBridge {
         name: s.source === "claudeai" ? s.name.replace(/^claude\.ai(?:\s*[:/·-]\s*|\s+)/i, "") : s.name,
         installUrl: "https://claude.ai/settings/connectors", enabled: s.status !== "disabled", callable: s.status === "connected", isEnabled: s.status !== "disabled", isAccessible: s.status === "connected" })), nextCursor: null };
     }
+    if (method === "project/sessions/list") return this.projectSessions(params);
+    if (method === "project/folders/list") return this.projectFolders(params);
+    if (method === "project/session/attach") return this.attachProjectSession(params);
     if (method === "thread/start") {
       selectedModel(params.model);
+      if (params.wonderProject) params.wonderProject = await projectContext(params.wonderProject);
       const policy = new ToolPolicy({ ...params.wonderPolicy, cwd: params.cwd, tools: params.dynamicTools?.map(t => t.name) ?? [] });
       if (!await policy.permits(params.cwd)) throw new Error("Claude's workspace is outside the allowed scope.");
       const session = await this.sessions.create(params);
@@ -152,6 +174,13 @@ export class ClaudeBridge {
     }
     if (method === "thread/list") return page([...this.sessions.values.values()].filter(s => !params.sourceKinds || s.parent).map(s => this.sessions.describe(s)), params);
     const session = this.sessions.get(params.threadId);
+    if (session.options.wonderProject && ["thread/turns/list", "thread/items/list"].includes(method)) {
+      // The native transcript includes turns written by Claude Code on the Mac.
+      const turns = await this.projectTurns(session);
+      if (method === "thread/turns/list") return page([...turns].reverse().map(t => params.itemsView === "notLoaded" ? { ...t, items: [] } : t), params);
+      const selected = params.turnId ? turns.filter(t => t.id === params.turnId) : params.sortDirection === "asc" ? turns : [...turns].reverse();
+      return page(selected.flatMap(t => t.items.map(item => ({ turnId: t.id, item }))), params);
+    }
     if (method === "thread/read") return { thread: this.sessions.describe(session, params.includeTurns === true) };
     if (method === "thread/turns/list") return page([...session.turns].reverse().map(t => params.itemsView === "notLoaded" ? { ...t, items: [] } : t), params);
     if (method === "thread/items/list") {
@@ -170,10 +199,14 @@ export class ClaudeBridge {
       return { thread: this.sessions.describe(session, true), model: next.model };
     }
     if (method === "turn/start") {
+      if (session.options.wonderProject && params.wonderProject) params.wonderProject = await projectContext(params.wonderProject);
       const options = { ...session.options, ...params };
+      if (options.wonderProject && options.wonderProject.cwd !== session.options.wonderProject?.cwd)
+        throw new Error("A project conversation keeps its working folder.");
       selectedModel(options.model);
-      const policy = new ToolPolicy({ ...options.wonderPolicy, cwd: options.cwd,
-        internal: options.wonderInternal === true, structuredOutput: Boolean(options.outputSchema), tools: options.dynamicTools?.map(t => t.name) ?? [] });
+      const policy = new ToolPolicy({ ...options.wonderPolicy, cwd: options.wonderProject?.cwd ?? options.cwd,
+        project: Boolean(options.wonderProject), internal: options.wonderInternal === true, structuredOutput: Boolean(options.outputSchema),
+        tools: options.wonderProject ? [] : options.dynamicTools?.map(t => t.name) ?? [] });
       const content = await sdkInput(params.input, policy);
       const { turn, duplicate } = await this.sessions.accept(session, params);
       if (!duplicate) {
@@ -194,6 +227,67 @@ export class ClaudeBridge {
     }
     // No silent no-ops for features that the SDK cannot faithfully provide.
     throw new Error("This action is not available for Claude yet.");
+  }
+  async withSdk(action) {
+    const lease = await this.updates.acquire();
+    try { return await action(lease.runtime.sdk); }
+    finally { await lease.release(); }
+  }
+  // Metadata only: listing reads transcript headers and starts no model work.
+  async projectSessions(params) {
+    const dirs = Array.isArray(params.dirs) ? [...new Set(params.dirs)] : [];
+    if (!dirs.length || dirs.length > 32 || dirs.some(d => typeof d !== "string" || !isAbsolute(d))) throw new Error("Choose project folders to list.");
+    const limit = Number.isSafeInteger(params.limit) ? Math.max(1, Math.min(params.limit, 100)) : 20;
+    const offset = Number.isSafeInteger(params.offset) ? Math.max(0, Math.min(params.offset, 5000)) : 0;
+    const excluded = new Set(Array.isArray(params.excludeSessionIds) ? params.excludeSessionIds : []);
+    return this.withSdk(async sdk => {
+      const seen = new Map();
+      for (const dir of dirs) {
+        const sessions = await sdk.listSessions({ dir, includeWorktrees: false, includeProgrammatic: true, limit: offset + limit + 1 });
+        for (const info of sessions) {
+          // `dir` also matches worktrees in some runtimes; require the exact folder.
+          if (info.cwd !== dir || excluded.has(info.sessionId)) continue;
+          if (!seen.has(info.sessionId)) seen.set(info.sessionId, sessionSummary(info));
+        }
+      }
+      const all = [...seen.values()].sort((a, b) => b.updatedAt - a.updatedAt || a.sessionId.localeCompare(b.sessionId));
+      return { data: all.slice(offset, offset + limit), hasMore: all.length > offset + limit };
+    });
+  }
+  // Suggestions for explicit inclusion: recent interactive Claude Code folders.
+  // SDK-originated sessions (including Bots) are not suggested.
+  async projectFolders(params) {
+    const limit = Number.isSafeInteger(params.limit) ? Math.max(1, Math.min(params.limit, 50)) : 20;
+    return this.withSdk(async sdk => {
+      const folders = new Map();
+      for (const info of await sdk.listSessions({ limit: 200, includeWorktrees: false, includeProgrammatic: false })) {
+        if (!info.cwd || !isAbsolute(info.cwd)) continue;
+        const updatedAt = Math.floor(info.lastModified / 1000);
+        if ((folders.get(info.cwd) ?? -1) < updatedAt) folders.set(info.cwd, updatedAt);
+      }
+      return { data: [...folders].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([cwd, updatedAt]) => ({ cwd, updatedAt })) };
+    });
+  }
+  async attachProjectSession(params) {
+    if (typeof params.sessionId !== "string" || !/^[0-9a-f-]{36}$/.test(params.sessionId)) throw new Error("Invalid Claude session.");
+    const project = await projectContext(params.wonderProject);
+    selectedModel(params.model);
+    new ToolPolicy({ ...params.wonderPolicy, cwd: project.cwd });
+    const existing = [...this.sessions.values.values()].find(s => s.sdkSessionId === params.sessionId && !s.parent);
+    if (existing) {
+      if (existing.options.wonderProject?.cwd !== project.cwd) throw new Error("This Claude session belongs to another folder.");
+      return { thread: this.sessions.describe(existing) };
+    }
+    const info = await this.withSdk(sdk => sdk.getSessionInfo(params.sessionId, { dir: project.cwd }));
+    // Never create a replacement: a missing transcript is a recoverable error.
+    if (!info || info.cwd !== project.cwd) throw new Error("This Claude session is no longer available on your Mac.");
+    const session = await this.sessions.create({ ...params, wonderProject: project, cwd: project.cwd }, null, { sdkSessionId: params.sessionId, sdkStarted: true });
+    return { thread: this.sessions.describe(session) };
+  }
+  async projectTurns(session) {
+    if (!session.sdkStarted) return session.turns;
+    const messages = await this.withSdk(sdk => sdk.getSessionMessages(session.sdkSessionId, { dir: session.options.wonderProject.cwd }));
+    return nativeTurns(messages, session.turns, this.active.has(session.id));
   }
   serverCall(method, params, signal) {
     if (signal?.aborted) return Promise.reject(new Error("Claude action cancelled."));
@@ -256,7 +350,7 @@ export class ClaudeBridge {
       projection.start(); await flush();
       lease = await this.updates.acquire();
       const { sdk } = lease.runtime;
-      const tools = (options.wonderPlanning ? [] : options.dynamicTools ?? [])
+      const tools = (options.wonderPlanning || options.wonderProject ? [] : options.dynamicTools ?? [])
         .filter(spec => spec.name !== "wonder_computer_use")
         .map(spec => sdk.tool(spec.name, spec.description,
         z.fromJSONSchema(spec.inputSchema).shape, async (input) => {
@@ -273,8 +367,9 @@ export class ClaudeBridge {
           return response;
         }));
       const model = selectedModel(options.model);
-      const base = baseOptions(lease.runtime, { connectors: options.wonderConnectors === true && !options.wonderPlanning && !policy.internal });
-      const computer = options.config?.["mcp_servers.cua_repl"];
+      const project = options.wonderProject;
+      const base = baseOptions(lease.runtime, { connectors: !project && options.wonderConnectors === true && !options.wonderPlanning && !policy.internal });
+      const computer = project ? null : options.config?.["mcp_servers.cua_repl"];
       let computerUnavailable = false;
       if (computer?.enabled === true && !options.wonderPlanning && !policy.internal) {
         try {
@@ -312,10 +407,21 @@ export class ClaudeBridge {
           delete sdkOptions.sessionId; sdkOptions.resume = session.sdkSessionId; session.sdkStarted = true;
         }
       }
+      if (project) {
+        // Normal Claude Code behavior and project configuration, still bounded
+        // by Wonder's PreToolUse/canUseTool policy and command sandbox.
+        Object.assign(sdkOptions, { systemPrompt: { type: "preset", preset: "claude_code" },
+          settingSources: ["user", "project", "local"], additionalDirectories: project.additionalDirectories,
+          tools: [...BUILTINS, "Glob", "Grep"], mcpServers: {}, strictMcpConfig: false,
+          settings: { ...sdkOptions.settings, disableClaudeAiConnectors: true } });
+        delete sdkOptions.hooks.PostToolUse;
+      }
       query = sdk.query({ prompt: (async function* () {
         await submit.promise;
+        // Project turns name their transcript entry after the Wonder turn so
+        // native history and live events reconcile by the same identity.
         if (!run.abort.signal.aborted) yield { type: "user", session_id: session.sdkSessionId, parent_tool_use_id: null,
-          message: { role: "user", content } };
+          ...(project ? { uuid: run.turn.id } : {}), message: { role: "user", content } };
         await done.promise;
       })(), options: sdkOptions });
       run.query = query;

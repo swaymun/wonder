@@ -14,8 +14,8 @@ impl Store {
         &self,
         conversation: &str,
     ) -> Result<Option<String>, sqlx::Error> {
-        sqlx::query_scalar("SELECT COALESCE(working_directory, workspace_path) FROM bots WHERE id = COALESCE((SELECT bot_id FROM conversation_metadata WHERE id = ?), ?)")
-            .bind(conversation).bind(conversation.strip_prefix("automation:").unwrap_or(conversation))
+        sqlx::query_scalar("SELECT cwd FROM project_conversations WHERE conversation_id = ? UNION ALL SELECT COALESCE(working_directory, workspace_path) FROM bots WHERE id = COALESCE((SELECT bot_id FROM conversation_metadata WHERE id = ?), ?) LIMIT 1")
+            .bind(conversation).bind(conversation).bind(conversation.strip_prefix("automation:").unwrap_or(conversation))
             .fetch_optional(&self.pool).await
     }
 
@@ -55,8 +55,8 @@ impl Store {
         .bind(host_epoch)
         .fetch_one(&mut *tx)
         .await?;
-        let workspace_path: Option<String> = sqlx::query_scalar("SELECT COALESCE(working_directory, workspace_path) FROM bots WHERE id = COALESCE((SELECT bot_id FROM conversation_metadata WHERE id = ?), ?)")
-            .bind(conversation_id).bind(conversation_id.strip_prefix("automation:").unwrap_or(conversation_id))
+        let workspace_path: Option<String> = sqlx::query_scalar("SELECT cwd FROM project_conversations WHERE conversation_id = ? UNION ALL SELECT COALESCE(working_directory, workspace_path) FROM bots WHERE id = COALESCE((SELECT bot_id FROM conversation_metadata WHERE id = ?), ?) LIMIT 1")
+            .bind(conversation_id).bind(conversation_id).bind(conversation_id.strip_prefix("automation:").unwrap_or(conversation_id))
             .fetch_optional(&mut *tx).await?;
         let Some(workspace_path) = workspace_path else {
             return Ok(None);
@@ -294,6 +294,7 @@ impl Store {
         // original lifecycle, identity and timeline position.
         if refresh {
             if let Some(mut saved) = previous {
+                let mut replace = false;
                 if let (
                     WonderEvent::Activity {
                         detail: Some(old), ..
@@ -307,6 +308,17 @@ impl Store {
                         serde_json::from_str(old).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
                     let new_value: serde_json::Value =
                         serde_json::from_str(new).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+                    // Project history is provider-owned: an entry that only
+                    // ever came from a native read takes the newer native read
+                    // (a turn continued or finished on the Mac), keeping its
+                    // original position. Live observations are never replaced.
+                    if new_value["turnStatus"].is_string()
+                        && old_value["historyRefresh"] == true
+                        && old_value != new_value
+                    {
+                        replace = true;
+                        refresh = false;
+                    }
                     if old_value["item"]["type"] == "fileChange"
                         && new_value["item"]["type"] == "fileChange"
                         && old_value["item"]["fileChangeVersion"] != 1
@@ -341,7 +353,7 @@ impl Store {
                         refresh = false;
                     }
                 }
-                if !refresh {
+                if !refresh && !replace {
                     historical = saved;
                 }
             }

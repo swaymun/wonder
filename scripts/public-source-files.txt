@@ -54,6 +54,7 @@ apps/ios/Wonder.xcodeproj/project.pbxproj
 apps/ios/Wonder.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 apps/ios/Wonder.xcodeproj/xcshareddata/xcschemes/Diagnostics.xcscheme
 apps/ios/Wonder.xcodeproj/xcshareddata/xcschemes/Wonder.xcscheme
+apps/ios/Wonder/AppShell.swift
 apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/AppIcon.png
 apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/Contents.json
 apps/ios/Wonder/Assets.xcassets/ConnectorAdobeAcrobat.imageset/Contents.json
@@ -95,6 +96,9 @@ apps/ios/Wonder/Identity.swift
 apps/ios/Wonder/MacFileAccess.swift
 apps/ios/Wonder/ManagementViews.swift
 apps/ios/Wonder/NativeChats.swift
+apps/ios/Wonder/NewChatView.swift
+apps/ios/Wonder/ProjectViews.swift
+apps/ios/Wonder/ProjectsModel.swift
 apps/ios/Wonder/PushNotifications.swift
 apps/ios/Wonder/ScienceAvatar.swift
 apps/ios/Wonder/ScienceAvatarGeometry.swift
@@ -157,6 +161,7 @@ apps/native/Sources/WonderPairing/Dictation.swift
 apps/native/Sources/WonderPairing/FileChangeSummary.swift
 apps/native/Sources/WonderPairing/Files.swift
 apps/native/Sources/WonderPairing/Management.swift
+apps/native/Sources/WonderPairing/Projects.swift
 apps/native/Sources/WonderPairing/Protocol.swift
 apps/native/Sources/WonderPairing/Queue.swift
 apps/native/Sources/WonderPairing/ReadAcknowledgement.swift
@@ -186,6 +191,7 @@ apps/native/Tests/WonderPairingTests/GuideTests.swift
 apps/native/Tests/WonderPairingTests/IdentityRecoveryTests.swift
 apps/native/Tests/WonderPairingTests/ManagementTests.swift
 apps/native/Tests/WonderPairingTests/MessageProjectionTests.swift
+apps/native/Tests/WonderPairingTests/ProjectsTests.swift
 apps/native/Tests/WonderPairingTests/ProtocolTests.swift
 apps/native/Tests/WonderPairingTests/ReadAcknowledgementTests.swift
 apps/native/Tests/WonderPairingTests/ReadCacheTests.swift
@@ -338,6 +344,7 @@ crates/wonder-store/migrations/0074_agent_families.sql
 crates/wonder-store/migrations/0075_first_message_model.sql
 crates/wonder-store/migrations/0076_draft_bot_group_isolation.sql
 crates/wonder-store/migrations/0077_group_creation_tombstones.sql
+crates/wonder-store/migrations/0078_projects.sql
 crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs
@@ -352,6 +359,7 @@ crates/wonder-store/src/lib.rs
 crates/wonder-store/src/onboarding.rs
 crates/wonder-store/src/pm_tools.rs
 crates/wonder-store/src/project_assignments.rs
+crates/wonder-store/src/projects.rs
 crates/wonder-store/src/push.rs
 crates/wonder-store/src/questions.rs
 crates/wonder-store/src/queue.rs
@@ -398,6 +406,7 @@ crates/wonderd/src/permission_modes.rs
 crates/wonderd/src/phone_approval_tests.rs
 crates/wonderd/src/pm_tools.rs
 crates/wonderd/src/project_assignments.rs
+crates/wonderd/src/projects.rs
 crates/wonderd/src/push.rs
 crates/wonderd/src/questions.rs
 crates/wonderd/src/queue.rs
@@ -549,6 +558,7 @@ services/claude-runtime/native-cua.mjs
 services/claude-runtime/package-lock.json
 services/claude-runtime/package.json
 services/claude-runtime/permissions.mjs
+services/claude-runtime/project-history.mjs
 services/claude-runtime/projection.mjs
 services/claude-runtime/runtime-updates.mjs
 services/claude-runtime/sdk-runtime.mjs
@@ -557,6 +567,7 @@ services/claude-runtime/test/bridge.test.mjs
 services/claude-runtime/test/fixtures/native-cua-peer.mjs
 services/claude-runtime/test/native-cua.test.mjs
 services/claude-runtime/test/permissions.test.mjs
+services/claude-runtime/test/project.test.mjs
 services/claude-runtime/test/projection.test.mjs
 services/claude-runtime/test/runtime-updates.test.mjs
 services/push/.gitignore
