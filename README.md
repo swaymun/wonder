@@ -6,18 +6,19 @@
 <p align="center"><strong>Your Mac’s agents, on your iPhone and iPad.</strong></p>
 <p align="center">Keep a conversation going, review a request, or check your Mac from your phone.</p>
 
-<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.97-beta.1/Wonder-1.0.97.dmg">Download the signed Mac beta</a> · <strong>TestFlight — public invite pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
+<p align="center"><a href="https://github.com/swaymun/wonder/releases/download/mac-v1.0.99-beta.1/Wonder-1.0.99.dmg">Download the signed Mac beta</a> · <strong>TestFlight — public invite pending</strong> · <a href="INSTALL.md">Setup guide</a></p>
 
 <p align="center"><img src="assets/screenshots/conversation.png" width="280" alt="Wonder’s native conversation and grouped moon helper icon, shown with sample content"></p>
 
-Wonder is a native iPhone and iPad messenger for agents running on your Mac. Give
-work to a Bot, bring Bots together in a Group Chat, and return to the same
-conversations, files, and decisions later. Your Mac hosts Wonder; your devices
+Wonder is a native iPhone and iPad messenger for agents running on your Mac.
+Organize work into projects and return to the same conversations, files, and
+decisions later. Your Mac hosts Wonder; your devices
 connect through your own Tailscale network.
 
-**The signed Mac beta is available.** iOS Release build 66 has processed and is
+**The signed Mac beta is available.** iOS Release build 68 has processed and is
 available for internal testing. External review and public enrollment remain
-pending. Source builds are available from this repository. [Release qualification](RELEASING.md).
+pending. The separate blue Wonder Testing app has processed Release build 2.
+Source builds are available from this repository. [Release qualification](RELEASING.md).
 
 ## Keep your work with you
 
@@ -30,15 +31,15 @@ Answer questions and review approval requests from your phone. Permission choice
 remain explicit, with server-confirmed settings applied before work starts.
 
 Wonder also supports **Claude through the Claude Agent SDK**, using your
-Claude subscription. A Bot or Group keeps the agent family selected by its first
-model. Claude has its own permission choices, connected apps, and five-hour and
-weekly usage.
+Claude subscription. Each project conversation keeps its selected provider.
+Claude has its own permission choices, connected apps, and five-hour and weekly usage.
 
 The native sidebar puts **Projects** and pinned threads first, with provider
 icons that distinguish Codex and Claude conversations. A project groups source
 folders on one paired Mac; its conversations keep their native session identity.
 Choose a computer and project, then set the model, access, and Plan mode in the
-composer before sending. Bots and Group Chats remain available in the sidebar. Continue on Mac copies an
+composer before sending. Existing Bot and Group records are preserved, while
+the current app shell exposes Projects and Threads. Continue on Mac copies an
 exact-session terminal command. Finish work in one client before switching;
 simultaneous control and direct desktop-app opening are not supported.
 
