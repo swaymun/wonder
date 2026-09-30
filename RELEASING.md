@@ -57,15 +57,25 @@ is independent of updates.
 
 ## iPhone/iPad artifact
 
-Run relevant native/model/UI/device checks, then serialize uploads using:
+After every completed change to the shipped iOS app, including affected shared
+code, run relevant native/model and focused simulator UI checks, then upload both
+Release channels sequentially. Both uploads have standing owner authorization;
+no separate candidate approval is required unless the owner defers uploads.
+Documentation, source-sync and tooling-only changes that do not alter the shipped
+app need no new binary.
 
 ```sh
 bundle exec fastlane ios beta channel:testing profile:release
+bundle exec fastlane ios beta channel:production profile:release
 ```
 
-Testing candidates install beside production. Only after the owner approves the
-candidate, use `channel:production` to publish orange Wonder. See
+Blue Wonder Testing installs beside orange Wonder with separate local data. See
 [the Testing setup](apps/ios/TESTING.md).
+
+Physical iPhone/iPad testing is optional for now and runs only when explicitly
+requested. It must not block completion or TestFlight uploads. Report hardware,
+cellular, APNs delivery and actual TestFlight installation as unverified when
+they have not been exercised; simulator checks do not establish those results.
 
 Use `~/.config/wonder/app-store-connect/upload.json` or `WONDER_ASC_CONFIG`.
 Prefer the encrypted Match/manual-signing path. Never fall back silently to
@@ -77,6 +87,10 @@ TestFlight installation as separate results. The upload lane does not submit
 beta review or change tester groups.
 
 ## Network, push and product gates
+
+Use these to report product qualification. Mobile checks requiring physical
+hardware are optional under the current policy above, including for a public
+prerelease; retain their unverified status rather than making them release blockers.
 
 - Real screen frames and visible input effects through Tailscale; HTTPS alone
   does not pass media. Cellular/independent-network testing remains separate.
@@ -157,9 +171,10 @@ Before a public prerelease:
 2. Review every file and commit intended for publication. A fresh export starts
    with only its reviewed initial commit; do not copy private historical branches
    or tags. For later public releases, review all newly published commits too.
-3. Complete fresh-Mac install and upgrade, external TestFlight installation, and
-   the physical acceptance checks above. Keep detailed evidence privately and
-   summarize remaining limits in `BETA_STATUS.md`.
+3. Complete fresh-Mac install and upgrade and relevant simulator/integration
+   checks. External TestFlight installation and physical mobile acceptance are
+   optional for now. Keep detailed evidence privately and summarize unverified
+   behavior and remaining limits in `BETA_STATUS.md`.
 4. Run `python3 scripts/verify-release-docs.py` and validate external links. Ensure
    screenshot provenance matches the shipped UI, with no personal content.
 5. Prepare a GitHub prerelease with the verified DMG, a `SHA256SUMS` file, supported
@@ -175,6 +190,44 @@ unmounts. It does not launch the app or modify installed user data.
 Retain a compact release report and symbols. Run the build-cleanup script in
 preview mode, then apply only after dependent checks are complete. Keep the final
 DMG and its digest; remove redundant app staging copies after verification.
+
+## Build and installation cleanup
+
+- Reuse one DerivedData directory per platform/configuration under `.local/build/`.
+  Keep it until dependent tests, installation and verification finish. Never clean
+  a directory another build/test uses.
+- Reuse named simulators: `Wonder Beta iPhone WS2`, `Wonder Connected QA`,
+  `Wonder Overnight iPhone QA`, `Wonder Overnight iPad QA`, `Wonder Group iPad QA`.
+  Shutdown fixtures are still retained fixtures. Prefer
+  `-parallel-testing-enabled NO` for focused UI/Diagnostics runs. Record temporary
+  UDIDs and remove only those destinations after stopping the run.
+- After simulator tests, inspect `xcrun simctl list devices`. Use
+  `xcrun simctl delete unavailable` only after checking no required runtime/fixture
+  is affected. Preserve named fixtures and paired physical-device records.
+- Before cleaning `~/Library/Developer/XCTestDevices`, confirm no `xcodebuild` or
+  `xctest` process is active and entries are generated `Clone ...` devices. Use
+  Xcode's supported cleanup or narrowly clean that verified clone root; never a
+  broad Library path. Verify removal and record substantial before/after disk use.
+- Once dependent checks finish, preview `python3 scripts/clean-build-artifacts.py`,
+  then run with `--apply`. It retains source, logs, test results and crash symbols.
+  The archive script clears its own DerivedData after verifying a signed archive.
+- After Apple confirms processing, retain upload/build metadata, matching dSYMs,
+  source commit, dirty diff and untracked-source snapshot. Remove redundant IPAs,
+  exported app copies and archive app/products. Retain unresolved upload packages
+  until Apple status is known.
+- Compress/deduplicate dSYMs under `.local/symbols/` with an original-path index.
+  Verify archived file hashes before deleting originals; extract for symbolication.
+- Keep `/Applications/Wonder.app` as the single installed Mac version. After
+  signature, launch and `/readyz` pass, remove superseded app bundles in staging,
+  `~/Applications` and `~/.wonder/Backups/signed-update-*`. A rollback app may remain
+  during validation. Preserve pairing, databases, credentials, runtime/model data
+  and source backups.
+- Remove an obsolete worktree only when clean, reachable from `main` and unused
+  by any process/task. Use `git worktree remove`, inspect ignored contents before
+  forcing removal and prune stale metadata.
+- Keep compact final reports and relevant crash/failure evidence. Avoid duplicate
+  screenshots, repository copies and repeated test bundles for unchanged code.
+  Record substantial disk savings and deliberately retained large artifacts.
 
 ## Prepare a clean public source tree
 

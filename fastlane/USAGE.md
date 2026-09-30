@@ -6,13 +6,19 @@ Use a managed Ruby (3.3 or newer) with Bundler. From the repository root:
 bundle install
 bundle exec fastlane ios validate
 bundle exec fastlane ios beta channel:testing profile:release
+bundle exec fastlane ios beta channel:production profile:release
 ```
 
 The default channel is **testing** (`com.swaymun.wonder.testing`), displayed as
 **Wonder Testing** with a blue icon. It installs beside orange Wonder and needs
-its own pairing. The Mac host and conversations can be shared. After the owner
-approves a tested candidate, use `channel:production` for orange Wonder; never
-promote merely because tests passed. The profile (`release` or `diagnostics`) is
+its own pairing. The Mac host and conversations can be shared. After every completed
+change to the shipped iOS app, including affected shared code, run relevant checks
+and upload both Release channels sequentially under standing owner authorization.
+No separate candidate approval is required unless uploads are explicitly deferred.
+Documentation, source-sync and tooling-only changes that do not alter the app need
+no binary. Physical phone/tablet testing is optional for now and runs only when
+explicitly requested; focused simulator checks are the default.
+The profile (`release` or `diagnostics`) is
 independent of the channel. Diagnostics uses the same identity within its channel.
 
 `validate` checks the local private key and release inputs without contacting
@@ -24,7 +30,7 @@ Run one upload at a time.
 
 Credentials default to `~/.config/wonder/app-store-connect/upload.json`.
 `WONDER_ASC_CONFIG` can override that location. The JSON fields are `keyId`,
-`issuerId`, `privateKeyPath`, and `appBundleId` (`com.swaymun.wonder`). Keep the
+`issuerId`, `privateKeyPath`, and `appBundleId` (`com.swaymun.wonder`). The
 lane reuses the credential but selects the exact app ID from the requested
 channel; the Testing app record and its own profiles must already exist. Keep the
 key and configuration private and outside Git. No Apple ID session is used.

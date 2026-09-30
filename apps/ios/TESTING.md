@@ -2,7 +2,7 @@
 
 Wonder Testing uses the same product source as Wonder, with a blue icon and its
 own app identity. Install it beside orange Wonder, pair it separately with your
-Mac, and use it to approve a candidate before updating the main app. Local
+Mac, and use it for development checks. Local
 pairing, Keychain access, preferences and drafts remain separate. Both clients
 can still read and change the same conversations on the paired Mac.
 
@@ -17,23 +17,27 @@ bounded Diagnostics tools. Regular Testing uploads use Release behavior, without
 the recorder. Each channel includes matching `.NotificationService` and `.Share`
 extensions; their Keychain access is confined to their own channel.
 
-## Upload and promotion
+## Upload both channels
+
+After every completed change to the shipped iOS app, including affected shared
+code, run relevant checks and upload both Release channels sequentially. Both
+uploads have standing owner authorization; no separate candidate approval is
+required unless uploads are explicitly deferred. Documentation, source-sync and
+tooling-only changes that do not alter the shipped app need no new binary.
+Physical phone/tablet tests are optional for now and run only when explicitly
+requested; use focused simulator checks by default.
 
 ```sh
 bundle exec fastlane ios validate channel:testing
 bundle exec fastlane ios beta channel:testing profile:release
+bundle exec fastlane ios beta channel:production profile:release
 ```
 
 Testing is the lane and archive script default. Each app has an independent
 increasing build number. The existing API key is reused with the selected app ID;
-no private key is copied into source. Production requires explicit owner approval
-of the candidate, then:
-
-```sh
-bundle exec fastlane ios beta channel:production profile:release
-```
-
-A passing test or processed Testing build does not authorize production promotion.
+no private key is copied into source. Serialize uploads across tasks, check each
+app's latest build number and report its Apple processing status separately.
+Upload authorization does not include beta-review submission or tester/group changes.
 Do not install a production-identity Diagnostics build over the owner's orange app.
 No Mac testing app is part of this workflow.
 
@@ -54,7 +58,7 @@ Each ID needs an App Store provisioning profile saved in encrypted Match using
 the existing Apple Distribution certificate. Profile creation requires explicit
 owner approval. The normal upload lane remains read-only for signing assets.
 
-For physical QA, use the approved Testing development profiles. Set
+For explicitly requested physical QA, use the approved Testing development profiles. Set
 `WONDER_APP_SIGNING_STYLE=Manual` and supply `WONDER_MAIN_PROFILE`,
 `WONDER_PUSH_PROFILE` and `WONDER_SHARE_PROFILE` to `xcodebuild` with the
 `TestingDiagnostics` configuration. Test runners retain automatic signing and

@@ -1,5 +1,14 @@
 # iOS diagnostics
 
+## Current verification policy
+
+Use focused unit/model/contract checks and simulator UI tests by default. Physical
+iPhone/iPad sessions are optional for now and run only when explicitly requested;
+they must not block completion or either TestFlight upload. Hardware-only cases
+and the physical procedures below are references for those optional runs. Label
+unexercised hardware behavior as unverified; retain separate simulator, scenario
+and physical results. See [AGENTS.md](../../AGENTS.md) for the current workflow.
+
 ## Projects and creation
 
 `testLiveProjectsSidebarAndDraftsStayReadOnly` uses an explicitly owned project
@@ -10,7 +19,7 @@ navigation; `WONDER_PROJECT_CAPTURE=1` starts the existing bounded two-minute
 resource capture. Neither selection nor navigation sends a message. Retain the
 actual observation window separately from the capture window.
 
-Run it on iPhone and iPad alongside the durable creation outbox, draft
+Run it on iPhone and iPad simulators alongside the durable creation outbox, draft
 restoration, and shared scene ownership diagnostics tests.
 
 Wonder has separate Production and Testing identities, each with two optimized
@@ -27,11 +36,11 @@ pairing and local data; pairing and drafts are isolated between channels.
 
 ## Build and distribute
 
-From the repository root:
+Normal app changes upload Release builds to both channels as described in
+[TESTING.md](TESTING.md). Use Diagnostics only when specifically requested:
 
 ```sh
 bundle exec fastlane ios beta channel:testing profile:diagnostics
-bundle exec fastlane ios beta channel:testing profile:release
 ```
 
 Omitting `profile` selects Release. Credentials use the existing owner-only App Store Connect configuration. Use existing Match/manual signing; do not fall back to an Xcode account or create profiles without explicit approval.
@@ -124,9 +133,9 @@ Launch arguments for development tooling:
 - `-diagnostics-fixtures -diagnostics-camera-physical`: uses the real camera and permission prompt with an isolated durable draft. Use only for explicitly authorized physical Camera XCTest. Capture attaches locally; it does not send a message, upload a file, or save to Photos. Check the initial half-height sheet bounds, capture and dismissal, cancellation, camera controls, and foreground recovery on the actual device. Simulator fixtures do not establish camera hardware acceptance.
 - `-diagnostics-fixtures -diagnostics-permission-fixture`: exercises the shared approval menu with isolated local persistence, without changing any Bot or contacting a runtime. Add `-diagnostics-permission-auto-available` for all three enabled choices, `-diagnostics-permission-old-host` for the update state, or `-diagnostics-permission-reset` to clear only this fixture's saved selection on first appearance. The two `testDiagnostics*Approval*` XCTest cases cover selection, unavailable choices, and persistence across relaunch.
 
-The `WonderUITests` target exercises live touch expansion and swipes using XCTest scrolling metrics, and independently exercises the large detail fixtures. It requires an unlocked, paired device with a real Wonder conversation. Missing pairing/data is a skip, not a pass. Simulator duration measurements are not physical-device hitch acceptance. `WonderDiagnosticsTests` covers storage, retries/export, host assignment, background suspension, and bounded image decoding; shared native tests cover flattened large activity histories.
+The `WonderUITests` target exercises expansion, swipes and large detail fixtures on simulators. Optional live/physical cases require the pairing, data and hardware specified by that case. Missing prerequisites are a skip, not a pass; do not make a hardware-only case part of default simulator acceptance. Simulator duration measurements are not physical-device hitch acceptance. `WonderDiagnosticsTests` covers storage, retries/export, host assignment, background suspension, and bounded image decoding; shared native tests cover flattened large activity histories.
 
-Choose the physical session length using `AGENTS.md`: normally 1–3 minutes for localized rendering fixes, 3–5 minutes for loading/cache/concurrency/anchoring changes, and ten minutes for leaks, watchdogs, long-lived resource issues or broad timeline changes. Use the affected interaction, with 10–15 repetitions for small fixes and at least 30 for intermittent bugs or resource-lifetime changes. The ten-minute runner is available when warranted; it is not the default for every UI change.
+When a physical run is explicitly requested, choose its length for the fix: normally 1–3 minutes for localized rendering fixes, 3–5 minutes for loading/cache/concurrency/anchoring changes, and ten minutes for leaks, watchdogs, long-lived resource issues or broad timeline changes. Use the affected interaction, with 10–15 repetitions for small fixes and at least 30 for intermittent bugs or resource-lifetime changes. Extend only when reproduction or unstable measurements warrant it. These are optional physical-run procedures, not default completion gates.
 
 Initial acceptance targets are local expansion/readiness p95 below 100 ms, no local interaction above 250 ms, actual scroll hitch time below 5 ms/s, and no watchdog/crash or sustained memory growth during the selected physical session. Check recording overhead when changing the recorder, adding high-frequency instrumentation or investigating recording cost; target less than 5% additional p95 latency after warmup on the same device and data. Preserve the actual device, session, duration, dataset, and measurement type with each result. Never substitute scenario or simulator results for physical touch/hitch evidence.
 
@@ -244,7 +253,7 @@ selection, absence of Saving text, helper sheet return, and persistence after
 relaunch. `-diagnostics-approval-reset` resets only that fixture preference.
 No real Bot, message, permission grant, or model work is involved.
 
-`testBotPolishPhysicalSession` runs the same controls for at least three minutes
+The optional `testBotPolishPhysicalSession` runs the same controls for at least three minutes
 with at least 30 permission changes and 10 helper cycles on physical iPhone; Simulator explicitly skips.
 This establishes physical touch behavior against a synthetic host, not live
 network latency or frame hitch measurements. Keep it separate from paired-host
