@@ -1,6 +1,6 @@
 # Wonder beta status
 
-The signed Mac beta is available. Release iOS build 1.0 (68) is uploaded,
+The signed Mac beta is available. Release iOS build 1.0 (69) is uploaded,
 processed, and available for internal testing. Apple reports it as ready for
 external beta submission; external review and public enrollment have not been
 opened for this build. No tester groups or notifications were changed.
@@ -14,8 +14,8 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (68) includes the Projects-first shell, pinned threads, provider icons, model/Plan settings, and draft/navigation fixes. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation of this build through TestFlight remains unverified. |
-| Wonder Testing | The separate blue app, Release 1.0 (2), is `VALID` and `READY_FOR_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. It keeps its own pairing, drafts, and Keychain access. Tester-group distribution was not changed. |
+| iPhone and iPad | Production Release 1.0 (69) is the Projects-only shell: pinned threads, provider icons, model/Plan settings, read-state and model-list fixes, and no Bot or Group management screens. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation of this build through TestFlight remains unverified. |
+| Wonder Testing | The separate blue app, Release 1.0 (3), is `VALID` and `READY_FOR_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. It keeps its own pairing, drafts, and Keychain access. Tester-group distribution was not changed. |
 | Mac companion | [Version 1.0.99](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.99-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and packaged verification against the installed Codex 0.159.0 runtime. |
 | Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The Projects-first shell update is published on `main`. Third-party components retain their own licenses. |
 

@@ -15,9 +15,9 @@ Organize work into projects and return to the same conversations, files, and
 decisions later. Your Mac hosts Wonder; your devices
 connect through your own Tailscale network.
 
-**The signed Mac beta is available.** iOS Release build 68 has processed and is
+**The signed Mac beta is available.** iOS Release build 69 has processed and is
 available for internal testing. External review and public enrollment remain
-pending. The separate blue Wonder Testing app has processed Release build 2.
+pending. The separate blue Wonder Testing app has processed Release build 3.
 Source builds are available from this repository. [Release qualification](RELEASING.md).
 
 ## Keep your work with you
