@@ -17,11 +17,21 @@ enum NewChatDraftStore {
         return data.flatMap { try? JSONDecoder().decode(NewChatDraft.self, from: $0) }
     }
     static func load(host: String) -> NewChatDraft? { read(key(host)) }
-    @discardableResult static func save(_ draft: NewChatDraft, host: String) -> Bool {
+    private static func pendingKey(_ host: String, _ request: String) -> String { key(host) + ".pending." + request }
+    @discardableResult static func save(_ draft: NewChatDraft, host: String, separately: Bool = false) -> Bool {
         do {
             try FileManager.default.createDirectory(at: draftDirectory, withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(draft)
-            for target in [key(host), destinationKey(host, draft.destination)] {
+            // A pending request is separate from the editable destination draft.
+            // Reviewing it must not overwrite newer words for that project.
+            let archived = draft.isSubmitted || separately || UserDefaults.standard.bool(forKey: pendingKey(host, draft.requestID))
+            var targets = archived
+                ? [pendingKey(host, draft.requestID), key(host)]
+                : [destinationKey(host, draft.destination), key(host)]
+            if archived, read(destinationKey(host, draft.destination))?.requestID == draft.requestID {
+                targets.insert(destinationKey(host, draft.destination), at: 0)
+            }
+            for target in targets {
                 try data.write(to: url(target), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
                 // Small ownership index supports scoped unpair cleanup.
                 UserDefaults.standard.set(true, forKey: target)
@@ -30,6 +40,49 @@ enum NewChatDraftStore {
         } catch { return false }
     }
     static func load(host: String, destination: ChatDestination) -> NewChatDraft? { read(destinationKey(host, destination)) }
+    static func savedMessages(host: String) -> [NewChatDraft] {
+        let prefix = key(host) + ".pending."
+        return UserDefaults.standard.dictionaryRepresentation().keys.sorted()
+            .filter { $0.hasPrefix(prefix) }.compactMap { read($0) }
+    }
+    static func removePending(host: String, requestID: String) {
+        let target = pendingKey(host, requestID)
+        try? FileManager.default.removeItem(at: url(target))
+        UserDefaults.standard.removeObject(forKey: target)
+    }
+    /// Escape an unconfirmed send without changing or losing its retry identity.
+    static func startNew(from submitted: NewChatDraft, host: String) -> NewChatDraft? {
+        guard submitted.isSubmitted, save(submitted, host: host) else { return nil }
+        let next = editableDraft(after: submitted, host: host)
+        return save(next, host: host) ? next : nil
+    }
+    /// A confirmed handoff retires only this request. An independent draft made
+    /// while it was unconfirmed keeps its words and attachments.
+    static func complete(_ submitted: NewChatDraft, host: String) -> NewChatDraft? {
+        let next = editableDraft(after: submitted, host: host)
+        guard save(next, host: host) else { return nil }
+        removePending(host: host, requestID: submitted.requestID)
+        return next
+    }
+    static func reject(_ submitted: NewChatDraft, host: String) -> NewChatDraft? {
+        var next = submitted
+        next.rejectSubmission()
+        let saved = submitted.destination.flatMap { load(host: host, destination: $0) }
+        let independent = saved.map { !$0.isSubmitted && $0.requestID != submitted.requestID } ?? false
+        guard save(next, host: host, separately: independent) else { return nil }
+        removePending(host: host, requestID: submitted.requestID)
+        return next
+    }
+    private static func editableDraft(after submitted: NewChatDraft, host: String) -> NewChatDraft {
+        var next = submitted
+        next.completeSubmission()
+        if let destination = submitted.destination,
+           let saved = load(host: host, destination: destination),
+           !saved.isSubmitted, saved.requestID != submitted.requestID {
+            next = read(pendingKey(host, saved.requestID)) ?? saved
+        }
+        return next
+    }
     /// A recording remains bound to its original draft when the owner navigates.
     static func insertDictation(_ text: String, requestID: String, draftID: String, host: String) throws {
         let prefix = key(host)
@@ -175,6 +228,23 @@ struct NewChatView: View {
     }
 
     private func restore() {
+        #if WONDER_DIAGNOSTICS
+        if ProcessInfo.processInfo.arguments.contains("-reset-new-chat-pending-preview") {
+            // Owned offline fixture; no real pairing, messages or model work.
+            NewChatDraftStore.remove(host: "studio")
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 80, height: 60)).pngData { context in
+                UIColor.systemOrange.setFill(); context.fill(CGRect(x: 0, y: 0, width: 80, height: 60))
+            }
+            if let file = try? StagedFile(name: "saved-image.png", mimeType: "image/png", data: image),
+               let attachment = try? NewChatDraftStore.stage(file) {
+                var pending = NewChatDraft(destination: .project(id: "preview-project"), text: "Saved unconfirmed message",
+                    family: .codex, model: "preview-model")
+                pending.attachments = [attachment]; pending.freeze()
+                NewChatDraftStore.save(pending, host: "studio")
+            }
+            NewChatDraftStore.lastHost = "studio"
+        }
+        #endif
         guard hostID == nil else { apply(shell.newChatRequest); return }
         let saved = library.saved.connections
         let hosts = saved.map(\.credential.hostInstallationId)
@@ -243,6 +313,7 @@ private struct NewChatContent: View {
     @State private var showingComputer = false
     @State private var showingConnectionPicker = false
     @State private var pairAfterConnectionPicker = false
+    @State private var savedMessages: [NewChatDraft] = []
 
     private var draftChat: ChatSummary {
         ChatSummary(conversationId: "new-chat:" + draft.requestID, botId: nil, title: "New chat",
@@ -300,6 +371,9 @@ private struct NewChatContent: View {
         .onChange(of: projects.projects.filter(\.isIncluded).map(\.id)) { _, _ in settleDestination() }
         .onChange(of: draft.family) { _, _ in ensureModel() }
         .onChange(of: projects.options?.models.count) { _, _ in ensureModel() }
+        .task(id: model.assignmentScope + ":" + draft.requestID) {
+            if let hostID { savedMessages = NewChatDraftStore.savedMessages(host: hostID).filter { $0.requestID != draft.requestID } }
+        }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
             guard importingFor == draft.requestID, canAttach else { return }
             if case .success(let url) = result {
@@ -386,6 +460,30 @@ private struct NewChatContent: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
             DictationControls(controller: model.dictation, model: model, chat: draftChat)
+            if draft.isSubmitted && !sending {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Your Mac hasn’t confirmed this message. Retry it or start a new draft. The original stays saved.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("new-chat-pending-notice")
+                    HStack {
+                        Button { Task { await send() } } label: { Text("Retry message").frame(minHeight: 44) }
+                            .disabled(!canSend).accessibilityIdentifier("new-chat-retry")
+                        Button(action: startNewDraft) { Text("New draft").frame(minHeight: 44) }
+                            .accessibilityIdentifier("new-chat-start-new-draft")
+                    }.buttonStyle(.plain).font(.subheadline)
+                }.padding(.horizontal, 4)
+            } else if !savedMessages.isEmpty && !sending {
+                Menu {
+                    ForEach(savedMessages, id: \.requestID) { pending in
+                        Button(pending.text.isEmpty ? "Message with attachments" : String(pending.text.prefix(60))) {
+                            review(pending)
+                        }
+                    }
+                } label: {
+                    Label("Saved messages", systemImage: "clock.badge.exclamationmark")
+                        .font(.subheadline).frame(minHeight: 44)
+                }.accessibilityIdentifier("new-chat-pending-messages")
+            }
             if let failure {
                 FailureDetails(draft.isSubmitted ? "Not confirmed" : "Couldn’t send", message: failure)
             }
@@ -751,46 +849,100 @@ private struct NewChatContent: View {
             return
         }
         let body = draft.submittedBody ?? draft.text
+        let request = draft.requestID
         let descriptors = draft.attachments ?? []
         let files: [StagedFile]
         do { files = try await Task.detached { try NewChatDraftStore.files(descriptors) }.value }
         catch {
-            if draft.preparedConversationID == nil { draft.rejectSubmission() }
+            guard scope == model.assignmentScope, self.hostID == hostID,
+                  request == draft.requestID, !Task.isCancelled else { return }
+            if draft.preparedConversationID == nil { rejectSubmission(host: hostID) }
             failure = "A saved attachment is unavailable. Remove it and attach the file again."
             return
         }
-        guard scope == model.assignmentScope, !model.accessEnded, !Task.isCancelled else { return }
+        guard scope == model.assignmentScope, self.hostID == hostID, request == draft.requestID,
+              !model.accessEnded, !Task.isCancelled else { return }
         do {
             let conversation: String
             if let prepared = draft.preparedConversationID { conversation = prepared }
             else {
                 let response = try await projects.createThread(projectID: projectID, draft: draft, body: body, deviceID: device)
+                guard scope == model.assignmentScope, self.hostID == hostID,
+                      request == draft.requestID, !Task.isCancelled else { return }
                 guard let created = response.conversation.conversationId else { throw PairingFailure.response(500) }
                 conversation = created
                 draft.preparedConversationID = created
                 NewChatDraftStore.save(draft, host: hostID)
             }
             let detail = try await projects.loadDetail(conversation)
+            guard scope == model.assignmentScope, self.hostID == hostID,
+                  request == draft.requestID, !Task.isCancelled else { return }
             let chat = model.projectChat(detail)
             try await model.prepareCreation(chat, body: body, requestID: draft.requestID, files: files)
-            draft.completeSubmission()
-            NewChatDraftStore.save(draft, host: hostID)
+            guard scope == model.assignmentScope, self.hostID == hostID,
+                  request == draft.requestID, !Task.isCancelled else { return }
+            guard let next = NewChatDraftStore.complete(draft, host: hostID) else {
+                failure = "Your message is saved, but the new draft could not be saved. Free some storage and retry this message."
+                return
+            }
+            draft = next
             shell.open(host: hostID, conversation: conversation)
             await model.deliver(chat)
         } catch PairingFailure.response(412) {
-            draft.rejectSubmission()
+            guard request == draft.requestID, self.hostID == hostID else { return }
+            rejectSubmission(host: hostID)
             await projects.refresh()
             failure = "The project's folders changed. Review the working folder and send again."
         } catch PairingFailure.response(409) {
+            guard request == draft.requestID, self.hostID == hostID else { return }
             failure = "This request conflicts with the saved thread or its folder. Check the project on your Mac, then retry this same request."
         } catch PairingFailure.response(422) {
-            draft.rejectSubmission()
+            guard request == draft.requestID, self.hostID == hostID else { return }
+            rejectSubmission(host: hostID)
             failure = "This project, model or access choice can’t be used. Check them and send again."
         } catch PairingFailure.response(503) {
+            guard request == draft.requestID, self.hostID == hostID else { return }
             failure = "\(model.macName) isn’t ready yet. Send again in a moment to check the same request."
         } catch {
+            guard request == draft.requestID, self.hostID == hostID, !Task.isCancelled else { return }
             failure = "Your Mac didn’t confirm the new thread. Send again to retry the same request; it won’t start twice."
         }
+    }
+
+    private func rejectSubmission(host: String) {
+        if let next = NewChatDraftStore.reject(draft, host: host) { draft = next }
+    }
+
+    private func startNewDraft() {
+        guard !sending, let hostID else { return }
+        guard let next = NewChatDraftStore.startNew(from: draft, host: hostID) else {
+            failure = "Your pending message could not be saved. Free some storage before starting a new draft."
+            return
+        }
+        model.dictation.captureControlsHidden(conversationID: draftChat.id)
+        draft = next; failure = nil
+        savedMessages = NewChatDraftStore.savedMessages(host: hostID).filter { $0.requestID != draft.requestID }
+        settleDestination(); ensureModel()
+    }
+
+    private func review(_ pending: NewChatDraft) {
+        guard !sending, let hostID else { return }
+        guard NewChatDraftStore.save(draft, host: hostID) else {
+            failure = "Your draft could not be saved. Free some storage before reviewing this message."
+            return
+        }
+        if !draft.text.isEmpty || !(draft.attachments ?? []).isEmpty {
+            guard NewChatDraftStore.save(draft, host: hostID, separately: true) else {
+                failure = "Your draft could not be saved. Free some storage before reviewing this message."
+                return
+            }
+        }
+        guard NewChatDraftStore.save(pending, host: hostID, separately: true) else {
+            failure = "Your draft could not be saved. Free some storage before reviewing this message."
+            return
+        }
+        model.dictation.captureControlsHidden(conversationID: draftChat.id)
+        draft = pending; failure = nil
     }
 }
 

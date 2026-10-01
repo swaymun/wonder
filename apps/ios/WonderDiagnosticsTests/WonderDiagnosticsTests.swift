@@ -1096,6 +1096,55 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(NewChatDraftStore.load(host: otherHost)?.text, "Group purpose")
     }
 
+    // Contract: leaving an unconfirmed creation unlocks a separate draft while
+    // preserving the original retry identity, attachment bytes and pairing.
+    // Reviewing, confirming or rejecting it cannot erase newer project words.
+    @MainActor func testUnconfirmedNewChatKeepsOriginalAndIndependentDraft() throws {
+        let host = "pending-draft-test-" + UUID().uuidString
+        let otherHost = "other-" + host
+        defer { NewChatDraftStore.remove(host: host); NewChatDraftStore.remove(host: otherHost) }
+        let file = try StagedFile(name: "original.txt", mimeType: "text/plain", data: Data("Original bytes".utf8))
+        let descriptor = try NewChatDraftStore.stage(file)
+        let storedFile = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("NewChatAttachments").appendingPathComponent(file.id)
+        defer { try? FileManager.default.removeItem(at: storedFile) }
+        var original = NewChatDraft(destination: .project(id: "project"), text: "Original message", family: .codex, model: "model")
+        original.attachments = [descriptor]
+        original.submittedDeviceID = "original-device"
+        XCTAssertTrue(NewChatDraftStore.save(original, host: host))
+        original.freeze()
+        XCTAssertTrue(NewChatDraftStore.save(original, host: host))
+        var fresh = try XCTUnwrap(NewChatDraftStore.startNew(from: original, host: host))
+        XCTAssertFalse(fresh.isSubmitted)
+        XCTAssertNotEqual(fresh.requestID, original.requestID)
+        XCTAssertTrue(fresh.text.isEmpty)
+        XCTAssertNil(fresh.attachments)
+        fresh.text = "Independent words"
+        XCTAssertTrue(NewChatDraftStore.save(fresh, host: host))
+        let restored = try XCTUnwrap(NewChatDraftStore.savedMessages(host: host).first)
+        XCTAssertEqual(restored, original)
+        XCTAssertEqual(try NewChatDraftStore.files(try XCTUnwrap(restored.attachments)).first?.data, file.data)
+        XCTAssertTrue(NewChatDraftStore.save(restored, host: host))
+        XCTAssertEqual(NewChatDraftStore.load(host: host), original)
+        XCTAssertEqual(NewChatDraftStore.load(host: host, destination: .project(id: "project")), fresh)
+        XCTAssertEqual(NewChatDraftStore.startNew(from: restored, host: host), fresh)
+        let completed = try XCTUnwrap(NewChatDraftStore.complete(restored, host: host))
+        XCTAssertEqual(completed, fresh)
+        XCTAssertTrue(NewChatDraftStore.savedMessages(host: host).isEmpty)
+        XCTAssertTrue(NewChatDraftStore.save(original, host: host))
+        let rejected = try XCTUnwrap(NewChatDraftStore.reject(original, host: host))
+        XCTAssertFalse(rejected.isSubmitted)
+        XCTAssertEqual(rejected.text, original.text)
+        XCTAssertEqual(rejected.attachments, original.attachments)
+        XCTAssertNotEqual(rejected.requestID, original.requestID)
+        XCTAssertEqual(NewChatDraftStore.load(host: host, destination: .project(id: "project")), fresh)
+        XCTAssertEqual(NewChatDraftStore.savedMessages(host: host), [rejected])
+        XCTAssertTrue(NewChatDraftStore.save(original, host: otherHost))
+        NewChatDraftStore.remove(host: host)
+        XCTAssertTrue(NewChatDraftStore.savedMessages(host: host).isEmpty)
+        XCTAssertEqual(NewChatDraftStore.load(host: otherHost), original)
+    }
+
     // Contract: saving a project pin updates the thread, global Pinned list and
     // offline detail together. Regression: a details-sheet save left the old
     // cache behind, and its overlapping GET put the unpinned detail back.

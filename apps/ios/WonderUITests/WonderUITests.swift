@@ -3177,6 +3177,63 @@ import UIKit
         app.terminate()
     }
 
+    // An offline pending creation must explain its locked fields and offer a
+    // durable escape. No messages or model work run in this synthetic fixture.
+    func testUnconfirmedNewChatCanStartEditableDraftAndReviewOriginal() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview", "-reset-new-chat-pending-preview"]
+        app.launch()
+        let notice = app.staticTexts["new-chat-pending-notice"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 15))
+        let draft = app.textViews["new-chat-draft"]
+        XCTAssertEqual(draft.value as? String, "Saved unconfirmed message")
+        let removals = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "composer-attachment-remove:"))
+        XCTAssertTrue(removals.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(removals.firstMatch.isEnabled)
+        XCTAssertFalse(app.buttons["connection-picker"].isEnabled)
+        XCTAssertFalse(app.buttons["destination-picker"].isEnabled)
+        let newDraft = app.buttons["new-chat-start-new-draft"]
+        XCTAssertTrue(newDraft.isHittable)
+        retainMenuScreenshot(app, name: "Unconfirmed new chat with visible recovery")
+        newDraft.tap()
+        XCTAssertFalse(notice.exists)
+        XCTAssertEqual(removals.count, 0)
+        XCTAssertEqual(draft.value as? String, "")
+        draft.tap(); draft.typeText("Editable words")
+        XCTAssertEqual(draft.value as? String, "Editable words")
+        draft.typeText(XCUIKeyboardKey.delete.rawValue)
+        XCTAssertEqual(draft.value as? String, "Editable word")
+        XCTAssertTrue(app.buttons["connection-picker"].isEnabled)
+        XCTAssertTrue(app.buttons["destination-picker"].isEnabled)
+        app.buttons["connection-picker"].tap()
+        XCTAssertTrue(app.buttons["connection-option:macbook"].waitForExistence(timeout: 5))
+        app.buttons["connection-option:macbook"].tap()
+        XCTAssertEqual(app.buttons["connection-picker"].value as? String, "Laptop")
+        app.buttons["connection-picker"].tap()
+        app.buttons["connection-option:studio"].tap()
+        XCTAssertEqual(draft.value as? String, "Editable word")
+        app.buttons["destination-picker"].tap()
+        XCTAssertTrue(app.buttons["New project"].waitForExistence(timeout: 5))
+        app.navigationBars["New chat"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        retainMenuScreenshot(app, name: "Editable draft preserves saved pending message")
+        app.terminate()
+        app.launchArguments = ["-connections-preview"]
+        app.launch()
+        XCTAssertTrue(draft.waitForExistence(timeout: 15))
+        XCTAssertEqual(draft.value as? String, "Editable word")
+        let saved = app.buttons["new-chat-pending-messages"]
+        XCTAssertTrue(saved.waitForExistence(timeout: 5))
+        saved.tap()
+        app.buttons["Saved unconfirmed message"].tap()
+        XCTAssertTrue(notice.waitForExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, "Saved unconfirmed message")
+        XCTAssertTrue(removals.firstMatch.waitForExistence(timeout: 5))
+        newDraft.tap()
+        XCTAssertEqual(draft.value as? String, "Editable word")
+        app.terminate()
+    }
+
     // Exercise the real App/WindowGroup boundary. A view-only fixture cannot
     // catch a root builder invoked by SwiftUI's asynchronous renderer.
     func testRootSceneSurvivesRepeatedLaunchAndForeground() throws {
