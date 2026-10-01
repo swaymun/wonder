@@ -9,6 +9,37 @@ enum ComputerInputMode: String, CaseIterable, Identifiable {
     var title: String { self == .trackpad ? "Trackpad" : "Direct touch" }
 }
 
+/// Command stays down while the native app switcher is open. The session's
+/// release-all path remains the owner of cleanup on disconnect or lease loss.
+struct ComputerAppSwitcher {
+    private(set) var isPresented = false
+
+    mutating func toggle() -> [ComputerInputAction] {
+        if isPresented { return finish() }
+        isPresented = true
+        return [.key(key: "command", phase: "down", modifiers: 8),
+                .key(key: "tab", phase: "press", modifiers: 8)]
+    }
+
+    mutating func finish(cancel: Bool = false) -> [ComputerInputAction] {
+        guard isPresented else { return [] }
+        isPresented = false
+        let release = ComputerInputAction.key(key: "command", phase: "up", modifiers: 0)
+        return cancel ? [.key(key: "escape", phase: "press", modifiers: 8), release] : [release]
+    }
+
+    mutating func key(_ key: String) -> [ComputerInputAction] {
+        if isPresented {
+            if key == "escape" { return finish(cancel: true) }
+            if key == "return" { return finish() }
+            if ["tab", "left", "right", "up", "down"].contains(key) {
+                return [.key(key: key, phase: "press", modifiers: 8)]
+            }
+        }
+        return finish(cancel: true) + [.key(key: key, phase: "press", modifiers: 0)]
+    }
+}
+
 @MainActor
 final class ComputerPointerState: ObservableObject {
     @Published private(set) var position = CGPoint(x: 0.5, y: 0.5)

@@ -743,7 +743,9 @@ import UIKit
         let computerContainer = app.descendants(matching: .any)
             .matching(identifier: "computer-session-container").firstMatch
         XCTAssertTrue(computerContainer.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Unavailable"].waitForExistence(timeout: 5))
+        let status = app.descendants(matching: .any).matching(identifier: "computer-session-status").firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertEqual(status.value as? String, "Unavailable")
         XCTAssertTrue(app.staticTexts["Live computer viewing is unavailable on this Mac."].exists)
         XCTAssertTrue(app.staticTexts["Live computer viewing is unavailable on this Mac. Update Wonder on the Mac, then try again."].exists)
         let preview = app.descendants(matching: .any)
@@ -759,12 +761,12 @@ import UIKit
         app.buttons["computer-session-fit"].tap()
         XCTAssertTrue(app.buttons["computer-session-refresh"].exists)
         XCTAssertFalse(app.buttons["computer-session-take-control"].exists)
-        XCTAssertTrue(app.staticTexts["View only"].exists)
+        XCTAssertFalse(app.staticTexts["View only"].exists)
         let zoomValue = app.buttons["computer-session-more"]
         XCTAssertTrue(zoomValue.exists)
         XCTAssertEqual(zoomValue.label, "More, zoom 100 percent")
         XCTAssertFalse(app.staticTexts["Waiting for a verified computer stream."].exists)
-        retainMenuScreenshot(app, name: "Computer session unavailable")
+        retainMenuScreenshot(app, name: "Computer session unavailable", fullScreen: true)
 
         selectComputerMoreAction(app, identifier: "computer-session-zoom-in")
         XCTAssertEqual(zoomValue.label, "More, zoom 125 percent")
@@ -776,6 +778,8 @@ import UIKit
 
     func testDiagnosticsComputerSessionAvailableFixtureTakesControlAndReleasesIt() throws {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
         app.launch()
@@ -783,7 +787,9 @@ import UIKit
         let computerContainer = app.descendants(matching: .any)
             .matching(identifier: "computer-session-container").firstMatch
         XCTAssertTrue(computerContainer.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Live"].waitForExistence(timeout: 5))
+        let status = app.descendants(matching: .any).matching(identifier: "computer-session-status").firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertEqual(status.value as? String, "Live")
         let takeControl = app.buttons["computer-session-take-control"]
         XCTAssertTrue(takeControl.waitForExistence(timeout: 5))
         takeControl.tap()
@@ -800,12 +806,22 @@ import UIKit
         assertComputerControlRow(app)
         let preview = app.descendants(matching: .any).matching(identifier: "computer-session-preview").firstMatch
         XCTAssertEqual(preview.frame.width, app.frame.width, accuracy: 1, "Portrait preview must use the phone width.")
-        let status = app.descendants(matching: .any).matching(identifier: "computer-session-status").firstMatch
+        let header = app.descendants(matching: .any).matching(identifier: "computer-session-header").firstMatch
         let controls = app.descendants(matching: .any).matching(identifier: "computer-session-controls-row").firstMatch
-        XCTAssertLessThanOrEqual(preview.frame.minY - status.frame.maxY, 24,
+        XCTAssertLessThanOrEqual(preview.frame.minY - header.frame.maxY, 24,
                                  "The trackpad must include the black area below the computer status.")
         XCTAssertEqual(preview.frame.maxY, controls.frame.minY, accuracy: 1,
                        "The trackpad must reach the controls, including the lower black area.")
+        let switcher = app.buttons["computer-session-shortcut-app-switcher"]
+        switcher.tap()
+        XCTAssertEqual(switcher.value as? String, "Open, Command held")
+        app.buttons["computer-session-key-tab"].tap()
+        XCTAssertEqual(switcher.value as? String, "Open, Command held")
+        app.buttons["computer-session-key-escape"].tap()
+        XCTAssertEqual(switcher.value as? String, "Closed")
+        switcher.tap()
+        switcher.tap()
+        XCTAssertEqual(switcher.value as? String, "Closed")
         app.buttons["computer-session-keyboard"].tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         assertComputerControlRow(app)
@@ -815,11 +831,19 @@ import UIKit
         XCTAssertTrue(copy.waitForExistence(timeout: 5))
         copy.tap()
         XCTAssertTrue(app.staticTexts["Copied from Mac"].waitForExistence(timeout: 5))
-        retainMenuScreenshot(app, name: "Computer session control active")
+        retainMenuScreenshot(app, name: "Computer session control active", fullScreen: true)
 
+        switcher.tap()
+        XCTAssertEqual(switcher.value as? String, "Open, Command held")
         app.buttons["computer-session-done"].tap()
         XCTAssertTrue(takeControl.waitForExistence(timeout: 5))
         XCTAssertFalse(active.exists)
+        takeControl.tap()
+        XCTAssertTrue(switcher.waitForExistence(timeout: 5))
+        XCTAssertEqual(switcher.value as? String, "Closed")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        retainMenuScreenshot(app, name: "Computer controls in landscape", fullScreen: true)
+        assertComputerControlRow(app)
         app.buttons["computer-session-close"].tap()
         XCTAssertFalse(computerContainer.waitForExistence(timeout: 2))
     }
@@ -838,10 +862,47 @@ import UIKit
         app.buttons["computer-session-keyboard"].tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         assertComputerControlRow(app)
-        retainMenuScreenshot(app, name: "Single control row at largest accessibility text size")
+        retainMenuScreenshot(app, name: "Single control row at largest accessibility text size", fullScreen: true)
         app.buttons["computer-session-done"].tap()
         XCTAssertTrue(takeControl.waitForExistence(timeout: 5))
         app.buttons["computer-session-close"].tap()
+    }
+
+    func testDiagnosticsComputerPickerSwitchesHostsAndReleasesControl() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture", "-connections-preview"]
+        app.launch()
+        let picker = app.buttons["computer-session-connection-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.tap()
+        let studio = app.buttons["computer-session-connection:studio"]
+        XCTAssertTrue(studio.waitForExistence(timeout: 5))
+        studio.tap()
+        XCTAssertTrue(app.buttons["computer-session-take-control"].waitForExistence(timeout: 5))
+        XCTAssertEqual(picker.value as? String, "Studio")
+        app.buttons["computer-session-take-control"].tap()
+        let switcher = app.buttons["computer-session-shortcut-app-switcher"]
+        XCTAssertTrue(switcher.waitForExistence(timeout: 5))
+        switcher.tap()
+        XCTAssertEqual(switcher.value as? String, "Open, Command held")
+        picker.tap()
+        let laptop = app.buttons["computer-session-connection:macbook"]
+        XCTAssertTrue(laptop.waitForExistence(timeout: 5))
+        laptop.tap()
+        XCTAssertTrue(app.buttons["computer-session-take-control"].waitForExistence(timeout: 5))
+        XCTAssertEqual(picker.value as? String, "Laptop")
+        XCTAssertFalse(switcher.exists)
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+        app.buttons["computer-session-take-control"].tap()
+        XCTAssertTrue(switcher.waitForExistence(timeout: 5))
+        XCTAssertEqual(switcher.value as? String, "Closed")
+        picker.tap()
+        app.buttons["computer-session-connection:macbook"].tap()
+        XCTAssertTrue(switcher.exists, "Reselecting the same computer preserves the session.")
+        retainMenuScreenshot(app, name: "Computer picker switched to Laptop", fullScreen: true)
+        app.buttons["computer-session-close"].tap()
+        XCTAssertTrue(app.staticTexts["Computer viewer closed"].waitForExistence(timeout: 5))
     }
 
     func testDiagnosticsComputerPointerModeMenuDoesNotOpenKeyboard() throws {
@@ -914,6 +975,17 @@ import UIKit
         }
         for frame in frames {
             XCTAssertEqual(frame.midY, frames[0].midY, accuracy: 1, "Essential controls must share one row.")
+        }
+        let shortcuts = ["all-windows", "app-windows", "next-window", "app-switcher"].map {
+            app.buttons["computer-session-shortcut-" + $0]
+        }
+        for shortcut in shortcuts {
+            XCTAssertTrue(shortcut.isHittable)
+            XCTAssertGreaterThanOrEqual(shortcut.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(shortcut.frame.height, 44)
+            XCTAssertEqual(shortcut.frame.midY, shortcuts[0].frame.midY, accuracy: 1)
+            XCTAssertLessThanOrEqual(shortcut.frame.maxY, frames[0].minY + 1,
+                                     "Shortcuts have their own row above the essential controls.")
         }
         if app.keyboards.firstMatch.exists {
             XCTAssertLessThanOrEqual(frames[0].maxY, app.keyboards.firstMatch.frame.minY + 2)
@@ -1368,8 +1440,8 @@ import UIKit
         selectComputerMoreAction(app, identifier: "computer-session-recenter")
         assertComputerMoreMenuExcludesTeaching(app)
         let trackpadY: CGFloat = 0.12
-        let status = app.descendants(matching: .any).matching(identifier: "computer-session-status").firstMatch
-        let sourceDescription = status.value as? String ?? ""
+        let header = app.descendants(matching: .any).matching(identifier: "computer-session-header").firstMatch
+        let sourceDescription = header.value as? String ?? ""
         let dimensions = sourceDescription.split(separator: "·").last?.split(separator: "×").compactMap {
             Double($0.trimmingCharacters(in: .whitespaces))
         } ?? []
@@ -1666,11 +1738,9 @@ import UIKit
         // This wait is the manual gesture handoff. The coordinator then presses
         // Stop control on the Mac; the phone must return to view-only. The test
         // injects no pointer or keyboard input during the handoff.
-        let viewOnly = app.descendants(matching: .any)
-            .matching(identifier: "computer-session-view-only").firstMatch
         let externallyRevoked = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
-                takeControl.exists && viewOnly.exists && !active.exists
+                takeControl.exists && !active.exists
             },
             object: nil
         )
@@ -1680,7 +1750,6 @@ import UIKit
             "The phone did not leave active control after the external Mac revocation."
         )
         XCTAssertTrue(takeControl.exists)
-        XCTAssertTrue(viewOnly.exists)
         XCTAssertFalse(active.exists)
     }
 
@@ -1702,8 +1771,8 @@ import UIKit
         }
     }
 
-    private func retainMenuScreenshot(_ app: XCUIApplication, name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+    private func retainMenuScreenshot(_ app: XCUIApplication, name: String, fullScreen: Bool = false) {
+        let attachment = XCTAttachment(screenshot: fullScreen ? XCUIScreen.main.screenshot() : app.screenshot())
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

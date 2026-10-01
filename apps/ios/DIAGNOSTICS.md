@@ -143,6 +143,31 @@ The optional `WonderUITests/WonderUITests/testLiveImagePreview` case expects a d
 
 `WonderUITests/WonderUITests/testLiveInlineImageScrolling` uses the paired `Wonder iOS` conversation with an existing working image. It expands the image's Working disclosure, scrolls to a fully visible preview, retains its stable accessibility identity, and measures ten sets of three scroll round trips. It collapses the disclosure afterward. `testLiveWorkingImageDisclosure` checks ten expand/load/collapse cycles and verifies that the image disappears when Working is collapsed. Both send no messages. Missing pairing is a skip; failure to reach the image is a failure. Retain exported image attachments and available screen recordings alongside the metrics, since row-position jumps can happen without a long frame stall. Diagnostics records image download and thumbnail decode durations separately, plus content-free cache-hit counts. Thumbnail tests cover fixed loading/failure geometry, revision and connection invalidation, deduplication, bounded work, cancellation and eviction.
 
+## Computer controls
+
+Computer view keeps Refresh beside More and exposes its live/unavailable status
+through the green/red dot's accessibility value. The Mac-name picker switches
+only the computer viewer: it closes the previous receiver and releases its
+control lease before opening a host-level view on the selected saved connection.
+The presenting chat and its draft stay on their original connection.
+
+While control is active, the upper row sends the default macOS All windows,
+App windows and Next window shortcuts. Command-Tab opens the native app switcher
+and holds Command. Tab moves through it; another Command-Tab tap or Return
+chooses the highlighted app, Escape cancels, and clicking an app releases Command.
+Other shortcuts, text entry and clipboard actions cancel the switcher first.
+Done, backgrounding, disconnect and host changes use the existing release-all
+lease cleanup. Apps/Launchpad is not exposed because the input protocol does not
+support its Fn modifier. These defaults can differ from customized Mac shortcuts.
+
+`testComputerAppSwitcherHoldsCommandUntilSelectionOrCancellation` owns the ordered
+held-key contract. The existing computer UI fixtures check both 44-point control
+rows, native keyboard use, unavailable status and zoom, while
+`testDiagnosticsComputerPickerSwitchesHostsAndReleasesControl` checks two saved
+hosts, held-switcher cleanup and same-host reselection. Run the focused fixtures
+on iPhone and iPad, including the largest accessibility text size. Fixtures do
+not prove that a real Mac's app switcher or customized shortcuts respond.
+
 ## Bot startup and appearance regression
 
 `testConnectedAppsKeepNamesAndIconsAcrossFamilies` uses the existing synthetic

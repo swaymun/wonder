@@ -20,6 +20,10 @@ private struct WonderRoot: View {
     @ObservedObject var preview: ConnectionModel
 
     var body: some View {
+        content.environmentObject(library)
+    }
+
+    @ViewBuilder private var content: some View {
         #if WONDER_DIAGNOSTICS
         if ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps") { DiagnosticConnectedAppsFixtureView() }
         else if DiagnosticSubagentFixture.chatLayoutFixture { DiagnosticChatLayoutFixtureView() }

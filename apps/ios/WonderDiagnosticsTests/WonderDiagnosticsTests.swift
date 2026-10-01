@@ -2024,6 +2024,31 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertTrue([ComputerControlState.viewOnly, .starting, .active].map(\.title).contains("Starting control…"))
     }
 
+    func testComputerAppSwitcherHoldsCommandUntilSelectionOrCancellation() {
+        var switcher = ComputerAppSwitcher()
+        let open: [ComputerInputAction] = [.key(key: "command", phase: "down", modifiers: 8),
+                                           .key(key: "tab", phase: "press", modifiers: 8)]
+        let release: [ComputerInputAction] = [.key(key: "command", phase: "up", modifiers: 0)]
+        XCTAssertEqual(switcher.toggle(), open)
+        XCTAssertTrue(switcher.isPresented)
+        XCTAssertEqual(switcher.key("tab"), [.key(key: "tab", phase: "press", modifiers: 8)])
+        XCTAssertTrue(switcher.isPresented)
+        XCTAssertEqual(switcher.key("left"), [.key(key: "left", phase: "press", modifiers: 8)])
+        XCTAssertEqual(switcher.toggle(), release)
+        XCTAssertFalse(switcher.isPresented)
+        XCTAssertTrue(switcher.finish().isEmpty)
+        XCTAssertEqual(switcher.toggle(), open)
+        XCTAssertEqual(switcher.key("escape"), [.key(key: "escape", phase: "press", modifiers: 8)] + release)
+        XCTAssertFalse(switcher.isPresented)
+        XCTAssertEqual(switcher.toggle(), open)
+        XCTAssertEqual(switcher.key("delete"), [.key(key: "escape", phase: "press", modifiers: 8)] + release
+                       + [.key(key: "delete", phase: "press", modifiers: 0)])
+        XCTAssertFalse(switcher.isPresented)
+        XCTAssertEqual(switcher.toggle(), open)
+        XCTAssertEqual(switcher.key("return"), release)
+        XCTAssertFalse(switcher.isPresented)
+    }
+
     @MainActor func testComputerKeyboardCommitsCompositionWithoutDuplicatingMarkedText() {
         var input = ComputerKeyboardComposition()
         XCTAssertEqual(input.update("ni", hasMarkedText: true), [])

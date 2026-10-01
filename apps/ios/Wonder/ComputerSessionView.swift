@@ -48,6 +48,8 @@ final class ComputerSessionModel: ObservableObject {
     @Published private(set) var zoomScale: CGFloat = 1
     @Published private(set) var viewportCenter = CGPoint(x: 0.5, y: 0.5)
     @Published private(set) var keyboardRevision: UInt64 = 0
+    @Published private var appSwitcher = ComputerAppSwitcher()
+    var isAppSwitcherPresented: Bool { appSwitcher.isPresented }
     @Published var inputMode: ComputerInputMode {
         didSet {
             guard inputMode != oldValue else { return }
@@ -334,6 +336,7 @@ final class ComputerSessionModel: ObservableObject {
             keyboardPresented = false
             return
         }
+        cancelAppSwitcher()
         keyboardPresented.toggle()
     }
 
@@ -344,17 +347,42 @@ final class ComputerSessionModel: ObservableObject {
             controlMessage = "Keep text under 4,096 characters and use ordinary text."
             return
         }
+        cancelAppSwitcher()
         enqueueInput([.text(text)])
     }
 
     func sendKey(_ key: String) {
         guard isControlActive else { return }
         keyboardRevision &+= 1
-        enqueueInput([.key(key: key, phase: "press", modifiers: 0)])
+        enqueueInput(appSwitcher.key(key))
+    }
+
+    func toggleAppSwitcher() {
+        guard isControlActive else { return }
+        finishPointerDrag()
+        keyboardRevision &+= 1
+        // Keep Command held so opening the switcher does not immediately
+        // activate the next app. The owner will try this interaction first.
+        enqueueInput(appSwitcher.toggle())
+    }
+
+    func sendShortcut(key: String, modifiers: UInt32) {
+        guard isControlActive else { return }
+        finishPointerDrag()
+        keyboardRevision &+= 1
+        let actions = appSwitcher.finish(cancel: true)
+            + [.key(key: key, phase: "press", modifiers: modifiers)]
+        enqueueInput(actions)
+    }
+
+    private func cancelAppSwitcher() {
+        let actions = appSwitcher.finish(cancel: true)
+        if !actions.isEmpty { enqueueInput(actions) }
     }
 
     func pasteFromPhone() {
         guard isControlActive else { return }
+        cancelAppSwitcher()
         guard let text = UIPasteboard.general.string, !text.isEmpty else {
             controlMessage = "There is no text on this phone to paste."
             return
@@ -371,6 +399,7 @@ final class ComputerSessionModel: ObservableObject {
 
     func copyFromMac() {
         guard isControlActive else { return }
+        cancelAppSwitcher()
         enqueueInput([.clipboard(operation: "copyToPhone", text: nil)])
     }
 
@@ -384,6 +413,7 @@ final class ComputerSessionModel: ObservableObject {
             failClosed("The keyboard input was too large or contained unsupported characters. Take control again to continue.")
             return
         }
+        cancelAppSwitcher()
         for start in stride(from: 0, to: actions.count, by: 32) {
             enqueueInput(Array(actions[start..<min(start + 32, actions.count)]))
         }
@@ -400,7 +430,7 @@ final class ComputerSessionModel: ObservableObject {
         let actions: [ComputerInputAction] = [
             .pointer(x: Double(pointer.x), y: Double(pointer.y), phase: "down", button: button),
             .pointer(x: Double(pointer.x), y: Double(pointer.y), phase: "up", button: button)
-        ]
+        ] + appSwitcher.finish()
         enqueueInput(actions)
     }
 
@@ -639,6 +669,7 @@ final class ComputerSessionModel: ObservableObject {
         heldPointerButton = nil
         heldPointerPoint = nil
         keyboardPresented = false
+        appSwitcher = ComputerAppSwitcher()
         keyboardRevision &+= 1
     }
 
@@ -943,32 +974,55 @@ private struct AuthenticatedComputerSignalingTransport: ComputerSignalingTranspo
 }
 
 struct ComputerSessionView: View {
+    @EnvironmentObject private var library: ConnectionLibrary
+    let model: ConnectionModel
+    let chat: ChatSummary
+    @State private var selectedModel: ConnectionModel?
+
+    var body: some View {
+        let currentModel = selectedModel ?? model
+        let selectedChat = selectedModel == nil ? chat : ChatSummary(
+            conversationId: "wonder-host-view", botId: nil, title: "Computer", lastMessagePreview: nil,
+            lastMessageAt: nil, messageCount: 0, deliveryState: nil, hasUnread: false, isArchived: false, isPinned: false
+        )
+        ComputerConnectionSessionView(model: currentModel, chat: selectedChat, library: library) { saved in
+            guard let current = library.saved.connections.first(where: {
+                $0.credential.hostInstallationId == saved.credential.hostInstallationId
+                    && $0.credential.deviceId == saved.credential.deviceId && !$0.requiresPairing
+            }) else { return }
+            selectedModel = library.model(for: current)
+        }
+        // A new host/device owns a new receiver and input lease. Chat and draft
+        // selection in the presenting screen stay with their original Mac.
+        .id(currentModel.connection.map { $0.credential.hostInstallationId + ":" + $0.credential.deviceId } ?? "fixture")
+    }
+}
+
+private struct ComputerConnectionSessionView: View {
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
+    @ObservedObject var library: ConnectionLibrary
+    let selectConnection: (SavedConnection) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var sessionModel: ComputerSessionModel
 
-    init(model: ConnectionModel, chat: ChatSummary) {
+    init(model: ConnectionModel, chat: ChatSummary, library: ConnectionLibrary,
+         selectConnection: @escaping (SavedConnection) -> Void) {
         self.model = model
         self.chat = chat
+        self.library = library
+        self.selectConnection = selectConnection
         let computer = ComputerSessionModel(model: model, chat: chat)
         _sessionModel = StateObject(wrappedValue: computer)
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            if let session = sessionModel.session {
-                ComputerSessionHeader(model: model, session: session, receiverState: sessionModel.receiverState)
-            } else {
-                HStack(spacing: 10) {
-                    if sessionModel.isLoading { ProgressView() }
-                    Text(sessionModel.isClosed ? "Computer view closed" : sessionModel.isLoading ? "Opening computer view…" : "Computer view")
-                        .font(.headline)
-                    Spacer()
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
+            ComputerSessionHeader(model: model, library: library, session: sessionModel.session, receiverState: sessionModel.receiverState) { saved in
+                await closeComputer()
+                guard !Task.isCancelled else { return }
+                selectConnection(saved)
             }
 
             ComputerViewport(model: sessionModel)
@@ -1004,6 +1058,20 @@ struct ComputerSessionView: View {
                     }
                 }
                 .accessibilityIdentifier("computer-session-close")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    Task {
+                        if sessionModel.failure != nil { await sessionModel.retry() }
+                        else { await sessionModel.refresh() }
+                    }
+                } label: {
+                    if sessionModel.isLoading { ProgressView() }
+                    else { Label("Refresh", systemImage: "arrow.clockwise") }
+                }
+                .disabled(sessionModel.isLoading || sessionModel.isClosed || sessionModel.isFixture)
+                .accessibilityLabel("Refresh")
+                .accessibilityIdentifier("computer-session-refresh")
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -1076,35 +1144,106 @@ struct ComputerSessionView: View {
 
 private struct ComputerSessionHeader: View {
     @ObservedObject var model: ConnectionModel
-    let session: ComputerSession
+    @ObservedObject var library: ConnectionLibrary
+    let session: ComputerSession?
     let receiverState: ComputerReceiverState
+    let selectConnection: (SavedConnection) async -> Void
+    @State private var showingConnections = false
+    @State private var switching = false
+    @State private var candidates: [String: ConnectionModel] = [:]
+    @State private var requestedConnection: SavedConnection?
 
     private var statusTitle: String {
-        session.state == .unavailable ? session.state.title : receiverState.title
+        session?.state == .unavailable ? "Unavailable" : receiverState.title
     }
 
     private var sourceDescription: String {
-        guard let name = session.source.name ?? session.source.kind else { return "Source not selected" }
-        if let width = session.source.width, let height = session.source.height {
-            return "\(name) · \(width) × \(height)"
-        }
+        guard let source = session?.source, let name = source.name ?? source.kind else { return "Source not selected" }
+        if let width = source.width, let height = source.height { return "\(name) · \(width) × \(height)" }
         return name
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            Label(statusTitle, systemImage: session.state == .unavailable ? "nosign" : "circle.fill")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(session.state == .unavailable ? .secondary : .primary)
+            Circle()
+                .fill(session?.state == .live && receiverState == .live ? Color.green : Color.red)
+                .frame(width: 10, height: 10)
+                .accessibilityLabel("Computer view status")
+                .accessibilityValue(statusTitle)
+                .accessibilityIdentifier("computer-session-status")
             Spacer(minLength: 8)
-            Text(model.macName).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+            Button {
+                candidates = Dictionary(uniqueKeysWithValues: library.saved.connections.map {
+                    ($0.credential.hostInstallationId, library.model(for: $0))
+                })
+                showingConnections = true
+            } label: {
+                HStack(spacing: 6) {
+                    Text(model.macName).lineLimit(1)
+                    if switching { ProgressView().controlSize(.small) }
+                    else { Image(systemName: "chevron.down").font(.caption.weight(.semibold)) }
+                }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .font(.footnote).foregroundStyle(.primary).buttonStyle(.plain)
+            .disabled(switching)
+            .accessibilityLabel("Computer")
+            .accessibilityValue(model.macName)
+            .accessibilityIdentifier("computer-session-connection-picker")
+            .popover(isPresented: $showingConnections, arrowEdge: .top) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(library.saved.connections, id: \.credential.hostInstallationId) { saved in
+                            if let candidate = candidates[saved.credential.hostInstallationId] {
+                                let connected = !candidate.accessEnded && candidate.macConnected == true
+                                let selected = saved.credential.hostInstallationId == model.connection?.credential.hostInstallationId
+                                let detail = candidate.accessEnded ? "Access ended" : connected ? "Connected" : candidate.macConnected == false ? "Offline" : "Connecting"
+                                Button {
+                                    showingConnections = false
+                                    guard !selected else { return }
+                                    switching = true
+                                    requestedConnection = saved
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "checkmark").opacity(selected ? 1 : 0).frame(width: 16)
+                                        Text(candidate.macName).lineLimit(2)
+                                        Circle().fill(connected ? Color.green : Color.red)
+                                            .frame(width: 7, height: 7).accessibilityHidden(true)
+                                        Spacer(minLength: 12)
+                                    }
+                                    .frame(minHeight: 44).contentShape(Rectangle())
+                                }
+                                .disabled(candidate.accessEnded || saved.requiresPairing)
+                                .accessibilityLabel(candidate.macName)
+                                .accessibilityValue(selected ? "\(detail), Selected" : detail)
+                                .accessibilityIdentifier("computer-session-connection:" + saved.credential.hostInstallationId)
+                            }
+                        }
+                        if library.saved.connections.isEmpty { Text("No saved computers").foregroundStyle(.secondary) }
+                    }
+                    .font(.body).foregroundStyle(.primary).buttonStyle(.plain)
+                    .padding(.horizontal, 14).padding(.vertical, 6)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(idealWidth: 280, maxWidth: 320,
+                       idealHeight: CGFloat(max(library.saved.connections.count, 1)) * 44 + 12,
+                       maxHeight: CGFloat(max(library.saved.connections.count, 1)) * 44 + 12)
+                .presentationCompactAdaptation(.popover)
+            }
         }
         .frame(minHeight: 36)
         .padding(.horizontal, 16)
         .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityValue(sourceDescription)
-        .accessibilityIdentifier("computer-session-status")
+        .accessibilityIdentifier("computer-session-header")
+        .task(id: requestedConnection?.credential.hostInstallationId) {
+            guard let requestedConnection else { return }
+            await selectConnection(requestedConnection)
+            guard !Task.isCancelled else { return }
+            switching = false
+        }
     }
 }
 
@@ -1235,6 +1374,23 @@ struct ComputerSessionControls: View {
             }
             if model.isControlActive {
                 HStack(spacing: 4) {
+                    shortcutButton("Windows", symbol: "rectangle.3.group", label: "All windows, Control Up Arrow",
+                                   identifier: "all-windows") { model.sendShortcut(key: "up", modifiers: 2) }
+                    shortcutButton("App windows", symbol: "macwindow", label: "App windows, Control Down Arrow",
+                                   identifier: "app-windows") { model.sendShortcut(key: "down", modifiers: 2) }
+                    shortcutButton("Next window", symbol: "rectangle.on.rectangle", label: "Next window, Command Grave",
+                                   identifier: "next-window") { model.sendShortcut(key: "`", modifiers: 8) }
+                    shortcutButton(model.isAppSwitcherPresented ? "Choose app" : "⌘ Tab", symbol: "command",
+                                   label: model.isAppSwitcherPresented ? "Choose highlighted app" : "Show app switcher, Command Tab",
+                                   identifier: "app-switcher") { model.toggleAppSwitcher() }
+                        .background(model.isAppSwitcherPresented ? Color.accentColor.opacity(0.15) : .clear, in: Capsule())
+                        .accessibilityValue(model.isAppSwitcherPresented ? "Open, Command held" : "Closed")
+                        .accessibilityHint("Opens and holds the Mac app switcher. Use Tab to move, tap again to choose, or Escape to cancel.")
+                }
+                .font(.caption)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("computer-session-shortcuts-row")
+                HStack(spacing: 4) {
                     keyButton("Esc", key: "escape", label: "Escape", symbol: "escape")
                     keyButton("Tab", key: "tab", label: "Tab", symbol: "arrow.right.to.line")
                     Menu {
@@ -1274,30 +1430,25 @@ struct ComputerSessionControls: View {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Starting control…").font(.footnote)
-                    Spacer()
                 }
+                .frame(maxWidth: .infinity)
                 .frame(minHeight: 44)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("computer-session-waiting")
             } else {
-                HStack(spacing: 8) {
-                    Text("View only")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("computer-session-view-only")
-                    Spacer(minLength: 4)
-                    if model.controlAvailable {
+                if model.controlAvailable {
+                    HStack {
+                        Spacer(minLength: 0)
                         Button { model.takeControl() } label: {
-                            Text("Take control").frame(minHeight: 44)
+                            Text("Take control").foregroundStyle(.white)
+                                .padding(.horizontal, 14).frame(minHeight: 44)
                         }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .disabled(!model.canTakeControl)
                         .accessibilityIdentifier("computer-session-take-control")
+                        Spacer(minLength: 0)
                     }
-                    Button { Task { await model.refresh() } } label: {
-                        Image(systemName: "arrow.clockwise").frame(width: 44, height: 44)
-                    }
-                    .accessibilityLabel("Refresh")
-                    .disabled(model.isLoading || model.session == nil || model.isFixture)
-                    .accessibilityIdentifier("computer-session-refresh")
                 }
             }
         }
@@ -1306,7 +1457,7 @@ struct ComputerSessionControls: View {
         .font(.body)
         .foregroundStyle(Color.accentColor)
         .buttonStyle(.plain)
-        .background(Color(uiColor: .secondarySystemBackground))
+        .background(model.isControlActive ? Color(uiColor: .secondarySystemBackground) : Color(uiColor: .systemBackground))
         .background(alignment: .bottomLeading) {
             ComputerNativeKeyboard(
                 presented: model.isControlActive && model.keyboardPresented,
@@ -1319,6 +1470,20 @@ struct ComputerSessionControls: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("computer-session-controls-row")
+    }
+
+    private func shortcutButton(_ title: String, symbol: String, label: String,
+                                identifier: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Group {
+                if dynamicTypeSize.isAccessibilitySize { Image(systemName: symbol) }
+                else { Text(title).lineLimit(1) }
+            }
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("computer-session-shortcut-" + identifier)
     }
 
     private func keyButton(_ title: String, key: String, label: String, symbol: String) -> some View {
