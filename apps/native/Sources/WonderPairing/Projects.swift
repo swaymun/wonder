@@ -47,10 +47,13 @@ public struct ProjectsResponse: Codable, Sendable {
     public let families: [ProjectFamilyAvailability]
     /// 1 when the host accepts `claudeApproval` and `planMode`; nil on older hosts.
     public let modesVersion: Int?
+    /// 1 when the host supports provider-synchronized Codex archiving.
+    public let archiveVersion: Int?
     /// Pinned threads across included projects, most recent first; nil on older hosts.
     public let pinned: [PinnedProjectThread]?
-    public init(projects: [ProjectSummary], families: [ProjectFamilyAvailability], modesVersion: Int? = nil, pinned: [PinnedProjectThread]? = nil) {
+    public init(projects: [ProjectSummary], families: [ProjectFamilyAvailability], modesVersion: Int? = nil, pinned: [PinnedProjectThread]? = nil, archiveVersion: Int? = nil) {
         self.projects = projects; self.families = families; self.modesVersion = modesVersion; self.pinned = pinned
+        self.archiveVersion = archiveVersion
     }
 }
 
@@ -259,6 +262,8 @@ public struct ProjectConversationDetail: Codable, Hashable, Sendable {
     public let isPinned: Bool
     public let hasUnread: Bool
     public let hasNativeSession: Bool
+    /// nil on older hosts; the provider owns this state.
+    public let isArchived: Bool?
     public let folderInProject: Bool
     public let notice: String?
     /// nil on hosts without project modes; see `ProjectsResponse.modesVersion`.

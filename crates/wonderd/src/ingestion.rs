@@ -1184,7 +1184,18 @@ for line in sys.stdin:
         if os.path.exists(root + '/crash-after-execution'): sys.exit(0)
         result = {'turn':{'id':'turn'}}
     elif method == 'thread/resume': result = {'thread':child_thread()} if r.get('params',{}).get('threadId') == 'child-thread' else {'thread':{'status':{'type':'idle'}}}
-    elif method == 'thread/list': result = {'data':[child_thread(), {'id':'ordinary-task','parentThreadId':None,'source':'appServer','status':{'type':'idle'},'canAcceptDirectInput':True}] if os.path.exists(root + '/child-fixture') and not r.get('params',{}).get('archived',False) else [], 'nextCursor':None}
+    elif method == 'thread/list':
+        if os.path.exists(root + '/archive-fixture'):
+            archived = os.path.exists(root + '/archived-thread')
+            result = {'data':[idle['thread']] if r.get('params',{}).get('archived',False) == archived else [], 'nextCursor':None}
+        else: result = {'data':[child_thread(), {'id':'ordinary-task','parentThreadId':None,'source':'appServer','status':{'type':'idle'},'canAcceptDirectInput':True}] if os.path.exists(root + '/child-fixture') and not r.get('params',{}).get('archived',False) else [], 'nextCursor':None}
+    elif method in ('thread/archive','thread/unarchive') and os.path.exists(root + '/archive-fixture'):
+        if os.path.exists(root + '/archive-fail'):
+            print(json.dumps({'id':r['id'],'error':{'code':-32000,'message':'Archive failed'}}),flush=True)
+            continue
+        if method == 'thread/archive': open(root + '/archived-thread','w').close()
+        elif os.path.exists(root + '/archived-thread'): os.remove(root + '/archived-thread')
+        result = {} if method == 'thread/archive' else {'thread':idle['thread']}
     elif method == 'turn/steer': result = {'turnId':'turn'}
     elif method == 'thread/items/list':
         if os.path.exists(root + '/long-history'):

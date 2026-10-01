@@ -269,6 +269,8 @@ struct ConnectionLifecycle: View {
                 while !Task.isCancelled {
                     do { try await Task.sleep(for: .seconds(30)) } catch { return }
                     await model.loadChats(force: true)
+                    guard !Task.isCancelled else { return }
+                    await model.projects.refresh()
                 }
             }
     }
@@ -315,7 +317,7 @@ private struct ShellMain: View {
             case .conversation(let host, let id):
                 if let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == host }) {
                     let model = library.model(for: saved)
-                    ShellConversation(model: model, projects: model.projects, chatID: id)
+                    ShellConversation(model: model, projects: model.projects, chatID: id) { shell.route = .newChat }
                         .id(shell.route)
                 } else {
                     ContentUnavailableView("Chat unavailable", systemImage: "bubble.left",
@@ -372,6 +374,7 @@ private struct ShellConversation: View {
     @ObservedObject var model: ConnectionModel
     @ObservedObject var projects: ProjectLibrary
     let chatID: String
+    var onArchived: () -> Void
     @State private var resolving = false
     @State private var unavailable = false
     var body: some View {
@@ -388,6 +391,9 @@ private struct ShellConversation: View {
             }
         }
         .task(id: chatID + ":" + String(model.macConnected == true)) { await resolve() }
+        .onChange(of: projects.details[chatID]?.isArchived) { _, archived in
+            if archived == true { onArchived() }
+        }
     }
 
     private func resolve() async {
@@ -395,6 +401,7 @@ private struct ShellConversation: View {
             projects.noteOpened(chatID)
             guard model.macConnected == true else { return }
             await projects.refreshDetail(chatID)
+            if !Task.isCancelled, projects.details[chatID]?.isArchived == true { onArchived() }
             return
         }
         // A notification or restored route can arrive before anything is saved.
@@ -402,7 +409,9 @@ private struct ShellConversation: View {
         resolving = true
         defer { resolving = false }
         do {
-            try await projects.loadDetail(chatID)
+            let detail = try await projects.loadDetail(chatID)
+            guard !Task.isCancelled else { return }
+            if detail.isArchived == true { onArchived(); return }
             projects.noteOpened(chatID)
             return
         } catch PairingFailure.response(404) {
@@ -832,10 +841,35 @@ struct SidebarView: View {
                 renaming = ThreadTarget(host: host, project: projectID, thread: thread)
             }
             Button("Copy resume command", systemImage: "terminal") { copyResumeCommand(host, projectID, thread) }
+            if thread.family == .codex, !thread.reference.hasPrefix("wonder:"), model(host)?.projects.supportsArchive == true {
+                Button("Archive", systemImage: "archivebox") { archive(host, projectID, thread) }
+                    .disabled(busyThread != nil || thread.isWorking || model(host)?.macConnected != true)
+                    .accessibilityIdentifier("archive-project-thread")
+            }
         }
     }
 
     // MARK: Actions
+
+    private func archive(_ host: String, _ projectID: String, _ thread: ProjectThreadSummary) {
+        guard busyThread == nil, let model = model(host) else { return }
+        let scope = model.assignmentScope
+        busyThread = thread.reference
+        Task {
+            defer { busyThread = nil }
+            do {
+                try await model.projects.archive(projectID, thread: thread)
+                guard scope == model.assignmentScope else { return }
+                if shell.selectedConversation?.host == host, shell.selectedConversation?.id == thread.conversationId {
+                    shell.route = .newChat
+                }
+            } catch is CancellationError {
+            } catch {
+                guard scope == model.assignmentScope else { return }
+                failure = "The chat couldn’t be archived. " + managementError(error)
+            }
+        }
+    }
 
     private func setUnread(_ host: String, _ projectID: String, _ thread: ProjectThreadSummary, _ unread: Bool) {
         guard busyThread == nil, let model = model(host) else { return }

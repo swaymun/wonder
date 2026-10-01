@@ -1225,6 +1225,69 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(model.projects.details["project-chat"]?.isPinned, false)
     }
 
+    // Contract: confirmed archives survive stale catalog responses without
+    // discarding drafts; a desktop restore makes the native thread visible again.
+    @MainActor func testProjectArchiveFencesStalePageAndPreservesDraftOnRestore() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        model.projects.forgetCache()
+        defer { MessageRecoveryURLProtocol.releaseHeld(); model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        // Reuse the Project fixtures with the native Codex family.
+        func codex(_ data: Data) -> Data {
+            Data(String(decoding: data, as: UTF8.self).replacingOccurrences(of: "claude", with: "codex").utf8)
+        }
+        let path = "/api/v1/project-conversations/project-chat"
+        let pagePath = "/api/v1/projects/project/threads"
+        let page = codex(projectPage(pinned: true))
+        let detail = codex(projectDetail(pinned: true))
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: codex(projectCatalog(pinned: true)))
+        await model.projects.refresh()
+        MessageRecoveryURLProtocol.enqueue(path: pagePath, body: page)
+        model.projects.loadThreads("project")
+        for _ in 0..<100 {
+            if model.projects.threads["project"]?.hasLoaded == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        MessageRecoveryURLProtocol.enqueue(path: path, body: detail)
+        try await model.projects.loadDetail("project-chat")
+        model.editDraft("Keep my unsent words", chat: "project-chat")
+        MessageRecoveryURLProtocol.enqueue(path: pagePath, body: page)
+        MessageRecoveryURLProtocol.hold(path: pagePath)
+        model.projects.loadThreads("project")
+        for _ in 0..<100 {
+            if MessageRecoveryURLProtocol.bodies(path: pagePath, includingEmpty: true).count >= 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        var archived = try XCTUnwrap(JSONSerialization.jsonObject(with: detail) as? [String: Any])
+        archived["isArchived"] = true
+        MessageRecoveryURLProtocol.enqueue(path: path, method: "PATCH", body: try JSONSerialization.data(withJSONObject: archived))
+        try await model.projects.updateConversation("project-chat", fields: ["isArchived": true])
+        MessageRecoveryURLProtocol.releaseHeld()
+        for _ in 0..<100 {
+            if model.projects.threads["project"]?.isLoading == false { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(model.projects.pinned.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(model.projects.threads["project"]).threads.isEmpty)
+        XCTAssertEqual(model.projects.details["project-chat"]?.isArchived, true)
+        XCTAssertEqual(model.composers["project-chat"]?.draft, "Keep my unsent words")
+
+        // A new catalog is authoritative after a restore in Codex Desktop.
+        MessageRecoveryURLProtocol.enqueue(path: pagePath, body: page)
+        model.projects.loadThreads("project")
+        for _ in 0..<100 {
+            if model.projects.threads["project"]?.isLoading == false { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        archived["isArchived"] = false
+        MessageRecoveryURLProtocol.enqueue(path: path, body: try JSONSerialization.data(withJSONObject: archived))
+        try await model.projects.loadDetail("project-chat")
+        XCTAssertEqual(model.projects.threads["project"]?.threads.first?.reference, "codex:fixture")
+        XCTAssertEqual(model.projects.details["project-chat"]?.isArchived, false)
+        XCTAssertEqual(model.composers["project-chat"]?.draft, "Keep my unsent words")
+    }
+
     // Contract: old hosts expose no plan controls or mode writes; a response
     // for an ended pairing cannot claim a successful mode save.
     @MainActor func testProjectPlanSaveRequiresCapabilityAndCurrentPairing() async throws {

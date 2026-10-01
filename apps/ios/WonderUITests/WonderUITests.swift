@@ -206,6 +206,37 @@ import UIKit
     // Contract: long-press read actions update the sidebar without opening the
     // chat, and seeing the latest Project reply clears the same unread dot.
     // Uses the existing synthetic transport and real product controls.
+    // Contract: failed native archives leave the pinned chat visible; a confirmed
+    // retry removes it from the real sidebar and leaves the open conversation.
+    func testProjectArchiveFailureAndConfirmedRemoval() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+            "-diagnostics-chat-layout-unsaved", "-diagnostics-project-archive"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let row = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        row.tap()
+        XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 15))
+        openSidebarIfNeeded(app)
+        row.press(forDuration: 1)
+        let archive = app.buttons["archive-project-thread"]
+        XCTAssertTrue(archive.waitForExistence(timeout: 5))
+        retainMenuScreenshot(app, name: "Codex archive menu")
+        archive.tap()
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 10))
+        app.alerts.buttons["OK"].tap()
+        XCTAssertTrue(row.exists, "A failed archive keeps the chat visible")
+        row.press(forDuration: 1)
+        XCTAssertTrue(archive.waitForExistence(timeout: 5))
+        archive.tap()
+        let removed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !row.exists }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 10), .completed)
+        XCTAssertFalse(app.buttons["Conversation details"].exists, "Archiving closes the selected chat")
+        retainMenuScreenshot(app, name: "Archived Codex chat removed")
+    }
+
     func testProjectThreadReadMenuAndVisibleAcknowledgement() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

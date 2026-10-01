@@ -14,6 +14,7 @@ import WonderPairing
     @Published private(set) var loadingProjects = false
     /// The host accepts Claude approval modes and plan mode.
     @Published private(set) var supportsModes = false
+    @Published private(set) var supportsArchive = false
     /// Pinned threads across this Mac's included projects.
     @Published private(set) var pinned: [PinnedProjectThread] = []
     /// Conversations the Mac reported gone while a saved copy was still open.
@@ -35,6 +36,8 @@ import WonderPairing
     /// Bumped by every local pin change so an older refresh cannot undo it.
     private var pinRevision = 0
     private var pendingPins: [String: Bool] = [:]
+    /// A response begun before a successful archive cannot put that row back.
+    private var archivedReferences: Set<String> = []
     private var detailRevisions: [String: Int] = [:]
     private var updatingDetails: Set<String> = []
     /// Fences older catalog/detail reads and automatic acknowledgements against
@@ -65,7 +68,8 @@ import WonderPairing
             threadTasks = [:]
             projects = []; families = []; loadingProjects = false; failure = nil
             threads = [:]; details = [:]; supportsProjects = nil; options = nil
-            supportsModes = false; pinned = []; unavailable = []; manuallyUnread = []; recentlyOpened = RecentlyOpenedConversations()
+            supportsModes = false; supportsArchive = false; pinned = []; unavailable = []; manuallyUnread = []; recentlyOpened = RecentlyOpenedConversations()
+            archivedReferences = []
             pendingPins = [:]; detailRevisions = [:]; updatingDetails = []; readRevisions = [:]
             restoreCache()
         }
@@ -109,8 +113,10 @@ import WonderPairing
             projects = response.projects
             families = response.families
             supportsModes = (response.modesVersion ?? 0) >= 1
+            supportsArchive = (response.archiveVersion ?? 0) >= 1
             // A pin changed while this request was in flight; the next refresh reports it.
             if pinRevision == pinRevisionAtStart, pendingPins.isEmpty, updatingDetails.isEmpty {
+                archivedReferences.subtract((response.pinned ?? []).map(\.thread.reference))
                 pinned = (response.pinned ?? []).map {
                     PinnedProjectThread(projectId: $0.projectId, thread: reconcilingRead($0.thread, startedAt: readsAtStart))
                 }
@@ -120,6 +126,9 @@ import WonderPairing
                 if previous[project.id] != project.rootsRevision { threads[project.id]?.nextCursor = nil }
                 loadThreads(project.id)
             }
+            // A desktop archive can happen in another app-server process.
+            // Refresh the open thread as well as catalog rows and pins.
+            if let current = model.selectedChat, model.isProject(current) { await refreshDetail(current.id) }
             saveCache()
         } catch PairingFailure.response(404) {
             guard isCurrent(scope) else { return }
@@ -255,6 +264,7 @@ import WonderPairing
             return current
         }
         details[conversationID] = detail
+        if detail.isArchived == true { removeArchivedRows(conversationID) }
         if unavailable.contains(conversationID) { unavailable.remove(conversationID) }
         model.registerProjectConversation(detail)
         trimDetails(keeping: conversationID)
@@ -278,14 +288,15 @@ import WonderPairing
         guard updatingDetails.insert(conversationID).inserted else { throw PairingFailure.response(409) }
         let changesPin = fields["isPinned"] != nil
         let changesRead = fields["hasUnread"] != nil
+        let changesArchive = fields["isArchived"] != nil
         detailRevisions[conversationID, default: 0] += 1
-        if changesPin { pinRevision += 1 }
+        if changesPin || changesArchive { pinRevision += 1 }
         if changesRead { readRevisions[conversationID, default: 0] += 1 }
         defer {
             if self.scope == scope, model.assignmentScope == scope {
                 updatingDetails.remove(conversationID)
                 detailRevisions[conversationID, default: 0] += 1
-                if changesPin { pinRevision += 1 }
+                if changesPin || changesArchive { pinRevision += 1 }
                 if changesRead { readRevisions[conversationID, default: 0] += 1 }
             }
         }
@@ -299,6 +310,11 @@ import WonderPairing
         }
         details[conversationID] = detail
         model.registerProjectConversation(detail)
+        if detail.isArchived == true {
+            removeArchivedRows(conversationID)
+            saveCache()
+            return
+        }
         for (project, var state) in threads {
             guard let index = state.threads.firstIndex(where: { $0.conversationId == conversationID }) else { continue }
             let old = state.threads[index]
@@ -324,8 +340,11 @@ import WonderPairing
     /// Reads started before a local pin save must not put the old pin back.
     /// Reads started during the optimistic sidebar change keep that state too.
     private func reconcilingPins(_ page: ProjectThreadsPage, startedAt revision: Int) -> ProjectThreadsPage {
-        guard revision != pinRevision || !pendingPins.isEmpty || !updatingDetails.isEmpty else { return page }
-        let rows = page.threads.map { row in
+        guard revision != pinRevision || !pendingPins.isEmpty || !updatingDetails.isEmpty else {
+            archivedReferences.subtract(page.threads.map(\.reference))
+            return page
+        }
+        let rows = page.threads.filter { !archivedReferences.contains($0.reference) }.map { row in
             if let value = pendingPins[row.reference] { return row.settingPinned(value) }
             if let id = row.conversationId, let detail = details[id] { return row.settingPinned(detail.isPinned) }
             if let current = threads.values.lazy.flatMap({ $0.threads }).first(where: { $0.reference == row.reference }) {
@@ -397,6 +416,23 @@ import WonderPairing
     func rename(_ projectID: String, thread: ProjectThreadSummary, to title: String) async throws {
         let conversation = try await attach(projectID, thread: thread)
         try await updateConversation(conversation, fields: ["title": title])
+    }
+
+    func archive(_ projectID: String, thread: ProjectThreadSummary) async throws {
+        guard supportsArchive, thread.family == .codex else { throw PairingFailure.response(422) }
+        let conversation = try await attach(projectID, thread: thread)
+        try await updateConversation(conversation, fields: ["isArchived": true])
+        await refresh()
+    }
+
+    private func removeArchivedRows(_ conversationID: String) {
+        for (project, var state) in threads {
+            for row in state.threads where row.conversationId == conversationID { archivedReferences.insert(row.reference) }
+            state.threads.removeAll { $0.conversationId == conversationID }
+            threads[project] = state
+        }
+        for row in pinned where row.thread.conversationId == conversationID { archivedReferences.insert(row.thread.reference) }
+        pinned.removeAll { $0.thread.conversationId == conversationID }
     }
 
     func hasUnread(_ conversationID: String) -> Bool {
@@ -545,7 +581,7 @@ extension ConnectionModel {
     func projectChat(_ detail: ProjectConversationDetail) -> ChatSummary {
         ChatSummary(conversationId: detail.conversationId, botId: nil, title: detail.title, lastMessagePreview: nil,
                     lastMessageAt: nil, messageCount: 0, deliveryState: nil, hasUnread: detail.hasUnread,
-                    isArchived: false, isPinned: detail.isPinned)
+                    isArchived: detail.isArchived == true, isPinned: detail.isPinned)
     }
     func projectDetail(_ chat: ChatSummary) -> ProjectConversationDetail? { projects.details[chat.id] }
 }

@@ -17,10 +17,17 @@ final class ProjectsTests: XCTestCase {
     func testHostResponsesDecode() throws {
         let projects = try JSONDecoder().decode(ProjectsResponse.self, from: Data(#"{"projects":[{"id":"p","name":"Codex P0","isIncluded":true,"isPinned":false,"rootsRevision":1,"folders":[{"id":"f","path":"/Users/owner/app","name":"app","isPrimary":true,"isAvailable":true}],"lastFamily":null,"lastUsedAt":null,"createdAt":"2026-09-30T02:18:38.447Z"}],"families":[{"family":"codex","available":true},{"family":"claude","available":true}]}"#.utf8))
         XCTAssertEqual(projects.projects.first?.primaryFolder?.path, "/Users/owner/app")
+        XCTAssertNil(projects.archiveVersion, "Older hosts do not offer Archive")
         let page = try JSONDecoder().decode(ProjectThreadsPage.self, from: Data(#"{"threads":[{"reference":"claude:a0b0","conversationId":"f861","title":"Wonder-p0","family":"claude","updatedAt":1790735086,"isPinned":false,"hasUnread":true,"isWorking":false}],"nextCursor":null,"partial":[]}"#.utf8))
         XCTAssertEqual(page.threads.first?.family, .claude)
         let detail = try JSONDecoder().decode(ProjectConversationDetail.self, from: Data(#"{"conversationId":"c","projectId":"p","projectName":"Codex P0","title":"t","family":"codex","model":"gpt-5.6-luna","effort":"low","accessMode":"read_only","workingFolder":"/w","workingFolderName":"w","isPinned":false,"hasUnread":false,"hasNativeSession":true,"folderInProject":true,"notice":null}"#.utf8))
         XCTAssertEqual(detail.accessMode, .readOnly)
+        XCTAssertNil(detail.isArchived)
+        let encoded = try JSONEncoder().encode(detail)
+        var archived = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        archived["isArchived"] = true
+        XCTAssertEqual(try JSONDecoder().decode(ProjectConversationDetail.self,
+            from: JSONSerialization.data(withJSONObject: archived)).isArchived, true)
     }
 
     // Contract: changing Macs never keeps a destination, provider or settings

@@ -256,6 +256,7 @@ pub(crate) struct ProjectConversationDetail {
     is_pinned: bool,
     has_unread: bool,
     has_native_session: bool,
+    is_archived: bool,
     folder_in_project: bool,
     notice: Option<String>,
 }
@@ -286,6 +287,7 @@ async fn conversation_detail(
         is_pinned: conversation.is_pinned,
         has_unread: conversation.has_unread,
         has_native_session: conversation.native_session_id.is_some(),
+        is_archived: codex_is_archived(state, conversation).await?,
         folder_in_project: project.root_for(&conversation.cwd).is_some(),
         notice: state
             .projects
@@ -295,6 +297,172 @@ async fn conversation_detail(
             .get(&conversation.conversation_id)
             .cloned(),
     })
+}
+
+/// Read provider-owned archive state without resuming a thread or relying on
+/// its unstable rollout path. A failed/incomplete catalog never means active.
+async fn archived_codex_ids(
+    state: &AppState,
+    conversations: &[StoredProjectConversation],
+) -> Result<HashSet<String>, String> {
+    let mut folders = HashSet::new();
+    for conversation in conversations
+        .iter()
+        .filter(|c| c.family == AgentFamily::Codex && c.native_session_id.is_some())
+    {
+        if conversation.provider_store != state.projects.codex_store {
+            return Err("This thread belongs to a different Codex history on your Mac.".into());
+        }
+        folders.insert(conversation.cwd.clone());
+    }
+    if folders.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let rpc = codex_rpc(state).await?;
+    let mut archived = HashSet::new();
+    let mut cursor: Option<String> = None;
+    let mut seen = HashSet::new();
+    for _ in 0..200 {
+        let page = result(
+            &rpc,
+            "thread/list",
+            json!({
+                "cwd": folders, "sourceKinds": CODEX_SOURCE_KINDS, "archived": true,
+                "useStateDbOnly": true, "limit": 100, "cursor": cursor,
+            }),
+        )
+        .await?;
+        let rows = page["data"]
+            .as_array()
+            .ok_or("Codex archive state is unavailable.")?;
+        for row in rows {
+            archived.insert(
+                row["id"]
+                    .as_str()
+                    .ok_or("Codex archive state is incomplete.")?
+                    .to_owned(),
+            );
+        }
+        cursor = match page.get("nextCursor") {
+            Some(Value::Null) => None,
+            Some(Value::String(value)) => Some(value.clone()),
+            _ => return Err("Codex archive state is incomplete.".into()),
+        };
+        let Some(next) = &cursor else {
+            return Ok(archived);
+        };
+        if !seen.insert(next.clone()) {
+            break;
+        }
+    }
+    Err("Codex archive state could not be fully refreshed. Try again.".into())
+}
+
+async fn codex_is_archived(
+    state: &AppState,
+    conversation: &StoredProjectConversation,
+) -> Result<bool, String> {
+    let archived = archived_codex_ids(state, std::slice::from_ref(conversation)).await?;
+    Ok(conversation
+        .native_session_id
+        .as_ref()
+        .is_some_and(|id| archived.contains(id)))
+}
+
+async fn set_archived(
+    state: &AppState,
+    conversation: &StoredProjectConversation,
+    archived: bool,
+) -> Result<(), (StatusCode, String)> {
+    let conflict = |message: &str| (StatusCode::CONFLICT, message.to_owned());
+    let unavailable = |message: String| (StatusCode::SERVICE_UNAVAILABLE, message);
+    if conversation.family != AgentFamily::Codex {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Archiving in Claude and Wonder together is not available yet.".into(),
+        ));
+    }
+    let Some(native) = conversation.native_session_id.as_deref() else {
+        return Err(conflict(
+            "Send the first message before archiving this thread.",
+        ));
+    };
+    // Serialize against Wonder dispatch and refuse unsettled user intent.
+    let _guard = state.dispatch_lock.lock().await;
+    if state
+        .store
+        .conversation_has_archive_blocking_work(&conversation.conversation_id)
+        .await
+        .map_err(|_| unavailable("The thread's work could not be checked. Try again.".into()))?
+    {
+        return Err(conflict(
+            "Finish or stop this thread's work and resolve its pending sends before archiving it.",
+        ));
+    }
+    if codex_is_archived(state, conversation)
+        .await
+        .map_err(unavailable)?
+        == archived
+    {
+        return Ok(()); // A lost response or a desktop action already completed it.
+    }
+    let rpc = codex_rpc(state).await.map_err(unavailable)?;
+    let read = result(&rpc, "thread/read", json!({"threadId": native}))
+        .await
+        .map_err(unavailable)?;
+    if read["thread"]["id"].as_str() != Some(native)
+        || read["thread"]["cwd"].as_str() != Some(conversation.cwd.as_str())
+    {
+        return Err(conflict(
+            "This thread's identity on your Mac changed. Reopen it before archiving.",
+        ));
+    }
+    if archived {
+        let turns = result(
+            &rpc,
+            "thread/turns/list",
+            json!({
+                "threadId": native, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded",
+            }),
+        )
+        .await
+        .map_err(unavailable)?;
+        if read["thread"]["status"]["type"].as_str() == Some("active")
+            || turns.pointer("/data/0/status").and_then(Value::as_str) == Some("inProgress")
+        {
+            return Err(conflict(
+                "This thread is still working on your Mac. Finish or stop it before archiving.",
+            ));
+        }
+        if !turns["data"].is_array() {
+            return Err(unavailable(
+                "This thread's work could not be checked. Try again.".into(),
+            ));
+        }
+    }
+    result(
+        &rpc,
+        if archived {
+            "thread/archive"
+        } else {
+            "thread/unarchive"
+        },
+        json!({"threadId": native}),
+    )
+    .await
+    .map_err(|_| {
+        unavailable(
+            "The archive change could not be confirmed. Refresh before trying again.".into(),
+        )
+    })?;
+    // Existing catalog pages were read before the mutation and can contain it.
+    state
+        .projects
+        .cursors
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +563,7 @@ struct ProjectsResponse {
     projects: Vec<ProjectSummary>,
     families: Vec<FamilyAvailability>,
     modes_version: u8,
+    archive_version: u8,
     pinned: Vec<PinnedThread>,
 }
 
@@ -440,7 +609,19 @@ pub(crate) async fn list(
         }
     };
     let mut pinned_threads = Vec::with_capacity(pinned.len());
+    let archived = match archived_codex_ids(&state, &pinned).await {
+        Ok(ids) => ids,
+        Err(message) => return error(StatusCode::SERVICE_UNAVAILABLE, message),
+    };
     for conversation in &pinned {
+        if conversation.family == AgentFamily::Codex
+            && conversation
+                .native_session_id
+                .as_ref()
+                .is_some_and(|id| archived.contains(id))
+        {
+            continue;
+        }
         pinned_threads.push(PinnedThread {
             project_id: conversation.project_id.clone(),
             thread: attached_summary(
@@ -468,6 +649,7 @@ pub(crate) async fn list(
         projects: projects.iter().map(project_summary).collect(),
         families,
         modes_version: MODES_VERSION,
+        archive_version: 1,
         pinned: pinned_threads,
     })
     .into_response()
@@ -1105,10 +1287,25 @@ pub(crate) async fn threads(
             .project_conversations(&project.id)
             .await
             .unwrap_or_default();
+        let archived = match archived_codex_ids(&state, &attached).await {
+            Ok(ids) => ids,
+            Err(_) => {
+                cursor.codex.failed = true;
+                HashSet::new()
+            }
+        };
         for conversation in attached
             .iter()
             .filter(|c| c.is_pinned || c.native_session_id.is_none())
         {
+            if conversation.family == AgentFamily::Codex
+                && conversation
+                    .native_session_id
+                    .as_ref()
+                    .is_some_and(|id| archived.contains(id))
+            {
+                continue;
+            }
             if let Some(native) = &conversation.native_session_id {
                 cursor
                     .emitted
@@ -1499,6 +1696,7 @@ pub(crate) async fn conversation(
 pub(crate) struct UpdateConversationRequest {
     title: Option<String>,
     is_pinned: Option<bool>,
+    is_archived: Option<bool>,
     has_unread: Option<bool>,
     model: Option<String>,
     #[serde(default, deserialize_with = "patch_effort")]
@@ -1567,6 +1765,32 @@ pub(crate) async fn update_conversation(
     let Ok(Some(existing)) = state.store.project_conversation(&id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if let Some(archived) = request.is_archived {
+        if request.title.is_some()
+            || request.is_pinned.is_some()
+            || request.has_unread.is_some()
+            || request.model.is_some()
+            || request.effort.is_some()
+            || request.access_mode.is_some()
+            || request.claude_approval.is_some()
+            || request.plan_mode.is_some()
+        {
+            return error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Save the archive change separately from other thread settings.",
+            );
+        }
+        if let Err((status, message)) = set_archived(&state, &existing, archived).await {
+            return error(status, message);
+        }
+        return match conversation_detail(&state, &existing).await {
+            Ok(detail) if detail.is_archived == archived => Json(detail).into_response(),
+            _ => error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The archive change could not be confirmed. Refresh before trying again.",
+            ),
+        };
+    }
     if request.model.is_some() || request.effort.is_some() {
         let model = request.model.as_deref().or(existing.model.as_deref());
         if let Err(message) = validate_model(
@@ -2078,6 +2302,9 @@ async fn dispatch_inner(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("This project conversation is unavailable.")?;
+    if codex_is_archived(state, &conversation).await? {
+        return Err("This thread is archived. Restore it on your Mac before sending.".into());
+    }
     let project = state
         .store
         .project(&conversation.project_id)
@@ -2971,6 +3198,171 @@ pub(crate) mod tests {
             .is_ok()
     }
 
+    // Contract: one provider-owned archive hides even pinned chats, failures
+    // preserve visibility, restart/retry retain identity, and desktop changes
+    // reconcile both ways without resuming archived work.
+    #[tokio::test]
+    async fn codex_archive_reconciles_pins_retry_restart_and_desktop_restore() {
+        let (dir, state, message) = handoff_fixture().await;
+        let conversation = state
+            .store
+            .project_conversation("project-chat")
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::write(dir.path().join("archive-fixture"), "").unwrap();
+        std::fs::write(
+            dir.path().join("idle-fixture.json"),
+            json!({"thread": {
+                "id": "thread", "cwd": conversation.cwd, "name": "Recovery", "updatedAt": 1,
+                "status": {"type": "idle"}, "parentThreadId": null,
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        state
+            .store
+            .update_project_conversation(
+                "project-chat",
+                ProjectConversationPatch {
+                    pinned: Some(true),
+                    ..Default::default()
+                },
+                "now",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            set_archived(&state, &conversation, true)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        state
+            .store
+            .update_message_delivery(&message.id, "completed", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("completed"), "").unwrap();
+
+        std::fs::write(dir.path().join("archive-fail"), "").unwrap();
+        assert_eq!(
+            set_archived(&state, &conversation, true)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            !conversation_detail(&state, &conversation)
+                .await
+                .unwrap()
+                .is_archived
+        );
+        std::fs::remove_file(dir.path().join("archive-fail")).unwrap();
+
+        let request: UpdateConversationRequest =
+            serde_json::from_value(json!({"isArchived": true})).unwrap();
+        let archived = update_conversation(
+            State(state.clone()),
+            Extension(OwnerAuthority),
+            Path("project-chat".into()),
+            Json(request),
+        )
+        .await;
+        let status = archived.status();
+        let body = axum::body::to_bytes(archived.into_body(), 100_000)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["isArchived"], true);
+        crate::tests::validate_http_contract("projectConversationDetail", &body);
+        assert!(
+            state
+                .store
+                .project_conversation("project-chat")
+                .await
+                .unwrap()
+                .unwrap()
+                .is_pinned
+        );
+        let library = list(State(state.clone()), Extension(OwnerAuthority)).await;
+        let body = axum::body::to_bytes(library.into_body(), 100_000)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["pinned"], json!([]));
+        let mut submitting = false;
+        assert!(dispatch_inner(&state, &message, &mut submitting)
+            .await
+            .unwrap_err()
+            .contains("archived"));
+        assert!(!submitting);
+        let attempts = std::fs::read_to_string(dir.path().join("requests"))
+            .unwrap()
+            .lines()
+            .filter(|method| *method == "thread/archive")
+            .count();
+        set_archived(&state, &conversation, true).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("requests"))
+                .unwrap()
+                .lines()
+                .filter(|method| *method == "thread/archive")
+                .count(),
+            attempts
+        );
+        state.projects.shutdown().await;
+        assert!(
+            conversation_detail(&state, &conversation)
+                .await
+                .unwrap()
+                .is_archived
+        );
+
+        // Desktop restoration does not call Wonder's mutation endpoint.
+        std::fs::remove_file(dir.path().join("archived-thread")).unwrap();
+        assert!(
+            !conversation_detail(&state, &conversation)
+                .await
+                .unwrap()
+                .is_archived
+        );
+        let library = list(State(state.clone()), Extension(OwnerAuthority)).await;
+        let body = axum::body::to_bytes(library.into_body(), 100_000)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["pinned"][0]["thread"]["conversationId"],
+            "project-chat"
+        );
+        // Desktop archive is likewise authoritative without a Wonder write.
+        std::fs::write(dir.path().join("archived-thread"), "").unwrap();
+        assert!(
+            conversation_detail(&state, &conversation)
+                .await
+                .unwrap()
+                .is_archived
+        );
+        set_archived(&state, &conversation, false).await.unwrap();
+        assert!(
+            !conversation_detail(&state, &conversation)
+                .await
+                .unwrap()
+                .is_archived
+        );
+        let mut claude = conversation.clone();
+        claude.family = AgentFamily::Claude;
+        assert_eq!(
+            set_archived(&state, &claude, true).await.unwrap_err().0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        state.projects.shutdown().await;
+    }
+
     // Contract: a lost terminal notification cannot leave a live-generation
     // receipt busy forever. The existing transport/SQLite owner checks exact
     // turn proof, paged history, durable intent and the actual OS writer lock.
@@ -3235,6 +3627,7 @@ pub(crate) mod tests {
                 available: true,
             }],
             modes_version: MODES_VERSION,
+            archive_version: 1,
             pinned: vec![PinnedThread {
                 project_id: "p1".into(),
                 thread: pinned,
@@ -3259,6 +3652,7 @@ pub(crate) mod tests {
             is_pinned: false,
             has_unread: false,
             has_native_session: true,
+            is_archived: false,
             folder_in_project: true,
             notice: None,
         })

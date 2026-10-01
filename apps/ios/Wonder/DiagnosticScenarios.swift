@@ -239,7 +239,8 @@ enum DiagnosticSubagentFixture {
     }
     static var approvalDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.approval-settings")! }
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
-    static var projectReadFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
+    static var projectArchiveFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-archive") }
+    static var projectReadFixture: Bool { projectArchiveFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
     static let hostID = "diagnostic-host"
     static let parentID = "fixture-parent-conversation"
     static let childID = "fixture-child-conversation"
@@ -368,6 +369,8 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var childRevision = 2
         var childStatus = "completed"
         var projectUnread = true
+        var projectArchived = false
+        var archiveFailures = 1
         var goalPresent = DiagnosticSubagentFixture.goalFixture
         var goalObjective = "Prepare a reliable beta launch with the Scout helper."
         var goalStatus = DiagnosticSubagentFixture.goalFixtureStatus
@@ -426,6 +429,9 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
     private func respond(method: String, path: String, body: Data?) {
         if DiagnosticSubagentFixture.projectReadFixture {
             let conversation = DiagnosticSubagentFixture.parentID
+            let archiveFixture = DiagnosticSubagentFixture.projectArchiveFixture
+            let family = archiveFixture ? "codex" : "claude"
+            let archived = Self.state.lock.withLock { Self.state.projectArchived }
             switch path {
             case "/api/v1/pairing/session/refresh-challenge":
                 let now = UInt64(Date().timeIntervalSince1970 * 1000)
@@ -438,20 +444,33 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                 finish(status: 200, body: json([
                     "projects": [["id": "read-project", "name": "Read status", "isIncluded": true, "isPinned": false,
                                   "rootsRevision": 1, "folders": [], "createdAt": "fixture"]],
-                    "families": [["family": "claude", "available": true]], "modesVersion": 1,
-                    "pinned": [["projectId": "read-project", "thread": projectReadThread()]]
+                    "families": [["family": family, "available": true]], "modesVersion": 1, "archiveVersion": 1,
+                    "pinned": archived ? [] : [["projectId": "read-project", "thread": projectReadThread()]]
                 ])); return
             case "/api/v1/projects/read-project/threads":
-                finish(status: 200, body: json(["threads": [projectReadThread()], "nextCursor": NSNull(), "partial": []])); return
+                finish(status: 200, body: json(["threads": archived ? [] : [projectReadThread()], "nextCursor": NSNull(), "partial": []])); return
+            case "/api/v1/projects/read-project/threads/attach":
+                finish(status: 200, body: json(projectReadThread())); return
+            case "/api/v1/conversations/\(conversation)/history/refresh":
+                finish(status: 200, body: json(["state": "completed"])); return
             case "/api/v1/project-conversations/\(conversation)":
-                if method == "PATCH", let fields = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any],
-                   let unread = fields["hasUnread"] as? Bool { Self.state.lock.withLock { Self.state.projectUnread = unread } }
+                if method == "PATCH", let fields = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any] {
+                    if let value = fields["isArchived"] as? Bool {
+                        let fail = Self.state.lock.withLock {
+                            if Self.state.archiveFailures > 0 { Self.state.archiveFailures -= 1; return true }
+                            Self.state.projectArchived = value; return false
+                        }
+                        if fail { finish(status: 503, body: Data("The archive could not be confirmed. Try again.".utf8)); return }
+                    }
+                    if let unread = fields["hasUnread"] as? Bool { Self.state.lock.withLock { Self.state.projectUnread = unread } }
+                }
                 finish(status: 200, body: json([
                     "conversationId": conversation, "projectId": "read-project", "projectName": "Read status",
-                    "title": "Read status fixture", "family": "claude", "model": "claude:sonnet", "effort": "high",
+                    "title": "Read status fixture", "family": family, "model": archiveFixture ? "gpt-fixture" : "claude:sonnet", "effort": "high",
                     "accessMode": "read_only", "workingFolder": "/fixture", "workingFolderName": "fixture",
                     "isPinned": true, "hasUnread": Self.state.lock.withLock { Self.state.projectUnread },
-                    "hasNativeSession": false, "folderInProject": true, "claudeApproval": "ask", "planMode": false
+                    "hasNativeSession": archiveFixture, "folderInProject": true, "claudeApproval": "ask", "planMode": false,
+                    "isArchived": Self.state.lock.withLock { Self.state.projectArchived }
                 ])); return
             case "/api/v1/conversations": finish(status: 200, body: Data("[]".utf8)); return
             case "/api/v1/conversations/\(conversation)" where method == "PATCH":
@@ -562,8 +581,9 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
     }
     private func projectReadThread() -> [String: Any] {
-        ["reference": "claude:read-fixture", "conversationId": DiagnosticSubagentFixture.parentID,
-         "title": "Read status fixture", "family": "claude", "updatedAt": 1, "isPinned": true,
+        let family = DiagnosticSubagentFixture.projectArchiveFixture ? "codex" : "claude"
+        return ["reference": "\(family):read-fixture", "conversationId": DiagnosticSubagentFixture.parentID,
+         "title": "Read status fixture", "family": family, "updatedAt": 1, "isPinned": true,
          "hasUnread": Self.state.lock.withLock { Self.state.projectUnread }, "isWorking": false]
     }
     private func goalValue() -> Any {

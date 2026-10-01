@@ -1018,6 +1018,8 @@ export interface ProjectsResponse {
   families: Array<{ family: AgentFamily; available: boolean }>;
   /** 1: the host accepts `claudeApproval` and `planMode` and reports `pinned`. */
   modesVersion: 1;
+  /** 1: Codex archive/restore changes the provider session and reconciles desktop archives. */
+  archiveVersion?: 1;
   /** Attached, pinned threads of included projects, most recent activity first, at most 50. */
   pinned: PinnedProjectThread[];
 }
@@ -1086,12 +1088,16 @@ export interface ProjectConversationDetail {
   isPinned: boolean;
   hasUnread: boolean;
   hasNativeSession: boolean;
+  /** Provider-owned archive state; absent on older hosts. */
+  isArchived?: boolean;
   folderInProject: boolean;
   notice: string | null;
 }
 export interface UpdateProjectConversationRequest {
   title?: string;
   isPinned?: boolean;
+  /** Codex native threads only. Submit separately from other settings. */
+  isArchived?: boolean;
   hasUnread?: boolean;
   model?: string;
   /** Omitted preserves the current effort; null clears it for a model without effort. */

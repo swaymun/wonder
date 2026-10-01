@@ -2122,6 +2122,7 @@
           }
         },
         "modesVersion": { "const": 1 },
+        "archiveVersion": { "const": 1 },
         "pinned": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/pinnedProjectThread" } }
       },
       "additionalProperties": false
@@ -2289,6 +2290,7 @@
         "isPinned": { "type": "boolean" },
         "hasUnread": { "type": "boolean" },
         "hasNativeSession": { "type": "boolean" },
+        "isArchived": { "type": "boolean" },
         "folderInProject": { "type": "boolean" },
         "notice": { "type": ["string", "null"] }
       },
@@ -2299,6 +2301,7 @@
       "properties": {
         "title": { "type": "string", "minLength": 1, "maxLength": 400 },
         "isPinned": { "type": "boolean" },
+        "isArchived": { "type": "boolean", "description": "Codex native threads only; save separately from other settings." },
         "hasUnread": { "type": "boolean" },
         "model": { "type": "string", "minLength": 1 },
         "effort": { "type": ["string", "null"], "minLength": 1 },

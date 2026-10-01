@@ -772,6 +772,14 @@ impl Store {
         Ok(active != 0)
     }
 
+    pub async fn conversation_has_archive_blocking_work(
+        &self,
+        conversation: &str,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=? AND state IN ('accepted_by_wonder','dispatching_to_codex','accepted_by_codex','streaming','uncertain'))")
+            .bind(conversation).fetch_one(&self.pool).await
+    }
+
     /// Claude SDK sessions already owned by Bots, excluded from project catalogs.
     pub async fn bot_claude_sessions(&self) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar("SELECT session_id FROM runtime_bindings WHERE agent_family='claude' AND execution_scope='bots' AND session_id IS NOT NULL")
