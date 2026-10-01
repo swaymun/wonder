@@ -151,10 +151,11 @@ only the computer viewer: it closes the previous receiver and releases its
 control lease before opening a host-level view on the selected saved connection.
 The presenting chat and its draft stay on their original connection.
 
-While control is active, the upper row sends the default macOS All windows,
-App windows and Next window shortcuts. Command-Tab opens the native app switcher
+While control is active, the upper row shows icons and sends the default macOS
+All windows, App windows and Next window shortcuts. Command-Tab opens the native app switcher
 and holds Command. Tab moves through it; another Command-Tab tap or Return
 chooses the highlighted app, Escape cancels, and clicking an app releases Command.
+Clicks first move the native pointer to the target while Command is still held.
 Other shortcuts, text entry and clipboard actions cancel the switcher first.
 Done, backgrounding, disconnect and host changes use the existing release-all
 lease cleanup. Apps/Launchpad is not exposed because the input protocol does not

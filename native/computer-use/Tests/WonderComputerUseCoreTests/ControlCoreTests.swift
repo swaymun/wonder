@@ -1,4 +1,6 @@
 import XCTest
+import CoreGraphics
+import IOKit.hidsystem
 @testable import WonderComputerUseCore
 
 final class ControlCoreTests: XCTestCase {
@@ -119,6 +121,51 @@ final class ControlCoreTests: XCTestCase {
             XCTAssertFalse(ControlInputTranslator.validText(value, maximum: 8_192, allowEmpty: true))
         }
         XCTAssertTrue(ControlInputTranslator.validText(String(repeating: "e\u{301}", count: 4_096), maximum: 8_192))
+    }
+
+    func testWindowShortcutPostsACompleteChordAndPreservesNativeArrowFlags() throws {
+        for keyCode: UInt16 in [125, 126] {
+            var keyboard = ControlKeyboardState()
+            let events = try XCTUnwrap(keyboard.events(keyCode: keyCode, phase: "press", modifiers: 2))
+            XCTAssertEqual(events.map(\.type), [.flagsChanged, .keyDown, .keyUp, .flagsChanged])
+            XCTAssertEqual(events.map { $0.getIntegerValueField(.keyboardEventKeycode) }, [59, Int64(keyCode), Int64(keyCode), 59])
+            for event in events.prefix(3) {
+                XCTAssertTrue(event.flags.contains(.maskControl))
+                XCTAssertNotEqual(event.flags.rawValue & UInt64(NX_DEVICELCTLKEYMASK), 0)
+            }
+            for event in events[1...2] {
+                XCTAssertTrue(event.flags.contains(.maskNumericPad))
+                XCTAssertTrue(event.flags.contains(.maskSecondaryFn))
+            }
+            XCTAssertFalse(events.last!.flags.contains(.maskControl))
+            XCTAssertTrue(keyboard.heldKeyCodes.isEmpty)
+        }
+    }
+
+    func testAppSwitcherModifierSurvivesPointerInteractionUntilExplicitRelease() throws {
+        var keyboard = ControlKeyboardState()
+        let down = try XCTUnwrap(keyboard.events(keyCode: 55, phase: "down", modifiers: 8)).first!
+        XCTAssertEqual(down.type, .flagsChanged)
+        XCTAssertNotEqual(down.flags.rawValue & UInt64(NX_DEVICELCMDKEYMASK), 0)
+        let tab = try XCTUnwrap(keyboard.events(keyCode: 48, phase: "press", modifiers: 8))
+        XCTAssertEqual(tab.map(\.type), [.keyDown, .keyUp])
+        XCTAssertTrue(tab.allSatisfy { $0.flags.contains(.maskCommand) })
+        XCTAssertTrue(keyboard.modifierFlags.contains(.maskCommand))
+        XCTAssertEqual(keyboard.heldKeyCodes, [55])
+        // Pointer and scroll delivery use this same state between batches.
+        let up = try XCTUnwrap(keyboard.events(keyCode: 55, phase: "up", modifiers: 0)).first!
+        XCTAssertEqual(up.type, .flagsChanged)
+        XCTAssertFalse(up.flags.contains(.maskCommand))
+        XCTAssertEqual(up.flags.rawValue & UInt64(NX_DEVICELCMDKEYMASK), 0)
+        XCTAssertTrue(keyboard.heldKeyCodes.isEmpty)
+        XCTAssertTrue(keyboard.modifierFlags.isEmpty)
+        _ = keyboard.events(keyCode: 54, phase: "down", modifiers: 8)
+        _ = keyboard.events(keyCode: 48, phase: "down", modifiers: 8)
+        let releases = keyboard.releaseEvents()
+        XCTAssertEqual(releases.map { $0.getIntegerValueField(.keyboardEventKeycode) }, [48, 54])
+        XCTAssertTrue(releases.first!.flags.contains(.maskCommand))
+        XCTAssertFalse(releases.last!.flags.contains(.maskCommand))
+        XCTAssertTrue(keyboard.heldKeyCodes.isEmpty)
     }
 
     func testNativeTextEventsKeepUnicodeSurrogatesTogetherAtTheLimit() {

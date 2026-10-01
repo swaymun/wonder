@@ -428,6 +428,7 @@ final class ComputerSessionModel: ObservableObject {
         }
         keyboardRevision &+= 1
         let actions: [ComputerInputAction] = [
+            .pointer(x: Double(pointer.x), y: Double(pointer.y), phase: "move", button: nil),
             .pointer(x: Double(pointer.x), y: Double(pointer.y), phase: "down", button: button),
             .pointer(x: Double(pointer.x), y: Double(pointer.y), phase: "up", button: button)
         ] + appSwitcher.finish()
@@ -1477,7 +1478,12 @@ struct ComputerSessionControls: View {
         Button(action: action) {
             Group {
                 if dynamicTypeSize.isAccessibilitySize { Image(systemName: symbol) }
-                else { Text(title).lineLimit(1) }
+                else {
+                    VStack(spacing: 3) {
+                        Image(systemName: symbol).font(.system(size: 14))
+                        Text(title).lineLimit(1)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, minHeight: 44)
             .contentShape(Rectangle())

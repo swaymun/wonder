@@ -50,7 +50,7 @@ private final class ControlSurfaceController: NSObject, @unchecked Sendable {
 struct WonderComputerUse {
     private final class HeldInputState: @unchecked Sendable {
         var mouseButtons: Set<String> = []
-        var keyCodes: Set<UInt16> = []
+        var keyboard = ControlKeyboardState()
     }
 
     private static let publisher = WebRTCPublisher { object in
@@ -717,7 +717,7 @@ struct WonderComputerUse {
     private enum PreparedControlEffect {
         case post(CGEvent)
         case setMouseHeld(String, Bool)
-        case setKeyHeld(UInt16, Bool)
+        case setKeyboard(ControlKeyboardState)
         case setClipboardResult(String)
     }
 
@@ -727,31 +727,17 @@ struct WonderComputerUse {
 
         var effects: [PreparedControlEffect] = []
         var preparedMouseButtons = heldInput.mouseButtons
-        var preparedKeyCodes = heldInput.keyCodes
+        var preparedKeyboard = heldInput.keyboard
         var preparedPointerLocation = CGEvent(source: nil)?.location ?? .zero
         var preparedClipboard: String?
         var readSystemClipboard = false
 
         func appendKey(keyCode: UInt16, phase: String, modifiers: UInt32) throws {
-            let flags = modifierFlags(modifiers)
-            if phase == "down" || phase == "press" {
-                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true) else {
-                    throw ComputerUseError.inputUnavailable
-                }
-                event.flags = flags
-                effects.append(.post(event))
-                effects.append(.setKeyHeld(keyCode, true))
-                preparedKeyCodes.insert(keyCode)
+            guard let events = preparedKeyboard.events(keyCode: keyCode, phase: phase, modifiers: modifiers) else {
+                throw ComputerUseError.inputUnavailable
             }
-            if phase == "up" || phase == "press" {
-                guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
-                    throw ComputerUseError.inputUnavailable
-                }
-                event.flags = flags
-                effects.append(.post(event))
-                effects.append(.setKeyHeld(keyCode, false))
-                preparedKeyCodes.remove(keyCode)
-            }
+            effects.append(contentsOf: events.map(PreparedControlEffect.post))
+            effects.append(.setKeyboard(preparedKeyboard))
         }
 
         func appendText(_ text: String) throws {
@@ -790,6 +776,7 @@ struct WonderComputerUse {
                 ) else {
                     throw ComputerUseError.inputUnavailable
                 }
+                event.flags = preparedKeyboard.modifierFlags
                 effects.append(.post(event))
                 preparedPointerLocation = CGPoint(x: point.x, y: point.y)
                 if phase == "down" {
@@ -810,6 +797,7 @@ struct WonderComputerUse {
                 ) else {
                     throw ComputerUseError.inputUnavailable
                 }
+                event.flags = preparedKeyboard.modifierFlags
                 effects.append(.post(event))
             case let .key(key, phase, modifiers):
                 guard let keyCode = ControlInputTranslator.keyCode(for: key) else {
@@ -847,18 +835,13 @@ struct WonderComputerUse {
                           ) else {
                         throw ComputerUseError.inputUnavailable
                     }
+                    event.flags = preparedKeyboard.modifierFlags
                     effects.append(.post(event))
                     effects.append(.setMouseHeld(buttonName, false))
                 }
-                for keyCode in preparedKeyCodes {
-                    guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
-                        throw ComputerUseError.inputUnavailable
-                    }
-                    effects.append(.post(event))
-                    effects.append(.setKeyHeld(keyCode, false))
-                }
+                effects.append(contentsOf: preparedKeyboard.releaseEvents().map(PreparedControlEffect.post))
+                effects.append(.setKeyboard(preparedKeyboard))
                 preparedMouseButtons.removeAll()
-                preparedKeyCodes.removeAll()
             }
         }
 
@@ -869,9 +852,8 @@ struct WonderComputerUse {
             case let .setMouseHeld(buttonName, held):
                 if held { heldInput.mouseButtons.insert(buttonName) }
                 else { heldInput.mouseButtons.remove(buttonName) }
-            case let .setKeyHeld(keyCode, held):
-                if held { heldInput.keyCodes.insert(keyCode) }
-                else { heldInput.keyCodes.remove(keyCode) }
+            case let .setKeyboard(keyboard):
+                heldInput.keyboard = keyboard
             case let .setClipboardResult(value):
                 clipboardText = value
             }
@@ -896,30 +878,18 @@ struct WonderComputerUse {
         }
     }
 
-    private static func modifierFlags(_ modifiers: UInt32) -> CGEventFlags {
-        var flags: CGEventFlags = []
-        if modifiers & ControlInputTranslator.shiftModifier != 0 { flags.insert(.maskShift) }
-        if modifiers & ControlInputTranslator.controlModifier != 0 { flags.insert(.maskControl) }
-        if modifiers & ControlInputTranslator.optionModifier != 0 { flags.insert(.maskAlternate) }
-        if modifiers & ControlInputTranslator.commandModifier != 0 { flags.insert(.maskCommand) }
-        if modifiers & ControlInputTranslator.capsLockModifier != 0 { flags.insert(.maskAlphaShift) }
-        return flags
-    }
-
     private static func releaseHeldInput() {
         let point = CGEvent(source: nil)?.location ?? .zero
         for name in heldInput.mouseButtons {
             guard let button = mouseButton(name, required: true),
                   let event = CGEvent(mouseEventSource: nil, mouseType: mouseEventType(.leftMouseUp, button: button), mouseCursorPosition: point, mouseButton: button) else { continue }
+            event.flags = heldInput.keyboard.modifierFlags
             event.post(tap: .cghidEventTap)
         }
-        for keyCode in heldInput.keyCodes {
-            if let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) {
-                event.post(tap: .cghidEventTap)
-            }
+        for event in heldInput.keyboard.releaseEvents() {
+            event.post(tap: .cghidEventTap)
         }
         heldInput.mouseButtons.removeAll()
-        heldInput.keyCodes.removeAll()
     }
 
     private static func accessibilityObservation() -> [String: Any] {

@@ -82,6 +82,12 @@ control from paired devices** in local Wonder Settings. Stopping the lease,
 disabling the preference, losing the capture binding, backgrounding the
 session, or expiry releases held input and hides the local control surface.
 
+Control key presses with modifiers emit a complete native chord, preserving
+arrow-key flags and left/right modifier identity. Explicit held modifiers also
+apply to pointer and scroll events until released. `ControlCoreTests` checks the
+native events without posting input; live shortcut acceptance still requires a
+Mac with the corresponding keyboard shortcuts enabled.
+
 The package script copies the helper into `Contents/Helpers`, adds the
 `@loader_path/../Frameworks` rpath for WebRTC, signs it before the app, and
 rejects a nested helper app or the older `Resources` layout in finished

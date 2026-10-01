@@ -473,6 +473,7 @@ native/computer-use/Sources/WonderComputerUse/WonderComputerUse.swift
 native/computer-use/Sources/WonderComputerUseCore/CaptureModels.swift
 native/computer-use/Sources/WonderComputerUseCore/CaptureSourceSelectionPlanner.swift
 native/computer-use/Sources/WonderComputerUseCore/CaptureStateMachine.swift
+native/computer-use/Sources/WonderComputerUseCore/ControlKeyboardState.swift
 native/computer-use/Sources/WonderComputerUseCore/ControlModels.swift
 native/computer-use/Sources/WonderComputerUseCore/ControlPreferences.swift
 native/computer-use/Sources/WonderComputerUseCore/LatestFrameQueue.swift
