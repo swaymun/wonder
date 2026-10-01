@@ -32,6 +32,12 @@ if ! /usr/bin/lockf -s -t 0 9; then
   exit 0
 fi
 export WONDER_SERVICE_DIR="$WONDER_DATA_DIR/Service"
+# The local installer needs the same owner authority as Sparkle. Write it only
+# after owning the launcher lock, with an atomic, owner-only replacement.
+control="$(mktemp "$WONDER_SERVICE_DIR/.update-control.XXXXXX")"
+printf '%s\0' "$(cd "$APP_ROOT/.." && pwd)" "${WONDER_LISTEN_ADDR:-127.0.0.1:3777}" "$WONDER_LOOPBACK_CAPABILITY" > "$control"
+chmod 600 "$control"
+mv -f "$control" "$WONDER_SERVICE_DIR/update-control"
 rm -f "$WONDER_SERVICE_DIR/stop" "$WONDER_SERVICE_DIR/stopped" "$WONDER_SERVICE_DIR/update-ready"
 export WONDER_PUBLIC_ORIGIN_FILE="$WONDER_SERVICE_DIR/tunnel.jsonl"
 export WONDER_CODEX_BIN="${WONDER_CODEX_BIN:-$("$RESOURCES/wonderd" --locate-runtime)}"
@@ -160,6 +166,18 @@ while kill -0 "$MENU_PID" 2>/dev/null; do
   fi
   NOW=$SECONDS
   if [[ -f "$WONDER_SERVICE_DIR/restart" ]]; then
+    # An explicit service restart uses the same persisted handoff. Unexpected
+    # crashes still reconcile normally and never invent a continuation.
+    request_id="$(uuidgen)"
+    if ! /usr/bin/curl -fsS --noproxy '*' --max-time 30 -X POST \
+        -H "x-wonder-loopback-capability: $WONDER_LOOPBACK_CAPABILITY" \
+        -H 'Content-Type: application/json' \
+        --data "{\"requestId\":\"$request_id\"}" \
+        "http://${WONDER_LISTEN_ADDR:-127.0.0.1:3777}/api/v1/host/update/prepare" \
+        >/dev/null 2>> "$HOME/Library/Logs/Wonder/service.log"; then
+      sleep 1
+      continue
+    fi
     rm -f "$WONDER_SERVICE_DIR/restart"
     stop_child "$TUNNEL_PID"; TUNNEL_PID=""
     stop_child "$DAEMON_PID"; DAEMON_PID=""

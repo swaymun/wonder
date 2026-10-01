@@ -217,6 +217,10 @@ async fn structured(
     parent: Option<&str>,
 ) -> Result<Value, String> {
     validate_settings(state, settings).await?;
+    let admission = state
+        .update_admission
+        .dispatch_guard(&state.dispatch_lock)
+        .await;
     let family = AgentFamily::for_model(Some(&settings.model));
     let client = claude::client(state, family)?;
     let rpc = client.lock().await.rpc();
@@ -266,6 +270,7 @@ async fn structured(
         .and_then(|r| r["turn"]["id"].as_str())
         .ok_or("Planning returned no turn")?
         .to_owned();
+    drop(admission);
     for _ in 0..600 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if let Some(parent) = parent {
@@ -1263,6 +1268,13 @@ pub(super) async fn stop(
             .await
         {
             if let (Some(thread), Some(turn)) = (&m.codex_thread_id, &m.codex_turn_id) {
+                if let Err(e) = state
+                    .store
+                    .cancel_update_handoff_tree(&m.conversation_id, thread, turn)
+                    .await
+                {
+                    return error(e);
+                }
                 let _ = state
                     .app_server
                     .lock()

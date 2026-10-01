@@ -1266,9 +1266,28 @@ pub(super) async fn conversation_snapshot(
         events,
         next_cursor,
     } = snapshot;
+    let handoffs = match state
+        .store
+        .conversation_update_handoffs(&conversation_id)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    // The receipt tracks the currently running continuation; its original
+    // user bubble stays at the original turn throughout repeated updates.
+    let mut projection_messages = messages.clone();
+    for message in &mut projection_messages {
+        if let Some(first) = handoffs
+            .iter()
+            .find(|h| h.message_id.as_deref() == Some(&message.id) && h.resumed_turn_id.is_some())
+        {
+            message.codex_turn_id = Some(first.stopped_turn_id.clone());
+        }
+    }
     let mut thread = conversation_thread_projection_with_items(
         codex_thread_id.clone(),
-        &messages,
+        &projection_messages,
         &assistant_messages,
         &events,
         &[],
@@ -1331,14 +1350,19 @@ pub(super) async fn conversation_snapshot(
     for turn in &mut thread.turns {
         turn.items.retain(|item| {
             item.item_type != "userMessage"
-                || !answers.iter().any(|m| {
+                || (!handoffs.iter().any(|h| {
+                    item.payload
+                        .get("clientId")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(h.resume_client_id.as_str())
+                }) && !answers.iter().any(|m| {
                     item.id == m.id
                         || item
                             .payload
                             .get("clientId")
                             .and_then(serde_json::Value::as_str)
                             == Some(m.client_message_id.as_str())
-                })
+                }))
         });
     }
     let messages = messages

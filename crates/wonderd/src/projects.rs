@@ -2194,6 +2194,57 @@ struct CodexTurn<'a> {
     plan: bool,
 }
 
+/// Reuse normal execution's root checks before restoring frozen update policy.
+pub(crate) async fn validate_update_policy(
+    state: &AppState,
+    conversation: &StoredProjectConversation,
+    resume: &Value,
+    turn: &Value,
+) -> Result<(), String> {
+    let project = state
+        .store
+        .project(&conversation.project_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("The paused project was removed")?;
+    let roots = root_paths(&project);
+    let checked = project.clone();
+    let denied = state.denied_roots.clone();
+    tokio::task::spawn_blocking(move || validate_execution_roots(&checked, &denied))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(str::to_owned)?;
+    if project.root_for(&conversation.cwd).is_none()
+        || resume["cwd"].as_str() != Some(&conversation.cwd)
+    {
+        return Err("The paused project folder is no longer authorized".into());
+    }
+    let compatible = match conversation.family {
+        AgentFamily::Codex => {
+            let (_, approval, policy) = codex_policy(&conversation.access_mode, &roots);
+            resume["runtimeWorkspaceRoots"] == json!(roots)
+                && turn["sandboxPolicy"] == policy
+                && turn["approvalPolicy"] == approval
+        }
+        AgentFamily::Claude => {
+            let mut policy = claude_policy(
+                state,
+                &project,
+                ClaudeModes::from(conversation),
+                &conversation.cwd,
+            );
+            policy["workspace"] = json!(media_workspace(state, &conversation.conversation_id)
+                .await
+                .ok_or("The paused attachment folder is unavailable")?);
+            resume["wonderPolicy"] == policy && turn["wonderPolicy"] == policy
+        }
+    };
+    if !compatible {
+        return Err("Project access changed while work was paused. Review the conversation before continuing.".into());
+    }
+    Ok(())
+}
+
 pub(crate) async fn is_project(state: &AppState, conversation: &str) -> bool {
     matches!(
         state.store.project_conversation(conversation).await,
@@ -2208,7 +2259,10 @@ pub(crate) async fn ready(state: &AppState) -> bool {
 /// Durable project send. Mirrors Bot dispatch: claim, resolve, persist the
 /// receipt before turn/start, and never blindly resend an uncertain request.
 pub(crate) async fn dispatch(state: AppState, message: wonder_store::StoredMessage) {
-    let guard = state.dispatch_lock.lock().await;
+    let guard = state
+        .update_admission
+        .dispatch_guard(&state.dispatch_lock)
+        .await;
     match state.store.claim_message_for_dispatch(&message.id).await {
         Ok(true) => {}
         _ => return,
@@ -2516,6 +2570,17 @@ async fn dispatch_inner(
             "wonderProject": claude_project(&project, &conversation.cwd)})
         }
     };
+    let resume = match conversation.family {
+        AgentFamily::Codex => {
+            let (sandbox, approval, _) = codex_policy(&conversation.access_mode, &roots);
+            json!({"threadId":thread_id,"excludeTurns":true,"cwd":conversation.cwd,"model":model,
+                "sandbox":sandbox,"approvalPolicy":approval,"runtimeWorkspaceRoots":roots})
+        }
+        AgentFamily::Claude => json!({"threadId":thread_id,"excludeTurns":true,
+            "cwd":conversation.cwd,"model":model,"wonderPolicy":permission,
+            "wonderProject":claude_project(&project, &conversation.cwd)}),
+    };
+    crate::update_handoff::remember_settings(state, &thread_id, &resume, &params).await?;
     let started = result(&rpc, "turn/start", params).await?;
     let turn = started
         .pointer("/turn/id")

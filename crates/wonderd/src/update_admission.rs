@@ -1,5 +1,5 @@
-//! A short, process-local barrier while Sparkle swaps the host application.
-//! An expired or restarted daemon admits work normally again.
+//! Fence new work while the host persists and pauses update continuations.
+//! Cancellation, expiry or a replacement daemon recovers the durable handoff.
 use crate::{AppState, LocalOwnerAuthority};
 use axum::{
     body::Body,
@@ -11,15 +11,18 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
+};
 use tokio::sync::Mutex;
-use wonder_store::Store;
 
 const LEASE_DURATION: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub struct UpdateAdmission {
     lease: Mutex<Option<Lease>>,
+    paused: AtomicBool,
 }
 
 pub(crate) struct Lease {
@@ -44,42 +47,73 @@ impl UpdateAdmission {
         if Self::current(&mut lease) {
             None
         } else {
+            self.paused.store(false, Ordering::Release);
             Some(lease)
         }
     }
 
-    async fn prepare_lease(
-        &self,
-        request_id: &str,
-        store: &Store,
-        host_installation_id: &str,
-        dispatch_lock: &Mutex<()>,
-    ) -> Result<(), StatusCode> {
-        let mut lease = self.lease.lock().await;
-        if Self::current(&mut lease)
-            && lease
-                .as_ref()
-                .is_some_and(|value| value.request_id != request_id)
-        {
-            return Err(StatusCode::CONFLICT);
-        }
-        // Dispatch and Group acceptance already use this lock. Holding it
-        // while checking durable state prevents a claim from changing beneath
-        // the check.
-        let _dispatch = dispatch_lock.lock().await;
-        match store.has_update_blocking_work(host_installation_id).await {
-            Ok(false) => {}
-            Ok(true) => return Err(StatusCode::CONFLICT),
-            Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
-        }
-        *lease = Some(Lease {
-            request_id: request_id.to_owned(),
-            expires: Instant::now() + LEASE_DURATION,
-        });
-        Ok(())
+    pub(crate) fn work_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
     }
 
-    async fn cancel_lease(&self, request_id: &str) -> bool {
+    /// Background Group/automation tasks can reach dispatch after the HTTP
+    /// admission has finished. Fence their native submits at the shared lock.
+    pub(crate) async fn dispatch_guard<'a>(
+        &self,
+        lock: &'a Mutex<()>,
+    ) -> tokio::sync::MutexGuard<'a, ()> {
+        loop {
+            while self.work_paused() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let guard = lock.lock().await;
+            if !self.work_paused() {
+                return guard;
+            }
+        }
+    }
+
+    pub(crate) async fn prepare_update(
+        &self,
+        request_id: &str,
+        state: &AppState,
+    ) -> Result<(), (StatusCode, String)> {
+        let mut lease = self.lease.lock().await;
+        if Self::current(&mut lease) && lease.as_ref().is_some_and(|l| l.request_id != request_id) {
+            return Err((
+                StatusCode::CONFLICT,
+                "Another update is being prepared.".into(),
+            ));
+        }
+        let _dispatch = state.dispatch_lock.lock().await;
+        self.paused.store(true, Ordering::Release);
+        *lease = Some(Lease {
+            request_id: request_id.into(),
+            expires: Instant::now() + LEASE_DURATION,
+        });
+        let paused = tokio::time::timeout(
+            Duration::from_secs(25),
+            crate::update_handoff::pause(state, request_id),
+        )
+        .await;
+        match paused {
+            Ok(Ok(())) => {
+                lease.as_mut().unwrap().expires = Instant::now() + LEASE_DURATION;
+                Ok(())
+            }
+            result => {
+                *lease = None;
+                self.paused.store(false, Ordering::Release);
+                let message = match result {
+                    Ok(Err(message)) => message,
+                    _ => "Work could not be safely paused. The update will retry.".into(),
+                };
+                Err((StatusCode::CONFLICT, message))
+            }
+        }
+    }
+
+    pub(crate) async fn cancel_lease(&self, request_id: &str) -> bool {
         let mut lease = self.lease.lock().await;
         if Self::current(&mut lease) {
             if lease
@@ -90,6 +124,7 @@ impl UpdateAdmission {
             }
             *lease = None;
         }
+        self.paused.store(false, Ordering::Release);
         true
     }
 }
@@ -121,19 +156,11 @@ pub(crate) async fn prepare(
     }
     match state
         .update_admission
-        .prepare_lease(
-            &request.request_id,
-            &state.store,
-            &state.host_installation_id,
-            &state.dispatch_lock,
-        )
+        .prepare_update(&request.request_id, &state)
         .await
     {
         Ok(()) => {}
-        Err(StatusCode::CONFLICT) => {
-            return (StatusCode::CONFLICT, "Wait for Wonder's work to finish.").into_response()
-        }
-        Err(status) => return status.into_response(),
+        Err(error) => return error.into_response(),
     }
     let expires_at =
         (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -220,7 +247,6 @@ pub(crate) async fn guard_new_work(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn gate_covers_all_work_admissions() {
@@ -250,16 +276,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preparation_waits_for_admission_and_sees_accepted_work() {
-        let store = Store::connect("sqlite::memory:").await.unwrap();
-        store
-            .upsert_owner_device("device", "Owner", "{}", "now")
-            .await
-            .unwrap();
-        let admission = Arc::new(UpdateAdmission::default());
-        let dispatch_lock = Mutex::new(());
+    async fn preparation_waits_for_admission_and_preserves_queued_work() {
+        let (_dir, state) = crate::ingestion::tests::fixture().await;
+        let store = &state.store;
+        let admission = &state.update_admission;
         let in_flight = admission.claim_guard().await.unwrap();
-        let preparing = admission.prepare_lease("request", &store, "host", &dispatch_lock);
+        let preparing = admission.prepare_update("request", &state);
         tokio::pin!(preparing);
         assert!(
             tokio::time::timeout(Duration::from_millis(20), &mut preparing)
@@ -267,46 +289,69 @@ mod tests {
                 .is_err()
         );
         store
-            .insert_dispatch_message("device", "client", "body", "hash", "bot", &[], "now", true)
+            .insert_dispatch_message("owner", "client", "body", "hash", "bot", &[], "now", true)
             .await
             .unwrap();
         drop(in_flight);
-        assert_eq!(preparing.await, Err(StatusCode::CONFLICT));
-        assert!(admission.claim_guard().await.is_some());
+        assert_eq!(preparing.await, Ok(()));
+        assert_eq!(store.pending_dispatch_messages().await.unwrap().len(), 1);
+        assert!(admission.claim_guard().await.is_none());
     }
 
     #[tokio::test]
     async fn lease_blocks_admission_until_cancel_or_expiry() {
-        let store = Store::connect("sqlite::memory:").await.unwrap();
-        let admission = UpdateAdmission::default();
-        let dispatch_lock = Mutex::new(());
-        admission
-            .prepare_lease("first", &store, "host", &dispatch_lock)
-            .await
-            .unwrap();
+        let (_dir, state) = crate::ingestion::tests::fixture().await;
+        let admission = &state.update_admission;
+        admission.prepare_update("first", &state).await.unwrap();
         assert!(admission.claim_guard().await.is_none());
         assert_eq!(
-            admission
-                .prepare_lease("second", &store, "host", &dispatch_lock)
-                .await,
-            Err(StatusCode::CONFLICT)
+            admission.prepare_update("second", &state).await,
+            Err((
+                StatusCode::CONFLICT,
+                "Another update is being prepared.".into()
+            ))
         );
         assert!(!admission.cancel_lease("second").await);
         assert!(admission.claim_guard().await.is_none());
-        admission
-            .prepare_lease("first", &store, "host", &dispatch_lock)
-            .await
-            .unwrap();
+        admission.prepare_update("first", &state).await.unwrap();
         assert!(admission.cancel_lease("first").await);
         assert!(admission.claim_guard().await.is_some());
-        admission
-            .prepare_lease("first", &store, "host", &dispatch_lock)
-            .await
-            .unwrap();
+        admission.prepare_update("first", &state).await.unwrap();
         {
             let mut lease = admission.lease.lock().await;
             lease.as_mut().unwrap().expires = Instant::now() - Duration::from_secs(1);
         }
         assert!(admission.claim_guard().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn background_dispatch_waits_for_cancel_and_remote_clients_have_no_update_authority() {
+        let (_dir, state) = crate::ingestion::tests::fixture().await;
+        let request = uuid::Uuid::new_v4().to_string();
+        let response = prepare(
+            State(state.clone()),
+            None,
+            Json(UpdateRequest {
+                request_id: request.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        state
+            .update_admission
+            .prepare_update(&request, &state)
+            .await
+            .unwrap();
+        let dispatch = state.update_admission.dispatch_guard(&state.dispatch_lock);
+        tokio::pin!(dispatch);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut dispatch)
+                .await
+                .is_err()
+        );
+        assert!(state.update_admission.cancel_lease(&request).await);
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut dispatch)
+            .await
+            .is_ok());
     }
 }

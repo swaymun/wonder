@@ -48,6 +48,7 @@ mod queue;
 mod subagents;
 mod teaching;
 pub mod update_admission;
+mod update_handoff;
 
 use std::{
     collections::HashMap,
@@ -1406,6 +1407,42 @@ async fn process_app_server_notification(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     });
+    if method == "turn/completed" {
+        if let (Some(thread), Some(turn)) = (thread_id.as_deref(), turn_id.as_deref()) {
+            match update_handoff::terminal(
+                state,
+                thread,
+                turn,
+                params
+                    .pointer("/turn/status")
+                    .and_then(serde_json::Value::as_str),
+            )
+            .await
+            {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(_) => return false,
+            }
+        }
+    }
+    if params
+        .pointer("/item/type")
+        .and_then(serde_json::Value::as_str)
+        == Some("userMessage")
+    {
+        if let (Some(thread), Some(client)) = (
+            thread_id.as_deref(),
+            params
+                .pointer("/item/clientId")
+                .and_then(serde_json::Value::as_str),
+        ) {
+            match state.store.is_update_continuation(thread, client).await {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(_) => return false,
+            }
+        }
+    }
     if let Some(active) = notification
         .get("_wonderRuntimeId")
         .and_then(serde_json::Value::as_str)
@@ -6924,7 +6961,13 @@ fn deterministic_uuid(seed: &str) -> String {
 }
 
 async fn wait_for_message_terminal(state: &AppState, message_id: &str) -> Option<String> {
-    for _ in 0..300 {
+    let mut remaining = 300;
+    while remaining > 0 {
+        if state.update_admission.work_paused() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        remaining -= 1;
         let message = state.store.message_by_id(message_id).await.ok().flatten()?;
         if matches!(
             message.state.as_str(),
@@ -9275,7 +9318,10 @@ async fn dispatch_guide(
     turn_id: String,
 ) -> Response {
     let conversation_id = steered_message.conversation_id.clone();
-    let _dispatch_guard = state.dispatch_lock.lock().await;
+    let _dispatch_guard = state
+        .update_admission
+        .dispatch_guard(&state.dispatch_lock)
+        .await;
     let target = async {
         if state
             .store
@@ -9474,11 +9520,20 @@ async fn interrupt_turn(
     State(state): State<AppState>,
     Path((conversation_id, turn_id)): Path<(String, String)>,
 ) -> Response {
+    let _dispatch = state.dispatch_lock.lock().await;
     if let Some(response) = subagents::reject_user_mutation(&state, &conversation_id).await {
         return response;
     }
     match subagents::runtime_for_conversation(&state, &conversation_id).await {
         Ok(Some(child)) => {
+            if state
+                .store
+                .cancel_update_handoff_tree(&conversation_id, &child.ownership.thread_id, &turn_id)
+                .await
+                .is_err()
+            {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
             match child_turn_status(&child, &turn_id).await {
                 Ok(Some(status)) if status == "interrupted" => {
                     return StatusCode::NO_CONTENT.into_response()
@@ -9559,6 +9614,14 @@ async fn interrupt_turn(
     let Some(thread_id) = message.codex_thread_id.as_deref() else {
         return (StatusCode::CONFLICT, "turn has no Codex thread").into_response();
     };
+    if state
+        .store
+        .cancel_update_handoff_tree(&conversation_id, thread_id, &turn_id)
+        .await
+        .is_err()
+    {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     if message.state == "interrupted" {
         return StatusCode::NO_CONTENT.into_response();
     }
@@ -9984,7 +10047,10 @@ async fn dispatch_to_codex_inner(
     // creation, which may restart the App Server to add a permission profile.
     // Release the guard once the turn id is durable; the turn itself can run
     // concurrently with other work.
-    let _dispatch_guard = state.dispatch_lock.lock().await;
+    let _dispatch_guard = state
+        .update_admission
+        .dispatch_guard(&state.dispatch_lock)
+        .await;
     let claimed = match state.store.claim_message_for_dispatch(&message.id).await {
         Ok(claimed) => claimed,
         Err(_) => return,
@@ -10174,6 +10240,17 @@ async fn dispatch_to_codex_inner(
             turn_params["wonderInternal"] = serde_json::json!(state.store.bot_initialization_messages(&message.conversation_id).await.map_err(|e| e.to_string())?.iter().any(|m| m.id == message.id)
                 || group_collaboration::internal_message(&state, &message, &bot.id).await?);
         }
+        let mut update_resume = serde_json::json!({
+            "threadId": thread_id, "excludeTurns": true, "cwd": bot.execution_directory(),
+            "permissions": resolved.permission_profile,
+            "runtimeWorkspaceRoots": permission_modes::runtime_roots(&state, &bot).await?,
+            "approvalPolicy": resolved.approval_policy, "approvalsReviewer": resolved.approvals_reviewer,
+            "developerInstructions": wonder_harness::instructions(&format!("{}\n\n{}", teaching::BETA_POLICY, bot.system_prompt)),
+            "config": if bot.agent_family == AgentFamily::Codex { teaching::runtime_config(&state, &app_server.rpc(), bot.execution_directory()).await? } else { serde_json::json!({}) },
+        });
+        claude::configure_thread(&state, &bot, &mut update_resume).await?;
+        computer_runtime::configure(&state, &message.conversation_id, &bot, &mut update_resume).await?;
+        update_handoff::remember_settings(&state, &thread_id, &update_resume, &turn_params).await?;
         let response = app_server.request("turn/start", turn_params).await.map_err(|e| e.to_string())?;
         if let Some(error) = response.error {
             return Err(format!("App Server turn/start rejected: {error:?}"));

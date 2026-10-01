@@ -55,22 +55,22 @@ pub const ALLOWED_SERVER_REQUESTS: [&str; 6] = [
 
 pub fn is_allowed_method(method: &str) -> bool {
     // Optional native-MCP lifecycle cleanup; not a required runtime feature.
-    method == "mcpServer/tool/call"
-        || RequiredMethod::ALL
-            .iter()
-            .any(|candidate| candidate.as_str() == method)
+    matches!(
+        method,
+        "mcpServer/tool/call" | "thread/loaded/list" | "thread/backgroundTerminals/list"
+    ) || RequiredMethod::ALL
+        .iter()
+        .any(|candidate| candidate.as_str() == method)
 }
 
 /// Native project metadata, allowed only on the normal-home Projects client.
 /// Older runtimes without these methods remain compatible; callers treat an
 /// unknown-method response as an unsupported capability.
-pub const PROJECT_METHODS: [&str; 10] = [
+pub const PROJECT_METHODS: [&str; 8] = [
     "project/list",
     "project/read",
     "project/create",
     "thread/metadata/update",
-    "thread/loaded/list",
-    "thread/backgroundTerminals/list",
     "thread/archive",
     // Wonder's Claude bridge: native Claude Code session metadata and attach.
     "project/sessions/list",
@@ -477,6 +477,8 @@ mod tests {
 
     #[test]
     fn subagent_discovery_and_reopen_methods_are_explicitly_allowlisted() {
+        assert!(is_allowed_method("thread/loaded/list"));
+        assert!(is_allowed_method("thread/backgroundTerminals/list"));
         assert!(is_allowed_method("thread/list"));
         assert!(is_allowed_method("thread/read"));
         assert!(is_allowed_method("thread/unarchive"));

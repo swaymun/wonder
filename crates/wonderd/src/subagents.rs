@@ -639,7 +639,7 @@ pub(crate) async fn runtime_for_conversation(
     )
 }
 
-async fn list_runtime_threads(
+pub(crate) async fn list_runtime_threads(
     state: &AppState,
     parent_conversation_id: &str,
     parent_thread_id: &str,

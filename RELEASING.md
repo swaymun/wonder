@@ -150,8 +150,29 @@ Before accepting the updater, install a real signed version N and upgrade it to
 signed/notarized N+1 through Sparkle. Verify consent and opt-out persistence,
 manual checks, automatic downloads, busy-work and computer-sharing deferral,
 complete launcher shutdown, one relaunch, `/readyz`, and preserved pairing/history.
-An authenticated local-owner admission lease prevents new work during the final
-shutdown; cancellation or expiry must restore normal admission. Test malformed
+An authenticated local-owner admission lease fences both new requests and native
+submissions from already queued Group/automation work. Before shutdown, Wonder
+records running turns and their settings in SQLite, interrupts their exact native
+turns, and confirms interruption. The replacement daemon reopens those same
+threads and starts a continuation with a stable client identity. It does not
+replay the original prompt. User Stop cancels continuation; natural completion
+wins the race. A lost start response is reconciled from native history rather
+than submitted again. Cancellation or lease expiry resumes recorded work on the
+existing host. Computer sharing, active native goals, background commands and
+work without a safely resumable receipt defer installation. Unexpected crashes
+and ordinary Quit do not create continuations.
+
+The signed manual installer uses this same handoff and relaunches the host. When
+invoked by a Wonder-owned agent it detaches before pausing that agent, reporting
+its result under the private `Service/updates` directory. First upgrades from
+older hosts use their authenticated idle-work lease and wait for current work to
+finish; older turns have no recovery settings to replay safely. The legacy bridge
+reads only the verified installed daemon's owner capability and never logs its
+environment. Subsequent launches write an atomic owner-only control file.
+
+Run `cargo test -p wonderd update_`, `python3 scripts/test-install-handoff.py`,
+`python3 scripts/test-service-lifecycle.py` and the Mac `ServiceMenuTests` for
+focused handoff, interruption/continuation, rollback and launcher checks. Test malformed
 or incorrectly signed updates without altering the installed signed bundle.
 Unit tests and lifecycle fixtures support this check but do not replace it.
 

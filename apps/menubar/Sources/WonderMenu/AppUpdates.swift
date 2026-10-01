@@ -143,7 +143,7 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate, @preconc
     func postponeInstallation(_ installHandler: @escaping () -> Void) {
         preparingInstall = true
         pendingInstallation = installHandler
-        message = "Update ready. It will install after current work and computer sharing finish."
+        message = "Preparing the update. Current work will pause and continue after Wonder restarts."
         guard preparationTask == nil else { return }
         preparationTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -165,11 +165,11 @@ final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate, @preconc
             }
             admissionGranted = ready
             if !admissionGranted {
-                message = "Update ready. It will install after current work and computer sharing finish."
+                message = "Update ready. Waiting until work can safely pause and computer sharing finishes."
             }
             return admissionGranted
         } catch {
-            message = "Wonder could not confirm that work has finished. The update will retry."
+            message = "Wonder could not confirm that work was safely paused. The update will retry."
             return false
         }
     }
@@ -225,7 +225,7 @@ private struct UpdateAdmission {
         }
         var request = URLRequest(url: origin.appendingPathComponent("api/v1/host/update/" + action))
         request.httpMethod = "POST"
-        request.timeoutInterval = 4
+        request.timeoutInterval = 30
         request.setValue(capability, forHTTPHeaderField: "x-wonder-loopback-capability")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["requestId": requestID])

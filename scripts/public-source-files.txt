@@ -355,6 +355,7 @@ crates/wonder-store/migrations/0077_group_creation_tombstones.sql
 crates/wonder-store/migrations/0078_projects.sql
 crates/wonder-store/migrations/0079_project_modes.sql
 crates/wonder-store/migrations/0080_project_creation_payload.sql
+crates/wonder-store/migrations/0081_update_handoff.sql
 crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs
@@ -378,6 +379,7 @@ crates/wonder-store/src/runtime_bindings.rs
 crates/wonder-store/src/search.rs
 crates/wonder-store/src/sync.rs
 crates/wonder-store/src/teaching.rs
+crates/wonder-store/src/update_handoff.rs
 crates/wonderd/Cargo.toml
 crates/wonderd/src/account_usage.rs
 crates/wonderd/src/approval_routing_tests.rs
@@ -427,6 +429,7 @@ crates/wonderd/src/sync.rs
 crates/wonderd/src/teaching.rs
 crates/wonderd/src/tool_media.rs
 crates/wonderd/src/update_admission.rs
+crates/wonderd/src/update_handoff.rs
 fastlane/Fastfile
 fastlane/Matchfile
 fastlane/USAGE.md
@@ -546,6 +549,7 @@ scripts/test-codex-permission-modes.mjs
 scripts/test-degraded-service.py
 scripts/test-export-public-source.py
 scripts/test-generate-sparkle-appcast.py
+scripts/test-install-handoff.py
 scripts/test-nemo-speech-worker.py
 scripts/test-package-release-gates.py
 scripts/test-replay-codex-thread.py

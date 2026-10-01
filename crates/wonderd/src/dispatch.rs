@@ -9,8 +9,23 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
     Ok(tokio::spawn(async move {
         let mut groups = tokio::task::JoinSet::new();
         let mut next_project_recovery = tokio::time::Instant::now();
+        let mut next_update_recovery = tokio::time::Instant::now();
         loop {
             while groups.try_join_next().is_some() {}
+            let Some(_admission) = state.update_admission.claim_guard().await else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            };
+            if tokio::time::Instant::now() >= next_update_recovery {
+                if let Err(error) = crate::update_handoff::recover(&state).await {
+                    let _ = state.logger.record(
+                        "error",
+                        "update_handoff_recovery_failed",
+                        json!({"error":error}),
+                    );
+                }
+                next_update_recovery = tokio::time::Instant::now() + Duration::from_secs(5);
+            }
             let _ = crate::questions::expire_optional(&state).await;
             crate::goals::enforce_time_limits(&state).await;
             let bots_ready = state.ingestion.readiness(&state.store).await.ready;
@@ -33,6 +48,7 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
                 crate::projects::recover(&state).await;
                 next_project_recovery = tokio::time::Instant::now() + Duration::from_secs(5);
             }
+            drop(_admission);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }))

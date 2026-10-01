@@ -11,6 +11,8 @@ mod questions;
 pub use questions::AsyncQuestion;
 mod runtime_bindings;
 pub use runtime_bindings::{AgentFamily, RuntimeBinding};
+mod update_handoff;
+pub use update_handoff::UpdateHandoff;
 mod projects;
 pub use projects::{
     ProjectConversationCreate, ProjectConversationInsert, ProjectConversationPatch, ProjectCreate,
@@ -2483,7 +2485,7 @@ impl Store {
     }
 
     pub async fn active_runtime_messages(&self) -> Result<Vec<StoredMessage>, sqlx::Error> {
-        let rows = sqlx::query("SELECT * FROM messages WHERE codex_turn_id IS NOT NULL AND state IN ('accepted_by_codex', 'streaming', 'uncertain')")
+        let rows = sqlx::query("SELECT * FROM messages WHERE codex_turn_id IS NOT NULL AND state IN ('accepted_by_codex', 'streaming', 'uncertain') AND NOT EXISTS (SELECT 1 FROM update_handoffs h WHERE h.thread_id=messages.codex_thread_id AND h.stopped_turn_id=messages.codex_turn_id AND h.state IN ('paused','submitting'))")
             .fetch_all(&self.pool).await?;
         Ok(rows.iter().map(stored_message).collect())
     }
@@ -3240,23 +3242,6 @@ impl Store {
         Ok(rows.iter().map(stored_message).collect())
     }
 
-    /// Fail closed for every durable source of work that could be interrupted
-    /// when the host application exits for an update. Includes queued and
-    /// uncertain work, not only turns currently running in Codex.
-    pub async fn has_update_blocking_work(
-        &self,
-        host_installation_id: &str,
-    ) -> Result<bool, sqlx::Error> {
-        // An uncertain message needs user review, but is no longer executing.
-        // Blocking on it indefinitely would strand signed updates after a crash.
-        let blocking: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE state IN ('accepted_by_wonder','dispatching_to_codex','accepted_by_codex','streaming')) OR EXISTS(SELECT 1 FROM group_runs WHERE state NOT IN ('completed','failed','cancelled')) OR EXISTS(SELECT 1 FROM automation_runs WHERE status='running') OR EXISTS(SELECT 1 FROM project_assignments WHERE state IN ('queued','working','uncertain','awaiting_input','integrating')) OR EXISTS(SELECT 1 FROM computer_sessions WHERE host_installation_id=? AND state IN ('preparing','awaitingSource','live','paused','stale')) OR EXISTS(SELECT 1 FROM computer_control_leases WHERE host_installation_id=? AND status='active')")
-            .bind(host_installation_id)
-            .bind(host_installation_id)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(blocking != 0)
-    }
-
     /// Run only at service startup, before any dispatcher is allowed to claim.
     pub async fn recover_dispatch_claims(&self) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
@@ -3967,9 +3952,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_readiness_rejects_active_work_but_allows_uncertain_messages() {
+    async fn update_readiness_rejects_inflight_submission_and_computer_control() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
-        assert!(!store.has_update_blocking_work("host").await.unwrap());
+        assert!(!store.has_unsafe_update_work("host").await.unwrap());
         store
             .upsert_owner_device("device", "Owner", "{}", "now")
             .await
@@ -3981,33 +3966,35 @@ mod tests {
         else {
             panic!("message insertion");
         };
-        assert!(store.has_update_blocking_work("host").await.unwrap());
+        assert!(!store.has_unsafe_update_work("host").await.unwrap());
+        assert!(store.claim_message_for_dispatch(&message.id).await.unwrap());
+        assert!(store.has_unsafe_update_work("host").await.unwrap());
         store
             .update_message_delivery(&message.id, "uncertain", None, None)
             .await
             .unwrap();
-        assert!(!store.has_update_blocking_work("host").await.unwrap());
+        assert!(!store.has_unsafe_update_work("host").await.unwrap());
         store
             .update_message_delivery(&message.id, "completed", None, None)
             .await
             .unwrap();
-        assert!(!store.has_update_blocking_work("host").await.unwrap());
+        assert!(!store.has_unsafe_update_work("host").await.unwrap());
         sqlx::query("INSERT INTO computer_sessions(id,client_request_id,owner_device_id,host_installation_id,conversation_id,generation,state,geometry_revision,created_at,updated_at,last_state_at) VALUES ('session','request','device','host','bot',1,'paused',0,'now','now','now')")
             .execute(&store.pool).await.unwrap();
-        assert!(store.has_update_blocking_work("host").await.unwrap());
-        assert!(!store.has_update_blocking_work("other-host").await.unwrap());
+        assert!(store.has_unsafe_update_work("host").await.unwrap());
+        assert!(!store.has_unsafe_update_work("other-host").await.unwrap());
         sqlx::query("UPDATE computer_sessions SET state='ended' WHERE id='session'")
             .execute(&store.pool)
             .await
             .unwrap();
         sqlx::query("INSERT INTO computer_control_leases(id,client_request_id,session_id,owner_device_id,host_installation_id,conversation_id,session_generation,geometry_revision,status,acquired_at,updated_at,expires_at) VALUES ('control','control-request','session','device','host','bot',1,0,'active','now','now','later')")
             .execute(&store.pool).await.unwrap();
-        assert!(store.has_update_blocking_work("host").await.unwrap());
+        assert!(store.has_unsafe_update_work("host").await.unwrap());
         sqlx::query("UPDATE computer_control_leases SET status='released' WHERE id='control'")
             .execute(&store.pool)
             .await
             .unwrap();
-        assert!(!store.has_update_blocking_work("host").await.unwrap());
+        assert!(!store.has_unsafe_update_work("host").await.unwrap());
     }
 
     #[tokio::test]

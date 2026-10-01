@@ -69,6 +69,7 @@ struct RuntimeRegistration {
 /// arbitrary thread. Child discovery verifies the parent binding separately.
 #[derive(Clone)]
 pub(crate) struct RuntimeRoute {
+    pub family: AgentFamily,
     pub runtime_id: String,
     pub message_id: Option<String>,
     pub project: bool,
@@ -268,6 +269,7 @@ impl Ingestion {
             .filter(|(_, registration)| registration.health.is_alive())
             .filter_map(|(id, registration)| {
                 Some(RuntimeRoute {
+                    family: registration.family,
                     runtime_id: id.clone(),
                     message_id: registration.message_id.clone(),
                     project: registration.project,
@@ -1140,6 +1142,39 @@ for line in sys.stdin:
     with open(root + '/requests', 'a') as log: log.write(method + '\n')
     with open(root + '/requests-jsonl', 'a') as log: log.write(json.dumps(r) + '\n')
     result = {}
+    if os.path.exists(root + '/update-fixture.json') and method in ('thread/resume','thread/read','thread/list','thread/loaded/list','thread/turns/list','thread/items/list','turn/interrupt','turn/start'):
+        checkpoint = json.load(open(root + '/update-fixture.json'))
+        params = r.get('params',{})
+        thread = params.get('threadId','thread')
+        turns = checkpoint.get(thread,[])
+        active = any(t['status'] == 'inProgress' for t in turns)
+        if method in ('thread/resume','thread/read'):
+            result = {'thread':{'id':thread,'status':{'type':'active' if active else 'idle'}}}
+            if thread == 'child-thread':
+                result['thread'] = child_thread()
+                result['thread']['status'] = {'type':'active' if active else 'idle'}
+        elif method == 'thread/list':
+            children = [child_thread()] if 'child-thread' in checkpoint and params.get('parentThreadId') == 'thread' and not params.get('archived',False) else []
+            if children: children[0]['status'] = {'type':'active' if any(t['status']=='inProgress' for t in checkpoint['child-thread']) else 'idle'}
+            result = {'data':children,'nextCursor':None}
+        elif method == 'thread/loaded/list': result = {'data':list(checkpoint),'nextCursor':None}
+        elif method == 'thread/turns/list': result = {'data':list(reversed(turns)),'nextCursor':None}
+        elif method == 'thread/items/list': result = {'data':[{'turnId':t['id'],'item':{'type':'userMessage','clientId':t.get('clientId','')}} for t in reversed(turns)],'nextCursor':None}
+        elif method == 'turn/interrupt':
+            for t in turns:
+                if t['id'] == params['turnId']: t['status'] = 'completed' if os.path.exists(root + '/complete-during-update') else 'interrupted'
+            result = {}
+        elif method == 'turn/start':
+            if os.path.exists(root + '/reject-update-continuation'):
+                print(json.dumps({'id':r['id'],'error':{'code':-32000,'message':'Cannot accept continuation'}}),flush=True)
+                continue
+            new = {'id':'resumed-'+str(len(turns)), 'status':'inProgress','clientId':params['clientUserMessageId']}
+            turns.append(new)
+            result = {'turn':new}
+        with open(root + '/update-fixture.json','w') as saved: json.dump(checkpoint,saved)
+        if method == 'turn/start' and os.path.exists(root + '/lose-update-response'): sys.exit(0)
+        print(json.dumps({'id':r['id'],'result':result}),flush=True)
+        continue
     idle = json.load(open(root + '/idle-fixture.json')) if os.path.exists(root + '/idle-fixture.json') else {}
     if method == 'initialize': result = {'capabilities': {'experimentalApi': True}}
     elif method == 'thread/loaded/list': result = {'data':list(idle), 'nextCursor':None}

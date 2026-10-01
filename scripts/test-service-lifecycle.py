@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Isolated real-launcher fault tests; no installed app, tunnel, or model usage."""
-import json, os, pathlib, signal, subprocess, tempfile, time
+import json, os, pathlib, signal, subprocess, tempfile, time, threading, uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def wait_for(fn, seconds=15):
@@ -59,7 +60,24 @@ while true; do sleep 0.1; done
 '''); path.chmod(0o700)
     data = root/'state'; data.mkdir()
     (data/'sentinel').write_text('saved chat')
-    env = {**os.environ, 'HOME': str(root), 'WONDER_DATA_DIR':str(data)}
+    prepared = []
+    allow_restart = False
+    class Host(BaseHTTPRequestHandler):
+        def log_message(self, *_): pass
+        def do_POST(self):
+            fields = (data/'Service/update-control').read_bytes().split(b'\0')
+            request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            uuid.UUID(request['requestId'])
+            assert self.path == '/api/v1/host/update/prepare'
+            assert self.headers['x-wonder-loopback-capability'] == fields[2].decode()
+            prepared.append(request['requestId'])
+            self.send_response(200 if allow_restart else 409); self.end_headers()
+            self.wfile.write(json.dumps({'ready':allow_restart,'requestId':request['requestId']}).encode())
+    host = ThreadingHTTPServer(('127.0.0.1',0),Host)
+    threading.Thread(target=host.serve_forever,daemon=True).start()
+    env = {**os.environ, 'HOME': str(root), 'WONDER_DATA_DIR':str(data),
+           'WONDER_CODEX_BIN':'/fixture/unused-codex',
+           'WONDER_LISTEN_ADDR':f'127.0.0.1:{host.server_port}'}
     def pids(name):
         f = data/(name+'.pids')
         return [int(x) for x in f.read_text().split()] if f.exists() else []
@@ -82,6 +100,10 @@ while true; do sleep 0.1; done
             wait_for(lambda: len(pids('wonder-tunnel')) == 2)
             assert len(pids('wonderd')) == 2
             (data/'Service/restart').touch()
+            wait_for(lambda: prepared)
+            assert len(pids('wonderd')) == 2, 'a rejected handoff must not stop the daemon'
+            assert (data/'Service/update-control').stat().st_mode & 0o077 == 0
+            allow_restart = True
             wait_for(lambda: len(pids('wonderd')) == 3 and len(pids('wonder-tunnel')) == 3)
             # Native/Sparkle quit handshake stops services before menu exits.
             (data/'Service/update-ready').touch()
@@ -124,6 +146,7 @@ while true; do sleep 0.1; done
             wait_for(lambda: all(not alive(pid) for name in ['wonderd','wonder-tunnel','worker','WonderHost'] for pid in pids(name)))
             print('PASS: native launcher attribution, duplicate launch, daemon crash/worker cleanup, independent tunnel crash, restart, updater quit handshake, menu quit, stale lock, SIGINT/SIGTERM forwarding, descendant cleanup, state preservation')
         finally:
+            host.shutdown(); host.server_close()
             if process.poll() is None: process.terminate(); process.wait(timeout=20)
             if process.returncode not in (0, 143): print((root/'launcher.log').read_text())
             for name in ['wonderd','wonder-tunnel','worker','WonderHost']:
