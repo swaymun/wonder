@@ -145,21 +145,24 @@ The optional `WonderUITests/WonderUITests/testLiveImagePreview` case expects a d
 
 ## Computer controls
 
-Computer view keeps Refresh beside More and exposes its live/unavailable status
-through the green/red dot's accessibility value. The Mac-name picker switches
+Computer view puts the Mac-name picker and its live/unavailable dot in the
+navigation bar. Refresh and More are separate toolbar buttons. The picker switches
 only the computer viewer: it closes the previous receiver and releases its
 control lease before opening a host-level view on the selected saved connection.
 The presenting chat and its draft stay on their original connection.
 
 While control is active, the upper row shows icons and sends the default macOS
-All windows, App windows and Next window shortcuts. Command-Tab opens the native app switcher
+All windows, App windows and Next window shortcuts. Apps opens Spotlight and
+selects its Applications browse mode with Command-Space, then Command-1.
+Command-Tab opens the native app switcher
 and holds Command. Tab moves through it; another Command-Tab tap or Return
 chooses the highlighted app, Escape cancels, and clicking an app releases Command.
 Clicks first move the native pointer to the target while Command is still held.
 Other shortcuts, text entry and clipboard actions cancel the switcher first.
 Done, backgrounding, disconnect and host changes use the existing release-all
-lease cleanup. Apps/Launchpad is not exposed because the input protocol does not
-support its Fn modifier. These defaults can differ from customized Mac shortcuts.
+lease cleanup. The native Fn-Shift-A Apps shortcut is not used because the input
+protocol does not support its Fn modifier. These defaults can differ from
+customized Mac shortcuts.
 
 `testComputerAppSwitcherHoldsCommandUntilSelectionOrCancellation` owns the ordered
 held-key contract. The existing computer UI fixtures check both 44-point control

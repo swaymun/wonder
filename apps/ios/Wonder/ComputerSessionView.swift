@@ -72,8 +72,10 @@ final class ComputerSessionModel: ObservableObject {
     private var controlSnapshot: ComputerControlSnapshot?
     private var heartbeatTask: Task<Void, Never>?
     private var inputTask: Task<Void, Never>?
+    private var applicationsTask: Task<Void, Never>?
     private var inputBuffer = ComputerInputBuffer()
     private var inputEpoch: UInt64 = 0
+    private var inputIntentRevision: UInt64 = 0
     private var heldPointerButton: String?
     private var heldPointerPoint: (x: Double, y: Double)?
     private var releasingControl = false
@@ -375,6 +377,28 @@ final class ComputerSessionModel: ObservableObject {
         enqueueInput(actions)
     }
 
+    func showApplications() {
+        guard isControlActive, let lease = controlLease, let session else { return }
+        finishPointerDrag()
+        keyboardRevision &+= 1
+        applicationsTask?.cancel()
+        // Spotlight needs a moment to open before its Applications browse
+        // shortcut is sent. Both keys use the existing authenticated input lease.
+        enqueueInput(appSwitcher.finish(cancel: true)
+            + [.key(key: "space", phase: "press", modifiers: 8)])
+        let intentRevision = inputIntentRevision
+        applicationsTask = Task { [weak self] in
+            await self?.awaitInputIdle()
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let self, !Task.isCancelled, self.isControlActive,
+                  self.controlLease?.id == lease.id,
+                  self.session?.id == session.id,
+                  self.session?.generation == session.generation,
+                  self.inputIntentRevision == intentRevision else { return }
+            self.enqueueInput([.key(key: "1", phase: "press", modifiers: 8)])
+        }
+    }
+
     private func cancelAppSwitcher() {
         let actions = appSwitcher.finish(cancel: true)
         if !actions.isEmpty { enqueueInput(actions) }
@@ -644,6 +668,7 @@ final class ComputerSessionModel: ObservableObject {
 
     private func enqueueInput(_ actions: [ComputerInputAction]) {
         guard isControlActive, let lease = controlLease else { return }
+        inputIntentRevision &+= 1
         guard inputBuffer.append(actions) else {
             failClosed("Your Mac is not keeping up with input. Take control again to continue.")
             return
@@ -663,6 +688,8 @@ final class ComputerSessionModel: ObservableObject {
     }
 
     private func discardPendingInput() {
+        applicationsTask?.cancel()
+        applicationsTask = nil
         inputEpoch &+= 1
         inputTask?.cancel()
         inputTask = nil
@@ -1020,12 +1047,6 @@ private struct ComputerConnectionSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ComputerSessionHeader(model: model, library: library, session: sessionModel.session, receiverState: sessionModel.receiverState) { saved in
-                await closeComputer()
-                guard !Task.isCancelled else { return }
-                selectConnection(saved)
-            }
-
             ComputerViewport(model: sessionModel)
             .frame(maxWidth: .infinity)
             .frame(maxHeight: .infinity)
@@ -1048,7 +1069,6 @@ private struct ComputerConnectionSessionView: View {
             }
         }
         .background(Color(uiColor: .systemBackground))
-        .navigationTitle("Computer")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -1059,6 +1079,14 @@ private struct ComputerConnectionSessionView: View {
                     }
                 }
                 .accessibilityIdentifier("computer-session-close")
+            }
+            ToolbarItem(placement: .principal) {
+                ComputerSessionHeader(model: model, library: library, session: sessionModel.session,
+                                      receiverState: sessionModel.receiverState) { saved in
+                    await closeComputer()
+                    guard !Task.isCancelled else { return }
+                    selectConnection(saved)
+                }
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -1073,6 +1101,9 @@ private struct ComputerConnectionSessionView: View {
                 .disabled(sessionModel.isLoading || sessionModel.isClosed || sessionModel.isFixture)
                 .accessibilityLabel("Refresh")
                 .accessibilityIdentifier("computer-session-refresh")
+            }
+            if #available(iOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -1127,8 +1158,8 @@ private struct ComputerConnectionSessionView: View {
         .onChange(of: chat.id) { _, _ in
             Task { await closeComputer(); dismiss() }
         }
-        // Keep the container addressable without allowing its identifier to
-        // replace the nested viewport's live status element in XCTest.
+        // Keep the container addressable without replacing the nested
+        // viewport's accessibility element in XCTest.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("computer-session-container")
     }
@@ -1165,14 +1196,7 @@ private struct ComputerSessionHeader: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(session?.state == .live && receiverState == .live ? Color.green : Color.red)
-                .frame(width: 10, height: 10)
-                .accessibilityLabel("Computer view status")
-                .accessibilityValue(statusTitle)
-                .accessibilityIdentifier("computer-session-status")
-            Spacer(minLength: 8)
+        HStack {
             Button {
                 candidates = Dictionary(uniqueKeysWithValues: library.saved.connections.map {
                     ($0.credential.hostInstallationId, library.model(for: $0))
@@ -1180,6 +1204,10 @@ private struct ComputerSessionHeader: View {
                 showingConnections = true
             } label: {
                 HStack(spacing: 6) {
+                    Circle()
+                        .fill(session?.state == .live && receiverState == .live ? Color.green : Color.red)
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
                     Text(model.macName).lineLimit(1)
                     if switching { ProgressView().controlSize(.small) }
                     else { Image(systemName: "chevron.down").font(.caption.weight(.semibold)) }
@@ -1187,10 +1215,10 @@ private struct ComputerSessionHeader: View {
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
             }
-            .font(.footnote).foregroundStyle(.primary).buttonStyle(.plain)
+            .font(.footnote.weight(.semibold)).foregroundStyle(.primary).buttonStyle(.plain)
             .disabled(switching)
-            .accessibilityLabel("Computer")
-            .accessibilityValue(model.macName)
+            .accessibilityLabel("Computer, \(model.macName)")
+            .accessibilityValue(statusTitle)
             .accessibilityIdentifier("computer-session-connection-picker")
             .popover(isPresented: $showingConnections, arrowEdge: .top) {
                 ScrollView {
@@ -1233,9 +1261,6 @@ private struct ComputerSessionHeader: View {
                 .presentationCompactAdaptation(.popover)
             }
         }
-        .frame(minHeight: 36)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
         .accessibilityValue(sourceDescription)
         .accessibilityIdentifier("computer-session-header")
@@ -1377,10 +1402,12 @@ struct ComputerSessionControls: View {
                 HStack(spacing: 4) {
                     shortcutButton("Windows", symbol: "rectangle.3.group", label: "All windows, Control Up Arrow",
                                    identifier: "all-windows") { model.sendShortcut(key: "up", modifiers: 2) }
-                    shortcutButton("App windows", symbol: "macwindow", label: "App windows, Control Down Arrow",
+                    shortcutButton("This app", symbol: "macwindow", label: "App windows, Control Down Arrow",
                                    identifier: "app-windows") { model.sendShortcut(key: "down", modifiers: 2) }
-                    shortcutButton("Next window", symbol: "rectangle.on.rectangle", label: "Next window, Command Grave",
+                    shortcutButton("Next", symbol: "rectangle.on.rectangle", label: "Next window, Command Grave",
                                    identifier: "next-window") { model.sendShortcut(key: "`", modifiers: 8) }
+                    shortcutButton("Apps", symbol: "square.grid.3x3", label: "Show Applications, Command Space then Command 1",
+                                   identifier: "applications") { model.showApplications() }
                     shortcutButton(model.isAppSwitcherPresented ? "Choose app" : "⌘ Tab", symbol: "command",
                                    label: model.isAppSwitcherPresented ? "Choose highlighted app" : "Show app switcher, Command Tab",
                                    identifier: "app-switcher") { model.toggleAppSwitcher() }

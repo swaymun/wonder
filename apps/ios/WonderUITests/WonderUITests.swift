@@ -743,9 +743,9 @@ import UIKit
         let computerContainer = app.descendants(matching: .any)
             .matching(identifier: "computer-session-container").firstMatch
         XCTAssertTrue(computerContainer.waitForExistence(timeout: 10))
-        let status = app.descendants(matching: .any).matching(identifier: "computer-session-status").firstMatch
-        XCTAssertTrue(status.waitForExistence(timeout: 5))
-        XCTAssertEqual(status.value as? String, "Unavailable")
+        let picker = app.buttons["computer-session-connection-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertEqual(picker.value as? String, "Unavailable")
         XCTAssertTrue(app.staticTexts["Live computer viewing is unavailable on this Mac."].exists)
         XCTAssertTrue(app.staticTexts["Live computer viewing is unavailable on this Mac. Update Wonder on the Mac, then try again."].exists)
         let preview = app.descendants(matching: .any)
@@ -759,7 +759,12 @@ import UIKit
         XCTAssertTrue(app.buttons["computer-session-zoom-out"].exists)
         XCTAssertTrue(app.buttons["computer-session-zoom-in"].exists)
         app.buttons["computer-session-fit"].tap()
-        XCTAssertTrue(app.buttons["computer-session-refresh"].exists)
+        let refresh = app.buttons["computer-session-refresh"]
+        let more = app.buttons["computer-session-more"]
+        XCTAssertTrue(refresh.exists)
+        XCTAssertTrue(more.exists)
+        XCTAssertGreaterThan(more.frame.minX - refresh.frame.maxX, 4,
+                             "Refresh and More should be separate toolbar buttons.")
         XCTAssertFalse(app.buttons["computer-session-take-control"].exists)
         XCTAssertFalse(app.staticTexts["View only"].exists)
         let zoomValue = app.buttons["computer-session-more"]
@@ -787,9 +792,9 @@ import UIKit
         let computerContainer = app.descendants(matching: .any)
             .matching(identifier: "computer-session-container").firstMatch
         XCTAssertTrue(computerContainer.waitForExistence(timeout: 10))
-        let status = app.descendants(matching: .any).matching(identifier: "computer-session-status").firstMatch
-        XCTAssertTrue(status.waitForExistence(timeout: 5))
-        XCTAssertEqual(status.value as? String, "Live")
+        let picker = app.buttons["computer-session-connection-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertEqual(picker.value as? String, "Live")
         let takeControl = app.buttons["computer-session-take-control"]
         XCTAssertTrue(takeControl.waitForExistence(timeout: 5))
         takeControl.tap()
@@ -824,6 +829,10 @@ import UIKit
         XCTAssertEqual(switcher.value as? String, "Closed")
         switcher.tap()
         app.otherElements["computer-session-preview"].tap()
+        XCTAssertEqual(switcher.value as? String, "Closed")
+        switcher.tap()
+        let applications = app.buttons["computer-session-shortcut-applications"]
+        applications.tap()
         XCTAssertEqual(switcher.value as? String, "Closed")
         app.buttons["computer-session-keyboard"].tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
@@ -883,7 +892,8 @@ import UIKit
         XCTAssertTrue(studio.waitForExistence(timeout: 5))
         studio.tap()
         XCTAssertTrue(app.buttons["computer-session-take-control"].waitForExistence(timeout: 5))
-        XCTAssertEqual(picker.value as? String, "Studio")
+        XCTAssertEqual(picker.label, "Computer, Studio")
+        XCTAssertEqual(picker.value as? String, "Live")
         app.buttons["computer-session-take-control"].tap()
         let switcher = app.buttons["computer-session-shortcut-app-switcher"]
         XCTAssertTrue(switcher.waitForExistence(timeout: 5))
@@ -894,7 +904,8 @@ import UIKit
         XCTAssertTrue(laptop.waitForExistence(timeout: 5))
         laptop.tap()
         XCTAssertTrue(app.buttons["computer-session-take-control"].waitForExistence(timeout: 5))
-        XCTAssertEqual(picker.value as? String, "Laptop")
+        XCTAssertEqual(picker.label, "Computer, Laptop")
+        XCTAssertEqual(picker.value as? String, "Live")
         XCTAssertFalse(switcher.exists)
         XCTAssertFalse(app.keyboards.firstMatch.exists)
         app.buttons["computer-session-take-control"].tap()
@@ -979,7 +990,7 @@ import UIKit
         for frame in frames {
             XCTAssertEqual(frame.midY, frames[0].midY, accuracy: 1, "Essential controls must share one row.")
         }
-        let shortcuts = ["all-windows", "app-windows", "next-window", "app-switcher"].map {
+        let shortcuts = ["all-windows", "app-windows", "next-window", "applications", "app-switcher"].map {
             app.buttons["computer-session-shortcut-" + $0]
         }
         for shortcut in shortcuts {
