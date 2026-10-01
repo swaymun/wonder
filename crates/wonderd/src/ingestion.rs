@@ -71,6 +71,7 @@ struct RuntimeRegistration {
 pub(crate) struct RuntimeRoute {
     pub runtime_id: String,
     pub message_id: Option<String>,
+    pub project: bool,
     client: Arc<tokio::sync::Mutex<wonder_app_server::AppServerClient>>,
 }
 
@@ -269,6 +270,7 @@ impl Ingestion {
                 Some(RuntimeRoute {
                     runtime_id: id.clone(),
                     message_id: registration.message_id.clone(),
+                    project: registration.project,
                     client: registration.client.upgrade()?,
                 })
             })
@@ -1001,6 +1003,49 @@ pub(crate) mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
     use wonder_app_server::{AppServerClient, LaunchConfig};
 
+    // Contract: native Projects children cannot poison the shared inbox by
+    // requiring a Bot parent. Live requests remain pending, historical
+    // envelopes convey no authority, and the following parent completion wins.
+    #[tokio::test]
+    async fn project_children_do_not_block_parent_completion_or_lose_approvals() {
+        let (_dir, state, message) = crate::projects::tests::handoff_fixture().await;
+        let runtime = crate::projects::codex_rpc(&state)
+            .await
+            .unwrap()
+            .health()
+            .id()
+            .to_owned();
+        for origin in [runtime.as_str(), "retired-runtime"] {
+            state.store.enqueue_notification(&json!({"_wonderRuntimeId":origin,
+                "method":"thread/status/changed", "params":{"threadId":"child-thread", "status":{"type":"active"}}})).await.unwrap();
+        }
+        state.store.enqueue_notification(&json!({"_wonderRuntimeId":runtime, "id":42,
+            "method":"item/commandExecution/requestApproval", "params":{"threadId":"child-thread", "turnId":"child-turn", "itemId":"command", "availableDecisions":["accept","decline"]}})).await.unwrap();
+        state.store.enqueue_notification(&json!({"_wonderRuntimeId":runtime,
+            "method":"turn/completed", "params":{"threadId":"thread", "turn":{"id":"turn", "status":"completed"}}})).await.unwrap();
+        while project_next(&state).await.unwrap() {}
+        assert_eq!(state.store.notification_backlog().await.unwrap(), 0);
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "completed"
+        );
+        assert!(state
+            .store
+            .subagent_ownership_for_thread("child-thread")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(state.store.list_pending_approvals().await.unwrap().len(), 1);
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn cancelled_planner_retires_only_its_runtime_thread_and_bounds_late_events() {
         let ingestion = Ingestion::default();
@@ -1075,8 +1120,11 @@ pub(crate) mod tests {
             .upsert_owner_device("owner", "Owner", "{}", "now")
             .await
             .unwrap();
-        let source = r#"import json, sys, os, threading, time
+        let source = r#"import json, sys, os, threading, time, fcntl
 root = os.path.dirname(__file__)
+if os.path.exists(root + '/lock-fixture'):
+    writer = open(root + '/writer.lock', 'w')
+    fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
 def child_thread():
     status = 'idle'
     if os.path.exists(root + '/child-active'): status = 'active'
@@ -1092,11 +1140,16 @@ for line in sys.stdin:
     with open(root + '/requests', 'a') as log: log.write(method + '\n')
     with open(root + '/requests-jsonl', 'a') as log: log.write(json.dumps(r) + '\n')
     result = {}
+    idle = json.load(open(root + '/idle-fixture.json')) if os.path.exists(root + '/idle-fixture.json') else {}
     if method == 'initialize': result = {'capabilities': {'experimentalApi': True}}
+    elif method == 'thread/loaded/list': result = {'data':list(idle), 'nextCursor':None}
+    elif method == 'thread/backgroundTerminals/list': result = {'data':idle.get(r['params']['threadId'],{}).get('background',[]), 'nextCursor':None}
+    elif method == 'thread/read' and r.get('params',{}).get('threadId') in idle:
+        result = {'thread':idle[r['params']['threadId']]}
     elif method == 'model/list' and os.path.exists(root + '/models.json'): result = json.load(open(root + '/models.json'))
     elif method == 'permissionProfile/list': result = {'data': [{'name': 'test', 'allowed': True}, {'name': ':read-only', 'allowed': True}, {'name': ':workspace', 'allowed': True}, {'name': ':danger-full-access', 'allowed': True}]}
     elif method == 'thread/goal/get':
-        result = {'goal':json.load(open(root + '/goal.json')) if os.path.exists(root + '/goal.json') else None}
+        result = {'goal':idle[r['params']['threadId']].get('goal') if r.get('params',{}).get('threadId') in idle else (json.load(open(root + '/goal.json')) if os.path.exists(root + '/goal.json') else None)}
     elif method == 'thread/goal/set':
         goal = json.load(open(root + '/goal.json')) if os.path.exists(root + '/goal.json') else {'threadId':'thread','createdAt':1700000000,'updatedAt':1700000000,'objective':'','status':'active','tokensUsed':0,'timeUsedSeconds':0,'tokenBudget':None}
         goal.update({k:v for k,v in r['params'].items() if k in ('objective','status','tokenBudget')})
@@ -1151,7 +1204,11 @@ for line in sys.stdin:
             with open(root + '/accepted-client') as saved: client = saved.read()
             result['data'].append({'turnId':'turn','item':{'type':'userMessage','clientId':client}})
     elif method == 'thread/turns/list':
-        if r.get('params',{}).get('threadId') == 'child-thread':
+        if os.path.exists(root + '/turn-pages.json'):
+            pages = json.load(open(root + '/turn-pages.json'))
+            page = int(r.get('params',{}).get('cursor') or '0')
+            result = {'data':pages[page], 'nextCursor':str(page+1) if page+1 < len(pages) else None}
+        elif r.get('params',{}).get('threadId') == 'child-thread':
             child_status = 'interrupted' if os.path.exists(root + '/child-interrupted') else ('inProgress' if os.path.exists(root + '/child-active') else 'completed')
             result = {'data':[{'id':'turn','status':child_status}], 'nextCursor':None}
         else: result = {} if os.path.exists(root + '/bad-history') else {'data':[{'id':'turn','status':'completed'}] if os.path.exists(root + '/completed') else [], 'nextCursor':None}

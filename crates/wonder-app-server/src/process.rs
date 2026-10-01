@@ -342,6 +342,13 @@ impl AppServerClient {
         self.health.clone()
     }
 
+    /// A captured RPC generation may still serve history or an approval.
+    /// Lifecycle callers hold the client lock before checking this, so no new
+    /// handle can be captured between the check and an idle shutdown.
+    pub fn has_rpc_handles(&self) -> bool {
+        Arc::strong_count(&self.next_id) > 1
+    }
+
     fn fail_pending(&self) {
         for (_, sender) in self
             .pending

@@ -2015,7 +2015,6 @@ pub(crate) async fn dispatch(state: AppState, message: wonder_store::StoredMessa
             {
                 return;
             }
-            crate::drain_pending_app_server_notifications(&state, &thread_id, &turn_id).await;
             publish_message_state(
                 &state,
                 &message,
@@ -2024,6 +2023,8 @@ pub(crate) async fn dispatch(state: AppState, message: wonder_store::StoredMessa
                 Some(&turn_id),
             )
             .await;
+            // A buffered completion must remain the last delivery event.
+            crate::drain_pending_app_server_notifications(&state, &thread_id, &turn_id).await;
             state
                 .projects
                 .notices
@@ -2298,17 +2299,15 @@ async fn dispatch_inner(
     Ok((thread_id, turn, rpc.health().id().to_owned()))
 }
 
-/// Settle project turns whose runtime generation ended (daemon restart,
-/// provider exit). Completed native turns are projected; anything else is
-/// uncertain for the owner to review, never resent automatically.
+/// Native history also settles a missed completion from a still-live runtime.
+/// An uncertain receipt is completed only with proof for its exact native turn;
+/// incomplete history never authorizes resubmission.
 pub(crate) async fn recover(state: &AppState) {
+    let _dispatch = state.dispatch_lock.lock().await;
     let Ok(messages) = state.store.active_runtime_messages().await else {
         return;
     };
     for message in messages {
-        if message.state == "uncertain" {
-            continue;
-        }
         let Ok(Some(conversation)) = state
             .store
             .project_conversation(&message.conversation_id)
@@ -2336,27 +2335,16 @@ pub(crate) async fn recover(state: &AppState) {
                 Err(_) => None,
             },
         };
-        if accepted.is_some()
+        let same_live_runtime = accepted.is_some()
             && current
                 .as_ref()
-                .is_some_and(|h| h.is_alive() && Some(h.id()) == accepted.as_deref())
-        {
-            continue;
-        }
+                .is_some_and(|h| h.is_alive() && Some(h.id()) == accepted.as_deref());
         let Ok(rpc) = rpc_for(state, conversation.family).await else {
             continue;
         };
-        let Ok(page) = result(&rpc, "thread/turns/list", json!({"threadId": thread, "limit": 20, "sortDirection": "desc", "itemsView": "notLoaded"})).await else {
+        let Ok(status) = native_turn_status(&rpc, &thread, &turn).await else {
             continue;
         };
-        let status = page
-            .get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|t| t.get("id").and_then(Value::as_str) == Some(turn.as_str()))
-            .and_then(|t| t.get("status").and_then(Value::as_str))
-            .map(str::to_owned);
         match status.as_deref() {
             Some("completed" | "failed" | "interrupted") => {
                 if let Some(items) =
@@ -2369,9 +2357,12 @@ pub(crate) async fn recover(state: &AppState) {
                         }
                     }
                 }
-                crate::process_app_server_notification(state, json!({"method": "turn/completed",
-                    "params": {"threadId": thread, "turnId": turn, "turn": {"id": turn, "status": status}}}), false).await;
+                if !crate::process_app_server_notification(state, json!({"method": "turn/completed",
+                    "params": {"threadId": thread, "turnId": turn, "turn": {"id": turn, "status": status}}}), false).await {
+                    continue;
+                }
             }
+            _ if same_live_runtime || message.state == "uncertain" => continue,
             _ => {
                 if state
                     .store
@@ -2396,6 +2387,122 @@ pub(crate) async fn recover(state: &AppState) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&message.id);
+    }
+    release_idle_codex_runtime(state).await;
+}
+
+async fn native_turn_status(
+    rpc: &RpcClient,
+    thread: &str,
+    turn: &str,
+) -> Result<Option<String>, String> {
+    let mut cursor: Option<String> = None;
+    let mut seen = HashSet::new();
+    for _ in 0..100 {
+        let page = result(
+            rpc,
+            "thread/turns/list",
+            json!({"threadId": thread,
+            "limit": 20, "sortDirection": "desc", "itemsView": "notLoaded", "cursor": cursor}),
+        )
+        .await?;
+        let turns = page["data"].as_array().ok_or("Missing native turns")?;
+        if let Some(found) = turns.iter().find(|t| t["id"].as_str() == Some(turn)) {
+            return found["status"]
+                .as_str()
+                .map(|s| Some(s.to_owned()))
+                .ok_or_else(|| "Missing native turn status".into());
+        }
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        let Some(next) = cursor.as_ref() else {
+            return Ok(None);
+        };
+        if !seen.insert(next.clone()) {
+            return Err("Native turns repeated a cursor".into());
+        }
+    }
+    Err("Native turn history is incomplete".into())
+}
+
+/// Unsubscribe retains Codex's writer lock for an inactivity grace period.
+/// Close our normal-home process once all of its loaded work is idle instead.
+/// Other project work, native children, goals, terminals and captured read/RPC
+/// handles retain the process; the private Bot runtime is never stopped here.
+async fn release_idle_codex_runtime(state: &AppState) {
+    let runtime = &state.projects;
+    let _start = runtime.start.lock().await;
+    let mut client = runtime.codex.lock().await;
+    if !client.health().is_alive() || client.health().storage_blocked() || client.has_rpc_handles()
+    {
+        return;
+    }
+    let rpc = client.rpc();
+    let Ok(loaded) = result(&rpc, "thread/loaded/list", json!({})).await else {
+        return;
+    };
+    let Some(threads) = loaded["data"].as_array() else {
+        return;
+    };
+    // Discovery alone holds no writer and needs no restart. Incomplete or
+    // unsupported lifecycle responses must never authorize process shutdown.
+    if threads.is_empty() || !loaded["nextCursor"].is_null() {
+        return;
+    }
+    let Ok(messages) = state.store.active_runtime_messages().await else {
+        return;
+    };
+    // Queued user intent remains in SQLite for the next dispatch tick. An
+    // admitted turn with unconfirmed completion keeps its runtime alive.
+    if messages.iter().any(|m| {
+        m.state != "uncertain"
+            && threads
+                .iter()
+                .any(|t| t.as_str() == m.codex_thread_id.as_deref())
+    }) {
+        return;
+    }
+    for thread in threads {
+        let Some(thread) = thread.as_str() else {
+            return;
+        };
+        let Ok(read) = result(&rpc, "thread/read", json!({"threadId": thread})).await else {
+            return;
+        };
+        if read["thread"]["id"].as_str() != Some(thread)
+            || read["thread"]["status"]["type"].as_str() != Some("idle")
+        {
+            return;
+        }
+        let Ok(goal) = result(&rpc, "thread/goal/get", json!({"threadId": thread})).await else {
+            return;
+        };
+        if !goal.get("goal").is_some_and(|g| {
+            g.is_null()
+                || matches!(
+                    g["status"].as_str(),
+                    Some("complete" | "blocked" | "paused" | "budgetLimited" | "usageLimited")
+                )
+        }) {
+            return;
+        }
+        let Ok(background) = result(
+            &rpc,
+            "thread/backgroundTerminals/list",
+            json!({"threadId": thread, "limit": 1}),
+        )
+        .await
+        else {
+            return;
+        };
+        if !background["data"].as_array().is_some_and(Vec::is_empty)
+            || !background["nextCursor"].is_null()
+        {
+            return;
+        }
+    }
+    drop(rpc);
+    if !client.has_rpc_handles() {
+        let _ = client.shutdown().await;
     }
 }
 
@@ -2762,8 +2869,305 @@ pub(crate) async fn continuation(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) async fn handoff_fixture(
+    ) -> (tempfile::TempDir, AppState, wonder_store::StoredMessage) {
+        let (dir, mut state) = crate::ingestion::tests::fixture().await;
+        let source = dir.path().join("project-source");
+        std::fs::create_dir(&source).unwrap();
+        let roots = validate_folders(&[source.to_string_lossy().into_owned()], &[]).unwrap();
+        state
+            .store
+            .create_project("project", "request", "hash", "Test", &roots, 0, "now")
+            .await
+            .unwrap();
+        state.projects = ProjectRuntime::configured(
+            dir.path().join("codex"),
+            "test".into(),
+            &dir.path().join("home"),
+            &dir.path().join("claude"),
+            crate::ingestion::notification_sink(state.store.clone()),
+        );
+        state
+            .store
+            .create_project_conversation(ProjectConversationInsert {
+                conversation_id: "project-chat",
+                project_id: "project",
+                family: AgentFamily::Codex,
+                provider_store: &state.projects.codex_store,
+                native_session_id: Some("thread"),
+                cwd: source.to_str().unwrap(),
+                roots_revision: 1,
+                title: "Recovery",
+                model: None,
+                effort: None,
+                access_mode: "read_only",
+                claude_approval: "ask",
+                plan_mode: false,
+                creation_request_id: None,
+                now: "now",
+            })
+            .await
+            .unwrap();
+        state
+            .store
+            .bind_project_runtime(
+                "project-chat",
+                AgentFamily::Codex,
+                &state.projects.codex_store,
+                "thread",
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+        let MessageInsert::Inserted(message) = state
+            .store
+            .insert_dispatch_message(
+                "owner",
+                "receipt",
+                "work",
+                "hash",
+                "project-chat",
+                &[],
+                "now",
+                true,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("new receipt")
+        };
+        state
+            .store
+            .update_message_delivery(&message.id, "streaming", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        std::fs::write(
+            dir.path().join("idle-fixture.json"),
+            json!({"thread":{
+            "id":"thread", "status":{"type":"idle"}}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("lock-fixture"), "").unwrap();
+        let rpc = codex_rpc(&state).await.unwrap();
+        state
+            .projects
+            .generations
+            .lock()
+            .unwrap()
+            .insert(message.id.clone(), rpc.health().id().into());
+        drop(rpc);
+        (dir, state, message)
+    }
+
+    fn writer_available(dir: &FsPath) -> bool {
+        std::fs::File::open(dir.join("writer.lock"))
+            .unwrap()
+            .try_lock()
+            .is_ok()
+    }
+
+    // Contract: a lost terminal notification cannot leave a live-generation
+    // receipt busy forever. The existing transport/SQLite owner checks exact
+    // turn proof, paged history, durable intent and the actual OS writer lock.
+    #[tokio::test]
+    async fn project_recovery_settles_live_and_uncertain_receipts_without_resending() {
+        let (dir, state, message) = handoff_fixture().await;
+        assert!(!writer_available(dir.path()));
+        std::fs::write(
+            dir.path().join("idle-fixture.json"),
+            json!({"thread":{
+            "id":"thread", "status":{"type":"active"}}})
+            .to_string(),
+        )
+        .unwrap();
+        for (delivery, native) in [("streaming", "inProgress"), ("uncertain", "inProgress")] {
+            state
+                .store
+                .update_message_delivery(&message.id, delivery, Some("thread"), Some("turn"))
+                .await
+                .unwrap();
+            std::fs::write(
+                dir.path().join("turn-pages.json"),
+                json!([[{"id":"turn", "status":native}]]).to_string(),
+            )
+            .unwrap();
+            recover(&state).await;
+            assert_eq!(
+                state
+                    .store
+                    .message_by_id(&message.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                delivery
+            );
+        }
+        std::fs::write(
+            dir.path().join("turn-pages.json"),
+            json!([[{"id":"other", "status":"completed"}]]).to_string(),
+        )
+        .unwrap();
+        recover(&state).await;
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "uncertain"
+        );
+        // Restore the original same-live-generation case. A terminal turn on
+        // the second page settles it and an uncertain receipt for the same turn.
+        assert!(state.projects.codex.lock().await.health().is_alive());
+        state
+            .store
+            .update_message_delivery(&message.id, "streaming", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        let MessageInsert::Inserted(uncertain) = state
+            .store
+            .insert_message("owner", "uncertain", "work", "hash", "project-chat", "now")
+            .await
+            .unwrap()
+        else {
+            panic!("new uncertain receipt")
+        };
+        state
+            .store
+            .update_message_delivery(&uncertain.id, "uncertain", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        let MessageInsert::Inserted(queued) = state
+            .store
+            .insert_dispatch_message(
+                "owner",
+                "queued",
+                "next",
+                "hash",
+                "project-chat",
+                &[],
+                "now",
+                true,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("new queued receipt")
+        };
+        std::fs::write(dir.path().join("completed"), "").unwrap();
+        std::fs::write(
+            dir.path().join("idle-fixture.json"),
+            json!({"thread":{
+            "id":"thread", "status":{"type":"idle"}}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("turn-pages.json"),
+            json!([
+                [{"id":"other", "status":"completed"}], [{"id":"turn", "status":"completed"}]
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        recover(&state).await;
+        for receipt in [&message, &uncertain] {
+            assert_eq!(
+                state
+                    .store
+                    .message_by_id(&receipt.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "completed"
+            );
+        }
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&queued.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "accepted_by_wonder"
+        );
+        assert!(writer_available(dir.path()));
+        assert!(!state.projects.codex.lock().await.health().is_alive());
+        assert!(state.app_server.lock().await.health().is_alive());
+        let requests = std::fs::read_to_string(dir.path().join("requests")).unwrap();
+        for method in ["thread/start", "thread/resume", "turn/start"] {
+            assert!(
+                !requests.lines().any(|line| line == method),
+                "{method} must not run during recovery"
+            );
+        }
+        assert!(state
+            .store
+            .assistant_messages_for_conversation("project-chat")
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.text == "recovered"));
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    // Contract: handing the writer back cannot stop another loaded thread,
+    // autonomous goal, background command or a captured history/approval RPC.
+    // Unmapped native children are checked directly, rather than assumed idle.
+    #[tokio::test]
+    async fn project_handoff_preserves_other_native_work_and_readers() {
+        let (dir, state, message) = handoff_fixture().await;
+        state
+            .store
+            .update_message_delivery(&message.id, "completed", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        let rpc = codex_rpc(&state).await.unwrap();
+        release_idle_codex_runtime(&state).await;
+        assert!(!writer_available(dir.path()));
+        drop(rpc);
+        let mut idle = json!({"thread":{"id":"thread", "status":{"type":"idle"}},
+            "child-thread":{"id":"child-thread", "status":{"type":"idle"}}});
+        for (path, value) in [
+            ("/child-thread/status/type", json!("active")),
+            ("/thread/goal", json!({"status":"active"})),
+            ("/thread/goal", json!({"status":"futureStatus"})),
+            ("/thread/background", json!([{"processId":"running"}])),
+        ] {
+            // Goal/background keys are optional in native snapshots.
+            if path == "/thread/goal" {
+                idle["thread"]["goal"] = value;
+            } else if path == "/thread/background" {
+                idle["thread"]["background"] = value;
+            } else {
+                *idle.pointer_mut(path).unwrap() = value;
+            }
+            std::fs::write(dir.path().join("idle-fixture.json"), idle.to_string()).unwrap();
+            release_idle_codex_runtime(&state).await;
+            assert!(
+                state.projects.codex.lock().await.health().is_alive(),
+                "{path}"
+            );
+            assert!(!writer_available(dir.path()));
+            idle = json!({"thread":{"id":"thread", "status":{"type":"idle"}},
+                "child-thread":{"id":"child-thread", "status":{"type":"idle"}}});
+        }
+        idle["thread"]["goal"] = json!({"status":"complete"});
+        std::fs::write(dir.path().join("idle-fixture.json"), idle.to_string()).unwrap();
+        release_idle_codex_runtime(&state).await;
+        assert!(writer_available(dir.path()));
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
 
     // Contract: generated commands keep paths and IDs as single arguments even
     // with spaces or quotes; nothing can inject a second shell command.

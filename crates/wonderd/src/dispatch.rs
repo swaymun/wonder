@@ -8,6 +8,7 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
     state.store.recover_group_runs().await?;
     Ok(tokio::spawn(async move {
         let mut groups = tokio::task::JoinSet::new();
+        let mut next_project_recovery = tokio::time::Instant::now();
         loop {
             while groups.try_join_next().is_some() {}
             let _ = crate::questions::expire_optional(&state).await;
@@ -25,6 +26,12 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
                         json!({"error":error}),
                     );
                 }
+            }
+            // Reconciliation must also run when a blocked notification queue
+            // prevents new sends. Exact native history is still safe to read.
+            if tokio::time::Instant::now() >= next_project_recovery {
+                crate::projects::recover(&state).await;
+                next_project_recovery = tokio::time::Instant::now() + Duration::from_secs(5);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -114,7 +121,6 @@ async fn tick(state: &AppState) -> Result<(), String> {
             crate::dispatch_to_codex(state.clone(), message).await;
         }
     }
-    crate::projects::recover(state).await;
     Ok(())
 }
 

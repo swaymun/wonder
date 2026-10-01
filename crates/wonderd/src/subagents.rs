@@ -476,10 +476,17 @@ pub(crate) async fn observe(
     }
     let origin_runtime_id =
         origin_runtime_id.ok_or_else(|| "Child notification has no runtime origin".to_owned())?;
-    let route = state
-        .ingestion
-        .runtime_route(origin_runtime_id)
-        .ok_or_else(|| "Child runtime is no longer available".to_owned())?;
+    let Some(route) = state.ingestion.runtime_route(origin_runtime_id) else {
+        // An unregistered historical envelope conveys no ownership. Preserve
+        // normal receipt correlation without depending on its dead transport.
+        return Ok(None);
+    };
+    // This registry owns Bot child conversations. Native Projects retain
+    // their children in provider history and the parent's collaboration items;
+    // attempting Bot registration would block every later envelope.
+    if route.project {
+        return Ok(None);
+    }
 
     // Activity payloads only seed verification. A parent envelope remains a
     // parent envelope even when it mentions child thread ids; register those
