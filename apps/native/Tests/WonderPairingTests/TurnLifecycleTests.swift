@@ -280,18 +280,51 @@ final class TurnLifecycleTests: XCTestCase {
         let delivered = snapshot(messages: [message("stopped", turn: "runtime", state: "interrupted")],
                                  turns: [turn("runtime", status: "interrupted")])
         XCTAssertEqual(delivered.rows(author: "Bot").count, 1)
-        XCTAssertEqual(delivered.latestRequestIssue, "interrupted")
+        XCTAssertEqual(delivered.latestRequestIssue, "The last response was stopped. Review the conversation before sending new work.")
     }
 
     func testRealFailuresRemainVisibleAndStaleReceiptsCannotOverrideCompletedWork() {
-        for state in ["uncertain", "safe_to_retry", "failed"] {
-            XCTAssertEqual(snapshot(messages: [message("failed", turn: nil, state: state)], turns: []).latestRequestIssue, state)
+        for (state, description) in [
+            ("uncertain", "A message’s delivery is unconfirmed. Review the conversation before trying again."),
+            ("safe_to_retry", "A message could not be sent. Review the conversation before trying again."),
+            ("failed", "A message could not be sent. Review the conversation before trying again.")
+        ] {
+            XCTAssertEqual(snapshot(messages: [message("failed", turn: nil, state: state)], turns: []).latestRequestIssue, description)
         }
         let finished = snapshot(messages: [message("stale", turn: "runtime", state: "uncertain"),
                                            message("cancelled", turn: nil, state: "interrupted")],
                                 turns: [turn("runtime", status: "completed"), turn("local:cancelled", status: "unknown")])
         XCTAssertNil(finished.latestRequestIssue)
         XCTAssertFalse(finished.hasUnassignedPreTurnWork)
+    }
+
+    func testFailedFollowupDoesNotDescribeCompletedWorkAsUnfinished() {
+        let value = snapshot(messages: [message("work", turn: "runtime", state: "completed"),
+                                        message("followup", turn: nil, state: "failed")],
+                             turns: [turn("runtime", status: "completed")])
+        XCTAssertNil(value.activeTurnID)
+        XCTAssertEqual(value.latestRequestIssue,
+                       "A message could not be sent. Review the conversation before trying again.")
+        for state in ["failed", "interrupted", "uncertain"] {
+            let finished = snapshot(messages: [message("work", turn: "runtime", state: state)],
+                                    turns: [turn("runtime", status: "completed")])
+            XCTAssertNil(finished.latestRequestIssue)
+        }
+    }
+
+    func testDeliveryUncertaintyAndUnfinishedResponsesKeepDistinctWarnings() {
+        for turnID in [nil, "runtime"] as [String?] {
+            let uncertain = snapshot(messages: [message("work", turn: turnID, state: "uncertain")], turns: [])
+            XCTAssertEqual(uncertain.latestRequestIssue,
+                           "A message’s delivery is unconfirmed. Review the conversation before trying again.")
+        }
+        for (state, description) in [
+            ("failed", "The last response could not finish. Review the conversation before sending new work."),
+            ("interrupted", "The last response was stopped. Review the conversation before sending new work.")
+        ] {
+            XCTAssertEqual(snapshot(messages: [message("work", turn: "runtime", state: state)],
+                                    turns: [turn("runtime", status: state)]).latestRequestIssue, description)
+        }
     }
 
     private func snapshot(messages: [ConversationMessage], turns: [ReadTurn]) -> ConversationSnapshot {

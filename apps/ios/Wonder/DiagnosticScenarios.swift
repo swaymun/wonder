@@ -753,6 +753,8 @@ struct DiagnosticSubagentFixtureView: View {
                 } else if selection == 9 {
                     Button("Add activity") { lifecycleModel.snapshots[lifecycleChat.id] = Self.cancelledQueueSnapshot(commandCount: 2) }
                         .accessibilityIdentifier("fixture-add-activity")
+                    Button("Complete with failed follow-up") { lifecycleModel.snapshots[lifecycleChat.id] = Self.cancelledQueueSnapshot(completed: true) }
+                        .accessibilityIdentifier("fixture-complete-failed-followup")
                     ConversationView(model: lifecycleModel, chat: lifecycleChat)
                 } else if selection == 8 {
                     ConversationView(model: lifecycleModel, chat: lifecycleChat)
@@ -883,21 +885,28 @@ struct DiagnosticSubagentFixtureView: View {
         return try! JSONDecoder().decode(ConversationSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
     }
 
-    private static func cancelledQueueSnapshot(commandCount: Int = 1) -> ConversationSnapshot {
+    private static func cancelledQueueSnapshot(commandCount: Int = 1, completed: Bool = false) -> ConversationSnapshot {
         let user: [String: Any] = ["id": "guide", "type": "userMessage", "state": "completed", "createdAt": "1000",
                                    "text": "Add filename links", "payload": ["clientId": "guide"]]
         let commands: [[String: Any]] = (0..<commandCount).map { index in
             ["id": "command-\(index)", "type": "commandExecution", "state": "completed", "createdAt": String(3000 + index),
              "payload": ["command": "fixture command \(index)", "output": "Fixture output"]]
         }
+        var messages: [[String: Any]] = [
+            ["messageId": "guide", "clientMessageId": "guide", "codexTurnId": "runtime", "codexThreadId": "fixture",
+             "body": "Add filename links", "state": completed ? "completed" : "streaming", "createdAt": "1000", "attachmentIds": []],
+            ["messageId": "cancelled", "clientMessageId": "cancelled", "body": "Add filename links", "state": "interrupted", "createdAt": "2000", "attachmentIds": []]
+        ]
+        if completed {
+            messages.append(["messageId": "followup", "body": "Also archive our own record", "state": "failed", "createdAt": "2500", "attachmentIds": []])
+        }
+        let reply: [[String: Any]] = completed ? [
+            ["id": "finished-reply", "type": "agentMessage", "state": "completed", "createdAt": "4000", "text": "The requested work is complete."]
+        ] : []
         let value: [String: Any] = [
             "conversationId": "diagnostics-lifecycle", "hostEpoch": "fixture", "lastSequence": commandCount,
-            "messages": [
-                ["messageId": "guide", "clientMessageId": "guide", "codexTurnId": "runtime", "codexThreadId": "fixture",
-                 "body": "Add filename links", "state": "streaming", "createdAt": "1000", "attachmentIds": []],
-                ["messageId": "cancelled", "clientMessageId": "cancelled", "body": "Add filename links", "state": "interrupted", "createdAt": "2000", "attachmentIds": []]
-            ], "assistantMessages": [], "thread": ["hydrated": true, "turns": [
-                ["id": "runtime", "status": "inProgress", "startedAt": "1000", "items": [user] + commands],
+            "messages": messages, "assistantMessages": [], "thread": ["hydrated": true, "turns": [
+                ["id": "runtime", "status": completed ? "completed" : "inProgress", "startedAt": "1000", "items": [user] + commands + reply],
                 ["id": "local:cancelled", "status": "unknown", "items": [
                     ["id": "cancelled", "type": "userMessage", "state": "interrupted", "createdAt": "2000", "text": "Add filename links", "payload": ["clientId": "cancelled"]]
                 ]]

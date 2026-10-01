@@ -2234,6 +2234,27 @@ import UIKit
         // Inspect only: no message or Guide is sent by this fixture.
     }
 
+    func testDiagnosticsCompletedResponseDistinguishesFailedFollowupDelivery() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-cancelled-queue", "-read-preview", "-send-preview"]
+        app.launch()
+        let working = app.buttons["activity-group:runtime/command-0"]
+        XCTAssertTrue(working.waitForExistence(timeout: 10))
+        XCTAssertEqual(working.label, "Working…")
+        let complete = app.buttons["fixture-complete-failed-followup"]
+        XCTAssertTrue(complete.isHittable)
+        complete.tap()
+        let issue = anyElement(app, identifier: "last-request-issue")
+        XCTAssertTrue(issue.waitForExistence(timeout: 5))
+        XCTAssertEqual(issue.label, "A message could not be sent. Review the conversation before trying again.")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Turn lifecycle: The requested work is complete.")).firstMatch.exists)
+        XCTAssertEqual(working.label, "Worked")
+        XCTAssertFalse(app.buttons["Stop response"].exists)
+        XCTAssertEqual(app.buttons["send-message"].label, "Send message")
+        retainMenuScreenshot(app, name: "Completed work with failed follow-up delivery")
+    }
+
     func testDiagnosticsFileChangeSummaryShowsFilenameCountsAndRetainsDiff() throws {
         continueAfterFailure = false
         for large in [false, true] {

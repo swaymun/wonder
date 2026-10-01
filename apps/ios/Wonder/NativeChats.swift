@@ -1030,8 +1030,8 @@ struct ConversationView: View {
                     if let error = model.composerErrors[chat.id] {
                         FailureDetails("Message not saved", message: error)
                     }
-                    if !model.botWorking(chat.id), let state = model.snapshots[chat.id]?.latestRequestIssue {
-                        Text(state == "uncertain" ? "The last outcome is unknown. Review the conversation before sending new work." : "The last request did not finish. Review the conversation before sending new work.")
+                    if !model.botWorking(chat.id), let issue = model.snapshots[chat.id]?.latestRequestIssue {
+                        Text(issue)
                             .font(.caption).foregroundStyle(.secondary)
                             .accessibilityIdentifier("last-request-issue")
                     }

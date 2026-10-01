@@ -138,7 +138,16 @@ public struct ConversationSnapshot: Codable, Sendable {
         guard activeTurnID == nil, !hasUnassignedPreTurnWork,
               let message = messages.last(where: { !$0.wasCancelledBeforeDispatch }) else { return nil }
         if message.codexTurnId == newestRuntimeTurn?.id, newestRuntimeTurn?.status == "completed" { return nil }
-        return ["uncertain", "safe_to_retry", "failed", "interrupted"].contains(message.state) ? message.state : nil
+        guard ["uncertain", "safe_to_retry", "failed", "interrupted"].contains(message.state) else { return nil }
+        if message.state == "uncertain" {
+            return "A message’s delivery is unconfirmed. Review the conversation before trying again."
+        }
+        if message.codexTurnId?.isEmpty != false {
+            return "A message could not be sent. Review the conversation before trying again."
+        }
+        return message.state == "interrupted"
+            ? "The last response was stopped. Review the conversation before sending new work."
+            : "The last response could not finish. Review the conversation before sending new work."
     }
     /// A message can be accepted before the daemon assigns it to a turn. It
     /// still occupies the composer until dispatch resolves, but it cannot
