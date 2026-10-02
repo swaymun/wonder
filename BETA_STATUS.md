@@ -80,6 +80,17 @@ remains at a research gate. Actual Widget Home Screen presentation, paired
 mobile-to-Mac Files/media and provider-send roundtrips, and TestFlight
 installation remain unverified.
 
+The post-release hardening review additionally corrected Bot and Project
+history/lifecycle waits that could delay update handoff; the combined daemon
+library suite passed 341 tests with three existing ignores, and the installer
+handoff suite passed 12/12. A visible Chats control in the iPad conversation
+shell passed a real-shell accessibility-size UI regression on iPad and the
+corresponding iPhone check (1/1 each). These changes remain in unshipped draft
+PR #61. With the owner's approval, a read-only pairing attempt found the
+installed Mac did not expose a usable full link through the accessible Devices
+UI, and the available simulator builds lacked durable pairing entitlements.
+No new owner device appeared; paired mobile acceptance remains open.
+
 ## Earlier qualification
 
 Testing build 7 and production build 71 passed six focused iPhone Simulator
