@@ -930,7 +930,7 @@ import UIKit
         XCTAssertTrue(app.buttons["1080p"].waitForExistence(timeout: 5))
     }
 
-    func testDiagnosticsComputerVideoQualityReconnectsAndReleasesControl() throws {
+    func testDiagnosticsComputerVideoQualityKeepsLiveControl() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
@@ -944,8 +944,8 @@ import UIKit
         let medium = app.buttons["1080p"]
         XCTAssertTrue(medium.waitForExistence(timeout: 5))
         medium.tap()
-        XCTAssertTrue(takeControl.waitForExistence(timeout: 5), "Changing quality must reconnect and release control.")
-        XCTAssertFalse(active.exists)
+        XCTAssertTrue(active.waitForExistence(timeout: 5), "Changing quality must preserve the live control session.")
+        XCTAssertFalse(takeControl.exists)
         app.buttons["computer-session-close"].tap()
     }
 
@@ -1088,6 +1088,8 @@ import UIKit
         XCTAssertLessThanOrEqual(more.frame.maxY, done.frame.minY + 2,
                                  "More must stay above the landscape control rail.")
         XCTAssertLessThanOrEqual(preview.frame.maxX, controls.frame.minX + 2)
+        XCTAssertLessThanOrEqual(app.windows.firstMatch.frame.maxX - controls.frame.maxX, 12,
+                                 "Landscape controls should sit close to the right edge.")
         XCTAssertGreaterThanOrEqual(preview.frame.maxY, controls.frame.maxY - 24,
                                     "The video viewport must reach the bottom safe area beside the rail.")
         XCTAssertLessThan(done.frame.midY, app.buttons["computer-session-shortcut-all-windows"].frame.midY)

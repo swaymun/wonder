@@ -43,6 +43,7 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
     // peer lifetime so ScreenCaptureKit frames continue reaching WebRTC.
     private var videoSource: RTCVideoSource?
     private var videoCapturer: RTCVideoCapturer?
+    private var videoSender: RTCRtpSender?
     private var remoteDescriptionSet = false
     private var pendingRemoteAnswer: String?
     private var remoteAnswer: String?
@@ -92,6 +93,7 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
         peerConnection = peer
         videoSource = source
         videoCapturer = capturer
+        videoSender = sender
         remoteDescriptionSet = false
         pendingRemoteAnswer = nil
         remoteAnswer = nil
@@ -137,6 +139,25 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
                 ])
             }
         }
+    }
+
+    @discardableResult
+    func updateQuality(sessionID: String, generation: UInt64, configuration: CaptureConfiguration,
+                       quality: CaptureVideoQuality) -> Bool {
+        lock.lock()
+        guard identity?.sessionID == sessionID, identity?.generation == generation,
+              let source = videoSource, let sender = videoSender else {
+            lock.unlock()
+            return false
+        }
+        source.adaptOutputFormat(toWidth: Int32(configuration.width), height: Int32(configuration.height),
+                                 fps: Int32(configuration.framesPerSecond))
+        let parameters = sender.parameters
+        parameters.degradationPreference = NSNumber(value: (quality == .auto
+            ? RTCDegradationPreference.balanced : RTCDegradationPreference.maintainResolution).rawValue)
+        sender.parameters = parameters
+        lock.unlock()
+        return true
     }
 
     /// Returns false for a stale identity, conflicting answer, or unavailable
@@ -288,6 +309,7 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
         peerConnection = nil
         videoSource = nil
         videoCapturer = nil
+        videoSender = nil
         identity = nil
         remoteDescriptionSet = false
         pendingRemoteAnswer = nil

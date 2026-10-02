@@ -241,6 +241,19 @@ final class CaptureCoreTests: XCTestCase {
         let prepared = machine.prepare(sessionID: "session", generation: 1, viewerCount: 1,
                                        screenRecordingAuthorized: true, configuration: CaptureVideoQuality.high.configuration)
         XCTAssertEqual(prepared.configuration, CaptureVideoQuality.high.configuration)
+        let source = CaptureSourceDescriptor(id: "display:1", kind: .display, title: "Display 1",
+                                             width: 1920, height: 1080, scale: 1,
+                                             contentRect: CaptureRect(x: 0, y: 0, width: 1920, height: 1080))
+        let ready = machine.selectSource(source)
+        XCTAssertNil(machine.updateConfiguration(CaptureVideoQuality.standard.configuration,
+                                                 sessionID: "old-session", generation: 1))
+        let resized = machine.updateConfiguration(CaptureVideoQuality.medium.configuration,
+                                                  sessionID: "session", generation: 1)
+        XCTAssertEqual(resized?.sessionID, ready.sessionID)
+        XCTAssertEqual(resized?.geometryRevision, ready.geometryRevision)
+        XCTAssertEqual(resized?.sourceID, ready.sourceID)
+        XCTAssertEqual(resized?.state, .ready)
+        XCTAssertEqual(resized?.configuration, CaptureVideoQuality.medium.configuration)
     }
 
     func testCaptureConfigurationCentersSourceWithoutChangingEncodedDimensions() {

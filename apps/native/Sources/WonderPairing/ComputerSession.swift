@@ -115,13 +115,15 @@ public struct ComputerSession: Codable, Equatable, Identifiable, Sendable {
     public let capability: ComputerCapability
     public let control: ComputerControlCapability?
     public let videoQuality: ComputerVideoQuality?
+    public let supportsLiveQualityChange: Bool?
 
     public init(id: String, clientRequestId: String, ownerDeviceId: String, hostInstallationId: String,
                 conversationId: String, generation: UInt64, state: ComputerSessionState,
                 source: ComputerSource, geometryRevision: UInt64, failureReason: String?,
                 createdAt: String, updatedAt: String, lastStateAt: String, endedAt: String?,
                 capability: ComputerCapability, control: ComputerControlCapability? = .unavailable,
-                videoQuality: ComputerVideoQuality? = nil) {
+                videoQuality: ComputerVideoQuality? = nil,
+                supportsLiveQualityChange: Bool? = nil) {
         self.id = id; self.clientRequestId = clientRequestId; self.ownerDeviceId = ownerDeviceId
         self.hostInstallationId = hostInstallationId; self.conversationId = conversationId
         self.generation = generation; self.state = state; self.source = source
@@ -129,6 +131,7 @@ public struct ComputerSession: Codable, Equatable, Identifiable, Sendable {
         self.createdAt = createdAt; self.updatedAt = updatedAt; self.lastStateAt = lastStateAt
         self.endedAt = endedAt; self.capability = capability; self.control = control
         self.videoQuality = videoQuality
+        self.supportsLiveQualityChange = supportsLiveQualityChange
     }
 }
 
@@ -166,6 +169,18 @@ public struct StartComputerSessionRequest: Encodable, Sendable {
         self.hostInstallationId = hostInstallationId; self.generation = generation; self.source = source
         // Older Macs already capture Auto at 1080p and ignore unknown request fields.
         // Updated Macs use the height hint to keep 1080p fixed.
+        self.videoQuality = videoQuality == .medium ? .auto : videoQuality
+        self.videoMaxHeight = videoQuality == .medium ? 1_080 : nil
+    }
+}
+
+public struct ComputerSessionQualityRequest: Encodable, Sendable {
+    public let generation: UInt64
+    public let videoQuality: ComputerVideoQuality
+    public let videoMaxHeight: Int?
+
+    public init(generation: UInt64, videoQuality: ComputerVideoQuality) {
+        self.generation = generation
         self.videoQuality = videoQuality == .medium ? .auto : videoQuality
         self.videoMaxHeight = videoQuality == .medium ? 1_080 : nil
     }

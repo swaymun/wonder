@@ -707,6 +707,29 @@ impl Store {
             .ok_or(sqlx::Error::RowNotFound)
     }
 
+    pub async fn update_computer_session_video_quality(
+        &self,
+        id: &str,
+        owner_device_id: &str,
+        generation: u64,
+        quality: &str,
+        now: &str,
+    ) -> Result<Option<StoredComputerSession>, sqlx::Error> {
+        let result = sqlx::query("UPDATE computer_sessions SET video_quality=?, video_quality_v2=?, updated_at=? WHERE id=? AND owner_device_id=? AND generation=? AND state IN ('live', 'paused')")
+            .bind(if quality == "medium" { "standard" } else { quality })
+            .bind(quality)
+            .bind(now)
+            .bind(id)
+            .bind(owner_device_id)
+            .bind(generation as i64)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.computer_session(id).await
+    }
+
     /// Applies helper state only to the expected session generation. A stale
     /// helper event returns `None` and cannot resurrect an ended session.
     #[allow(clippy::too_many_arguments)]
@@ -1152,6 +1175,58 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn quality_change_requires_current_owner_generation_and_live_session() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let request = ComputerSessionCreate {
+            id: "session-1".into(),
+            client_request_id: "request-1".into(),
+            owner_device_id: "phone-1".into(),
+            host_installation_id: "host-1".into(),
+            conversation_id: "bot-chat".into(),
+            generation: 1,
+            state: ComputerSessionState::Live,
+            video_quality: "standard".into(),
+            source_id: None,
+            source_name: None,
+            source_kind: None,
+            source_width: None,
+            source_height: None,
+            source_scale: None,
+            crop_json: None,
+            geometry_revision: 1,
+            failure_reason: None,
+            now: "now".into(),
+        };
+        store.insert_computer_session(&request).await.unwrap();
+        assert!(store
+            .update_computer_session_video_quality("session-1", "other", 1, "high", "later")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .update_computer_session_video_quality("session-1", "phone-1", 2, "high", "later")
+            .await
+            .unwrap()
+            .is_none());
+        let updated = store
+            .update_computer_session_video_quality("session-1", "phone-1", 1, "medium", "later")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.video_quality, "medium");
+        assert_eq!(updated.geometry_revision, 1);
+        store
+            .end_computer_session("session-1", "phone-1", Some(1), "ended")
+            .await
+            .unwrap();
+        assert!(store
+            .update_computer_session_video_quality("session-1", "phone-1", 2, "high", "later")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

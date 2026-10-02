@@ -57,6 +57,15 @@ pub(crate) struct StartRequest {
     video_max_height: Option<u16>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QualityRequest {
+    generation: u64,
+    video_quality: String,
+    #[serde(default)]
+    video_max_height: Option<u16>,
+}
+
 fn requested_video_quality(
     quality: Option<&str>,
     max_height: Option<u16>,
@@ -293,6 +302,7 @@ struct SessionResponse {
     generation: u64,
     state: String,
     video_quality: String,
+    supports_live_quality_change: bool,
     source: Source,
     geometry_revision: u64,
     failure_reason: Option<String>,
@@ -471,6 +481,7 @@ fn response(state: &AppState, session: StoredComputerSession) -> SessionResponse
         generation: session.generation,
         state: session.state,
         video_quality: session.video_quality,
+        supports_live_quality_change: state.computer_supervisor.quality_capable(),
         source: Source {
             id: session.source_id,
             name: session.source_name,
@@ -1470,6 +1481,92 @@ pub(crate) async fn read(
         return (StatusCode::CONFLICT, "computer session generation mismatch").into_response();
     }
     Json(response(&state, session)).into_response()
+}
+
+pub(crate) async fn set_quality(
+    State(state): State<AppState>,
+    authenticated: Option<Extension<AuthenticatedDevice>>,
+    Path(id): Path<String>,
+    Json(request): Json<QualityRequest>,
+) -> Response {
+    let device = match owner_device(authenticated).await {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let session = match owned_session(&state, &id, &device.device_id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    if session.generation != request.generation
+        || !matches!(session.state.as_str(), "live" | "paused")
+    {
+        return (StatusCode::CONFLICT, "computer session is not live").into_response();
+    }
+    let quality =
+        match requested_video_quality(Some(&request.video_quality), request.video_max_height) {
+            Ok(quality) => quality,
+            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        };
+    if quality == session.video_quality {
+        return Json(response(&state, session)).into_response();
+    }
+    if !state.computer_supervisor.quality_capable() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "live quality change is unavailable",
+        )
+            .into_response();
+    }
+    let handle = match state
+        .computer_supervisor
+        .signaling_handle(&session.id, &device.device_id)
+        .await
+    {
+        Some(handle) => handle,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "computer publisher is unavailable",
+            )
+                .into_response()
+        }
+    };
+    match handle
+        .request(
+            "capture.setQuality",
+            serde_json::json!({ "videoQuality": quality }),
+        )
+        .await
+    {
+        Ok(value) if value.get("accepted").and_then(serde_json::Value::as_bool) == Some(true) => {}
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "computer quality could not be changed",
+            )
+                .into_response()
+        }
+    }
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    match state
+        .store
+        .update_computer_session_video_quality(
+            &session.id,
+            &device.device_id,
+            session.generation,
+            quality,
+            &now,
+        )
+        .await
+    {
+        Ok(Some(updated)) => Json(response(&state, updated)).into_response(),
+        Ok(None) => (StatusCode::CONFLICT, "computer session changed").into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "computer quality was not saved",
+        )
+            .into_response(),
+    }
 }
 
 pub(crate) async fn admit(
@@ -2840,6 +2937,8 @@ impl SignalingHandle {
             .map_err(|_| "computer helper is unavailable".to_owned())?;
         let response_timeout = if method == "control.consent" {
             HELPER_CONSENT_TIMEOUT
+        } else if method == "capture.setQuality" {
+            Duration::from_secs(8)
         } else {
             HELPER_COMMAND_DELIVERY_TIMEOUT
         };
@@ -3038,6 +3137,7 @@ pub struct ComputerSessionSupervisor {
     active: tokio::sync::Mutex<Option<ManagedHelper>>,
     pub(crate) control_acquire: tokio::sync::Mutex<()>,
     control_capable: AtomicBool,
+    quality_capable: AtomicBool,
 }
 
 impl Default for ComputerSessionSupervisor {
@@ -3046,6 +3146,7 @@ impl Default for ComputerSessionSupervisor {
             active: tokio::sync::Mutex::new(None),
             control_acquire: tokio::sync::Mutex::new(()),
             control_capable: AtomicBool::new(false),
+            quality_capable: AtomicBool::new(false),
         }
     }
 }
@@ -3088,6 +3189,17 @@ impl ComputerSessionSupervisor {
 
     fn set_control_capable(&self, value: bool) {
         self.control_capable.store(value, Ordering::Release);
+        if !value {
+            self.quality_capable.store(false, Ordering::Release);
+        }
+    }
+
+    fn quality_capable(&self) -> bool {
+        self.quality_capable.load(Ordering::Acquire)
+    }
+
+    fn set_quality_capable(&self, value: bool) {
+        self.quality_capable.store(value, Ordering::Release);
     }
 
     pub async fn start(
@@ -3360,6 +3472,13 @@ fn verified_helper_control_capability(value: &serde_json::Value) -> bool {
     .unwrap_or(false)
 }
 
+fn verified_helper_quality_capability(value: &serde_json::Value) -> bool {
+    let result = &value["result"];
+    result["protocolVersion"].as_u64() == Some(1)
+        && result["capture"]["available"].as_bool() == Some(true)
+        && result["capture"]["liveQualityChange"].as_bool() == Some(true)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HelperSource {
@@ -3560,6 +3679,7 @@ async fn supervise_helper(
                             Ok(value) => {
                                 if value.get("id").and_then(serde_json::Value::as_u64) == Some(1) {
                                     supervisor.set_control_capable(verified_helper_control_capability(&value));
+                                    supervisor.set_quality_capable(verified_helper_quality_capability(&value));
                                     // Older helpers do not know capability
                                     // negotiation; that response is optional
                                     // so view-only startup remains compatible.
@@ -5150,6 +5270,18 @@ mod supervisor_tests {
             }
         });
         assert!(!verified_helper_control_capability(&no_accessibility));
+
+        let quality = serde_json::json!({
+            "result": {
+                "protocolVersion": 1,
+                "capture": { "available": true, "liveQualityChange": true }
+            }
+        });
+        assert!(verified_helper_quality_capability(&quality));
+        assert!(!verified_helper_quality_capability(&valid));
+        assert!(!verified_helper_quality_capability(&serde_json::json!({
+            "result": { "protocolVersion": 2, "capture": { "available": true, "liveQualityChange": true } }
+        })));
     }
 
     #[tokio::test]

@@ -167,6 +167,7 @@ final class ProtocolTests: XCTestCase {
         let session = try JSONDecoder().decode(ComputerSession.self, from: legacy)
         XCTAssertNil(session.control)
         XCTAssertNil(session.videoQuality)
+        XCTAssertNil(session.supportsLiveQualityChange)
         XCTAssertEqual(session.state, .unavailable)
     }
 
@@ -181,6 +182,11 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual((body["source"] as? [String: Any])?["id"] as? String, "display:1")
         let response = Data(#"{"id":"session","clientRequestId":"request","ownerDeviceId":"phone","hostInstallationId":"mac","conversationId":"chat","generation":1,"state":"live","source":{"id":null,"name":null,"kind":null,"width":null,"height":null,"scale":null,"crop":null},"geometryRevision":0,"failureReason":null,"createdAt":"now","updatedAt":"now","lastStateAt":"now","endedAt":null,"capability":{"available":true,"action":"none","reason":"Available"},"videoQuality":"medium"}"#.utf8)
         XCTAssertEqual(try JSONDecoder().decode(ComputerSession.self, from: response).videoQuality, .medium)
+        let quality = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(
+            ComputerSessionQualityRequest(generation: 1, videoQuality: .medium)
+        )) as? [String: Any])
+        XCTAssertEqual(quality["videoQuality"] as? String, "auto")
+        XCTAssertEqual(quality["videoMaxHeight"] as? Int, 1_080)
     }
 
     func testRejectsUntrustedLinks() throws {

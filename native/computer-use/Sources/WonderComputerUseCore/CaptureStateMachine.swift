@@ -68,6 +68,17 @@ public struct CaptureStateMachine: Sendable {
     }
 
     @discardableResult
+    public mutating func updateConfiguration(
+        _ configuration: CaptureConfiguration, sessionID: String, generation: UInt64
+    ) -> CaptureStatusSnapshot? {
+        guard status.sessionID == sessionID, status.generation == generation,
+              status.state == .capturing || status.state == .paused || status.state == .ready else { return nil }
+        self.configuration = configuration
+        status = copyStatus(message: status.message, reason: status.reason)
+        return status
+    }
+
+    @discardableResult
     public mutating func selectSource(_ source: CaptureSourceDescriptor) -> CaptureStatusSnapshot {
         guard status.sessionID != nil, status.screenRecordingAuthorized,
               status.state == .awaitingSource || status.state == .ready else { return status }

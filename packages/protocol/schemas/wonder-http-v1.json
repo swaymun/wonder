@@ -94,6 +94,9 @@
       "get": { "query": { "$ref": "#/$defs/computerSessionGenerationQuery" }, "response": { "$ref": "#/$defs/computerSession" } },
       "delete": { "query": { "$ref": "#/$defs/computerSessionGenerationQuery" }, "response": { "successStatus": 204 } }
     },
+    "/api/v1/computer/sessions/{id}/quality": {
+      "post": { "request": { "$ref": "#/$defs/computerSessionQualityRequest" }, "response": { "$ref": "#/$defs/computerSession" }, "failureStatus": 503 }
+    },
     "/api/v1/computer/sessions/{id}/admission": {
       "post": { "request": { "$ref": "#/$defs/computerAdmissionRequest" }, "response": { "$ref": "#/$defs/computerAdmissionResponse" }, "failureStatus": 503 }
     },
@@ -722,6 +725,16 @@
       "additionalProperties": false,
       "properties": { "generation": { "type": "integer", "minimum": 1 } }
     },
+    "computerSessionQualityRequest": {
+      "type": "object",
+      "required": ["generation", "videoQuality"],
+      "properties": {
+        "generation": { "type": "integer", "minimum": 1 },
+        "videoQuality": { "$ref": "#/$defs/computerVideoQuality" },
+        "videoMaxHeight": { "type": "integer", "const": 1080 }
+      },
+      "additionalProperties": false
+    },
     "computerSession": {
       "type": "object",
       "required": ["id", "clientRequestId", "ownerDeviceId", "hostInstallationId", "conversationId", "generation", "state", "source", "geometryRevision", "failureReason", "createdAt", "updatedAt", "lastStateAt", "endedAt", "capability"],
@@ -734,6 +747,7 @@
         "generation": { "type": "integer", "minimum": 1 },
         "state": { "$ref": "#/$defs/computerSessionState" },
         "videoQuality": { "$ref": "#/$defs/computerVideoQuality" },
+        "supportsLiveQualityChange": { "type": "boolean" },
         "source": { "$ref": "#/$defs/computerSource" },
         "geometryRevision": { "type": "integer", "minimum": 0 },
         "failureReason": { "type": ["string", "null"], "maxLength": 512 },

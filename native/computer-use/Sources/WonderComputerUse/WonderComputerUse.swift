@@ -191,7 +191,7 @@ struct WonderComputerUse {
             case "capabilities":
                 result = [
                     "protocolVersion": 1,
-                    "capture": ["available": true],
+                    "capture": ["available": true, "liveQualityChange": true],
                     "control": [
                         "available": AXIsProcessTrusted(),
                         "provider": "core-graphics-v1",
@@ -368,6 +368,29 @@ struct WonderComputerUse {
                                       configuration: configuration, quality: quality)
                 }
                 result = jsonObject(captureResult) ?? [:]
+            case "capture.setQuality":
+                guard let value = params["videoQuality"] as? String,
+                      let quality = CaptureVideoQuality(rawValue: value) else {
+                    throw ComputerUseError.invalidInput
+                }
+                let sessionID = try captureSessionID(params)
+                let generation = try captureGeneration(params)
+                Task { @MainActor in
+                    let captureResult = await captureSession.updateConfiguration(
+                        sessionID: sessionID, generation: generation, configuration: quality.configuration
+                    )
+                    guard captureResult.accepted else {
+                        writeResponse(id: id, error: captureResult.errorCode ?? "capture_configuration_failed")
+                        return
+                    }
+                    guard publisher.updateQuality(sessionID: sessionID, generation: generation,
+                                                  configuration: quality.configuration, quality: quality) else {
+                        writeResponse(id: id, error: "publisher_unavailable")
+                        return
+                    }
+                    writeResponse(id: id, result: ["accepted": true, "videoQuality": value])
+                }
+                return
             case "capture.sources", "capture.listSources", "listSources":
                 result = jsonObject(captureSession.listSources()) ?? [:]
             case "capture.pick", "pick":

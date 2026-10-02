@@ -50,6 +50,7 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
     private var frameSequence: UInt64 = 0
     private var lastFrameMetadataEmissionUptime: TimeInterval?
     private var intentionalStop = false
+    private var configurationUpdateToken: UUID?
     private let maximumSourceCount = 128
 
     public init(
@@ -116,6 +117,7 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
         stopStream()
         frameQueue.reset()
         lock.lock()
+        configurationUpdateToken = nil
         frameSequence = 0
         lastFrameMetadataEmissionUptime = nil
         selectedFilter = nil
@@ -132,6 +134,48 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
         lock.unlock()
         emit("capture.prepared", status: snapshot)
         return CaptureOperationResult(accepted: viewerCount > 0, action: "prepare", status: snapshot)
+    }
+
+    public func updateConfiguration(
+        sessionID: String, generation: UInt64, configuration: CaptureConfiguration
+    ) async -> CaptureOperationResult {
+        let token = UUID()
+        let prepared: (SCStream?, SCStreamConfiguration)? = lock.withLock {
+            guard configurationUpdateToken == nil, machine.status.sessionID == sessionID,
+                  machine.status.generation == generation,
+                  machine.status.state == .capturing || machine.status.state == .paused || machine.status.state == .ready,
+                  let source = selectedSource else { return nil }
+            configurationUpdateToken = token
+            return (stream, Self.makeStreamConfiguration(configuration, source: source))
+        }
+        guard let (currentStream, streamConfiguration) = prepared else {
+            return CaptureOperationResult(accepted: false, action: "setQuality", status: status(),
+                                          errorCode: "invalid_capture_state")
+        }
+
+        do {
+            if let currentStream { try await currentStream.updateConfiguration(streamConfiguration) }
+        } catch {
+            return lock.withLock {
+                if configurationUpdateToken == token { configurationUpdateToken = nil }
+                return CaptureOperationResult(accepted: false, action: "setQuality", status: machine.status,
+                                              errorCode: "capture_configuration_failed")
+            }
+        }
+
+        return lock.withLock {
+            guard configurationUpdateToken == token else {
+                return CaptureOperationResult(accepted: false, action: "setQuality", status: machine.status,
+                                              errorCode: "capture_session_changed")
+            }
+            configurationUpdateToken = nil
+            guard stream === currentStream,
+                  let snapshot = machine.updateConfiguration(configuration, sessionID: sessionID, generation: generation) else {
+                return CaptureOperationResult(accepted: false, action: "setQuality", status: machine.status,
+                                              errorCode: "capture_session_changed")
+            }
+            return CaptureOperationResult(accepted: true, action: "setQuality", status: snapshot)
+        }
     }
 
     public func listSources() -> CaptureOperationResult {
@@ -354,6 +398,7 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
             return rejected("stop", errorCode: "invalid_capture_session")
         }
         lock.lock()
+        configurationUpdateToken = nil
         let wasStopped = machine.status.state == .stopped
         let snapshot = machine.stop(reason: reason)
         intentionalStop = true

@@ -43,6 +43,7 @@ final class ComputerSessionModel: ObservableObject {
     @Published private(set) var controlLease: ComputerControlLease?
     @Published private(set) var controlMessage: String?
     @Published private(set) var clipboardMessage: String?
+    @Published private(set) var qualityMessage: String?
     @Published var keyboardPresented = false
     @Published var failure: String?
     @Published private(set) var zoomScale: CGFloat = 1
@@ -81,6 +82,7 @@ final class ComputerSessionModel: ObservableObject {
     private var heldPointerButton: String?
     private var heldPointerPoint: (x: Double, y: Double)?
     private var releasingControl = false
+    private var qualityUpdateInFlight = false
 
     init(model: ConnectionModel, chat: ChatSummary, inputPreferences: UserDefaults = .standard) {
         self.inputPreferences = inputPreferences
@@ -178,7 +180,8 @@ final class ComputerSessionModel: ObservableObject {
     }
 
     func refresh() async {
-        guard let current = session, !ended, !isFixture, !connectionModel.previewMode else { return }
+        guard let current = session, !ended, !isFixture, !connectionModel.previewMode,
+              !qualityUpdateInFlight else { return }
         let revision = lifetimeRevision
         isLoading = true
         defer { if lifetimeRevision == revision { isLoading = false } }
@@ -247,9 +250,68 @@ final class ComputerSessionModel: ObservableObject {
 
     func setVideoQuality(_ quality: ComputerVideoQuality) {
         guard quality != videoQuality, session?.videoQuality != nil, !isLoading else { return }
+        let previous = videoQuality
         videoQuality = quality
+        qualityMessage = nil
         if !isFixture { inputPreferences.set(quality.rawValue, forKey: "computer.videoQuality") }
-        Task { await retry(preservingSource: true) }
+        if session?.supportsLiveQualityChange == true {
+            Task { await changeVideoQuality(quality, previous: previous) }
+        } else {
+            Task { await retry(preservingSource: true) }
+        }
+    }
+
+    private func changeVideoQuality(_ quality: ComputerVideoQuality, previous: ComputerVideoQuality) async {
+        guard let current = session, !ended else { return }
+        if isFixture { return }
+        let revision = lifetimeRevision
+        qualityUpdateInFlight = true
+        isLoading = true
+        defer {
+            qualityUpdateInFlight = false
+            if lifetimeRevision == revision { isLoading = false }
+        }
+        do {
+            let body = try JSONEncoder().encode(ComputerSessionQualityRequest(
+                generation: current.generation, videoQuality: quality
+            ))
+            let updated: ComputerSession = try await connectionModel.manage(
+                "/api/v1/computer/sessions/\(Self.escape(current.id))/quality", method: "POST", body: body
+            )
+            guard !Task.isCancelled, !ended, lifetimeRevision == revision,
+                  session?.id == current.id, session?.generation == current.generation else { return }
+            guard updated.id == current.id, updated.ownerDeviceId == current.ownerDeviceId,
+                  updated.hostInstallationId == current.hostInstallationId,
+                  updated.videoQuality == quality else { throw PairingFailure.wrongHost }
+            session = updated
+            qualityMessage = nil
+        } catch {
+            guard !Task.isCancelled, !ended, lifetimeRevision == revision else { return }
+            videoQuality = previous
+            inputPreferences.set(previous.rawValue, forKey: "computer.videoQuality")
+            qualityMessage = "Could not change video quality. Choose it again to retry."
+        }
+    }
+
+    func connectionInterrupted() {
+        if controlLease != nil || isStarting {
+            failClosed("The Mac connection was interrupted. Control was released.")
+        }
+    }
+
+    func connectionRestored() async {
+        guard !ended, !isFixture, !isLoading else { return }
+        if session == nil { await start(); return }
+        let failedReceiver: Bool
+        if case .failed = receiverState { failedReceiver = true } else { failedReceiver = false }
+        if failedReceiver {
+            await retry(preservingSource: true)
+        } else {
+            await refresh()
+            if failure != nil || session?.state == .ended || session?.state == .failed || session?.state == .stale {
+                await retry(preservingSource: true)
+            }
+        }
     }
 
     func close() async {
@@ -962,7 +1024,8 @@ final class ComputerSessionModel: ObservableObject {
             endedAt: nil,
             capability: available ? ComputerCapability(available: true, action: "none", reason: "Live computer viewing is available on this Mac.") : .oldHost,
             control: control,
-            videoQuality: .auto
+            videoQuality: .auto,
+            supportsLiveQualityChange: true
         )
     }
 
@@ -1064,68 +1127,85 @@ private struct ComputerConnectionSessionView: View {
     }
 
     var body: some View {
+        viewerLayout
+            .background(.black)
+            .toolbar(.hidden, for: .navigationBar)
+            .task { await sessionModel.start() }
+            .onDisappear { Task { await closeComputer() } }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { Task { await handleLifetimeEnd() } }
+            }
+            .onChange(of: model.accessEnded) { _, ended in
+                if ended { Task { await handleLifetimeEnd() } }
+            }
+            .onChange(of: model.macConnected, macConnectionChanged)
+            .onChange(of: model.connection?.credential.hostInstallationId) { _, _ in
+                Task { await closeComputer(); dismiss() }
+            }
+            .onChange(of: chat.id) { _, _ in
+                Task { await closeComputer(); dismiss() }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("computer-session-container")
+    }
+
+    private var viewerLayout: some View {
         GeometryReader { geometry in
             let sideControls = geometry.size.width > geometry.size.height && geometry.size.width >= 650
-            Group {
-                if sideControls {
-                    HStack(spacing: 0) {
-                        computerContent
-                        if !sessionModel.isClosed {
-                            ComputerSessionControls(model: sessionModel, sidePlacement: true)
-                                .frame(width: 120)
-                                .frame(maxHeight: .infinity, alignment: .top)
-                        }
-                    }
-                } else {
-                    VStack(spacing: 0) {
-                        computerContent
-                        if !sessionModel.isClosed {
-                            ComputerSessionControls(model: sessionModel)
-                                .frame(maxWidth: .infinity)
-                        }
+            let layout = sideControls ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+            VStack(spacing: 0) {
+                header
+                layout {
+                    computerContent
+                    if !sessionModel.isClosed {
+                        ComputerSessionControls(model: sessionModel, sidePlacement: sideControls)
+                            .frame(width: sideControls ? 104 : nil)
+                            .frame(maxWidth: sideControls ? nil : .infinity,
+                                   maxHeight: sideControls ? .infinity : nil, alignment: .top)
                     }
                 }
             }
         }
-        .background(Color(uiColor: .systemBackground))
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Close") {
-                    Task {
-                        await closeComputer()
-                        dismiss()
-                    }
-                }
-                .accessibilityIdentifier("computer-session-close")
-            }
-            ToolbarItem(placement: .principal) {
-                ComputerSessionHeader(model: model, library: library, session: sessionModel.session,
-                                      receiverState: sessionModel.receiverState) { saved in
+    }
+
+    private func macConnectionChanged(_ old: Bool?, _ connected: Bool?) {
+        if connected == false { sessionModel.connectionInterrupted() }
+        else if connected == true { Task { await sessionModel.connectionRestored() } }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Button("Close") {
+                Task {
                     await closeComputer()
-                    guard !Task.isCancelled else { return }
-                    selectConnection(saved)
+                    dismiss()
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    Task {
-                        if sessionModel.failure != nil { await sessionModel.retry() }
-                        else { await sessionModel.refresh() }
-                    }
-                } label: {
-                    if sessionModel.isLoading { ProgressView() }
-                    else { Label("Refresh", systemImage: "arrow.clockwise") }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.capsule)
+            .accessibilityIdentifier("computer-session-close")
+            Spacer(minLength: 0)
+            ComputerSessionHeader(model: model, library: library, session: sessionModel.session,
+                                  receiverState: sessionModel.receiverState) { saved in
+                await closeComputer()
+                guard !Task.isCancelled else { return }
+                selectConnection(saved)
+            }
+            Spacer(minLength: 0)
+            Button {
+                Task {
+                    if sessionModel.failure != nil { await sessionModel.retry() }
+                    else { await sessionModel.refresh() }
                 }
-                .disabled(sessionModel.isLoading || sessionModel.isClosed || sessionModel.isFixture)
-                .accessibilityLabel("Refresh")
-                .accessibilityIdentifier("computer-session-refresh")
+            } label: {
+                if sessionModel.isLoading { ProgressView() }
+                else { Image(systemName: "arrow.clockwise") }
             }
-            if #available(iOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .topBarTrailing)
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
+            .frame(width: 44, height: 44)
+            .disabled(sessionModel.isLoading || sessionModel.isClosed || sessionModel.isFixture)
+            .accessibilityLabel("Refresh")
+            .accessibilityIdentifier("computer-session-refresh")
+            Menu {
                     Picker("Pointer mode", selection: $sessionModel.inputMode) {
                         ForEach(ComputerInputMode.allCases) { mode in
                             Text(mode.title).tag(mode)
@@ -1167,43 +1247,36 @@ private struct ComputerConnectionSessionView: View {
                     }
                     .disabled(!sessionModel.isControlActive)
                     .accessibilityIdentifier("computer-session-keys")
-                } label: {
-                    Label("More", systemImage: "ellipsis")
-                }
-                // Native toolbar menus omit accessibilityValue on iOS 27.
-                // Keep zoom available to VoiceOver in the spoken label too.
-                .accessibilityLabel("More, zoom \(Int((sessionModel.zoomScale * 100).rounded())) percent")
-                .accessibilityValue("\(Int((sessionModel.zoomScale * 100).rounded())) percent")
-                .accessibilityIdentifier("computer-session-more")
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
+            .accessibilityLabel("More, zoom \(Int((sessionModel.zoomScale * 100).rounded())) percent")
+            .accessibilityValue("\(Int((sessionModel.zoomScale * 100).rounded())) percent")
+            .accessibilityIdentifier("computer-session-more")
         }
-        .task { await sessionModel.start() }
-        .onDisappear { Task { await closeComputer() } }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .background { Task { await handleLifetimeEnd() } }
-        }
-        .onChange(of: model.accessEnded) { _, ended in
-            if ended { Task { await handleLifetimeEnd() } }
-        }
-        .onChange(of: model.macConnected) { _, connected in
-            if connected == false { Task { await handleLifetimeEnd() } }
-        }
-        .onChange(of: model.connection?.credential.hostInstallationId) { _, _ in
-            Task { await closeComputer(); dismiss() }
-        }
-        .onChange(of: chat.id) { _, _ in
-            Task { await closeComputer(); dismiss() }
-        }
-        // Keep the container addressable without replacing the nested
-        // viewport's accessibility element in XCTest.
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("computer-session-container")
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 8)
+        .frame(height: 52)
+        .background(.black)
+        .environment(\.colorScheme, .dark)
     }
 
     private var computerContent: some View {
         VStack(spacing: 0) {
             ComputerViewport(model: sessionModel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let message = sessionModel.qualityMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                    .accessibilityIdentifier("computer-session-quality-message")
+            }
             if let failure = sessionModel.failure, !sessionModel.isClosed {
                 VStack(alignment: .leading, spacing: 8) {
                     FailureDetails("Computer view unavailable", message: failure)
@@ -1240,7 +1313,7 @@ private struct ComputerSessionHeader: View {
     @State private var requestedConnection: SavedConnection?
 
     private var statusTitle: String {
-        session?.state == .unavailable ? "Unavailable" : receiverState.title
+        model.macConnected == false ? "Reconnecting" : session?.state == .unavailable ? "Unavailable" : receiverState.title
     }
 
     private var sourceDescription: String {
@@ -1259,7 +1332,7 @@ private struct ComputerSessionHeader: View {
             } label: {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(session?.state == .live && receiverState == .live ? Color.green : Color.red)
+                        .fill(model.macConnected != false && session?.state == .live && receiverState == .live ? Color.green : Color.red)
                         .frame(width: 8, height: 8)
                         .accessibilityHidden(true)
                     Text(model.macName).lineLimit(1)
@@ -1527,24 +1600,30 @@ struct ComputerSessionControls: View {
                     HStack {
                         Spacer(minLength: 0)
                         Button { model.takeControl() } label: {
-                            Text("Take control").foregroundStyle(.white)
-                                .padding(.horizontal, 14).frame(minHeight: 44)
+                            Group {
+                                if sidePlacement { Image(systemName: "hand.point.up.left") }
+                                else { Text("Take control") }
+                            }
+                            .foregroundStyle(.white)
+                            .frame(minWidth: sidePlacement ? 48 : nil, minHeight: 44)
+                            .padding(.horizontal, sidePlacement ? 0 : 14)
                         }
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.capsule)
                         .disabled(!model.canTakeControl)
+                        .accessibilityLabel("Take control")
                         .accessibilityIdentifier("computer-session-take-control")
                         Spacer(minLength: 0)
                     }
                 }
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, sidePlacement ? 2 : 8)
         .padding(.vertical, 4)
         .font(.body)
         .foregroundStyle(Color.accentColor)
         .buttonStyle(.plain)
-        .background(model.isControlActive ? Color(uiColor: .secondarySystemBackground) : Color(uiColor: .systemBackground))
+        .background(sidePlacement ? Color.black : model.isControlActive ? Color(uiColor: .secondarySystemBackground) : Color(uiColor: .systemBackground))
         .background(alignment: .bottomLeading) {
             ComputerNativeKeyboard(
                 presented: model.isControlActive && model.keyboardPresented,

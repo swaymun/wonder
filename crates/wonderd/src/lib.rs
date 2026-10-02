@@ -803,6 +803,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/runtime/capabilities", get(runtime_capabilities))
         .route("/api/v1/computer/sessions", post(computer_sessions::create))
         .route(
+            "/api/v1/computer/sessions/{id}/quality",
+            post(computer_sessions::set_quality),
+        )
+        .route(
             "/api/v1/computer/sessions/{id}",
             get(computer_sessions::read).delete(computer_sessions::end),
         )
