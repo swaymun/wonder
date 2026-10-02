@@ -4973,7 +4973,7 @@ pub(crate) mod tests {
         .unwrap();
         let annotation_id = uploaded["id"].as_str().unwrap().to_owned();
         let image_bytes = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;".to_vec();
-        let mut media_notes = vec![(
+        let media_notes = vec![(
             "marked.gif",
             image_bytes,
             json!({"kind":"imageRegion","x":0.1,"y":0.2,"width":0.3,"height":0.4}),
@@ -4981,13 +4981,17 @@ pub(crate) mod tests {
             "image region (normalized 0-1, origin at top left) x=0.1, y=0.2, width=0.3, height=0.4",
         )];
         #[cfg(target_os = "macos")]
-        media_notes.push((
-            "marked.pdf",
-            two_page_pdf(),
-            json!({"kind":"pdfRegion","page":2,"x":0.25,"y":0.5,"width":0.5,"height":0.25}),
-            "Check PDF page two",
-            "PDF page 2, region (normalized 0-1, origin at top left) x=0.25, y=0.5, width=0.5, height=0.25",
-        ));
+        let media_notes = {
+            let mut media_notes = media_notes;
+            media_notes.push((
+                "marked.pdf",
+                two_page_pdf(),
+                json!({"kind":"pdfRegion","page":2,"x":0.25,"y":0.5,"width":0.5,"height":0.25}),
+                "Check PDF page two",
+                "PDF page 2, region (normalized 0-1, origin at top left) x=0.25, y=0.5, width=0.5, height=0.25",
+            ));
+            media_notes
+        };
         let mut selected_ids = vec![annotation_id.clone()];
         let mut media_sources = Vec::new();
         for (name, bytes, anchor, note, _) in &media_notes {
