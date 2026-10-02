@@ -90,6 +90,11 @@ PR #61. With the owner's approval, a read-only pairing attempt found the
 installed Mac did not expose a usable full link through the accessible Devices
 UI, and the available simulator builds lacked durable pairing entitlements.
 No new owner device appeared; paired mobile acceptance remains open.
+An address-and-code option now exposes the existing pairing-code path in draft
+PR #61. Its focused UI check passed 1/1 on each iPhone and iPad simulator,
+including codes with `-` and `_`. A simulator-only ad-hoc signed build produced
+an empty entitlement payload and was not installed for owner pairing. A live
+code claim, Mac approval and paired Files/media/send roundtrip remain open.
 
 ## Earlier qualification
 
