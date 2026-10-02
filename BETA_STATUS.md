@@ -54,17 +54,22 @@ The Mac 1.0.108 replacement DMG passed signature, notarization, Gatekeeper,
 local upgrade and clean second-Mac first launch; both installed copies reached
 `/readyz`. Its public release remains gated as stated above. An accepted
 annotation now dispatches its frozen source copy even after an unrelated
-Project root change, verified by a fake-provider regression. No live Project
-model message or scheduled Automation run was started for these checks.
+Project root change, verified by a fake-provider regression. On the installed
+1.0.108 Mac, an isolated read-only Project thread completed a live Codex turn,
+then a Project Automation claimed its scheduled run and completed a second turn.
+Its durable message, native turn and assistant reply were verified. The
+Automation was deleted and only its disposable thread was archived afterward.
+This verifies the installed host's scheduled execution path; paired iPhone and
+iPad interaction with that path remains unverified.
 
 A post-upload review found retry and stale-response cases in these binaries:
 some Project sends can remain uncertain after a definite pre-execution failure,
 and a late New Chat error after re-pairing the same Mac can disturb the current
 draft. Rapid PDF page turns can overlap preview work, and long Project history
-scans can delay update handoff. The Mac install helper
-checks process health after replacement; these two installed copies were also
-checked manually for `/readyz`. Source corrections and focused iPhone, iPad,
-daemon and installer checks are complete on an unshipped branch. They are not
+scans can delay update handoff or miss receipts beyond 20,000 items. The Mac
+install helper checks process health after replacement; these two installed
+copies were also checked manually for `/readyz`. Source corrections and focused
+iPhone, iPad, daemon and installer checks are complete on an unshipped branch. They are not
 in Testing 20, production 82 or Mac 1.0.108; another release is required.
 
 Native progressive dictation had no supported SpeechTranscriber locale on the
@@ -72,7 +77,7 @@ tested iOS 26.5 simulators, so the existing dictation path remains in place.
 EPUB and read-only USDZ/OBJ/PLY/STL viewers passed focused checks, while
 repeated SceneKit conversion retained measurable memory; broader GLB support
 remains at a research gate. Actual Widget Home Screen presentation, paired
-mobile-to-Mac Files/media roundtrips, live provider sends, and TestFlight
+mobile-to-Mac Files/media and provider-send roundtrips, and TestFlight
 installation remain unverified.
 
 ## Earlier qualification
