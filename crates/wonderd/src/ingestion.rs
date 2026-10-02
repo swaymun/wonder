@@ -203,15 +203,11 @@ impl Ingestion {
             let status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if status.runtimes.values().any(|r| r.health.storage_blocked()) {
                 Some(("Chat updates could not be saved. Wonder is retrying; check available disk space if this continues.", "storage_unavailable"))
-            } else if status.error.is_some() {
-                Some((
-                    "Wonder is recovering chat updates. Please wait before sending again.",
-                    "recovering",
-                ))
-            } else if status
-                .consumer
-                .as_ref()
-                .is_none_or(tokio::task::AbortHandle::is_finished)
+            } else if status.error.is_some()
+                || status
+                    .consumer
+                    .as_ref()
+                    .is_none_or(tokio::task::AbortHandle::is_finished)
                 || status
                     .heartbeat
                     .is_none_or(|time| time.elapsed() > Duration::from_secs(5))

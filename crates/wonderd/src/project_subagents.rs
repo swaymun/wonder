@@ -75,70 +75,78 @@ fn unavailable(detail: &str) -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, detail.to_owned()).into_response()
 }
 
-async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent, Response> {
+async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent, Box<Response>> {
     let conversation = state
         .store
         .project_conversation(conversation_id)
         .await
-        .map_err(|_| unavailable("The Project thread could not be checked."))?
-        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+        .map_err(|_| Box::new(unavailable("The Project thread could not be checked.")))?
+        .ok_or_else(|| Box::new(StatusCode::NOT_FOUND.into_response()))?;
     let project = state
         .store
         .project(&conversation.project_id)
         .await
-        .map_err(|_| unavailable("The Project could not be checked."))?
-        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+        .map_err(|_| Box::new(unavailable("The Project could not be checked.")))?
+        .ok_or_else(|| Box::new(StatusCode::NOT_FOUND.into_response()))?;
     if !project.is_included || project.root_for(&conversation.cwd).is_none() {
-        return Err(StatusCode::FORBIDDEN.into_response());
+        return Err(Box::new(StatusCode::FORBIDDEN.into_response()));
     }
     let checked = project.clone();
     let denied = state.denied_roots.clone();
     let roots_valid =
         tokio::task::spawn_blocking(move || projects::validate_execution_roots(&checked, &denied))
             .await
-            .map_err(|_| unavailable("The Project folders could not be checked."))?;
+            .map_err(|_| Box::new(unavailable("The Project folders could not be checked.")))?;
     if roots_valid.is_err() {
-        return Err(StatusCode::CONFLICT.into_response());
+        return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
     if conversation.family != AgentFamily::Codex {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            "Project agent tasks are available for Codex threads.",
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::NOT_IMPLEMENTED,
+                "Project agent tasks are available for Codex threads.",
+            )
+                .into_response(),
+        ));
     }
     if conversation.provider_store != state.projects.codex_store {
-        return Err(StatusCode::CONFLICT.into_response());
+        return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
     let thread_id = conversation.native_session_id.clone().ok_or_else(|| {
-        (
-            StatusCode::CONFLICT,
-            "This Project thread has no agent history yet.",
+        Box::new(
+            (
+                StatusCode::CONFLICT,
+                "This Project thread has no agent history yet.",
+            )
+                .into_response(),
         )
-            .into_response()
     })?;
     let binding = state
         .store
         .runtime_binding(conversation_id)
         .await
-        .map_err(|_| unavailable("The Project runtime identity could not be checked."))?
-        .ok_or_else(|| StatusCode::CONFLICT.into_response())?;
+        .map_err(|_| {
+            Box::new(unavailable(
+                "The Project runtime identity could not be checked.",
+            ))
+        })?
+        .ok_or_else(|| Box::new(StatusCode::CONFLICT.into_response()))?;
     if binding.execution_scope != "projects"
         || binding.family != conversation.family
         || binding.thread_id != thread_id
     {
-        return Err(StatusCode::CONFLICT.into_response());
+        return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
     let rpc = projects::codex_rpc(state)
         .await
-        .map_err(|_| unavailable("Codex is unavailable on your Mac."))?;
+        .map_err(|_| Box::new(unavailable("Codex is unavailable on your Mac.")))?;
     let read = request(
         &rpc,
         "thread/read",
         json!({"threadId": thread_id, "includeTurns": false}),
     )
     .await
-    .map_err(|_| unavailable("The Project thread could not be verified."))?;
+    .map_err(|_| Box::new(unavailable("The Project thread could not be verified.")))?;
     let thread = read.get("thread").unwrap_or(&read);
     if thread.get("id").and_then(Value::as_str) != Some(thread_id.as_str())
         || thread.get("cwd").and_then(Value::as_str) != Some(conversation.cwd.as_str())
@@ -147,7 +155,7 @@ async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent
             .and_then(Value::as_str)
             .is_some()
     {
-        return Err(StatusCode::CONFLICT.into_response());
+        return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
     Ok(ProjectParent {
         conversation,
@@ -164,9 +172,7 @@ fn verified_child(
 ) -> Option<ProjectSubagentSummary> {
     let verified = subagents::verified_thread(&parent.thread_id, thread).ok()?;
     let cwd = thread.get("cwd").and_then(Value::as_str)?;
-    if parent.project.root_for(cwd).is_none() {
-        return None;
-    }
+    parent.project.root_for(cwd)?;
     let title = verified
         .agent_nickname
         .as_deref()
@@ -202,9 +208,9 @@ pub(crate) async fn list(
             .into_response();
         }
         Err(response) if response.status() == StatusCode::CONFLICT => {
-            return response;
+            return *response;
         }
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let mut children = Vec::new();
     let mut seen = HashSet::new();
@@ -273,7 +279,7 @@ pub(crate) async fn transcript(
     }
     let parent = match parent(&state, &conversation_id).await {
         Ok(parent) => parent,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let read = match request(
         &parent.rpc,

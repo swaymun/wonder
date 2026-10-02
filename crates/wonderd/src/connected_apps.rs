@@ -59,7 +59,7 @@ pub(super) async fn list(
     let thread = if let Some(project) = &project_conversation {
         match project_thread(&state, project).await {
             Ok(thread) => Some(thread),
-            Err(response) => return response,
+            Err(response) => return *response,
         }
     } else if let Some(conversation) = &query.conversation_id {
         // Preserve Bot and Group scope rather than substituting host scope.
@@ -174,34 +174,40 @@ pub(super) async fn list(
 async fn project_thread(
     state: &AppState,
     project: &wonder_store::StoredProjectConversation,
-) -> Result<String, Response> {
+) -> Result<String, Box<Response>> {
     let expected_store = match project.family {
         AgentFamily::Codex => &state.projects.codex_store,
         AgentFamily::Claude => &state.projects.claude_store,
     };
     if project.provider_store != *expected_store {
-        return Err((
-            StatusCode::CONFLICT,
-            "This Project belongs to another provider history on your Mac.",
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::CONFLICT,
+                "This Project belongs to another provider history on your Mac.",
+            )
+                .into_response(),
+        ));
     }
     let Some(native_session) = project.native_session_id.as_deref() else {
-        return Err((
-            StatusCode::CONFLICT,
-            "Start this Project chat before checking its app access.",
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::CONFLICT,
+                "Start this Project chat before checking its app access.",
+            )
+                .into_response(),
+        ));
     };
     // Claude's native session ID differs from its bridge thread ID. The
     // durable binding is the exact transport identity for both families.
     let binding = state.store.runtime_binding(&project.conversation_id).await;
     let Ok(Some(binding)) = binding else {
-        return Err((
-            StatusCode::CONFLICT,
-            "This Project's app access changed. Reopen the chat and try again.",
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::CONFLICT,
+                "This Project's app access changed. Reopen the chat and try again.",
+            )
+                .into_response(),
+        ));
     };
     let matches_native = match project.family {
         AgentFamily::Codex => binding.thread_id == native_session,
@@ -211,11 +217,13 @@ async fn project_thread(
         || binding.execution_scope != wonder_store::EXECUTION_SCOPE_PROJECTS
         || !matches_native
     {
-        return Err((
-            StatusCode::CONFLICT,
-            "This Project's app access changed. Reopen the chat and try again.",
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::CONFLICT,
+                "This Project's app access changed. Reopen the chat and try again.",
+            )
+                .into_response(),
+        ));
     }
     Ok(binding.thread_id)
 }
