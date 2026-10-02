@@ -357,6 +357,7 @@ crates/wonder-store/migrations/0079_project_modes.sql
 crates/wonder-store/migrations/0080_project_creation_payload.sql
 crates/wonder-store/migrations/0081_update_handoff.sql
 crates/wonder-store/migrations/0082_computer_video_quality.sql
+crates/wonder-store/migrations/0083_computer_video_quality_1080.sql
 crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs

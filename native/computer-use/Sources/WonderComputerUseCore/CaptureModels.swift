@@ -123,13 +123,15 @@ public struct CaptureConfiguration: Codable, Equatable, Sendable {
 
 public enum CaptureVideoQuality: String, Codable, CaseIterable, Sendable {
     case standard
+    case medium
     case auto
     case high
 
     public var configuration: CaptureConfiguration {
         switch self {
         case .standard: CaptureConfiguration(width: 1_280, height: 720)
-        case .auto: CaptureConfiguration(width: 1_920, height: 1_080)
+        case .medium: CaptureConfiguration(width: 1_920, height: 1_080)
+        case .auto: CaptureConfiguration(width: 2_560, height: 1_440)
         case .high: CaptureConfiguration(width: 2_560, height: 1_440)
         }
     }

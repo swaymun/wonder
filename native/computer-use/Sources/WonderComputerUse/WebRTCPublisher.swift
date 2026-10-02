@@ -55,7 +55,8 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
         super.init()
     }
 
-    func prepare(sessionID: String, generation: UInt64, configuration capture: CaptureConfiguration) {
+    func prepare(sessionID: String, generation: UInt64, configuration capture: CaptureConfiguration,
+                 quality: CaptureVideoQuality) {
         close(reason: "replaced")
         guard !sessionID.isEmpty, sessionID.utf8.count <= 128, generation > 0 else {
             emitError(reason: "invalid_identity")
@@ -78,7 +79,12 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
         source.adaptOutputFormat(toWidth: Int32(capture.width), height: Int32(capture.height), fps: Int32(capture.framesPerSecond))
         let capturer = RTCVideoCapturer(delegate: source)
         let track = Self.factory.videoTrack(with: source, trackId: "wonder-screen")
-        peer.add(track, streamIds: ["wonder-screen"])
+        let sender = peer.add(track, streamIds: ["wonder-screen"])
+        if quality == .auto, let sender {
+            let parameters = sender.parameters
+            parameters.degradationPreference = NSNumber(value: RTCDegradationPreference.balanced.rawValue)
+            sender.parameters = parameters
+        }
 
         let peerIdentity = PeerIdentity(sessionID: sessionID, generation: generation, token: UUID())
         lock.lock()

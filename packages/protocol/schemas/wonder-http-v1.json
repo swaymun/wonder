@@ -632,7 +632,7 @@
     },
     "computerVideoQuality": {
       "type": "string",
-      "enum": ["standard", "auto", "high"]
+      "enum": ["standard", "medium", "auto", "high"]
     },
     "computerCapability": {
       "type": "object",

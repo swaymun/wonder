@@ -364,7 +364,8 @@ struct WonderComputerUse {
                     configuration: configuration
                 )
                 if captureResult.accepted {
-                    publisher.prepare(sessionID: sessionID, generation: generation, configuration: configuration)
+                    publisher.prepare(sessionID: sessionID, generation: generation,
+                                      configuration: configuration, quality: quality)
                 }
                 result = jsonObject(captureResult) ?? [:]
             case "capture.sources", "capture.listSources", "listSources":

@@ -1241,7 +1241,7 @@ pub(crate) async fn create(
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
     let video_quality = request.video_quality.as_deref().unwrap_or("standard");
-    if !matches!(video_quality, "standard" | "auto" | "high") {
+    if !matches!(video_quality, "standard" | "medium" | "auto" | "high") {
         return (StatusCode::BAD_REQUEST, "video quality is invalid").into_response();
     }
     if !state
@@ -4872,7 +4872,7 @@ mod supervisor_tests {
         state.computer_use_bin = Some(helper.clone());
 
         let mut requested = session();
-        requested.video_quality = "high".into();
+        requested.video_quality = "medium".into();
         let stored = state
             .store
             .insert_computer_session(&requested)
@@ -4931,7 +4931,7 @@ mod supervisor_tests {
             .starts_with("control.")));
         assert_eq!(requests[1]["params"]["sessionID"], "fake-session");
         assert_eq!(requests[1]["params"]["generation"], 1);
-        assert_eq!(requests[1]["params"]["videoQuality"], "high");
+        assert_eq!(requests[1]["params"]["videoQuality"], "medium");
         assert!(requests[1]["params"]["handshake"]
             .as_str()
             .is_some_and(|value| !value.is_empty()));

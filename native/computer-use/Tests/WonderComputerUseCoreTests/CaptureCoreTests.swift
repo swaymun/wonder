@@ -234,7 +234,8 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertFalse(configuration.audioEnabled)
         XCTAssertEqual(configuration.queueDepth, 2)
         XCTAssertEqual(CaptureVideoQuality.standard.configuration, CaptureConfiguration(width: 1_280, height: 720))
-        XCTAssertEqual(CaptureVideoQuality.auto.configuration, CaptureConfiguration(width: 1_920, height: 1_080))
+        XCTAssertEqual(CaptureVideoQuality.medium.configuration, CaptureConfiguration(width: 1_920, height: 1_080))
+        XCTAssertEqual(CaptureVideoQuality.auto.configuration, CaptureConfiguration(width: 2_560, height: 1_440))
         XCTAssertEqual(CaptureVideoQuality.high.configuration, CaptureConfiguration(width: 2_560, height: 1_440))
         var machine = CaptureStateMachine(configuration: .init(), pickerAvailable: true)
         let prepared = machine.prepare(sessionID: "session", generation: 1, viewerCount: 1,

@@ -1090,7 +1090,7 @@ private struct ComputerConnectionSessionView: View {
         .background(Color(uiColor: .systemBackground))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
+            ToolbarItem(placement: .topBarLeading) {
                 Button("Close") {
                     Task {
                         await closeComputer()
@@ -1107,7 +1107,7 @@ private struct ComputerConnectionSessionView: View {
                     selectConnection(saved)
                 }
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     Task {
                         if sessionModel.failure != nil { await sessionModel.retry() }
@@ -1122,9 +1122,9 @@ private struct ComputerConnectionSessionView: View {
                 .accessibilityIdentifier("computer-session-refresh")
             }
             if #available(iOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .primaryAction)
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Picker("Pointer mode", selection: $sessionModel.inputMode) {
                         ForEach(ComputerInputMode.allCases) { mode in

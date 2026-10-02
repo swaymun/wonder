@@ -910,6 +910,26 @@ import UIKit
         XCTAssertTrue(viewComputer.waitForExistence(timeout: 5))
     }
 
+    func testDiagnosticsComputerLandscapeToolbarStaysAboveSideRail() throws {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
+        app.launch()
+        let takeControl = app.buttons["computer-session-take-control"]
+        XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
+        takeControl.tap()
+        XCTAssertTrue(app.buttons["computer-session-done"].waitForExistence(timeout: 5))
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let viewer = app.descendants(matching: .any).matching(identifier: "computer-session-container").firstMatch
+        XCTAssertTrue(viewer.waitForExistence(timeout: 5))
+        assertComputerSideRail(app)
+        retainMenuScreenshot(app, name: "Computer toolbar above landscape rail", fullScreen: true)
+        app.buttons["computer-session-more"].tap()
+        XCTAssertTrue(app.buttons["1080p"].waitForExistence(timeout: 5))
+    }
+
     func testDiagnosticsComputerVideoQualityReconnectsAndReleasesControl() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -921,9 +941,9 @@ import UIKit
         let active = app.descendants(matching: .any).matching(identifier: "computer-session-control-active").firstMatch
         XCTAssertTrue(active.waitForExistence(timeout: 5))
         app.buttons["computer-session-more"].tap()
-        let sharp = app.buttons["Sharp (1440p)"]
-        XCTAssertTrue(sharp.waitForExistence(timeout: 5))
-        sharp.tap()
+        let medium = app.buttons["1080p"]
+        XCTAssertTrue(medium.waitForExistence(timeout: 5))
+        medium.tap()
         XCTAssertTrue(takeControl.waitForExistence(timeout: 5), "Changing quality must reconnect and release control.")
         XCTAssertFalse(active.exists)
         app.buttons["computer-session-close"].tap()
@@ -1059,7 +1079,14 @@ import UIKit
         let preview = app.otherElements["computer-session-preview"]
         let controls = app.descendants(matching: .any).matching(identifier: "computer-session-controls-row").firstMatch
         let done = app.buttons["computer-session-done"]
+        let refresh = app.buttons["computer-session-refresh"]
+        let more = app.buttons["computer-session-more"]
         XCTAssertTrue(preview.exists && controls.exists && done.isHittable)
+        XCTAssertTrue(refresh.isHittable && more.isHittable)
+        XCTAssertLessThanOrEqual(refresh.frame.maxY, done.frame.minY + 2,
+                                 "Refresh must stay above the landscape control rail.")
+        XCTAssertLessThanOrEqual(more.frame.maxY, done.frame.minY + 2,
+                                 "More must stay above the landscape control rail.")
         XCTAssertLessThanOrEqual(preview.frame.maxX, controls.frame.minX + 2)
         XCTAssertGreaterThanOrEqual(preview.frame.maxY, controls.frame.maxY - 24,
                                     "The video viewport must reach the bottom safe area beside the rail.")

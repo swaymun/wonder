@@ -135,15 +135,17 @@ public struct ComputerSession: Codable, Equatable, Identifiable, Sendable {
 public enum ComputerVideoQuality: String, Codable, CaseIterable, Identifiable, Sendable {
     case auto
     case standard
+    case medium
     case high
 
     public var id: String { rawValue }
 
     public var title: String {
         switch self {
-        case .auto: "Auto (up to 1080p)"
-        case .standard: "Save data (720p)"
-        case .high: "Sharp (1440p)"
+        case .auto: "Auto (up to 1440p)"
+        case .standard: "720p"
+        case .medium: "1080p"
+        case .high: "1440p"
         }
     }
 }
