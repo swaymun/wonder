@@ -712,7 +712,8 @@
         "hostInstallationId": { "type": "string", "minLength": 1, "maxLength": 160 },
         "generation": { "type": "integer", "const": 1 },
         "source": { "$ref": "#/$defs/computerSourceRequest" },
-        "videoQuality": { "$ref": "#/$defs/computerVideoQuality" }
+        "videoQuality": { "$ref": "#/$defs/computerVideoQuality" },
+        "videoMaxHeight": { "type": "integer", "const": 1080 }
       },
       "additionalProperties": false
     },

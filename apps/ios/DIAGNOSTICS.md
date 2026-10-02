@@ -155,13 +155,15 @@ rotation. In landscape, controls move to a narrow right rail with two icon
 columns and Done above the grid; the video occupies the remaining width and
 height. In portrait, the existing two-row control layout remains.
 
-The More menu offers Auto (up to 1440p), 720p, 1080p, and 1440p
+The More menu offers Auto, 720p, 1080p, and 1440p
 when the Mac supports video quality requests. The choice persists on the phone.
 Changing it releases any control lease and reconnects to the same selected
 source; a removed source can require a new selection. The Mac bounds capture
-and WebRTC output to the selected ceiling at 15 fps. Auto gives WebRTC a 1440p
-ceiling and balanced network and encoder adaptation; it does not guarantee
-1440p delivery. Older Macs show the quality control as unavailable.
+and WebRTC output to the selected ceiling at 15 fps. On updated Macs, Auto gives
+WebRTC a 1440p ceiling and balanced network and encoder adaptation; it does not
+guarantee 1440p delivery. The 1080p choice uses the older Mac's Auto ceiling when needed;
+updated Macs honor it as a fixed 1080p ceiling. Older Macs without quality
+requests show the quality control as unavailable.
 
 While control is active, the upper row shows icons and sends the default macOS
 All windows, App windows and Next window shortcuts. Apps opens Spotlight and

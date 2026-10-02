@@ -142,7 +142,7 @@ public enum ComputerVideoQuality: String, Codable, CaseIterable, Identifiable, S
 
     public var title: String {
         switch self {
-        case .auto: "Auto (up to 1440p)"
+        case .auto: "Auto"
         case .standard: "720p"
         case .medium: "1080p"
         case .high: "1440p"
@@ -157,13 +157,17 @@ public struct StartComputerSessionRequest: Encodable, Sendable {
     public let generation: UInt64
     public let source: ComputerSource?
     public let videoQuality: ComputerVideoQuality
+    public let videoMaxHeight: Int?
 
     public init(clientRequestId: String, conversationId: String, hostInstallationId: String,
                 generation: UInt64 = 1, source: ComputerSource? = nil,
                 videoQuality: ComputerVideoQuality = .auto) {
         self.clientRequestId = clientRequestId; self.conversationId = conversationId
         self.hostInstallationId = hostInstallationId; self.generation = generation; self.source = source
-        self.videoQuality = videoQuality
+        // Older Macs already capture Auto at 1080p and ignore unknown request fields.
+        // Updated Macs use the height hint to keep 1080p fixed.
+        self.videoQuality = videoQuality == .medium ? .auto : videoQuality
+        self.videoMaxHeight = videoQuality == .medium ? 1_080 : nil
     }
 }
 

@@ -53,6 +53,19 @@ pub(crate) struct StartRequest {
     source: Option<SourceRequest>,
     #[serde(default)]
     video_quality: Option<String>,
+    #[serde(default)]
+    video_max_height: Option<u16>,
+}
+
+fn requested_video_quality(
+    quality: Option<&str>,
+    max_height: Option<u16>,
+) -> Result<&str, &'static str> {
+    match (quality.unwrap_or("standard"), max_height) {
+        ("auto", Some(1080)) => Ok("medium"),
+        ("standard" | "medium" | "auto" | "high", None) => Ok(quality.unwrap_or("standard")),
+        _ => Err("video quality is invalid"),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1236,14 +1249,15 @@ pub(crate) async fn create(
         )
             .into_response();
     }
+    let video_quality =
+        match requested_video_quality(request.video_quality.as_deref(), request.video_max_height) {
+            Ok(quality) => quality,
+            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        };
     let source = match source_fields(request.source) {
         Ok(source) => source,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
-    let video_quality = request.video_quality.as_deref().unwrap_or("standard");
-    if !matches!(video_quality, "standard" | "medium" | "auto" | "high") {
-        return (StatusCode::BAD_REQUEST, "video quality is invalid").into_response();
-    }
     if !state
         .store
         .computer_conversation_allowed(&request.conversation_id)
@@ -2460,6 +2474,35 @@ pub(crate) async fn end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_height_hint_preserves_older_mac_1080p_request() {
+        let request: StartRequest = serde_json::from_value(serde_json::json!({
+            "clientRequestId": "request",
+            "conversationId": "chat",
+            "hostInstallationId": "mac",
+            "videoQuality": "auto",
+            "videoMaxHeight": 1080
+        }))
+        .unwrap();
+        assert_eq!(
+            requested_video_quality(request.video_quality.as_deref(), request.video_max_height),
+            Ok("medium")
+        );
+
+        let invalid: StartRequest = serde_json::from_value(serde_json::json!({
+            "clientRequestId": "request",
+            "conversationId": "chat",
+            "hostInstallationId": "mac",
+            "videoQuality": "high",
+            "videoMaxHeight": 1080
+        }))
+        .unwrap();
+        assert_eq!(
+            requested_video_quality(invalid.video_quality.as_deref(), invalid.video_max_height),
+            Err("video quality is invalid")
+        );
+    }
 
     #[test]
     fn source_crop_is_bounded_and_requires_a_positive_rectangle() {

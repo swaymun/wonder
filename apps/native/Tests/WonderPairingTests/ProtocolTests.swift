@@ -176,7 +176,8 @@ final class ProtocolTests: XCTestCase {
             source: ComputerSource(id: "display:1"), videoQuality: .medium
         )
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
-        XCTAssertEqual(body["videoQuality"] as? String, "medium")
+        XCTAssertEqual(body["videoQuality"] as? String, "auto")
+        XCTAssertEqual(body["videoMaxHeight"] as? Int, 1_080)
         XCTAssertEqual((body["source"] as? [String: Any])?["id"] as? String, "display:1")
         let response = Data(#"{"id":"session","clientRequestId":"request","ownerDeviceId":"phone","hostInstallationId":"mac","conversationId":"chat","generation":1,"state":"live","source":{"id":null,"name":null,"kind":null,"width":null,"height":null,"scale":null,"crop":null},"geometryRevision":0,"failureReason":null,"createdAt":"now","updatedAt":"now","lastStateAt":"now","endedAt":null,"capability":{"available":true,"action":"none","reason":"Available"},"videoQuality":"medium"}"#.utf8)
         XCTAssertEqual(try JSONDecoder().decode(ComputerSession.self, from: response).videoQuality, .medium)
