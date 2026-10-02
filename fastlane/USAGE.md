@@ -51,11 +51,19 @@ verify the readonly lane before releasing. Never use `match nuke` for routine
 renewal. For each channel the app, `.NotificationService` and `.Share` extensions each need an
 App ID and App Store profile in Match; the upload key cannot register them.
 
-This lane supports an upload-only Developer key. It does not edit release
-notes, tester groups, review submissions, or notification preferences. The
-upload action skips its distribution phase, followed by fastlane's read-only
-build watcher. Existing App Store Connect automatic distribution settings may
-still apply. Processed does not mean tester availability was verified.
+This lane supports the existing upload-only Developer key. It does not edit
+release notes, tester groups, review submissions, or notification preferences.
+The upload action skips its distribution phase, followed by fastlane's read-only
+build watcher. Wonder Testing's internal Owner Beta group has automatic
+distribution enabled for Xcode builds. After processing, the lane uses the same
+API key to confirm the build is in that group, has reached internal testing,
+and the group has a tester. Only then does `upload-result.json` set
+`testFlightReady: true`; otherwise it keeps the processed build recorded and
+fails the availability check. Production uploads still report tester
+availability as unverified. Recheck an existing Testing build without uploading
+with `bundle exec fastlane ios verify_testing_distribution build:NUMBER`.
+If verification fails, inspect Apple's group settings and the saved evidence
+before considering another upload; Apple may already have accepted the build.
 
 Evidence is saved in a fresh `.local/testflight-*` directory. If processing
 times out, inspect `upload-result.json` and App Store Connect before retrying;

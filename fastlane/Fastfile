@@ -128,6 +128,22 @@ def wonder_api_key(config)
                            key_filepath: config.fetch("privateKeyPath"), in_house: false)
 end
 
+def wonder_testing_distribution(app, build_id)
+  groups = app.get_beta_groups(filter: { name: "Owner Beta" }, includes: "betaTesters")
+  UI.user_error!("Expected one internal Owner Beta group") unless groups.size == 1 && groups.first.is_internal_group
+  group = groups.first
+  UI.user_error!("Owner Beta must distribute builds automatically") unless group.has_access_to_all_builds
+  UI.user_error!("Owner Beta has no testers") if group.beta_testers.nil? || group.beta_testers.empty?
+
+  return nil unless group.fetch_builds.any? { |build| build.id == build_id }
+
+  build = Spaceship::ConnectAPI::Build.get(build_id: build_id)
+  return nil unless build.processing_state == "VALID" &&
+                    build.build_beta_detail&.internal_build_state == "IN_BETA_TESTING"
+
+  group.id
+end
+
 default_platform(:ios)
 platform :ios do
   desc "Validate local upload configuration without contacting Apple or building"
@@ -136,6 +152,20 @@ platform :ios do
     wonder_upload_config(wonder_channel(options[:channel]))
     wonder_match_credentials
     UI.success("Wonder API-key, Match secret, and dedicated signing keychain are valid locally. No upload or Apple authentication attempted.")
+  end
+
+  desc "Verify a processed Wonder Testing build is available in automatic Owner Beta"
+  lane :verify_testing_distribution do |options|
+    config = wonder_upload_config("testing")
+    wonder_api_key(config)
+    app = Spaceship::ConnectAPI::App.find(config.fetch("appBundleId"))
+    UI.user_error!("Cannot locate Wonder Testing") unless app
+    build_number = Integer(options.fetch(:build).to_s, 10).to_s
+    builds = Spaceship::ConnectAPI::Build.all(app_id: app.id, build_number: build_number,
+                                               platform: Spaceship::ConnectAPI::Platform.map("ios"))
+    UI.user_error!("Expected one Wonder Testing build #{build_number}") unless builds.size == 1
+    UI.user_error!("Build #{build_number} is not available in Owner Beta") unless wonder_testing_distribution(app, builds.first.id)
+    UI.success("Wonder Testing build #{build_number} is available in automatic Owner Beta")
   end
 
   desc "Archive, upload with the API key, and wait for TestFlight processing"
@@ -183,7 +213,23 @@ platform :ios do
       result["testFlightProcessed"] = true
       result["testFlightReady"] = false # Tester availability is a separate gate.
       File.write(File.join(output, "upload-result.json"), JSON.pretty_generate(result) + "\n")
-      UI.success("#{channel == "testing" ? "Wonder Testing" : "Wonder"} #{result.fetch('version')} (#{build}) uploaded and processed. Tester availability is not verified.")
+      if channel == "testing"
+        deadline = Time.now + 300
+        group_id = nil
+        loop do
+          group_id = wonder_testing_distribution(app, processed.id)
+          break if group_id
+          UI.user_error!("Build #{build} processed, but Owner Beta availability was not verified within 5 minutes") if Time.now >= deadline
+          sleep 30
+        end
+        result["testFlightReady"] = true
+        result["testFlightGroup"] = "Owner Beta"
+        result["testFlightGroupId"] = group_id
+        File.write(File.join(output, "upload-result.json"), JSON.pretty_generate(result) + "\n")
+        UI.success("Wonder Testing #{result.fetch('version')} (#{build}) uploaded, processed, and available in Owner Beta.")
+      else
+        UI.success("Wonder #{result.fetch('version')} (#{build}) uploaded and processed. Tester availability is not verified.")
+      end
     ensure
       wonder_lock_signing_keychain if signing_credentials
     end
