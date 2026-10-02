@@ -22,6 +22,7 @@ struct SystemLoginRegistration: LoginRegistration {
 final class ServiceControls: ObservableObject {
     @Published var message: String?
     @Published var busy = false
+    @Published private(set) var claudeAuthRequired = false
     @Published var launchAtLogin = false
     @Published var loginMessage: String?
     @Published var loginNeedsApproval = false
@@ -34,12 +35,14 @@ final class ServiceControls: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         login: any LoginRegistration = SystemLoginRegistration(),
-        serviceDirectory: URL? = nil
+        serviceDirectory: URL? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.defaults = defaults
         self.login = login
+        self.environment = environment
         let directory = serviceDirectory
-            ?? ProcessInfo.processInfo.environment["WONDER_SERVICE_DIR"].map { URL(fileURLWithPath: $0) }
+            ?? environment["WONDER_SERVICE_DIR"].map { URL(fileURLWithPath: $0) }
         controlPreferences = directory.map { ControlPreferencesStore(serviceDirectory: $0) }
         refreshLogin()
         refreshControlPreferences()
@@ -112,7 +115,7 @@ final class ServiceControls: ObservableObject {
     private var operation: Process?
     private var lastProbe = Date.distantPast
     private var probeGeneration = UUID()
-    private let environment = ProcessInfo.processInfo.environment
+    private let environment: [String: String]
 
     var serviceDirectory: URL? {
         environment["WONDER_SERVICE_DIR"].map { URL(fileURLWithPath: $0) }
@@ -140,6 +143,7 @@ final class ServiceControls: ObservableObject {
             return
         }
         busy = true
+        if claude && !signIn { claudeAuthRequired = false }
         message = signIn ? "Complete sign-in in your browser. Wonder will reconnect afterward." : (claude ? "Checking your Claude subscription…" : "Checking ChatGPT’s installed runtime…")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -159,8 +163,12 @@ final class ServiceControls: ObservableObject {
                     self.operation = nil
                     if finished.terminationStatus == 0 {
                         if claude {
+                            self.claudeAuthRequired = false
                             self.message = "Claude is connected. Its models will appear shortly."
                         } else { self.restart() }
+                    } else if claude && !signIn && finished.terminationStatus == 42 {
+                        self.claudeAuthRequired = true
+                        self.message = "Claude needs sign-in on this Mac. Your other agent chats remain available."
                     } else {
                         self.message = "Setup did not finish. Check your connection and free disk space, then try again. Your saved chats are kept."
                     }

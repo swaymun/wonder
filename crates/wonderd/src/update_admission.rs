@@ -194,11 +194,18 @@ pub(crate) async fn cancel(
 }
 
 fn admits_work(method: &Method, path: &str) -> bool {
+    if method == Method::PUT
+        && path.starts_with("/api/v1/conversations/")
+        && path.ends_with("/goal")
+    {
+        return true;
+    }
     if method != Method::POST {
         return false;
     }
     // These routes can persist a new user turn, automation, assignment, Bot
-    // onboarding task, or computer session/control lease.
+    // onboarding task, or computer session/control lease. Project creation
+    // checks this lease inside create_thread after exact receipt replay.
     (path.starts_with("/api/v1/conversations/")
         && (path.ends_with("/messages") || path.ends_with("/steer")))
         || ((path.starts_with("/api/v1/channels/") || path.starts_with("/api/v1/group-chats/"))
@@ -215,8 +222,6 @@ fn admits_work(method: &Method, path: &str) -> bool {
                 | "/api/v1/group-chats/propose"
         )
         || (path.starts_with("/api/v1/group-chats/") && path.ends_with("/retry"))
-        // A project thread's first message starts native provider work.
-        || (path.starts_with("/api/v1/projects/") && path.ends_with("/threads"))
         || (path.starts_with("/api/v1/bots/")
             && (path.ends_with("/teaching/sessions") || path.ends_with("/fixture-tests")))
         || path == "/api/v1/computer/sessions"
@@ -247,6 +252,7 @@ pub(crate) async fn guard_new_work(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
 
     #[test]
     fn gate_covers_all_work_admissions() {
@@ -264,10 +270,15 @@ mod tests {
             "/api/v1/computer/sessions",
             "/api/v1/computer/sessions/id/admission",
             "/api/v1/computer/sessions/id/control/acquire",
-            "/api/v1/projects/id/threads",
         ] {
             assert!(admits_work(&Method::POST, path), "{path}");
         }
+        assert!(!admits_work(&Method::POST, "/api/v1/projects/id/threads"));
+        assert!(admits_work(&Method::PUT, "/api/v1/conversations/id/goal"));
+        assert!(!admits_work(
+            &Method::DELETE,
+            "/api/v1/conversations/id/goal"
+        ));
         assert!(!admits_work(&Method::POST, "/api/v1/host/update/cancel"));
         assert!(!admits_work(
             &Method::GET,
@@ -322,6 +333,45 @@ mod tests {
             lease.as_mut().unwrap().expires = Instant::now() - Duration::from_secs(1);
         }
         assert!(admission.claim_guard().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn prepared_update_rejects_goal_mutation_but_allows_goal_clear() {
+        let (_dir, state) = crate::ingestion::tests::fixture().await;
+        {
+            let mut lease = state.update_admission.lease.lock().await;
+            *lease = Some(Lease {
+                request_id: "update".into(),
+                expires: Instant::now() + Duration::from_secs(60),
+            });
+            state.update_admission.paused.store(true, Ordering::Release);
+        }
+        let put = crate::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/v1/conversations/missing/goal")
+                    .header("x-wonder-loopback-capability", &state.loopback_capability)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"objective":"Start work"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::CONFLICT);
+        let clear = crate::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/v1/conversations/missing/goal")
+                    .header("x-wonder-loopback-capability", &state.loopback_capability)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(clear.status(), StatusCode::NOT_FOUND);
+        state.app_server.lock().await.shutdown().await.unwrap();
     }
 
     #[tokio::test]

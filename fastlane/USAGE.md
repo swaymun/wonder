@@ -48,8 +48,14 @@ creation and renewal are separate operator actions so a release cannot silently
 replace signing credentials. Bootstrap or renew with a reviewed Apple
 Distribution certificate and App Store profile, import both into Match, then
 verify the readonly lane before releasing. Never use `match nuke` for routine
-renewal. For each channel the app, `.NotificationService` and `.Share` extensions each need an
-App ID and App Store profile in Match; the upload key cannot register them.
+renewal. For each channel the app, `.NotificationService`, `.Share` and new
+`.Widget` extensions each need an App ID and App Store profile in Match; the
+upload key cannot register them. The app and Widget profiles also need the
+matching App Group capability: `group.com.swaymun.wonder.testing` for Testing,
+`group.com.swaymun.wonder` for production. Creating or changing Apple IDs,
+groups or profiles requires explicit owner approval. Source and unsigned
+simulator checks do not establish signed App Group access or a usable Home
+Screen widget; verify those before treating Widget delivery as accepted.
 
 This lane supports the existing upload-only Developer key. It does not edit
 release notes, tester groups, review submissions, or notification preferences.

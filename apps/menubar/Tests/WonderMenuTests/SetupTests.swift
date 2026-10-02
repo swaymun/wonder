@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ServiceManagement
 import XCTest
 @testable import WonderMenu
@@ -134,6 +135,38 @@ final class SetupTests: XCTestCase {
         XCTAssertTrue(service.loginMessage?.contains("could not") == true)
         ServiceControls(defaults: defaults, login: login).applyInitialLoginDefault()
         XCTAssertEqual(login.registrations, 1)
+    }
+
+    @MainActor
+    func testClaudeCheckOffersSignInOnlyForAccountFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("WonderClaudeCheck-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("manage-runtime.sh")
+        try "#!/bin/sh\nexit $(cat \"$WONDER_SERVICE_DIR/check-exit\")\n".write(to: script, atomically: true, encoding: .utf8)
+        let service = ServiceControls(
+            defaults: isolatedDefaults(), login: TestLogin(), serviceDirectory: directory,
+            environment: ["WONDER_RESOURCES": directory.path, "WONDER_SERVICE_DIR": directory.path]
+        )
+        func check(_ exitCode: Int32) async throws {
+            try "\(exitCode)".write(to: directory.appendingPathComponent("check-exit"), atomically: true, encoding: .utf8)
+            let finished = expectation(description: "Claude check exit \(exitCode)")
+            service.repair(claude: true)
+            var observation: AnyCancellable? = service.$busy.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
+            await fulfillment(of: [finished], timeout: 5)
+            observation?.cancel()
+            observation = nil
+        }
+
+        try await check(42)
+        XCTAssertTrue(service.claudeAuthRequired)
+        XCTAssertTrue(service.message?.contains("needs sign-in") == true)
+        try await check(1)
+        XCTAssertFalse(service.claudeAuthRequired)
+        XCTAssertTrue(service.message?.contains("did not finish") == true)
+        try await check(0)
+        XCTAssertFalse(service.claudeAuthRequired)
+        XCTAssertTrue(service.message?.contains("Claude is connected") == true)
     }
 
     func testHelperRelaunchUpdateAndInvalidOutput() throws {

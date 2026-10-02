@@ -34,6 +34,155 @@ enum Page {
     About,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadinessAction {
+    Retry,
+    Repair,
+    Restart,
+    ConnectMac,
+    OpenTailscale,
+    PairDevice,
+    ReviewAccess,
+    None,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReadinessSummary {
+    title: &'static str,
+    detail: String,
+    action: ReadinessAction,
+    fully_ready: bool,
+}
+
+impl ReadinessSummary {
+    fn from_snapshot(state: &Value, bridge_connected: bool) -> Self {
+        let summary = |title, detail: String, action| Self {
+            title,
+            detail,
+            action,
+            fully_ready: false,
+        };
+        if !bridge_connected {
+            return summary(
+                "Mac settings unavailable",
+                "Wonder could not check this Mac. Reopen the app to restore its status.".into(),
+                ReadinessAction::Retry,
+            );
+        }
+        if state["serviceRunning"] != true {
+            return summary(
+                "Wonder is offline",
+                "The local service is not responding. Your saved chats remain on this Mac.".into(),
+                ReadinessAction::Restart,
+            );
+        }
+        if state["ready"] != true {
+            let detail = text(state, "executionDetail");
+            return summary(
+                "Agent work needs attention",
+                if detail.is_empty() {
+                    "Wonder cannot start agent work yet. Check again in a moment.".into()
+                } else {
+                    detail.to_owned()
+                },
+                if text(state, "executionReason") == "runtime_unavailable" {
+                    ReadinessAction::Repair
+                } else {
+                    ReadinessAction::Retry
+                },
+            );
+        }
+        if state["updatePreparing"] == true {
+            return summary(
+                "Preparing an update",
+                "Wonder is waiting for active work to finish before installing the update.".into(),
+                ReadinessAction::None,
+            );
+        }
+        if state["remoteReady"] != true {
+            if state["remoteChecking"] == true {
+                return summary(
+                    "Ready on this Mac",
+                    "Local chats work. Wonder is checking access from paired devices.".into(),
+                    ReadinessAction::None,
+                );
+            }
+            return summary(
+                "Ready on this Mac",
+                "Local chats work. Paired devices cannot reach this Mac until remote access reconnects.".into(),
+                if state["canConnect"] == true {
+                    ReadinessAction::ConnectMac
+                } else {
+                    ReadinessAction::OpenTailscale
+                },
+            );
+        }
+        if state["pairingFresh"] != true {
+            return summary(
+                "Ready for chats",
+                "Wonder could not check paired devices. Open Devices to refresh their status."
+                    .into(),
+                ReadinessAction::PairDevice,
+            );
+        }
+        if !array(state, "devices")
+            .iter()
+            .any(|device| device["revoked"] != true)
+        {
+            return summary(
+                "Ready to connect a device",
+                "Wonder is reachable. Pair an iPhone or iPad to work from it.".into(),
+                ReadinessAction::PairDevice,
+            );
+        }
+        let screen = text(state, "screen");
+        let input = text(state, "input");
+        let screen_missing = matches!(screen, "Not enabled" | "Needs attention");
+        let input_missing = matches!(input, "Not enabled" | "Needs attention");
+        if screen_missing || input_missing {
+            let detail = match (screen_missing, input_missing) {
+                (true, true) => "Phone chats work. Screen viewing and computer control need permission in Access.",
+                (true, false) => "Phone chats work. Screen viewing needs Screen Recording permission in Access.",
+                (false, true) => "Phone chats work. Computer control needs Accessibility permission in Access.",
+                (false, false) => unreachable!(),
+            };
+            return summary(
+                "Ready for messages",
+                detail.into(),
+                ReadinessAction::ReviewAccess,
+            );
+        }
+        if screen == "Unavailable" || input == "Unavailable" {
+            return summary(
+                "Ready for chats",
+                "Phone chats work. Computer access could not be checked; review Access.".into(),
+                ReadinessAction::ReviewAccess,
+            );
+        }
+        if screen == "Checking…" || input == "Checking…" {
+            return summary(
+                "Ready for chats",
+                "Phone chats work. Wonder is checking computer access.".into(),
+                ReadinessAction::None,
+            );
+        }
+        if screen != "Enabled" || input != "Enabled" {
+            return summary(
+                "Ready for chats",
+                "Phone chats work. Computer access could not be confirmed; review Access.".into(),
+                ReadinessAction::ReviewAccess,
+            );
+        }
+        Self {
+            title: "Mac is ready for remote chats",
+            detail: "Wonder's private address responds from this Mac, and a device is paired."
+                .into(),
+            action: ReadinessAction::None,
+            fully_ready: true,
+        }
+    }
+}
+
 struct Bridge {
     child: Child,
     sender: mpsc::Sender<Value>,
@@ -366,9 +515,7 @@ impl MacSettings {
             }))
     }
     fn general(&self, cx: &Context<Self>) -> Div {
-        let local = self.flag("serviceRunning");
-        let remote = self.flag("remoteReady");
-        let ready = self.flag("ready") && remote && self.connected;
+        let summary = ReadinessSummary::from_snapshot(&self.state, self.connected);
         let mut status = stack()
             .gap_2()
             .child(
@@ -376,71 +523,97 @@ impl MacSettings {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().size(px(8.)).rounded_full().bg(if ready {
-                        cx.theme().success
-                    } else {
-                        cx.theme().warning
-                    }))
                     .child(
-                        note(if ready {
-                            "Wonder is ready"
-                        } else {
-                            "Wonder needs attention"
-                        })
-                        .role(Role::Heading)
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD),
+                        div()
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(if summary.fully_ready {
+                                cx.theme().success
+                            } else {
+                                cx.theme().warning
+                            }),
+                    )
+                    .child(
+                        note(summary.title)
+                            .role(Role::Heading)
+                            .text_xl()
+                            .font_weight(FontWeight::SEMIBOLD),
                     ),
             )
             .child(note(text(&self.state, "hostName")).text_color(cx.theme().muted_foreground))
-            .child(row(
-                "Local service",
-                if !self.connected {
-                    "Unavailable"
-                } else if local {
-                    "Running"
-                } else {
-                    "Unavailable"
-                },
-            ));
-        if !self.flag("ready") {
-            status = status.child(note(if local {
-                "Wonder can’t run Bot requests yet. Try restarting services."
-            } else {
-                "The local service isn’t responding. Try restarting services."
-            }));
-        }
+            .child(note(summary.detail));
         let mut actions = div().flex().gap_2().pt_2();
-        if let Some(open_chats) = cx.global::<crate::DesktopShell>().open_chats {
-            actions = actions.child(
-                Button::new("open-wonder")
-                    .label("Open Wonder")
-                    .on_click(move |_, _, cx| open_chats(cx)),
-            );
+        if self.flag("serviceRunning") {
+            if let Some(open_chats) = cx.global::<crate::DesktopShell>().open_chats {
+                actions = actions.child(
+                    Button::new("open-wonder")
+                        .label("Open Wonder")
+                        .on_click(move |_, _, cx| open_chats(cx)),
+                );
+            }
         }
-        actions = actions.child(self.action(
-            "restart",
-            "Restart services",
-            json!({"action":"restart"}),
-            self.flag("serviceBusy"),
-            cx,
-        ));
-        actions = actions.child(self.action(
-            "claude-sign-in", "Sign in to Claude", json!({"action":"claude-sign-in"}),
-            self.flag("serviceBusy"), cx,
-        ));
-        let mut remote_view = stack().gap_2().child(heading("Remote access")).child(row(
-            if remote {
-                "Available for paired devices."
-            } else {
-                "Paired devices can’t reach this Mac remotely."
-            },
-            remote_label(&self.state),
-        ));
-        if !remote {
-            remote_view = remote_view.child(self.connection(cx));
-        }
-        remote_view = remote_view.child(
+        actions = match summary.action {
+            ReadinessAction::Retry => actions.child(
+                Button::new("retry-readiness")
+                    .label("Try again")
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+            ),
+            ReadinessAction::Repair => actions.child(
+                self.action(
+                    "repair-runtime",
+                    "Check installed runtime",
+                    json!({"action":"repair"}),
+                    self.flag("serviceBusy"),
+                    cx,
+                )
+                .primary(),
+            ),
+            ReadinessAction::Restart => actions.child(
+                self.action(
+                    "restart",
+                    "Restart services",
+                    json!({"action":"restart"}),
+                    self.flag("serviceBusy"),
+                    cx,
+                )
+                .primary(),
+            ),
+            ReadinessAction::ConnectMac => actions.child(
+                self.action(
+                    "connect-mac",
+                    "Finish remote sign-in",
+                    json!({"action":"connect-mac"}),
+                    false,
+                    cx,
+                )
+                .primary(),
+            ),
+            ReadinessAction::OpenTailscale => actions.child(
+                self.action(
+                    "open-tailscale",
+                    "Open Tailscale",
+                    json!({"action":"tailscale-open"}),
+                    false,
+                    cx,
+                )
+                .primary(),
+            ),
+            ReadinessAction::PairDevice => actions.child(
+                Button::new("open-devices")
+                    .label("Open Devices")
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.select_page(Page::Devices, cx))),
+            ),
+            ReadinessAction::ReviewAccess => actions.child(
+                Button::new("open-access")
+                    .label("Review Access")
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.select_page(Page::Access, cx))),
+            ),
+            ReadinessAction::None => actions,
+        };
+        status = status.child(actions).child(
             Button::new("connection-details")
                 .label(if self.connection_details {
                     "Hide connection details"
@@ -455,15 +628,51 @@ impl MacSettings {
                 })),
         );
         if self.connection_details {
-            remote_view = remote_view.child(note(
-                "Keep this Mac awake and online for your paired devices.",
-            ));
+            status = status.child(row("Remote access", remote_label(&self.state)));
             if !text(&self.state, "remoteOrigin").is_empty() {
-                remote_view = remote_view.child(row("Address", text(&self.state, "remoteOrigin")));
+                status = status.child(row("Address", text(&self.state, "remoteOrigin")));
             }
+            if !self.flag("remoteReady") {
+                status = status.child(self.connection(cx));
+            }
+            status = status.child(row(
+                "Claude",
+                if self.flag("claudeAuthRequired") {
+                    "Sign-in needed"
+                } else {
+                    "Check account access"
+                },
+            ));
+            status = status.child(self.action(
+                "claude-check",
+                "Check Claude access",
+                json!({"action":"claude-check"}),
+                self.flag("serviceBusy"),
+                cx,
+            ));
+            if self.flag("claudeAuthRequired") {
+                status = status.child(self.action(
+                    "claude-sign-in",
+                    "Sign in to Claude",
+                    json!({"action":"claude-sign-in"}),
+                    self.flag("serviceBusy"),
+                    cx,
+                ));
+            }
+            status = status.child(self.action(
+                "restart-details",
+                "Restart services",
+                json!({"action":"restart"}),
+                self.flag("serviceBusy"),
+                cx,
+            ));
         }
         status = messages(
-            status.child(remote_view).child(actions),
+            status
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_lg()
+                .p_4(),
             &self.state,
             &["serviceMessage"],
             cx,
@@ -558,9 +767,7 @@ impl MacSettings {
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD),
             )
-            .child(note(
-                "A local-first messenger for your Bots and Group Chats.",
-            ))
+            .child(note("A local-first messenger for chats and Projects."))
             .child(row("Version", text(&self.state, "version")))
     }
     fn connection(&self, cx: &Context<Self>) -> Div {
@@ -1022,7 +1229,7 @@ impl MacSettings {
                     + 1
             )));
         view=match step {
-            0=>view.child(note("Your Bots work on this Mac. Pair your iPhone or iPad to chat with them wherever you are."))
+            0=>view.child(note("Wonder connects your chats and Projects to this Mac. Pair your iPhone or iPad to use them wherever you are."))
                 .child(row("This Mac", text(&self.state,"hostName")))
                 .child(row("Wonder", if self.flag("ready") { "Ready to set up" } else { "Getting ready…" }))
                 .when(!self.flag("ready") && self.flag("needsRepair"), |v| v.child(note("Wonder needs attention before setup can continue."))
@@ -1034,11 +1241,11 @@ impl MacSettings {
             6=>view.child(self.shared_display_choice(cx)),
             2=>view.when(!self.flag("remoteReady"), |v| v.child(note("Connect Tailscale on both devices before pairing. You can finish setup and pair later.")).child(self.connection(cx)))
                 .child(self.devices(cx)),
-            _=>view.child(note("Wonder stays in your menu bar while your Bots work."))
+            _=>view.child(note("Wonder stays in your menu bar so your chats and Projects remain available."))
                 .child(self.toggle("setup-login","Launch Wonder at login","login","login",cx))
                 .child(note(text(&self.state,"loginMessage")))
                 .when(self.flag("loginApproval"), |v| v.child(self.action("setup-login-settings","Open Login Settings…",json!({"action":"login-settings"}),false,cx)))
-                .child(note("Remote access needs this Mac to be awake and online. Closing setup keeps Wonder running; Quit Wonder stops Bots and remote access.")),
+                .child(note("Remote access needs this Mac to be awake and online. Closing setup keeps Wonder running; Quit Wonder stops active agent work and remote access.")),
         };
         view
     }
@@ -1081,7 +1288,7 @@ impl MacSettings {
                         "Continue"
                     },
                     json!({"action":"setup-step","step":steps[position+1]}),
-                    (step == 0 && (!self.flag("ready") || self.flag("serviceBusy"))),
+                    step == 0 && (!self.flag("ready") || self.flag("serviceBusy")),
                     cx,
                 )
                 .primary(),
@@ -1417,7 +1624,7 @@ fn last_seen(phone: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expired, last_seen, now_ms};
+    use super::{expired, last_seen, now_ms, ReadinessAction, ReadinessSummary};
     use serde_json::json;
     #[test]
     fn missing_or_elapsed_pairing_deadlines_fail_closed() {
@@ -1439,5 +1646,96 @@ mod tests {
             .timestamp_millis()
             .to_string();
         assert_eq!(last_seen(&json!({"lastSeen":millis})), seen);
+    }
+
+    #[test]
+    fn readiness_summary_preserves_local_work_and_selects_real_recovery() {
+        let healthy = json!({
+            "serviceRunning":true, "ready":true, "remoteReady":true,
+            "pairingFresh":true, "devices":[{"revoked":false}],
+            "screen":"Enabled", "input":"Enabled"
+        });
+        let summary = ReadinessSummary::from_snapshot(&healthy, true);
+        assert_eq!(summary.title, "Mac is ready for remote chats");
+        assert!(summary.fully_ready);
+        assert_eq!(summary.action, ReadinessAction::None);
+
+        let mut state = healthy.clone();
+        state["remoteReady"] = json!(false);
+        let summary = ReadinessSummary::from_snapshot(&state, true);
+        assert_eq!(summary.title, "Ready on this Mac");
+        assert!(summary.detail.contains("Local chats work"));
+        assert_eq!(summary.action, ReadinessAction::OpenTailscale);
+        state["canConnect"] = json!(true);
+        assert_eq!(
+            ReadinessSummary::from_snapshot(&state, true).action,
+            ReadinessAction::ConnectMac
+        );
+
+        let mut state = healthy.clone();
+        state["ready"] = json!(false);
+        state["executionDetail"] = json!("Chat storage is unavailable.");
+        let summary = ReadinessSummary::from_snapshot(&state, true);
+        assert_eq!(summary.detail, "Chat storage is unavailable.");
+        assert_eq!(summary.action, ReadinessAction::Retry);
+        assert!(!summary.detail.contains("Claude"));
+
+        state["executionReason"] = json!("runtime_unavailable");
+        state["executionDetail"] = json!("The installed runtime is unavailable.");
+        let summary = ReadinessSummary::from_snapshot(&state, true);
+        assert_eq!(summary.action, ReadinessAction::Repair);
+        assert!(summary.detail.contains("installed runtime"));
+
+        let mut state = healthy.clone();
+        state["serviceRunning"] = json!(false);
+        assert_eq!(
+            ReadinessSummary::from_snapshot(&state, true).action,
+            ReadinessAction::Restart
+        );
+        assert_eq!(
+            ReadinessSummary::from_snapshot(&healthy, false).action,
+            ReadinessAction::Retry
+        );
+
+        let mut state = healthy.clone();
+        state["devices"] = json!([]);
+        assert_eq!(
+            ReadinessSummary::from_snapshot(&state, true).action,
+            ReadinessAction::PairDevice
+        );
+        state["pairingFresh"] = json!(false);
+        assert!(ReadinessSummary::from_snapshot(&state, true)
+            .detail
+            .contains("could not check"));
+        state.as_object_mut().unwrap().remove("pairingFresh");
+        assert_eq!(
+            ReadinessSummary::from_snapshot(&state, true).action,
+            ReadinessAction::PairDevice
+        );
+
+        let mut state = healthy.clone();
+        state["screen"] = json!("Needs attention");
+        let summary = ReadinessSummary::from_snapshot(&state, true);
+        assert_eq!(summary.title, "Ready for messages");
+        assert_eq!(summary.action, ReadinessAction::ReviewAccess);
+        assert!(summary.detail.contains("Screen Recording"));
+
+        let mut state = healthy.clone();
+        state["screen"] = json!("Unavailable");
+        let summary = ReadinessSummary::from_snapshot(&state, true);
+        assert_eq!(summary.title, "Ready for chats");
+        assert_eq!(summary.action, ReadinessAction::ReviewAccess);
+
+        let mut state = healthy.clone();
+        state["screen"] = json!("Unexpected value");
+        let summary = ReadinessSummary::from_snapshot(&state, true);
+        assert!(!summary.fully_ready);
+        assert_eq!(summary.action, ReadinessAction::ReviewAccess);
+
+        let mut state = healthy;
+        state["updatePreparing"] = json!(true);
+        let summary = ReadinessSummary::from_snapshot(&state, true);
+        assert_eq!(summary.title, "Preparing an update");
+        assert_eq!(summary.action, ReadinessAction::None);
     }
 }

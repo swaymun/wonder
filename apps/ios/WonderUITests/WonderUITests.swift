@@ -10,6 +10,14 @@ import UIKit
         #endif
     }
     private var appDisplayName: String { appBundleIdentifier.hasSuffix(".testing") ? "Wonder Testing" : "Wonder" }
+    private func openConversationDetails(_ app: XCUIApplication) {
+        let title = app.buttons["conversation-title-menu"]
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        title.tap()
+        let details = app.buttons["Conversation details"]
+        XCTAssertTrue(details.waitForExistence(timeout: 5))
+        details.tap()
+    }
     // This optional private replay uses the production conversation controls.
     // Supply the projected snapshot in the app's Documents directory; never
     // check real session contents into source or initiate model work here.
@@ -25,7 +33,7 @@ import UIKit
         let scroll = anyElement(app, identifier: "conversation-scroll")
         XCTAssertTrue(scroll.exists)
         let groups = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "activity-group:"))
-        let header = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
+        let header = app.buttons["conversation-title-menu"]
         let draft = app.textViews["message-draft"]
         var selected: XCUIElement?
         for _ in 0..<20 {
@@ -95,7 +103,7 @@ import UIKit
         if !replyExists { retainMenuScreenshot(app, name: "Initial chat missing latest reply") }
         XCTAssertTrue(replyExists)
         let work = app.buttons["activity-group:layout-turn-12/layout-work-12"]
-        let header = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
+        let header = app.buttons["conversation-title-menu"]
         XCTAssertTrue(header.waitForExistence(timeout: 5))
         let before = reply.frame
         let workBefore = work.exists ? work.staticTexts.firstMatch.frame : nil
@@ -172,7 +180,7 @@ import UIKit
         let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Reply 6.")).firstMatch
         XCTAssertTrue(reply.waitForExistence(timeout: 10))
         let scroll = anyElement(app, identifier: "conversation-scroll")
-        let header = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
+        let header = app.buttons["conversation-title-menu"]
         XCTAssertTrue(header.waitForExistence(timeout: 5))
         let olderWork = app.buttons["activity-group:layout-turn-6/layout-work-6"]
         XCTAssertTrue(olderWork.waitForExistence(timeout: 5))
@@ -218,7 +226,7 @@ import UIKit
         let row = app.buttons["pinned-thread:codex:read-fixture"]
         XCTAssertTrue(row.waitForExistence(timeout: 15))
         row.tap()
-        XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["conversation-title-menu"].waitForExistence(timeout: 15))
         openSidebarIfNeeded(app)
         row.press(forDuration: 1)
         let archive = app.buttons["archive-project-thread"]
@@ -233,8 +241,47 @@ import UIKit
         archive.tap()
         let removed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !row.exists }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 10), .completed)
-        XCTAssertFalse(app.buttons["Conversation details"].exists, "Archiving closes the selected chat")
+        XCTAssertFalse(app.buttons["conversation-title-menu"].exists, "Archiving closes the selected chat")
         retainMenuScreenshot(app, name: "Archived Codex chat removed")
+    }
+
+    // Uses a synthetic Codex catalog and Project detail. Selecting speed
+    // must persist in the existing thread and be offered in a new draft
+    // without sending model work.
+    func testProjectSpeedControlsOnThreadAndNewDraft() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+            "-diagnostics-chat-layout-unsaved", "-diagnostics-project-speed"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let row = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        row.tap()
+        let model = app.buttons["project-composer-model"]
+        XCTAssertTrue(model.waitForExistence(timeout: 15))
+        model.tap()
+        let fast = app.buttons["project-speed:fast"]
+        XCTAssertTrue(fast.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["project-speed:default"].exists)
+        fast.tap()
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (model.value as? String)?.contains("Fast") == true
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 10), .completed)
+        app.buttons["Done"].tap()
+        model.tap()
+        XCTAssertTrue(fast.waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
+        app.buttons["new-chat"].tap()
+        let picker = app.buttons["project-agent-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.tap()
+        let newFast = app.buttons["new-chat-speed:fast"]
+        XCTAssertTrue(newFast.waitForExistence(timeout: 10))
+        newFast.tap()
+        app.buttons["Done"].tap()
+        XCTAssertTrue((picker.value as? String)?.contains("Fast") == true)
     }
 
     func testProjectThreadReadMenuAndVisibleAcknowledgement() throws {
@@ -260,7 +307,7 @@ import UIKit
                     row.exists && ((row.value as? String)?.contains("Unread") == true) == unread
                 }, object: nil)
                 XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 8), .completed)
-                XCTAssertFalse(app.buttons["Conversation details"].exists, "Marking status must not navigate into the chat")
+                XCTAssertFalse(app.buttons["conversation-title-menu"].exists, "Marking status must not navigate into the chat")
             }
         }
         row.tap()
@@ -294,6 +341,32 @@ import UIKit
         app.terminate()
     }
 
+    func testProjectAgentTaskOpensReadOnlyTranscript() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+                               "-diagnostics-chat-layout-unsaved", "-diagnostics-project-subagents"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let parent = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(parent.waitForExistence(timeout: 15))
+        parent.tap()
+        let pill = app.buttons["project-subagent-status-pill"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 15))
+        pill.tap()
+        let scout = app.buttons["project-subagent-roster:fixture-child-thread"]
+        XCTAssertTrue(scout.waitForExistence(timeout: 5))
+        scout.tap()
+        let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Scout found the parser issue.")).firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 15), app.debugDescription)
+        let transcript = app.scrollViews["project-subagent-transcript"]
+        XCTAssertTrue(transcript.exists)
+        XCTAssertEqual(transcript.textViews.count, 0, "Agent history has no direct-send composer")
+        XCTAssertTrue(app.staticTexts["Read only"].exists)
+        app.buttons["project-subagent-sheet-done"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 5))
+    }
+
     func testActivityDisclosureKeepsVisibleReadingAnchorAtLargeText() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -303,7 +376,7 @@ import UIKit
         let work = app.buttons["activity-group:layout-turn-6/layout-work-6"]
         let scroll = anyElement(app, identifier: "conversation-scroll")
         let draft = app.textViews["message-draft"]
-        let header = app.navigationBars.containing(.other, identifier: "conversation-avatar-header").firstMatch
+        let header = app.buttons["conversation-title-menu"]
         XCTAssertTrue(work.waitForExistence(timeout: 10))
         XCTAssertTrue(draft.waitForExistence(timeout: 10))
         for _ in 0..<8 {
@@ -745,7 +818,7 @@ import UIKit
         XCTAssertTrue(computerContainer.waitForExistence(timeout: 10))
         let picker = app.buttons["computer-session-connection-picker"]
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        XCTAssertEqual(picker.value as? String, "Unavailable")
+        XCTAssertEqual(picker.value as? String, "Connecting, screen unavailable")
         XCTAssertTrue(app.staticTexts["Live computer viewing is unavailable on this Mac."].exists)
         XCTAssertTrue(app.staticTexts["Live computer viewing is unavailable on this Mac. Update Wonder on the Mac, then try again."].exists)
         let preview = app.descendants(matching: .any)
@@ -794,7 +867,7 @@ import UIKit
         XCTAssertTrue(computerContainer.waitForExistence(timeout: 10))
         let picker = app.buttons["computer-session-connection-picker"]
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
-        XCTAssertEqual(picker.value as? String, "Live")
+        XCTAssertEqual(picker.value as? String, "Connecting, screen live")
         let takeControl = app.buttons["computer-session-take-control"]
         XCTAssertTrue(takeControl.waitForExistence(timeout: 5))
         takeControl.tap()
@@ -2144,7 +2217,7 @@ import UIKit
         let chat=app.buttons.matching(NSPredicate(format:"label BEGINSWITH %@", "Diagnostics image preview")).firstMatch
         guard chat.waitForExistence(timeout:15) else { throw XCTSkip("Prepare the dedicated image test thread with Preview fixture 4000x3000.png first.") }
         chat.tap()
-        app.buttons["Conversation details"].tap()
+        openConversationDetails(app)
         app.buttons["Files"].tap()
         let file=app.buttons["Preview fixture 4000x3000.png"]
         XCTAssertTrue(file.waitForExistence(timeout:10))
@@ -2179,8 +2252,7 @@ import UIKit
         let chat = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Wonder iOS")).firstMatch
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation.") }
         chat.tap()
-        XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 10))
-        app.buttons["Conversation details"].tap()
+        openConversationDetails(app)
         XCTAssertTrue(app.buttons["Files"].waitForExistence(timeout: 5))
         app.buttons["Files"].tap()
 
@@ -2252,8 +2324,7 @@ import UIKit
         computerClose.tap()
         XCTAssertTrue(waitUntilGone(computerClose, timeout: 10), "Computer view did not close")
         XCTAssertTrue(computerPill.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 10))
-        app.buttons["Conversation details"].tap()
+        openConversationDetails(app)
         XCTAssertTrue(app.buttons["Files"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@",
                                                         "View computer", "computer-status-pill")).count, 0,
@@ -2320,9 +2391,10 @@ import UIKit
         app.launchArguments = ["-read-preview", "-send-preview", "-files-preview"]
         app.launch()
 
-        XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 10))
-        app.buttons["Conversation details"].tap()
-        app.buttons["Files"].tap()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        XCTAssertTrue(files.isHittable)
+        files.tap()
         let picker = app.descendants(matching: .any).matching(identifier: "workspace-view-picker").firstMatch
         XCTAssertTrue(picker.waitForExistence(timeout: 10), "Workspace browser preview is unavailable in this build.")
         guard picker.exists else { return }
@@ -2351,6 +2423,516 @@ import UIKit
         let diff = XCTAttachment(screenshot: app.screenshot()); diff.name = "Workspace modified diff"; diff.lifetime = .keepAlways; add(diff)
         app.buttons["workspace-diff-close"].tap()
         XCTAssertTrue(app.buttons["workspace-modified-entry:README.md"].waitForExistence(timeout: 5))
+    }
+
+    func testWorkspaceHiddenRefreshCannotReplaceNavigatedProjectFolder() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-workspace-delayed-hidden"]
+        app.launch()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let projectFolder = app.buttons["workspace-directory-entry:Projects"]
+        XCTAssertTrue(projectFolder.waitForExistence(timeout: 10))
+        let hiddenToggle = app.buttons["workspace-hidden-toggle"]
+        hiddenToggle.tap()
+        XCTAssertEqual(hiddenToggle.value as? String, "On")
+        // The app process keeps running while XCTest waits; give the delayed
+        // fixture request a turn before changing the browser location.
+        Thread.sleep(forTimeInterval: 0.25)
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-refreshing"].waitForExistence(timeout: 5))
+        projectFolder.tap()
+        let plan = app.buttons["workspace-file-entry:Projects/Plan.md"]
+        XCTAssertTrue(plan.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 3.5)
+        XCTAssertTrue(plan.exists, "The late root response must not replace the Project folder")
+        XCTAssertFalse(app.buttons["workspace-file-entry:.gitignore"].exists,
+                       "A hidden file from the previous folder must not appear in Projects")
+        XCTAssertFalse(app.descendants(matching: .any)["workspace-unavailable"].exists)
+    }
+
+    func testWorkspaceGitAndDiffRepliesStayWithCurrentFilesView() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-workspace-delayed-git"]
+        app.launch()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        XCTAssertTrue(app.buttons["workspace-directory-entry:Projects"].waitForExistence(timeout: 10))
+        app.buttons["Modified"].tap()
+        XCTAssertTrue(app.staticTexts["Checking changes…"].waitForExistence(timeout: 5))
+        app.buttons["All files"].tap()
+        XCTAssertTrue(app.buttons["workspace-directory-entry:Projects"].waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 3.5)
+        XCTAssertTrue(app.buttons["workspace-directory-entry:Projects"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["workspace-unavailable"].exists,
+                       "The delayed Git failure belongs to Modified, not All files")
+
+        app.terminate()
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-workspace-delayed-diff"]
+        app.launch()
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        app.buttons["Modified"].tap()
+        let readme = app.buttons["workspace-modified-entry:README.md"]
+        let renamed = app.buttons["workspace-modified-entry:new-name.md"]
+        XCTAssertTrue(readme.waitForExistence(timeout: 5))
+        readme.tap()
+        renamed.tap()
+        XCTAssertTrue(app.buttons["workspace-diff-close"].waitForExistence(timeout: 5))
+        let diffText = app.staticTexts["workspace-diff-text"]
+        XCTAssertTrue(diffText.waitForExistence(timeout: 5))
+        XCTAssertTrue((diffText.label).contains("new-name.md"))
+        Thread.sleep(forTimeInterval: 3.5)
+        XCTAssertTrue(diffText.label.contains("new-name.md"),
+                      "A late README diff must not replace the currently selected diff")
+        XCTAssertFalse(diffText.label.contains("README.md"))
+    }
+
+    func testProjectConversationFilesOpenPreviewAndDiffWithoutSending() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-project-files-conversation-preview"]
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-title-menu"].waitForExistence(timeout: 10))
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 5))
+        XCTAssertTrue(files.isHittable)
+        files.tap()
+        let file = app.buttons["workspace-file-entry:README.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        file.tap()
+        XCTAssertTrue(app.buttons["workspace-document-close"].waitForExistence(timeout: 5))
+        app.buttons["workspace-document-close"].tap()
+        app.buttons["Modified"].tap()
+        let changed = app.buttons["workspace-modified-entry:README.md"]
+        XCTAssertTrue(changed.waitForExistence(timeout: 5))
+        changed.tap()
+        XCTAssertTrue(app.buttons["workspace-diff-close"].waitForExistence(timeout: 5))
+        app.buttons["workspace-diff-close"].tap()
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(files.waitForExistence(timeout: 5))
+    }
+
+    func testProjectVideoPreviewStreamsAndReopensWithoutSending() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-project-files-conversation-preview",
+                               "-workspace-media-preview"]
+        app.launch()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let video = app.buttons["workspace-file-entry:black.mp4"]
+        XCTAssertTrue(video.waitForExistence(timeout: 5))
+        for iteration in 0..<2 {
+            video.tap()
+            let player = app.descendants(matching: .any)["workspace-media-player"]
+            XCTAssertTrue(player.waitForExistence(timeout: 15), "Open \(iteration + 1) must load the authenticated video")
+            XCTAssertFalse(app.staticTexts["Playback unavailable"].exists)
+            if iteration == 0 {
+                XCUIDevice.shared.press(.home)
+                app.activate()
+                XCTAssertTrue(app.buttons["workspace-media-close"].waitForExistence(timeout: 5))
+            }
+            app.buttons["workspace-media-close"].tap()
+            XCTAssertTrue(video.waitForExistence(timeout: 5))
+        }
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].exists)
+    }
+
+    func testProjectVideoPreviewExplainsOfflineMacWithoutSending() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-project-files-conversation-preview",
+                               "-workspace-media-preview", "-workspace-media-offline-preview"]
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
+        app.buttons["conversation-files-pill"].tap()
+        let video = app.buttons["workspace-file-entry:black.mp4"]
+        XCTAssertTrue(video.waitForExistence(timeout: 5))
+        video.tap()
+        XCTAssertTrue(app.staticTexts["Playback unavailable"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["workspace-media-close"].isHittable)
+        app.buttons["workspace-media-close"].tap()
+        XCTAssertTrue(video.waitForExistence(timeout: 5))
+    }
+
+    func testProjectVideoPreviewExplainsFileChangeAfterProbe() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-project-files-conversation-preview",
+                               "-workspace-media-preview", "-workspace-media-stale-preview"]
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
+        app.buttons["conversation-files-pill"].tap()
+        let video = app.buttons["workspace-file-entry:black.mp4"]
+        XCTAssertTrue(video.waitForExistence(timeout: 5))
+        video.tap()
+        XCTAssertTrue(app.staticTexts["File changed. Close and reopen the preview."].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["workspace-media-close"].isHittable)
+        app.buttons["workspace-media-close"].tap()
+        XCTAssertTrue(video.waitForExistence(timeout: 5))
+    }
+
+    func testProjectTextPreviewAnnotationCanBeAddedEditedAndRemovedWithoutSending() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
+                               "-project-files-conversation-preview", "-artifact-annotation-preview"]
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
+        app.buttons["conversation-files-pill"].tap()
+        let file = app.buttons["workspace-file-entry:README.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        file.tap()
+        let select = app.buttons["annotation-select-lines"]
+        XCTAssertTrue(select.waitForExistence(timeout: 5))
+        select.tap()
+        let line = app.buttons["annotation-line:1"]
+        XCTAssertTrue(line.waitForExistence(timeout: 5))
+        line.tap()
+        let note = app.textFields["annotation-note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        note.tap()
+        note.typeText("Check the preview wording")
+        let add = app.buttons["annotation-add"]
+        XCTAssertTrue(add.isEnabled)
+        add.tap()
+        let chip = app.buttons["composer-annotation-edit"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5), "A preview note should appear in the unsent composer")
+        XCTAssertTrue(app.textViews["message-draft"].exists)
+        chip.tap()
+        let edit = app.textViews["annotation-edit-note"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5))
+        XCTAssertTrue((edit.value as? String)?.contains("Check the preview wording") == true)
+        edit.tap()
+        edit.typeText(" again")
+        app.buttons["annotation-edit-save"].tap()
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove preview note")).firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        remove.tap()
+        XCTAssertFalse(chip.exists)
+        XCTAssertTrue(app.textViews["message-draft"].exists)
+    }
+
+    func testProjectImageRegionAnnotationUsesDraggedAreaWithoutSending() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
+                               "-project-files-conversation-preview", "-artifact-annotation-preview"]
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
+        app.buttons["conversation-files-pill"].tap()
+        let image = app.buttons["workspace-file-entry:diagram.png"]
+        XCTAssertTrue(image.waitForExistence(timeout: 10))
+        image.tap()
+        let annotate = app.buttons["annotation-image-open"]
+        XCTAssertTrue(annotate.waitForExistence(timeout: 5))
+        annotate.tap()
+        let canvas = app.descendants(matching: .any)["annotation-region-canvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 10))
+        let start = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.25))
+        let end = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.7))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let selectedArea = app.staticTexts["annotation-region-status"].label
+        XCTAssertTrue(selectedArea.hasPrefix("Selected area:"), selectedArea)
+        XCTAssertFalse(selectedArea.contains("100% wide"), "The drag must select a bounded region")
+        retainMenuScreenshot(app, name: "Image region selection")
+        let note = app.descendants(matching: .any)["annotation-region-note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        note.tap(); note.typeText("Inspect the center diagram")
+        app.buttons["annotation-region-add"].tap()
+        let chip = app.buttons["composer-annotation-edit"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        chip.tap()
+        XCTAssertTrue(app.staticTexts["Selected image area"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].exists)
+    }
+
+    func testProjectTextRevisionWarnsAndReanchorsUnsentNote() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
+                               "-project-files-conversation-preview", "-artifact-annotation-preview",
+                               "-artifact-revision-preview"]
+        app.launch()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let file = app.buttons["workspace-file-entry:README.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        file.tap()
+        app.buttons["annotation-select-lines"].tap()
+        app.buttons["annotation-line:1"].tap()
+        let note = app.textFields["annotation-note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        note.tap(); note.typeText("Review this introduction")
+        app.buttons["annotation-add"].tap()
+        let chip = app.buttons["composer-annotation-edit"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+
+        files.tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        file.tap()
+        let refresh = app.buttons["workspace-document-refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 5))
+        refresh.tap()
+        let show = app.buttons["workspace-document-show-revision"]
+        XCTAssertTrue(show.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-document-revision-warning"].exists)
+        show.tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Revised workspace file")).firstMatch.waitForExistence(timeout: 5))
+        app.buttons["workspace-document-close"].tap()
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        XCTAssertTrue(chip.label.contains("Source changed"), chip.label)
+        chip.tap()
+        XCTAssertTrue(app.staticTexts["annotation-edit-stale"].waitForExistence(timeout: 5))
+        let staleNote = app.textViews["annotation-edit-note"]
+        staleNote.tap(); staleNote.typeText(" keep this note")
+        app.buttons["annotation-edit-save"].tap()
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        XCTAssertTrue(chip.label.contains("Source changed"),
+                      "Editing the note must not clear the old source revision warning")
+        chip.tap()
+        XCTAssertTrue(app.staticTexts["annotation-edit-stale"].waitForExistence(timeout: 5))
+        app.buttons["annotation-edit-reanchor"].tap()
+        let select = app.buttons["annotation-select-lines"]
+        XCTAssertTrue(select.waitForExistence(timeout: 10))
+        select.tap()
+        app.buttons["annotation-line:1"].tap()
+        let carriedNote = app.textFields["annotation-note"]
+        XCTAssertTrue(carriedNote.waitForExistence(timeout: 5))
+        XCTAssertTrue((carriedNote.value as? String)?.contains("keep this note") == true)
+        app.buttons["annotation-add"].tap()
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(identifier: "composer-annotation-edit").count, 1)
+        XCTAssertFalse(chip.label.contains("Source changed"), chip.label)
+        XCTAssertTrue(app.textViews["message-draft"].exists)
+    }
+
+    func testProjectPDFRegionAnnotationKeepsSelectedPageWithoutSending() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
+                               "-project-files-conversation-preview", "-artifact-annotation-preview"]
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
+        app.buttons["conversation-files-pill"].tap()
+        let pdf = app.buttons["workspace-file-entry:Weekend.pdf"]
+        XCTAssertTrue(pdf.waitForExistence(timeout: 10))
+        pdf.tap()
+        let annotate = app.buttons["annotation-pdf-open"]
+        XCTAssertTrue(annotate.waitForExistence(timeout: 5))
+        annotate.tap()
+        let position = app.staticTexts["annotation-page-position"]
+        XCTAssertTrue(position.waitForExistence(timeout: 10))
+        XCTAssertEqual(position.label, "Page 1 of 2")
+        app.buttons["annotation-next-page"].tap()
+        XCTAssertEqual(position.label, "Page 2 of 2")
+        let wholePage = app.buttons["annotation-region-all"]
+        XCTAssertTrue(wholePage.waitForExistence(timeout: 10))
+        XCTAssertTrue(wholePage.isEnabled)
+        let previewPage = app.images["annotation-preview-image"]
+        XCTAssertTrue(previewPage.waitForExistence(timeout: 5))
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertGreaterThan(previewPage.frame.height, 250, "The PDF page should be large enough to select a region on iPad")
+        }
+        wholePage.tap()
+        retainMenuScreenshot(app, name: "PDF page 2 region selection")
+        let note = app.descendants(matching: .any)["annotation-region-note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        note.tap(); note.typeText("Review the second page")
+        app.buttons["annotation-region-add"].tap()
+        let chip = app.buttons["composer-annotation-edit"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        chip.tap()
+        XCTAssertTrue(app.staticTexts["Selected area on page 2"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].exists)
+    }
+
+    func testProjectImageAndPDFRevisionPreviewsStayInConversation() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
+                               "-project-files-conversation-preview", "-artifact-annotation-preview",
+                               "-artifact-revision-preview"]
+        app.launch()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let image = app.buttons["workspace-file-entry:diagram.png"]
+        XCTAssertTrue(image.waitForExistence(timeout: 10))
+        image.tap()
+        let refreshImage = app.buttons["workspace-image-refresh"]
+        XCTAssertTrue(refreshImage.waitForExistence(timeout: 5))
+        let viewedImage = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "photo-viewer-image:")).firstMatch
+        XCTAssertTrue(viewedImage.waitForExistence(timeout: 5))
+        viewedImage.doubleTap()
+        let zoomedBefore = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "200%"), object: viewedImage)
+        XCTAssertEqual(XCTWaiter.wait(for: [zoomedBefore], timeout: 5), .completed)
+        refreshImage.tap()
+        let showImage = app.buttons["workspace-image-show-revision"]
+        XCTAssertTrue(showImage.waitForExistence(timeout: 5), app.debugDescription)
+        showImage.tap()
+        XCTAssertTrue(app.buttons["annotation-image-open"].exists)
+        let zoomedAfter = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "200%"), object: viewedImage)
+        XCTAssertEqual(XCTWaiter.wait(for: [zoomedAfter], timeout: 5), .completed,
+                       "The open image should retain its zoom after showing the new revision")
+        retainMenuScreenshot(app, name: "Updated image in open viewer")
+        app.buttons["photo-viewer-close"].tap()
+
+        let pdf = app.buttons["workspace-file-entry:Weekend.pdf"]
+        XCTAssertTrue(pdf.waitForExistence(timeout: 5))
+        pdf.tap()
+        let refreshPDF = app.buttons["workspace-document-refresh"]
+        XCTAssertTrue(refreshPDF.waitForExistence(timeout: 5))
+        refreshPDF.tap()
+        let showPDF = app.buttons["workspace-document-show-revision"]
+        XCTAssertTrue(showPDF.waitForExistence(timeout: 5))
+        showPDF.tap()
+        XCTAssertTrue(app.buttons["annotation-pdf-open"].exists)
+        retainMenuScreenshot(app, name: "Updated PDF in open viewer")
+        app.buttons["workspace-document-close"].tap()
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].exists)
+    }
+
+    func testProjectTitleMenuOpensDetailsAppsAndUsage() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-project-files-conversation-preview"]
+        app.launch()
+        let title = app.buttons["conversation-title-menu"]
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        XCTAssertTrue(title.label.contains("Project notes"))
+        XCTAssertTrue(title.label.contains("project, Codex"), "VoiceOver should retain project and provider context")
+        title.tap()
+        XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Connected apps"].exists)
+        XCTAssertTrue(app.buttons["Codex usage"].exists)
+        retainMenuScreenshot(app, name: "Project title menu")
+
+        app.buttons["Codex usage"].tap()
+        XCTAssertTrue(app.navigationBars["Codex usage"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Usage is unavailable right now."].exists)
+        app.buttons["Done"].tap()
+
+        title.tap()
+        app.buttons["Connected apps"].tap()
+        XCTAssertTrue(app.navigationBars["Connected apps"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
+
+        openConversationDetails(app)
+        XCTAssertTrue(app.navigationBars["Thread"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].isHittable)
+    }
+
+    func testProjectGoalPillOpensExactConversationGoalWithoutSending() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-project-files-conversation-preview", "-project-goal-preview"]
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-title-menu"].waitForExistence(timeout: 10))
+        let pill = app.buttons["goal-status-pill"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 10))
+        XCTAssertEqual(pill.label, "Goal active")
+        pill.tap()
+        let objective = app.staticTexts["goal-objective"]
+        XCTAssertTrue(objective.waitForExistence(timeout: 5))
+        XCTAssertEqual(objective.label, "Review the Project plan")
+        app.buttons["goal-done"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].isHittable)
+    }
+
+    func testNewProjectChatOpensSelectedFolderFilesWithoutSending() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview", "-project-files-preview", "-files-preview"]
+        app.launch()
+        let files = app.buttons["new-chat-files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        XCTAssertTrue(files.isHittable)
+        files.tap()
+        XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].waitForExistence(timeout: 10))
+        app.buttons["Modified"].tap()
+        let changed = app.buttons["workspace-modified-entry:README.md"]
+        XCTAssertTrue(changed.waitForExistence(timeout: 5))
+        changed.tap()
+        XCTAssertTrue(app.buttons["workspace-diff-close"].waitForExistence(timeout: 5))
+        app.buttons["workspace-diff-close"].tap()
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(files.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["new-chat-send"].isEnabled)
+    }
+
+    func testNewProjectFilesExplainRevokedAndMissingFolders() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        for (argument, expected) in [
+            ("-project-files-root-revoked", "Access to this folder changed"),
+            ("-project-files-project-removed", "conversation or Project folder is unavailable")
+        ] {
+            app.launchArguments = ["-connections-preview", "-project-files-preview", argument]
+            app.launch()
+            let files = app.buttons["new-chat-files"]
+            XCTAssertTrue(files.waitForExistence(timeout: 10))
+            files.tap()
+            let unavailable = app.descendants(matching: .any).matching(identifier: "workspace-unavailable").firstMatch
+            XCTAssertTrue(unavailable.waitForExistence(timeout: 10))
+            XCTAssertTrue(unavailable.label.contains(expected))
+            XCTAssertTrue(app.buttons["workspace-retry"].exists)
+            app.buttons["workspace-close"].tap()
+            XCTAssertTrue(files.waitForExistence(timeout: 5))
+            app.terminate()
+        }
+    }
+
+    func testNewProjectFilesRecoverAfterSelectedRootChanges() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview", "-project-files-preview", "-project-files-root-changed"]
+        app.launch()
+        let files = app.buttons["new-chat-files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let unavailable = app.descendants(matching: .any).matching(identifier: "workspace-unavailable").firstMatch
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 10))
+        app.buttons["workspace-retry"].tap()
+        XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].waitForExistence(timeout: 10))
+        XCTAssertFalse(unavailable.exists)
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(files.waitForExistence(timeout: 5))
+    }
+
+    func testNewProjectFilesRetryReturnsToRootAfterSubfolderMoves() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview", "-project-files-preview", "-project-files-directory-moved"]
+        app.launch()
+        let files = app.buttons["new-chat-files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let folder = app.buttons["workspace-directory-entry:Projects"]
+        XCTAssertTrue(folder.waitForExistence(timeout: 10))
+        folder.tap()
+        let unavailable = app.descendants(matching: .any).matching(identifier: "workspace-unavailable").firstMatch
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 10))
+        XCTAssertTrue(unavailable.label.contains("folder moved or was deleted"))
+        app.buttons["workspace-retry"].tap()
+        XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].waitForExistence(timeout: 10))
+        XCTAssertFalse(unavailable.exists)
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(files.waitForExistence(timeout: 5))
     }
 
     func testLargeActivityDetails() throws {
@@ -3312,14 +3894,14 @@ import UIKit
             XCTAssertTrue(thread.waitForExistence(timeout: 40))
             threadIdentifier = thread.identifier
             thread.tap()
-            let opened = app.descendants(matching: .any).matching(identifier: "project-conversation-header").firstMatch.waitForExistence(timeout: 15)
+            let opened = app.buttons["conversation-title-menu"].waitForExistence(timeout: 15)
             if !opened { retainMenuScreenshot(app, name: "Project navigation failure"); print(app.debugDescription) }
             XCTAssertTrue(opened)
             XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 15))
             XCTAssertNil(app.textViews["message-draft"].label.range(of: #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#, options: .regularExpression), "The composer must use the project title, not its storage identity")
             if cycle == 0 { retainMenuScreenshot(app, name: "Project native conversation") }
             if cycle == 0, environment["WONDER_PROJECT_EDIT_PIN"] == "1" {
-                app.buttons["Conversation details"].tap()
+                openConversationDetails(app)
                 let pin = app.switches["project-thread-pin"]
                 XCTAssertTrue(pin.waitForExistence(timeout: 10))
                 let previous = try XCTUnwrap(pin.value as? String)
@@ -3330,7 +3912,7 @@ import UIKit
                 let persisted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@ AND enabled == true", changed), object: pin)
                 XCTAssertEqual(XCTWaiter.wait(for: [persisted], timeout: 15), .completed)
                 app.buttons["Done"].tap()
-                app.buttons["Conversation details"].tap()
+                openConversationDetails(app)
                 XCTAssertTrue(pin.waitForExistence(timeout: 10))
                 XCTAssertEqual(pin.value as? String, changed)
                 pin.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
@@ -3552,7 +4134,7 @@ import UIKit
             let chat = app.buttons.matching(identifier: qaRowID).firstMatch
             XCTAssertTrue(chat.waitForExistence(timeout: 20))
             chat.tap()
-            XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.buttons["conversation-title-menu"].waitForExistence(timeout: 15))
             // Only the explicitly selected QA conversation is read; no message is submitted.
             retainMenuScreenshot(app, name: "Physical paired conversation after launch \(pass + 1)")
             app.terminate()
@@ -3627,6 +4209,27 @@ import UIKit
         }
     }
 
+    func testProjectConnectedAppsUseConversationScopeAndExplainRecovery() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-connected-apps", "-diagnostics-connected-apps-project"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Gmail"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Available"].exists)
+        XCTAssertFalse(app.segmentedControls.buttons["Claude"].exists,
+                       "Conversation access must stay scoped to its Project provider")
+        retainMenuScreenshot(app, name: "Project connected apps")
+        app.terminate()
+
+        app.launchArguments = ["-diagnostics-connected-apps", "-diagnostics-connected-apps-project",
+                               "-diagnostics-connected-apps-stale"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Start this conversation or reopen it, then check its app access again."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["connected-apps-retry"].exists)
+        XCTAssertFalse(app.staticTexts["Available"].exists)
+        app.terminate()
+    }
+
     // Provider cache mix-ups must be visible here: each fixture has distinct
     // percentages, and both providers stay in the existing connection settings.
     func testDiagnosticsCodexUsageIsInlineInConnectionSettings() throws {
@@ -3638,20 +4241,23 @@ import UIKit
         let studio = app.buttons["Studio"]
         XCTAssertTrue(studio.waitForExistence(timeout: 10))
         studio.tap()
+        XCTAssertTrue(app.switches["connection-notifications"].exists)
+        XCTAssertTrue(app.switches["connection-notifications"].isEnabled)
 
         let heading = app.staticTexts["Codex usage"]
+        for _ in 0..<6 where !heading.exists { app.swipeUp() }
         XCTAssertTrue(heading.waitForExistence(timeout: 10))
         let fiveHours = app.descendants(matching: .any).matching(identifier: "codex-usage-window:five-hours").firstMatch
         let weekly = app.descendants(matching: .any).matching(identifier: "codex-usage-window:weekly").firstMatch
+        for _ in 0..<6 where !fiveHours.exists { app.swipeUp() }
         XCTAssertTrue(fiveHours.waitForExistence(timeout: 10))
-        XCTAssertTrue(weekly.waitForExistence(timeout: 10))
         XCTAssertEqual(fiveHours.label, "5 hours")
         XCTAssertEqual(fiveHours.value as? String, "73% left")
+        for _ in 0..<6 where !weekly.exists { app.swipeUp() }
+        XCTAssertTrue(weekly.waitForExistence(timeout: 10))
         XCTAssertEqual(weekly.label, "Weekly")
         XCTAssertEqual(weekly.value as? String, "59% left")
         XCTAssertFalse(app.navigationBars["Codex usage"].exists, "Codex usage must remain inline, not a navigation destination")
-        XCTAssertTrue(app.switches["connection-notifications"].exists)
-        XCTAssertTrue(app.switches["connection-notifications"].isEnabled)
         retainMenuScreenshot(app, name: "Codex usage inline settings")
         let claudeFive = app.descendants(matching: .any).matching(identifier: "claude-usage-window:five_hour").firstMatch
         for _ in 0..<4 where !claudeFive.isHittable { app.swipeUp() }
@@ -3662,6 +4268,56 @@ import UIKit
         XCTAssertEqual(claudeWeek.value as? String, "92% left")
         XCTAssertFalse(app.navigationBars["Claude usage"].exists)
         retainMenuScreenshot(app, name: "Claude usage inline settings")
+    }
+
+    func testCodexUsageDistinguishesEmptyAndUnavailable() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        for (flag, expected) in [
+            ("-diagnostics-usage-empty", "Codex returned no usage windows. Try refreshing after checking sign-in on your Mac."),
+            ("-diagnostics-usage-unsupported", "This Codex version doesn't provide usage details in Wonder."),
+            ("-diagnostics-usage-unavailable", "Codex usage couldn't be verified on this Mac. Check Codex sign-in, then try again.")
+        ] {
+            app.launchArguments = ["-connections-preview", "-diagnostics-usage-fixture", flag, "-show-connections"]
+            app.launch()
+            let studio = app.buttons["Studio"]
+            XCTAssertTrue(studio.waitForExistence(timeout: 10))
+            studio.tap()
+            for _ in 0..<6 where !app.staticTexts[expected].exists { app.swipeUp() }
+            XCTAssertTrue(app.staticTexts[expected].waitForExistence(timeout: 10))
+            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "codex-usage-window:five-hours").firstMatch.exists)
+            if flag != "-diagnostics-usage-empty" {
+                XCTAssertTrue(app.buttons["codex-usage-retry"].exists)
+            }
+            retainMenuScreenshot(app, name: "Codex usage \(flag)")
+            app.terminate()
+        }
+    }
+
+    func testCodexUsageRefreshFailureMarksPreviousValuesStale() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview", "-diagnostics-usage-fixture",
+                               "-diagnostics-usage-refresh-fails", "-show-connections"]
+        app.launch()
+        let studio = app.buttons["Studio"]
+        XCTAssertTrue(studio.waitForExistence(timeout: 10))
+        studio.tap()
+        let fiveHours = app.descendants(matching: .any).matching(identifier: "codex-usage-window:five-hours").firstMatch
+        for _ in 0..<6 where !fiveHours.exists { app.swipeUp() }
+        XCTAssertTrue(fiveHours.exists)
+        XCTAssertEqual(fiveHours.value as? String, "73% left")
+        let refresh = app.buttons["codex-usage-refresh"]
+        for _ in 0..<6 where !refresh.exists { app.swipeUp() }
+        XCTAssertTrue(refresh.waitForExistence(timeout: 10))
+        refresh.tap()
+        XCTAssertTrue(app.staticTexts["Previous usage values may be out of date."].waitForExistence(timeout: 10))
+        let retry = app.buttons["codex-usage-retry"]
+        for _ in 0..<6 where !retry.exists { app.swipeUp() }
+        XCTAssertTrue(retry.exists)
+        for _ in 0..<6 where !fiveHours.exists { app.swipeDown() }
+        XCTAssertEqual(fiveHours.value as? String, "73% left")
+        retainMenuScreenshot(app, name: "Codex usage stale refresh")
     }
 
     func testNativeQuestionHistoryShowsSelectionsWithoutReplyMetadata() throws {
@@ -3700,6 +4356,13 @@ import UIKit
         for size in ["UICTContentSizeCategoryL", "UICTContentSizeCategoryAccessibilityXXL"] {
             app.launchArguments = ["-read-preview", "-send-preview", "-question-preview", "-UIPreferredContentSizeCategoryName", size]
             app.launch()
+            let draft = app.textViews["message-draft"]
+            XCTAssertTrue(draft.waitForExistence(timeout: 10))
+            let notice = app.buttons["question-dock-open"]
+            XCTAssertTrue(notice.waitForExistence(timeout: 10))
+            XCTAssertTrue(notice.isHittable, "The question notice must stay above the composer")
+            XCTAssertFalse(app.buttons["Next question"].exists, "Questions should open in their sheet")
+            notice.tap()
             let next = app.buttons["Next question"]
             XCTAssertTrue(next.waitForExistence(timeout: 10))
             next.tap()
@@ -3719,7 +4382,51 @@ import UIKit
             second.tap()
             XCTAssertFalse(second.isSelected)
             XCTAssertTrue(first.isSelected, "A comma in one label must not select another answer")
+            let done = app.buttons["Done"]
+            XCTAssertTrue(done.exists)
+            done.tap()
+            XCTAssertTrue(draft.isHittable, "Closing questions must return to the composer")
+            XCTAssertTrue(notice.exists)
             retainMenuScreenshot(app, name: "Multiple question choices " + size)
+            app.terminate()
+        }
+    }
+
+    func testQuestionReplyAndSkipClearNoticeWithoutLosingComposerDraft() throws {
+        continueAfterFailure = false
+        for decision in ["reply", "skip"] {
+            let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+            app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-question-resolution"]
+            app.launch()
+            let draft = app.textViews["message-draft"]
+            XCTAssertTrue(draft.waitForExistence(timeout: 15), app.debugDescription)
+            draft.tap(); draft.typeText("Keep this unsent draft")
+            let notice = app.buttons["question-dock-open"]
+            XCTAssertTrue(notice.waitForExistence(timeout: 10))
+            notice.tap()
+            if decision == "reply" {
+                let day = app.buttons["Saturday"]
+                XCTAssertTrue(day.waitForExistence(timeout: 5))
+                day.tap()
+                app.buttons["Next question"].tap()
+                let fixtures = app.buttons["question-option-fixtures-A, B"]
+                XCTAssertTrue(fixtures.waitForExistence(timeout: 5))
+                fixtures.tap()
+                let reply = app.buttons["Reply"]
+                XCTAssertTrue(reply.isEnabled)
+                reply.tap()
+            } else {
+                let skip = app.buttons["Skip"]
+                XCTAssertTrue(skip.waitForExistence(timeout: 5))
+                skip.tap()
+            }
+            let resolved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !notice.exists }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [resolved], timeout: 10), .completed,
+                           "The Mac fixture must accept the \(decision) payload and clear the pending question")
+            let done = app.buttons["Done"]
+            if done.isHittable { done.tap() }
+            XCTAssertTrue(draft.waitForExistence(timeout: 5))
+            XCTAssertTrue((draft.value as? String)?.contains("Keep this unsent draft") == true)
             app.terminate()
         }
     }

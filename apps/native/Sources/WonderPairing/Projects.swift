@@ -7,6 +7,67 @@ public enum HostFeature {
     public static let projects = "projects-v1"
 }
 
+/// A provider-verified child of one Codex Project thread. Project tasks are
+/// read-only and have no Bot conversation identity.
+public struct ProjectSubagentSummary: Codable, Hashable, Identifiable, Sendable {
+    public let parentConversationId: String
+    public let threadId: String
+    public let title: String
+    public let agentNickname: String?
+    public let agentRole: String?
+    public let status: String
+    public let isArchived: Bool
+    public let canAcceptDirectInput: Bool
+    public var id: String { threadId }
+
+    public var statusLabel: String {
+        if isArchived { return "Completed" }
+        switch status {
+        case "active", "running", "inProgress": return "Running"
+        case "idle": return "Idle"
+        case "pendingInit", "pending", "waiting": return "Waiting"
+        case "waitingOnApproval": return "Waiting for approval"
+        case "waitingOnUserInput": return "Waiting for input"
+        case "completed": return "Completed"
+        case "interrupted", "shutdown": return "Stopped"
+        case "failed", "errored": return "Failed"
+        default: return "Unavailable"
+        }
+    }
+}
+
+public struct ProjectSubagentList: Codable, Sendable {
+    public let available: Bool
+    public let detail: String?
+    public let subagents: [ProjectSubagentSummary]
+}
+
+public struct ProjectSubagentTranscript: Codable, Sendable {
+    public let subagent: ProjectSubagentSummary
+    public let snapshot: ConversationSnapshot
+}
+
+public enum ProjectSubagentPaths {
+    private static func component(_ value: String) throws -> String {
+        guard !value.isEmpty,
+              let escaped = value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else {
+            throw PairingFailure.invalidLink
+        }
+        return escaped
+    }
+
+    public static func roster(parentConversationId: String) throws -> String {
+        "/api/v1/project-conversations/\(try component(parentConversationId))/subagents"
+    }
+
+    public static func transcript(parentConversationId: String, threadId: String, cursor: String? = nil) throws -> String {
+        let base = try roster(parentConversationId: parentConversationId)
+            + "/\(try component(threadId))/transcript"
+        guard let cursor else { return base }
+        return base + "?cursor=\(try component(cursor))"
+    }
+}
+
 public struct ProjectFolder: Codable, Hashable, Identifiable, Sendable {
     public let id: String
     public let path: String
@@ -256,6 +317,7 @@ public struct ProjectConversationDetail: Codable, Hashable, Sendable {
     public let family: AgentFamily
     public let model: String?
     public let effort: String?
+    public let serviceTier: String?
     public let accessMode: ProjectAccessMode
     public let workingFolder: String
     public let workingFolderName: String
@@ -353,7 +415,7 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
             folderId = nil
             if case .project = destination {
                 let preferred = project?.lastFamily ?? family ?? .codex
-                if family != preferred { family = preferred; model = nil; effort = nil; claudeApproval = nil }
+                if family != preferred { family = preferred; model = nil; effort = nil; serviceTier = nil; claudeApproval = nil }
             }
         }
         self.destination = destination
@@ -401,6 +463,9 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
         if let current = models.first(where: { $0.id == model }) {
             let valid = ModelDefaults.effort(effort, for: current)
             if valid != effort { effort = valid }
+            if let serviceTier,
+               !(current.serviceTiers ?? []).contains(where: { $0.id == serviceTier }),
+               current.defaultServiceTier != serviceTier { self.serviceTier = nil }
         } else if let remembered, let option = models.first(where: { $0.id == remembered.model }) {
             model = option.id; effort = ModelDefaults.effort(remembered.effort, for: option); serviceTier = nil
         } else if let option = ModelDefaults.defaultModel(in: models) {

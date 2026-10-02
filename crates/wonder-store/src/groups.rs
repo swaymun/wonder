@@ -467,7 +467,7 @@ mod tests {
                 "continuation",
                 "group_chat",
                 "group",
-                "bot",
+                Some("bot"),
                 Some("group-chat"),
                 "Task",
                 "FREQ=DAILY",

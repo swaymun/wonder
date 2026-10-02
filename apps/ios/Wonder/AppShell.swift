@@ -13,6 +13,58 @@ struct NewChatRequest: Equatable {
     let id = UUID()
     let host: String?
     let destination: ChatDestination?
+    var exactProject = false
+}
+
+/// Widget and external links carry only bounded, nonsecret addresses. The
+/// channel-specific scheme is registered in BuildInfo.plist.
+enum WonderDeepLink: Equatable {
+    case chat(host: String, id: String)
+    case newProjectChat(host: String, project: String)
+
+    static func parse(_ url: URL, scheme: String) -> Self? {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              url.absoluteString.utf8.count <= 512,
+              parts.scheme == scheme, parts.host == "v1", parts.user == nil,
+              parts.password == nil, parts.port == nil, parts.query == nil,
+              parts.fragment == nil else { return nil }
+        let path = parts.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard (path.count == 5 || path.count == 6), path[0].isEmpty,
+              path[1] == "hosts", validID(path[2]), validID(path[4]) else { return nil }
+        if path.count == 5, path[3] == "chats" { return .chat(host: path[2], id: path[4]) }
+        if path.count == 6, path[3] == "projects", path[5] == "new" {
+            return .newProjectChat(host: path[2], project: path[4])
+        }
+        return nil
+    }
+
+    var host: String {
+        switch self {
+        case .chat(let host, _), .newProjectChat(let host, _): host
+        }
+    }
+
+    func url(scheme: String) -> URL? {
+        guard !scheme.isEmpty, Self.validID(host) else { return nil }
+        var parts = URLComponents()
+        parts.scheme = scheme
+        parts.host = "v1"
+        switch self {
+        case .chat(_, let id):
+            guard Self.validID(id) else { return nil }
+            parts.path = "/hosts/\(host)/chats/\(id)"
+        case .newProjectChat(_, let project):
+            guard Self.validID(project) else { return nil }
+            parts.path = "/hosts/\(host)/projects/\(project)/new"
+        }
+        return parts.url
+    }
+
+    static func validID(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 128 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
+        }
+    }
 }
 
 /// Per-window navigation state. Another iPad window keeps its own selection;
@@ -25,16 +77,19 @@ struct NewChatRequest: Equatable {
     @Published var settingsOpen = false
     /// The Mac the new-chat draft is addressed to, reported by the draft view.
     @Published var draftHost: String?
+    @Published var linkedConversation: ShellRoute?
 
-    func open(host: String, conversation: String) {
+    func open(host: String, conversation: String, fromLink: Bool = false) {
         route = .conversation(host: host, id: conversation)
+        linkedConversation = fromLink ? route : nil
         sidebarOpen = false
         settingsOpen = false
     }
     /// A fresh draft; in a project the draft stays in that project.
-    func newChat(host: String? = nil, destination: ChatDestination? = nil) {
-        newChatRequest = NewChatRequest(host: host, destination: destination)
+    func newChat(host: String? = nil, destination: ChatDestination? = nil, exactProject: Bool = false) {
+        newChatRequest = NewChatRequest(host: host, destination: destination, exactProject: exactProject)
         route = .newChat
+        linkedConversation = nil
         sidebarOpen = false
         settingsOpen = false
     }
@@ -55,6 +110,7 @@ struct ChatShell: View {
     @State private var choosingProjectsHost: String?
     /// First launch has no Mac to show, so pairing comes first as a sheet.
     @State private var pairing = false
+    @State private var linkIssue: String?
 
     var body: some View {
         Group {
@@ -74,6 +130,9 @@ struct ChatShell: View {
             }
         }
         .sheet(isPresented: $pairing) { ConnectionsView(library: library, isSheet: true) }
+        .alert("Couldn’t open link", isPresented: Binding(get: { linkIssue != nil }, set: { if !$0 { linkIssue = nil } })) {
+            Button("OK", role: .cancel) { linkIssue = nil }
+        } message: { Text(linkIssue ?? "") }
         .sheet(item: Binding(get: { choosingProjectsHost.map(HostSheet.init) }, set: { choosingProjectsHost = $0?.id })) { sheet in
             if let model = model(sheet.id) { ChooseProjectsView(model: model, library: model.projects) }
         }
@@ -81,6 +140,7 @@ struct ChatShell: View {
             guard let value else { return }
             shell.open(host: value.host, conversation: value.conversation)
         }
+        .onOpenURL { openLink($0) }
         .onChange(of: phase, initial: true) { _, next in
             library.setScene(sceneID, active: next == .active)
             #if WONDER_DIAGNOSTICS
@@ -96,6 +156,11 @@ struct ChatShell: View {
         #endif
         .task {
             library.load(); PushNotifications.shared.attach(library)
+            #if WONDER_DIAGNOSTICS
+            let arguments = ProcessInfo.processInfo.arguments
+            if let index = arguments.firstIndex(of: "-diagnostics-deep-link"), arguments.indices.contains(index + 1),
+               let url = URL(string: arguments[index + 1]) { openLink(url) }
+            #endif
             #if DEBUG || WONDER_DIAGNOSTICS
             if ProcessInfo.processInfo.arguments.contains("-show-connections") { pairing = true }
             #endif
@@ -124,6 +189,35 @@ struct ChatShell: View {
     }
     private func model(_ host: String) -> ConnectionModel? {
         library.saved.connections.first { $0.credential.hostInstallationId == host }.map { library.model(for: $0) }
+    }
+
+    private func openLink(_ url: URL) {
+        // Keychain loading can complete after the URL arrives on a cold launch.
+        library.load()
+        guard library.loaded else {
+            linkIssue = "Saved computers are unavailable. Unlock your device and try again."
+            return
+        }
+        let scheme = Bundle.main.object(forInfoDictionaryKey: "WonderDeepLinkScheme") as? String ?? ""
+        guard let target = WonderDeepLink.parse(url, scheme: scheme) else {
+            linkIssue = "This link is invalid or belongs to another Wonder app. Ask for a new link."
+            return
+        }
+        guard let linkedModel = model(target.host) else {
+            linkIssue = "The linked computer is not paired on this device. Pair that computer to open it."
+            return
+        }
+        #if WONDER_DIAGNOSTICS
+        if library.isPreview && ProcessInfo.processInfo.arguments.contains("-diagnostics-deep-link-offline") {
+            linkedModel.macConnected = false
+        }
+        #endif
+        switch target {
+        case .chat(let host, let id): shell.open(host: host, conversation: id, fromLink: true)
+        case .newProjectChat(let host, let project):
+            shell.newChat(host: host, destination: .project(id: project), exactProject: true)
+        }
+        linkIssue = nil
     }
 }
 
@@ -319,7 +413,8 @@ private struct ShellMain: View {
             case .conversation(let host, let id):
                 if let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == host }) {
                     let model = library.model(for: saved)
-                    ShellConversation(model: model, projects: model.projects, chatID: id) { shell.route = .newChat }
+                    ShellConversation(model: model, projects: model.projects, chatID: id,
+                                      fromLink: shell.linkedConversation == shell.route) { shell.route = .newChat }
                         .id(shell.route)
                 } else {
                     ContentUnavailableView("Chat unavailable", systemImage: "bubble.left",
@@ -376,18 +471,41 @@ private struct ShellConversation: View {
     @ObservedObject var model: ConnectionModel
     @ObservedObject var projects: ProjectLibrary
     let chatID: String
+    let fromLink: Bool
     var onArchived: () -> Void
     @State private var resolving = false
     @State private var unavailable = false
+    @State private var archived = false
+    @State private var loadFailed = false
     var body: some View {
         Group {
-            if !model.accessEnded, !projects.unavailable.contains(chatID), let detail = projects.details[chatID] {
+            if !archived, !model.accessEnded, !projects.unavailable.contains(chatID),
+               let detail = projects.details[chatID] {
                 ConversationView(model: model, chat: model.projectChat(detail))
-            } else if !model.accessEnded, let chat = model.chats.first(where: { $0.id == chatID }) {
-                ConversationView(model: model, chat: chat)
+            } else if archived {
+                ContentUnavailableView("Chat archived", systemImage: "archivebox",
+                                       description: Text("This chat has been archived on \(model.macName)."))
             } else if unavailable || model.accessEnded || projects.unavailable.contains(chatID) {
                 ContentUnavailableView("Chat unavailable", systemImage: "bubble.left",
                                        description: Text(model.accessEnded ? "Pair this computer again in Settings." : "This chat is no longer on \(model.macName)."))
+            } else if let chat = model.chats.first(where: { $0.id == chatID }) {
+                ConversationView(model: model, chat: chat)
+            } else if model.macConnected != true {
+                ContentUnavailableView {
+                    Label("Computer offline", systemImage: "wifi.slash")
+                } description: {
+                    Text("Connect to \(model.macName) to open this chat.")
+                } actions: {
+                    Button("Try again") { Task { await model.check(renew: true); await resolve() } }
+                }
+            } else if loadFailed {
+                ContentUnavailableView {
+                    Label("Couldn’t load chat", systemImage: "exclamationmark.arrow.circlepath")
+                } description: {
+                    Text("Check the connection to \(model.macName) and try again.")
+                } actions: {
+                    Button("Try again") { Task { await resolve() } }
+                }
             } else {
                 ProgressView("Loading chat…").accessibilityIdentifier("conversation-loading")
             }
@@ -400,25 +518,36 @@ private struct ShellConversation: View {
 
     private func resolve() async {
         if projects.details[chatID] != nil {
+            if fromLink, projects.details[chatID]?.isArchived == true { archived = true; return }
             projects.noteOpened(chatID)
             guard model.macConnected == true else { return }
             await projects.refreshDetail(chatID)
-            if !Task.isCancelled, projects.details[chatID]?.isArchived == true { onArchived() }
+            if !Task.isCancelled, projects.details[chatID]?.isArchived == true {
+                if fromLink { archived = true } else { onArchived() }
+            }
             return
         }
         // A notification or restored route can arrive before anything is saved.
         guard model.macConnected == true, !resolving, !model.chats.contains(where: { $0.id == chatID }) else { return }
         resolving = true
         defer { resolving = false }
+        loadFailed = false
         do {
             let detail = try await projects.loadDetail(chatID)
             guard !Task.isCancelled else { return }
-            if detail.isArchived == true { onArchived(); return }
+            if detail.isArchived == true {
+                if fromLink { archived = true } else { onArchived() }
+                return
+            }
             projects.noteOpened(chatID)
             return
         } catch PairingFailure.response(404) {
-        } catch { return }
-        if model.chats.isEmpty { await model.loadChats(force: true) }
+        } catch {
+            if !Task.isCancelled { loadFailed = true }
+            return
+        }
+        await model.loadChats(force: true)
+        guard !Task.isCancelled, model.macConnected == true else { return }
         guard !model.chats.contains(where: { $0.id == chatID }) else { return }
         unavailable = true
     }
@@ -690,8 +819,8 @@ struct SidebarView: View {
     private func pill(_ title: String, isOnline: Bool?, selected: Bool, id: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                if let isOnline { Circle().fill(isOnline ? Color.green : Color.secondary.opacity(0.6)).frame(width: 7, height: 7) }
                 Text(title).font(.subheadline.weight(selected ? .semibold : .regular)).lineLimit(1)
+                if let isOnline { Circle().fill(isOnline ? Color.green : Color.secondary.opacity(0.6)).frame(width: 7, height: 7).accessibilityHidden(true) }
             }
             .foregroundStyle(selected ? Color.primary : Color.secondary)
             .padding(.horizontal, 12).frame(minHeight: 32)
@@ -717,8 +846,8 @@ struct SidebarView: View {
         case .host(let host, let name, let isOnline, let isCollapsed):
             Button { setHostCollapsed(host, !isCollapsed) } label: {
                 HStack(spacing: 8) {
-                    Circle().fill(isOnline ? Color.green : Color.secondary.opacity(0.6)).frame(width: 8, height: 8)
                     Text(name).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
+                    Circle().fill(isOnline ? Color.green : Color.secondary.opacity(0.6)).frame(width: 8, height: 8).accessibilityHidden(true)
                     Spacer(minLength: 4)
                     Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                         .rotationEffect(.degrees(isCollapsed ? -90 : 0))

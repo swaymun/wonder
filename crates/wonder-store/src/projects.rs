@@ -69,6 +69,7 @@ pub struct StoredProjectConversation {
     pub title: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub service_tier: Option<String>,
     pub access_mode: String,
     /// How a Claude thread asks before acting; always `ask` for Codex threads.
     pub claude_approval: String,
@@ -93,6 +94,7 @@ pub struct ProjectConversationInsert<'a> {
     pub title: &'a str,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    pub service_tier: Option<&'a str>,
     pub access_mode: &'a str,
     pub claude_approval: &'a str,
     pub plan_mode: bool,
@@ -109,6 +111,8 @@ pub struct ProjectConversationPatch<'a> {
     pub model: Option<&'a str>,
     /// Omitted preserves the current effort; `Some(None)` clears it.
     pub effort: Option<Option<&'a str>>,
+    /// Omitted preserves speed; `Some(None)` returns to Standard.
+    pub service_tier: Option<Option<&'a str>>,
     pub access_mode: Option<&'a str>,
     pub claude_approval: Option<&'a str>,
     pub plan_mode: Option<bool>,
@@ -118,6 +122,52 @@ pub struct ProjectConversationPatch<'a> {
 pub enum ProjectConversationCreate {
     Created(StoredProjectConversation),
     Existing(StoredProjectConversation),
+}
+
+fn project_creation_payload(
+    insert: &ProjectConversationInsert<'_>,
+    request_digest: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!([
+        insert.project_id,
+        insert.family.as_str(),
+        insert.provider_store,
+        insert.cwd,
+        insert.roots_revision,
+        insert.model,
+        insert.effort,
+        insert.access_mode,
+        insert.claude_approval,
+        i64::from(insert.plan_mode)
+    ]);
+    // Migration 0080 and existing requests use ten fields when speed is omitted.
+    if let Some(tier) = insert.service_tier {
+        payload
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(tier));
+    }
+    match request_digest {
+        Some(digest) => serde_json::json!({
+            "version": 2,
+            "resolved": payload,
+            "requestDigest": digest,
+        }),
+        None => payload,
+    }
+}
+
+fn matching_project_creation(
+    row: &sqlx::sqlite::SqliteRow,
+    payload: &serde_json::Value,
+) -> Result<StoredProjectConversation, sqlx::Error> {
+    let original: Option<String> = row.get("creation_payload");
+    let original =
+        original.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok());
+    if original.as_ref() != Some(payload) {
+        return Err(invalid("creation_request_conflict"));
+    }
+    project_conversation(row)
 }
 
 fn invalid(message: &str) -> sqlx::Error {
@@ -138,6 +188,7 @@ fn project_conversation(
         title: row.get("title"),
         model: row.get("model"),
         effort: row.get("effort"),
+        service_tier: row.get("service_tier"),
         access_mode: row.get("access_mode"),
         claude_approval: row.get("claude_approval"),
         plan_mode: row.get::<i64, _>("plan_mode") != 0,
@@ -483,11 +534,68 @@ impl Store {
         Ok(winner)
     }
 
+    /// Check an existing creation before validating today's runtime catalog.
+    /// A retry must recover the original thread even if its model disappeared.
+    pub async fn existing_project_creation(
+        &self,
+        insert: &ProjectConversationInsert<'_>,
+    ) -> Result<Option<StoredProjectConversation>, sqlx::Error> {
+        let Some(request) = insert.creation_request_id else {
+            return Ok(None);
+        };
+        let row = sqlx::query("SELECT * FROM project_conversations WHERE creation_request_id=?")
+            .persistent(false)
+            .bind(request)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref()
+            .map(|row| matching_project_creation(row, &project_creation_payload(insert, None)))
+            .transpose()
+    }
+
+    /// The immutable request payload is read before current runtime/folder
+    /// gates so an already accepted creation can replay its original receipt.
+    pub async fn project_creation_by_request(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<(StoredProjectConversation, serde_json::Value)>, sqlx::Error> {
+        let row = sqlx::query("SELECT * FROM project_conversations WHERE creation_request_id=?")
+            .persistent(false)
+            .bind(request_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            let payload: Option<String> = row.get("creation_payload");
+            let payload = payload
+                .and_then(|value| serde_json::from_str(&value).ok())
+                .ok_or_else(|| invalid("creation_payload_unavailable"))?;
+            Ok((project_conversation(&row)?, payload))
+        })
+        .transpose()
+    }
+
     /// Idempotent by creation request and by native identity: rediscovering a
     /// session returns its existing conversation instead of a duplicate.
     pub async fn create_project_conversation(
         &self,
         insert: ProjectConversationInsert<'_>,
+    ) -> Result<ProjectConversationCreate, sqlx::Error> {
+        self.create_project_conversation_inner(insert, None).await
+    }
+
+    pub async fn create_project_conversation_with_request_digest(
+        &self,
+        insert: ProjectConversationInsert<'_>,
+        request_digest: &str,
+    ) -> Result<ProjectConversationCreate, sqlx::Error> {
+        self.create_project_conversation_inner(insert, Some(request_digest))
+            .await
+    }
+
+    async fn create_project_conversation_inner(
+        &self,
+        insert: ProjectConversationInsert<'_>,
+        request_digest: Option<&str>,
     ) -> Result<ProjectConversationCreate, sqlx::Error> {
         if !ACCESS_MODES.contains(&insert.access_mode) {
             return Err(invalid("Unknown project access mode"));
@@ -501,35 +609,18 @@ impl Store {
         if insert.title.trim().is_empty() || insert.title.len() > 400 {
             return Err(invalid("Invalid conversation title"));
         }
-        let creation_payload = serde_json::json!([
-            insert.project_id,
-            insert.family.as_str(),
-            insert.provider_store,
-            insert.cwd,
-            insert.roots_revision,
-            insert.model,
-            insert.effort,
-            insert.access_mode,
-            insert.claude_approval,
-            i64::from(insert.plan_mode)
-        ]);
+        let creation_payload = project_creation_payload(&insert, request_digest);
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(request) = insert.creation_request_id {
             if let Some(row) =
                 sqlx::query("SELECT * FROM project_conversations WHERE creation_request_id=?")
+                    .persistent(false)
                     .bind(request)
                     .fetch_optional(&mut *tx)
                     .await?
             {
-                let existing = project_conversation(&row)?;
-                // Compare the original request, never the current settings:
-                // PATCH can change model, effort and modes after creation.
-                let original: Option<String> = row.get("creation_payload");
-                let original = original
-                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(&payload).ok());
-                if original.as_ref() != Some(&creation_payload) {
-                    return Err(invalid("creation_request_conflict"));
-                }
+                // Compare the original request, never settings changed by PATCH.
+                let existing = matching_project_creation(&row, &creation_payload)?;
                 tx.commit().await?;
                 return Ok(ProjectConversationCreate::Existing(existing));
             }
@@ -550,10 +641,10 @@ impl Store {
         }
         sqlx::query("INSERT INTO conversations(id,codex_thread_id,session_id,created_at) VALUES(?,NULL,NULL,?)")
             .bind(insert.conversation_id).bind(insert.now).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO project_conversations(conversation_id,project_id,agent_family,provider_store,native_session_id,cwd,roots_revision,title,model,effort,access_mode,claude_approval,plan_mode,creation_request_id,creation_payload,created_at,updated_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO project_conversations(conversation_id,project_id,agent_family,provider_store,native_session_id,cwd,roots_revision,title,model,effort,service_tier,access_mode,claude_approval,plan_mode,creation_request_id,creation_payload,created_at,updated_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(insert.conversation_id).bind(insert.project_id).bind(insert.family.as_str())
             .bind(insert.provider_store).bind(insert.native_session_id).bind(insert.cwd)
-            .bind(insert.roots_revision).bind(insert.title.trim()).bind(insert.model).bind(insert.effort)
+            .bind(insert.roots_revision).bind(insert.title.trim()).bind(insert.model).bind(insert.effort).bind(insert.service_tier)
             .bind(insert.access_mode).bind(insert.claude_approval).bind(i64::from(insert.plan_mode))
             .bind(insert.creation_request_id).bind(insert.creation_request_id.map(|_| creation_payload.to_string()))
             .bind(insert.now).bind(insert.now).bind(insert.now)
@@ -629,6 +720,37 @@ impl Store {
         patch: ProjectConversationPatch<'_>,
         now: &str,
     ) -> Result<Option<StoredProjectConversation>, sqlx::Error> {
+        self.update_project_conversation_with_expected_settings(conversation, patch, None, now)
+            .await
+    }
+
+    /// Reject a settings PATCH if another device changed model, effort, or
+    /// speed after the caller validated their combined values.
+    pub async fn update_project_conversation_if_settings_match(
+        &self,
+        conversation: &str,
+        patch: ProjectConversationPatch<'_>,
+        expected_model: Option<&str>,
+        expected_effort: Option<&str>,
+        expected_tier: Option<&str>,
+        now: &str,
+    ) -> Result<Option<StoredProjectConversation>, sqlx::Error> {
+        self.update_project_conversation_with_expected_settings(
+            conversation,
+            patch,
+            Some((expected_model, expected_effort, expected_tier)),
+            now,
+        )
+        .await
+    }
+
+    async fn update_project_conversation_with_expected_settings(
+        &self,
+        conversation: &str,
+        patch: ProjectConversationPatch<'_>,
+        expected: Option<(Option<&str>, Option<&str>, Option<&str>)>,
+        now: &str,
+    ) -> Result<Option<StoredProjectConversation>, sqlx::Error> {
         if patch
             .access_mode
             .is_some_and(|mode| !ACCESS_MODES.contains(&mode))
@@ -659,16 +781,42 @@ impl Store {
                 return Err(invalid("Claude approval applies only to Claude threads"));
             }
         }
-        let updated = sqlx::query("UPDATE project_conversations SET title=COALESCE(?,title),is_pinned=COALESCE(?,is_pinned),has_unread=COALESCE(?,has_unread),model=COALESCE(?,model),effort=CASE WHEN ? THEN ? ELSE effort END,access_mode=COALESCE(?,access_mode),claude_approval=COALESCE(?,claude_approval),plan_mode=COALESCE(?,plan_mode),updated_at=? WHERE conversation_id=?")
+        let updated = sqlx::query("UPDATE project_conversations SET title=COALESCE(?,title),is_pinned=COALESCE(?,is_pinned),has_unread=COALESCE(?,has_unread),model=COALESCE(?,model),effort=CASE WHEN ? THEN ? ELSE effort END,service_tier=CASE WHEN ? THEN ? ELSE service_tier END,access_mode=COALESCE(?,access_mode),claude_approval=COALESCE(?,claude_approval),plan_mode=COALESCE(?,plan_mode),updated_at=? WHERE conversation_id=? AND (?=0 OR (model IS ? AND effort IS ? AND service_tier IS ?))")
             .bind(patch.title.map(str::trim)).bind(patch.pinned.map(i64::from)).bind(patch.unread.map(i64::from))
-            .bind(patch.model).bind(patch.effort.is_some()).bind(patch.effort.flatten()).bind(patch.access_mode)
+            .bind(patch.model).bind(patch.effort.is_some()).bind(patch.effort.flatten())
+            .bind(patch.service_tier.is_some()).bind(patch.service_tier.flatten()).bind(patch.access_mode)
             .bind(patch.claude_approval).bind(patch.plan_mode.map(i64::from))
-            .bind(now).bind(conversation)
+            .bind(now).bind(conversation).bind(expected.is_some())
+            .bind(expected.and_then(|value| value.0))
+            .bind(expected.and_then(|value| value.1))
+            .bind(expected.and_then(|value| value.2))
             .execute(&self.pool).await?;
         if updated.rows_affected() == 0 {
-            return Ok(None);
+            return if expected.is_some() && self.project_conversation(conversation).await?.is_some()
+            {
+                Err(invalid("project_settings_changed"))
+            } else {
+                Ok(None)
+            };
         }
         self.project_conversation(conversation).await
+    }
+
+    /// The settings accepted with this message, independent of later edits.
+    /// Pre-upgrade messages without a snapshot use current thread settings.
+    pub async fn project_message_execution_settings(
+        &self,
+        message: &str,
+    ) -> Result<Option<(Option<String>, Option<String>, Option<String>)>, sqlx::Error> {
+        let row = sqlx::query("SELECT model,reasoning_effort,service_tier FROM message_execution_settings WHERE message_id=?")
+            .bind(message).fetch_optional(&self.pool).await?;
+        Ok(row.map(|row| {
+            (
+                row.get("model"),
+                row.get("reasoning_effort"),
+                row.get("service_tier"),
+            )
+        }))
     }
 
     /// Attached, pinned conversations of included projects, newest activity first.
@@ -837,6 +985,7 @@ mod tests {
             title: "Fix",
             model: None,
             effort: None,
+            service_tier: None,
             access_mode: "workspace",
             claude_approval: "ask",
             plan_mode: false,
@@ -1086,6 +1235,7 @@ mod tests {
             },
             ProjectConversationInsert {
                 effort: Some("high"),
+                service_tier: None,
                 ..claude("m3", Some("modes"))
             },
             ProjectConversationInsert {
@@ -1211,6 +1361,57 @@ mod tests {
         .is_err());
     }
 
+    // New creation rows retain the exact client folder/request identity for
+    // receipt replay. Legacy rows keep their original array payload.
+    #[tokio::test]
+    async fn creation_request_digest_is_frozen_and_recoverable() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        project(&store, "p1", &["/work/app"]).await;
+        let insert = || conversation("digest-1", "p1", None, Some("digest-request"));
+        assert!(matches!(
+            store
+                .create_project_conversation_with_request_digest(
+                    insert(),
+                    "folder-id-and-settings-a"
+                )
+                .await
+                .unwrap(),
+            ProjectConversationCreate::Created(_)
+        ));
+        let (stored_conversation, payload) = store
+            .project_creation_by_request("digest-request")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_conversation.conversation_id, "digest-1");
+        assert_eq!(payload["version"], 2);
+        assert_eq!(payload["requestDigest"], "folder-id-and-settings-a");
+        assert!(matches!(
+            store.create_project_conversation_with_request_digest(insert(), "folder-id-and-settings-a").await.unwrap(),
+            ProjectConversationCreate::Existing(c) if c.conversation_id == "digest-1"
+        ));
+        assert!(store
+            .create_project_conversation_with_request_digest(insert(), "different-folder-id")
+            .await
+            .is_err());
+        assert!(store
+            .project_creation_by_request("absent")
+            .await
+            .unwrap()
+            .is_none());
+
+        store
+            .create_project_conversation(conversation("legacy", "p1", None, Some("legacy-request")))
+            .await
+            .unwrap();
+        let (_, legacy) = store
+            .project_creation_by_request("legacy-request")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(legacy.is_array());
+    }
+
     // Contract: omitted effort preserves it and explicit null clears it.
     // Regression: a model without effort inherits the previous model's value.
     // Owner boundary: the persistent project-conversation PATCH operation.
@@ -1221,6 +1422,7 @@ mod tests {
         store
             .create_project_conversation(ProjectConversationInsert {
                 effort: Some("high"),
+                service_tier: None,
                 ..conversation("c1", "p1", None, None)
             })
             .await
@@ -1268,6 +1470,7 @@ mod tests {
             family: AgentFamily::Claude,
             model: Some("claude:haiku"),
             effort: Some("high"),
+            service_tier: None,
             claude_approval: "auto",
             plan_mode: true,
             ..conversation("legacy", "p1", None, Some("legacy-request"))
@@ -1309,6 +1512,118 @@ mod tests {
             store.create_project_conversation(original).await.unwrap(),
             ProjectConversationCreate::Existing(c) if c.conversation_id == "legacy" && c.effort.is_none() && !c.plan_mode
         ));
+    }
+
+    // A creation retry compares the selected tier, while accepted messages
+    // keep their own settings after the thread is edited.
+    #[tokio::test]
+    async fn project_speed_retry_and_accepted_message_are_stable() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        store
+            .upsert_owner_device("device", "Owner", "{}", "now")
+            .await
+            .unwrap();
+        project(&store, "p1", &["/work/app"]).await;
+        let selected = ProjectConversationInsert {
+            model: Some("gpt-x"),
+            effort: Some("high"),
+            service_tier: Some("fast"),
+            ..conversation("c1", "p1", None, Some("request"))
+        };
+        store
+            .create_project_conversation(selected.clone())
+            .await
+            .unwrap();
+        let MessageInsert::Inserted(message) = store
+            .insert_dispatch_message("device", "client", "work", "hash", "c1", &[], "now", true)
+            .await
+            .unwrap()
+        else {
+            panic!("new message")
+        };
+        store
+            .update_project_conversation(
+                "c1",
+                ProjectConversationPatch {
+                    service_tier: Some(Some("default")),
+                    ..Default::default()
+                },
+                "later",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .project_conversation("c1")
+                .await
+                .unwrap()
+                .unwrap()
+                .service_tier
+                .as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            store
+                .project_message_execution_settings(&message.id)
+                .await
+                .unwrap(),
+            Some((
+                Some("gpt-x".into()),
+                Some("high".into()),
+                Some("fast".into())
+            ))
+        );
+        assert!(matches!(
+            store
+                .create_project_conversation(selected.clone())
+                .await
+                .unwrap(),
+            ProjectConversationCreate::Existing(_)
+        ));
+        assert!(store
+            .create_project_conversation(ProjectConversationInsert {
+                service_tier: Some("default"),
+                ..selected
+            })
+            .await
+            .is_err());
+        // Two devices can validate against the same old settings. Once the
+        // model changes, the stale speed write must lose atomically.
+        store
+            .update_project_conversation_if_settings_match(
+                "c1",
+                ProjectConversationPatch {
+                    model: Some("other-model"),
+                    service_tier: Some(None),
+                    ..Default::default()
+                },
+                Some("gpt-x"),
+                Some("high"),
+                Some("default"),
+                "next",
+            )
+            .await
+            .unwrap();
+        let stale = store
+            .update_project_conversation_if_settings_match(
+                "c1",
+                ProjectConversationPatch {
+                    service_tier: Some(Some("fast")),
+                    ..Default::default()
+                },
+                Some("gpt-x"),
+                Some("high"),
+                Some("default"),
+                "stale",
+            )
+            .await;
+        assert!(matches!(
+            stale,
+            Err(sqlx::Error::Protocol(message)) if message == "project_settings_changed"
+        ));
+        let current = store.project_conversation("c1").await.unwrap().unwrap();
+        assert_eq!(current.model.as_deref(), Some("other-model"));
+        assert_eq!(current.service_tier, None);
     }
 
     // Contract: only attached, pinned conversations of included projects feed

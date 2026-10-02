@@ -173,6 +173,10 @@ struct NewChatView: View {
     @State private var failure: String?
     @State private var addingProject = false
     @State private var pairing = false
+    @State private var linkedProjectID: String?
+    @State private var linkedProjectChecked = false
+    @State private var linkRetry = 0
+    @State private var pendingLinkedRequest: NewChatRequest?
 
     private var model: ConnectionModel? {
         guard let hostID, let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == hostID }) else { return nil }
@@ -182,9 +186,20 @@ struct NewChatView: View {
     var body: some View {
         Group {
             if let model {
-                NewChatContent(library: library, shell: shell, model: model, projects: model.projects,
-                               hostID: $hostID, draft: $draft, sending: $sending, failure: $failure,
-                               addingProject: $addingProject, pairing: $pairing)
+                ProjectRouteGate(projects: model.projects) {
+                    if let linkedProjectID,
+                       (!linkedProjectChecked || model.macConnected != true ||
+                        model.projects.failure != nil ||
+                        model.projects.project(linkedProjectID)?.isIncluded != true ||
+                        draft.destination != .project(id: linkedProjectID)) {
+                        linkedProjectRecovery(model)
+                    } else {
+                        NewChatContent(library: library, shell: shell, model: model, projects: model.projects,
+                                       hostID: $hostID, draft: $draft, sending: $sending, failure: $failure,
+                                       addingProject: $addingProject, pairing: $pairing,
+                                       linkedProjectID: $linkedProjectID)
+                    }
+                }
             } else {
                 noConnection
             }
@@ -195,8 +210,17 @@ struct NewChatView: View {
         .onChange(of: hostID, initial: true) { _, host in shell.draftHost = host }
         .onChange(of: shell.newChatRequest) { _, request in apply(request) }
         .onChange(of: library.saved.connections.map(\.credential.hostInstallationId)) { _, hosts in
-            if let hostID, !hosts.contains(hostID) { self.hostID = nil; draft = NewChatDraft() }
-            if hostID == nil { restore() }
+            if let hostID, !hosts.contains(hostID), linkedProjectID == nil {
+                self.hostID = nil; draft = NewChatDraft()
+            }
+            if hostID == nil, linkedProjectID == nil { restore() }
+        }
+        .task(id: "\(hostID ?? ""):\(linkedProjectID ?? ""):\(model?.macConnected == true):\(linkRetry)") {
+            guard linkedProjectID != nil, pendingLinkedRequest == nil, let model else { return }
+            linkedProjectChecked = false
+            guard model.macConnected == true else { linkedProjectChecked = true; return }
+            await model.projects.refresh()
+            if !Task.isCancelled { linkedProjectChecked = true }
         }
         .task(id: PersistenceKey(host: hostID, draft: draft)) {
             let savedDraft = draft, host = hostID
@@ -221,10 +245,68 @@ struct NewChatView: View {
     private var noConnection: some View {
         VStack(spacing: 16) {
             Spacer()
-            Text("Pair your Mac to get started").font(.title3.weight(.semibold))
+            Text(linkedProjectID == nil ? "Pair your Mac to get started" : "Linked computer is not paired")
+                .font(.title3.weight(.semibold))
+            if linkedProjectID != nil {
+                Text("Pair the computer from this link to open its project.").foregroundStyle(.secondary)
+            }
             Button("Add computer", systemImage: "plus") { pairing = true }.buttonStyle(.borderedProminent)
             Spacer()
         }.frame(maxWidth: .infinity).padding()
+    }
+
+    private func linkedProjectRecovery(_ model: ConnectionModel) -> some View {
+        Group {
+            if let pendingLinkedRequest {
+                ContentUnavailableView {
+                    Label("Couldn’t open project", systemImage: "folder.badge.questionmark")
+                } description: {
+                    Text("Your current draft could not be saved. Free some storage and try again.")
+                } actions: {
+                    Button("Try again") { apply(pendingLinkedRequest) }
+                }
+            } else if let linkedProjectID, model.projects.project(linkedProjectID)?.isIncluded == true,
+               draft.destination != .project(id: linkedProjectID) {
+                ContentUnavailableView {
+                    Label("Couldn’t open project", systemImage: "folder.badge.questionmark")
+                } description: {
+                    Text("Your draft could not be saved. Free some storage and try again.")
+                } actions: {
+                    Button("Try again") {
+                        if let hostID {
+                            let destination = ChatDestination.project(id: linkedProjectID)
+                            if NewChatDraftStore.save(draft, host: hostID) {
+                                draft = NewChatDraftStore.load(host: hostID, destination: destination)
+                                    ?? NewChatDraft(destination: destination)
+                            }
+                        }
+                    }
+                }
+            } else if model.macConnected != true {
+                ContentUnavailableView {
+                    Label("Computer offline", systemImage: "wifi.slash")
+                } description: {
+                    Text("Connect to \(model.macName) to open this project.")
+                } actions: {
+                    Button("Try again") { linkRetry += 1; Task { await model.check(renew: true) } }
+                }
+            } else if !linkedProjectChecked || model.projects.loadingProjects {
+                ProgressView("Checking project…")
+            } else {
+                ContentUnavailableView {
+                    Label(model.projects.failure == nil ? "Project unavailable" : "Couldn’t check project",
+                          systemImage: "folder.badge.questionmark")
+                } description: {
+                    Text(model.projects.failure == nil
+                         ? "This project is no longer available on \(model.macName). Check the link or choose another project."
+                         : "Check the connection to \(model.macName) and try again.")
+                } actions: {
+                    Button("Try again") { linkRetry += 1 }
+                    Button("Choose a project") { linkedProjectID = nil; draft.destination = nil }
+                }
+            }
+        }
+        .accessibilityIdentifier("linked-project-recovery")
     }
 
     private func restore() {
@@ -264,7 +346,34 @@ struct NewChatView: View {
 
     private func apply(_ request: NewChatRequest?) {
         guard let request else { return }
+        if request.exactProject, let host = request.host,
+           case .project(let id)? = request.destination {
+            // A link opens this project's own draft. Never carry words or
+            // attachments from another Mac or project into the linked target.
+            let destination = ChatDestination.project(id: id)
+            if host != hostID || draft.destination != destination {
+                if let hostID, !NewChatDraftStore.save(draft, host: hostID) {
+                    linkedProjectID = id
+                    pendingLinkedRequest = request
+                    failure = "Your draft could not be saved. Free some storage and try again."
+                    shell.newChatRequest = nil
+                    return
+                }
+                hostID = host
+                draft = NewChatDraftStore.load(host: host, destination: destination)
+                    ?? NewChatDraft(destination: destination)
+                NewChatDraftStore.lastHost = host
+            }
+            linkedProjectID = id
+            pendingLinkedRequest = nil
+            linkedProjectChecked = false
+            shell.newChatRequest = nil
+            return
+        }
         if let host = request.host, host != hostID { switchHost(host) }
+        linkedProjectID = nil
+        pendingLinkedRequest = nil
+        linkedProjectChecked = false
         if let destination = request.destination, !draft.isSubmitted, let hostID {
             draft = NewChatDraftStore.selecting(destination, from: draft, host: hostID, project: projectSummary(destination))
         }
@@ -286,6 +395,18 @@ struct NewChatView: View {
     }
 }
 
+/// The exact linked destination must respond to catalog changes even when the
+/// connection library itself has not changed.
+private struct ProjectRouteGate<Content: View>: View {
+    @ObservedObject var projects: ProjectLibrary
+    let content: () -> Content
+    init(projects: ProjectLibrary, @ViewBuilder content: @escaping () -> Content) {
+        self.projects = projects
+        self.content = content
+    }
+    var body: some View { content() }
+}
+
 private struct NewChatContent: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
@@ -297,6 +418,7 @@ private struct NewChatContent: View {
     @Binding var failure: String?
     @Binding var addingProject: Bool
     @Binding var pairing: Bool
+    @Binding var linkedProjectID: String?
     @Environment(\.dynamicTypeSize) private var typeSize
 
     @State private var importing = false
@@ -311,6 +433,7 @@ private struct NewChatContent: View {
     @State private var cameraScope: String?
     @State private var showingModel = false
     @State private var showingComputer = false
+    @State private var showingFiles = false
     @State private var showingConnectionPicker = false
     @State private var pairAfterConnectionPicker = false
     @State private var savedMessages: [NewChatDraft] = []
@@ -335,12 +458,22 @@ private struct NewChatContent: View {
         if case .project(let id) = draft.destination { return projects.project(id) }
         return nil
     }
+    private var projectFilesChat: ChatSummary? {
+        guard let project, project.isIncluded,
+              let folder = project.folders.first(where: { $0.id == (draft.folderId ?? project.primaryFolder?.id) }) else { return nil }
+        return ChatSummary(conversationId: "project-files:\(project.id):\(folder.id)", botId: nil,
+            title: project.name, lastMessagePreview: nil, lastMessageAt: nil, messageCount: 0,
+            deliveryState: nil, hasUnread: false, isArchived: false, isPinned: false)
+    }
     private var familyModels: [BotOptions.Model] {
         (projects.options?.models ?? []).filter { !$0.hidden && $0.family == draft.family }
     }
     private var selectedModel: BotOptions.Model? { familyModels.first { $0.id == draft.model } }
     private var modelTitle: String {
-        selectedModel.map { ModelDefaults.summary(model: $0, effort: draft.effort) } ?? "Model"
+        guard let selectedModel else { return "Model" }
+        let summary = ModelDefaults.summary(model: selectedModel, effort: draft.effort)
+        let speed = selectedModel.serviceTiers?.first { $0.id == draft.serviceTier }
+        return speed.map { $0.id == "default" ? summary : summary + " · " + $0.label } ?? summary
     }
     private var placeholder: String { "Message \(project?.name ?? "project")" }
     private var canSend: Bool {
@@ -410,6 +543,9 @@ private struct NewChatContent: View {
         .sheet(isPresented: $showingModel) { modelSheet }
         .fullScreenCover(isPresented: $showingComputer) {
             NavigationStack { ComputerSessionView(model: model, chat: hostViewChat) }
+        }
+        .sheet(isPresented: $showingFiles) {
+            if let projectFilesChat { WorkspaceBrowser(model: model, chat: projectFilesChat, attachmentIDs: nil) }
         }
         .onChange(of: showingComputer) { _, showing in
             if showing { model.dictation.captureControlsHidden(conversationID: draftChat.id) }
@@ -583,6 +719,13 @@ private struct NewChatContent: View {
                     .buttonStyle(.plain).disabled(model.accessEnded)
                     .accessibilityHint("Shows the screen of \(model.macName)")
                     .accessibilityIdentifier("view-computer")
+                if projectFilesChat != nil {
+                    Button { showingFiles = true } label: { PickerRow(systemImage: "folder", title: "Files", showsChevron: false) }
+                        .buttonStyle(.plain).disabled(model.accessEnded)
+                        .accessibilityHint("Browse the selected project folder and changes")
+                        .accessibilityIdentifier("new-chat-files")
+                        .padding(.leading, 16)
+                }
                 Spacer(minLength: 0)
             }
         }
@@ -590,12 +733,13 @@ private struct NewChatContent: View {
     }
 
     private var computerMenu: some View {
-        Button { showingConnectionPicker = true } label: {
+        let status = model.accessEnded ? "Access ended" : model.macConnected == true ? "Connected" : model.macConnected == false ? "Offline" : "Connecting"
+        return Button { showingConnectionPicker = true } label: {
             PickerRow(systemImage: "laptopcomputer", title: model.macName)
         }
         .buttonStyle(.plain).tint(.primary)
         .accessibilityLabel("Computer")
-        .accessibilityValue(model.macName)
+        .accessibilityValue("\(model.macName), \(status)")
         .accessibilityIdentifier("connection-picker")
         .popover(isPresented: $showingConnectionPicker, arrowEdge: .bottom) {
             let preferredHeight = CGFloat(library.saved.connections.count + 1) * 44 + 21
@@ -614,7 +758,7 @@ private struct NewChatContent: View {
                                 Image(systemName: "checkmark")
                                     .opacity(selected ? 1 : 0).frame(width: 16)
                                 Text(candidate.macName).lineLimit(2)
-                                Circle().fill(connected ? Color.green : Color.red)
+                                Circle().fill(connected ? Color.green : Color.secondary.opacity(0.6))
                                     .frame(width: 7, height: 7).accessibilityHidden(true)
                                 Spacer(minLength: 12)
                             }
@@ -676,6 +820,7 @@ private struct NewChatContent: View {
 
     private func choose(destination: ChatDestination, project: ProjectSummary? = nil) {
         guard let hostID else { return }
+        linkedProjectID = nil
         model.dictation.captureControlsHidden(conversationID: draftChat.id)
         draft = NewChatDraftStore.selecting(destination, from: draft, host: hostID, project: project)
         ensureModel()
@@ -683,6 +828,7 @@ private struct NewChatContent: View {
 
     private func choose(host: String) {
         guard host != hostID else { return }
+        linkedProjectID = nil
         model.dictation.captureControlsHidden(conversationID: draftChat.id)
         if let hostID { NewChatDraftStore.save(draft, host: hostID) }
         draft = NewChatDraft.switching(from: draft, toSaved: NewChatDraftStore.load(host: host))
@@ -743,6 +889,25 @@ private struct NewChatContent: View {
                         }
                     }
                 }
+                if let selectedModel, let tiers = selectedModel.serviceTiers, tiers.count > 1 {
+                    Section("Speed") {
+                        ForEach(tiers) { option in
+                            Button { draft.serviceTier = option.id } label: {
+                                HStack(alignment: .firstTextBaseline) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(option.label)
+                                        if let description = option.description {
+                                            Text(description).font(.footnote).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    if option.id == (draft.serviceTier ?? "default") { Image(systemName: "checkmark") }
+                                }
+                            }
+                            .accessibilityIdentifier("new-chat-speed:\(option.id)")
+                        }
+                    }
+                }
                 if let project, project.folders.count > 1 {
                     Section("Working folder") {
                         ForEach(project.folders) { folder in
@@ -772,6 +937,7 @@ private struct NewChatContent: View {
     /// A draft with no destination, a Bot, or a project that is gone belongs in
     /// the first included project.
     private func settleDestination() {
+        if linkedProjectID != nil { return }
         var next = draft
         guard next.settle(in: projects.includedProjects) else { return }
         draft = next

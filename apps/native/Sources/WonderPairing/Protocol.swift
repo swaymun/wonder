@@ -6,13 +6,14 @@ public extension Data {
 }
 
 public enum PairingFailure: LocalizedError {
-    case invalidLink, wrongHost, expired, response(Int), missingIdentity
+    case invalidLink, wrongHost, expired, response(Int), annotationRejected(Int, String), missingIdentity
     public var errorDescription: String? {
         switch self {
         case .invalidLink: "Use the complete HTTPS address or pairing QR code shown on your Mac."
         case .wrongHost: "This connection does not match your Mac. Create a new pairing code on the intended Mac."
         case .expired: "This pairing request expired. Create a new code on your Mac."
         case .response(let code): code == 409 ? "Confirm this phone on your Mac." : code == 410 ? "This request expired or was rejected. Create a new code on your Mac." : code == 401 || code == 404 ? "Access is no longer available. Check this phone in Wonder on your Mac." : "Wonder could not connect (\(code)). Check your Mac and try again."
+        case .annotationRejected(_, let detail): detail
         case .missingIdentity: "This phone’s saved identity is unavailable. Pair again from your Mac."
         }
     }
@@ -113,6 +114,15 @@ public struct SavedConnection: Codable, Sendable {
 private final class NoRedirect: NSObject, URLSessionTaskDelegate, Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) { completionHandler(nil) }
 }
+public struct WorkspaceMediaChunk: Sendable {
+    public let bytes: Data
+    public let start: UInt64
+    public let end: UInt64
+    public let total: UInt64
+    public let mimeType: String
+    /// A file-change token from the opened Mac descriptor, not a content hash.
+    public let revision: String
+}
 public final class PairingAPI: Sendable {
     private let session: URLSession
     private let timing: (@Sendable (Double, Double, Int, Bool) -> Void)?
@@ -174,6 +184,53 @@ public final class PairingAPI: Sendable {
         if let mimeType { try ConversationFile.validateContent(data, mime: mimeType) }
         return data
     }
+    public func downloadWorkspaceMediaRange(_ path: String, connection: SavedConnection,
+                                            start: UInt64, end: UInt64, revision: String?) async throws -> WorkspaceMediaChunk {
+        guard end >= start, end - start < 1024 * 1024,
+              (start == 0 && end == 0) || revision != nil else { throw FileFailure.integrity }
+        let origin = try PairingLink.origin(connection.origin)
+        guard let url = URL(string: origin + path) else { throw PairingFailure.invalidLink }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.httpShouldHandleCookies = false
+        request.setValue(origin, forHTTPHeaderField: "Origin")
+        request.setValue("__Host-wonder_session=\(connection.credential.sessionToken)", forHTTPHeaderField: "Cookie")
+        request.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+        if let revision { request.setValue(revision, forHTTPHeaderField: "X-Wonder-Revision") }
+        let (bytes, response) = try await session.bytes(for: request)
+        if (response as? HTTPURLResponse)?.statusCode == 409 { throw FileFailure.stale }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 206 else {
+            throw PairingFailure.response((response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        guard let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+              let range = Self.parseMediaContentRange(contentRange), range.start == start,
+              range.end <= end, range.end < range.total,
+              let contentLength = http.value(forHTTPHeaderField: "Content-Length").flatMap(UInt64.init),
+              contentLength == range.end - range.start + 1,
+              let mime = http.mimeType?.lowercased(),
+              ["video/mp4", "video/quicktime", "audio/mp4", "audio/mpeg", "audio/wav"].contains(mime),
+              let responseRevision = http.value(forHTTPHeaderField: "X-Wonder-Revision"),
+              responseRevision.count == 64, responseRevision.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "0123456789abcdef").contains($0) }) else { throw FileFailure.integrity }
+        if let revision, revision != responseRevision { throw FileFailure.stale }
+        var data = Data()
+        data.reserveCapacity(Int(contentLength))
+        for try await byte in bytes {
+            guard data.count < Int(contentLength) else { throw FileFailure.integrity }
+            data.append(byte)
+        }
+        guard UInt64(data.count) == contentLength else { throw FileFailure.integrity }
+        return WorkspaceMediaChunk(bytes: data, start: range.start, end: range.end,
+                                   total: range.total, mimeType: mime, revision: responseRevision)
+    }
+
+    private static func parseMediaContentRange(_ value: String) -> (start: UInt64, end: UInt64, total: UInt64)? {
+        guard value.hasPrefix("bytes ") else { return nil }
+        let range = value.dropFirst("bytes ".count)
+        let parts = range.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, let total = UInt64(parts[1]) else { return nil }
+        let bounds = parts[0].split(separator: "-", omittingEmptySubsequences: false)
+        guard bounds.count == 2, let start = UInt64(bounds[0]), let end = UInt64(bounds[1]), end >= start else { return nil }
+        return (start, end, total)
+    }
     /// Asks hosts to omit history data native clients never render (the raw
     /// event list and inline computer-use screenshots). Older hosts ignore it.
     static let compactViewHeader = "X-Wonder-History-View"
@@ -214,7 +271,16 @@ public final class PairingAPI: Sendable {
         received = timing == nil ? 0 : ProcessInfo.processInfo.systemUptime; byteCount = data.count
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode) || decodingStatuses.contains(http.statusCode) else {
-            throw PairingFailure.response((response as? HTTPURLResponse)?.statusCode ?? 0)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if path.hasPrefix("/api/v1/conversations/"), path.hasSuffix("/messages"),
+               [403, 409, 422].contains(status),
+               let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               message.utf8.count <= 512,
+               (message.hasPrefix("This annotation") || message.hasPrefix("Annotations require") ||
+                message.hasPrefix("This file changed since you annotated")) {
+                throw PairingFailure.annotationRejected(status, message)
+            }
+            throw PairingFailure.response(status)
         }
         let value: T
         do {

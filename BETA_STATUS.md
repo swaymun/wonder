@@ -1,9 +1,11 @@
 # Wonder beta status
 
-The signed Mac beta is available. Release iOS build 1.0 (71) is uploaded,
-processed, and available for internal testing. Apple reports it as ready for
-external beta submission; external review and public enrollment have not been
-opened for this build. Existing production tester-group settings were preserved.
+The signed public Mac beta remains available. The agent workspace Release
+builds, Wonder Testing 1.0 (20) and production Wonder 1.0 (82), were each
+uploaded once and processed by Apple. Wonder Testing build 20 is available in
+the automatic Owner Beta internal group. Production build 82 tester availability
+and installation through TestFlight have not been verified. No external beta
+review or public enrollment was requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -14,10 +16,16 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (71) fixes stale Queued labels, saved native question-and-answer forms, desktop project association on reopen, and trackpad input in the black screen area. Apple reports `VALID` and `IN_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Installation through TestFlight remains unverified. |
-| Wonder Testing | The separate blue app, Release 1.0 (7), contains the same fixes. It is `VALID` and `READY_FOR_BETA_TESTING`; external status is `READY_FOR_BETA_SUBMISSION`. Internal distribution of this build and installation through TestFlight remain unverified. Existing tester-group settings were preserved. Pairing, drafts and Keychain access remain separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) is the public download. It is signed, notarized, stapled, installed locally, and passes signature, Gatekeeper, `/readyz`, and packaged verification against the installed Codex 0.159.0 runtime. Project-only Macs leave private Bot storage absent. |
-| Source | The reviewed MIT source is public at [swaymun/wonder](https://github.com/swaymun/wonder). The current chat, project-association and trackpad fixes are published on `main`. Third-party components retain their own licenses. |
+| iPhone and iPad | Production Release 1.0 (82) is uploaded and Apple reports processing complete. Its signed archive includes the Project Widget and passed channel identity, APNs, App Group, Keychain and Diagnostics-exclusion checks. Tester availability and TestFlight installation remain unverified. |
+| Wonder Testing | The separate blue Release 1.0 (20) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed the same channel-specific checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Replacement 1.0.108 is signed, notarized and installed locally and on a clean second Mac; publication waits for the remaining pairing, permission and draft-upgrade gates. |
+| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder); this release's internal source is `91022396`. Third-party components retain their own licenses. |
+
+A replacement Mac companion, 1.0.108, has been signed, notarized, stapled and
+installed over 1.0.107 on the owner's Mac. The same verified DMG installed and
+first-launched on a clean second Mac; both reached `/readyz`, including after a
+restart. The public download remains 1.0.101 while fresh-Mac phone pairing,
+private permissions and existing-draft upgrade behavior await acceptance.
 
 The 1.0.101 update preserves the installed Mac's project chats and pairing. It
 loads shared model options through the normal project runtime and starts the
@@ -30,7 +38,33 @@ was installed through the signed local installer. Fresh-Mac setup remains unveri
 
 The [landing page, setup guide and privacy information](https://wonder-launch-preview.saimun-h-shahee.chatgpt.site) are public.
 
-## Qualification still in progress
+## Agent workspace qualification
+
+The current source passed the daemon library suite (327 passed, 3 existing
+ignored), store (159 passed), desktop (55 passed), host (17 passed), native
+pairing (246 passed, one expected skip), Computer View (8 passed), and Mac
+menu bar (36 passed). Focused iPhone and iPad simulator runs covered Project
+controls, Automations, questions, subagent pills, Files and diffs, annotation
+selection and revision recovery, EPUB and common bounded 3D previews, deep
+links and Widget snapshots. A final delayed Files/Git/diff navigation regression
+passed 2/2 on each simulator. Signed Release archives for both channels passed
+main app and Widget identities, entitlements, bundled notices, and symbol export.
+
+The Mac 1.0.108 replacement DMG passed signature, notarization, Gatekeeper,
+local upgrade and clean second-Mac first launch; both installed copies reached
+`/readyz`. Its public release remains gated as stated above. An accepted
+annotation now dispatches its frozen source copy even after an unrelated
+Project root change, verified by a fake-provider regression. No live Project
+model message or scheduled Automation run was started for these checks.
+Native progressive dictation had no supported SpeechTranscriber locale on the
+tested iOS 26.5 simulators, so the existing dictation path remains in place.
+EPUB and read-only USDZ/OBJ/PLY/STL viewers passed focused checks, while
+repeated SceneKit conversion retained measurable memory; broader GLB support
+remains at a research gate. Actual Widget Home Screen presentation, paired
+mobile-to-Mac Files/media roundtrips, live provider sends, and TestFlight
+installation remain unverified.
+
+## Earlier qualification
 
 Testing build 7 and production build 71 passed six focused iPhone Simulator
 checks and three iPad Simulator checks, with no failures or skips. These cover
@@ -79,7 +113,7 @@ maximum). Resident memory settled at 166.9–168.0 MiB and physical footprint at
 does not establish memory stability across the full navigation run or certify
 touch latency and rendered-frame performance.
 
-Both current Release exports exclude the recorder, developer controls,
+Those earlier Release exports exclude the recorder, developer controls,
 scenario runner and fixtures. Their signatures, app/extension identities,
 APNs entitlements and separate Keychain groups passed verification; provider
 icons include sRGB fallbacks and P3 variants.

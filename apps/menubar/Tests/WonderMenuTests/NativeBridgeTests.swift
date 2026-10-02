@@ -74,9 +74,14 @@ final class NativeBridgeTests: XCTestCase {
         let bridge = bridge()
         bridge.model.serviceRunning = true
         bridge.model.executionReady = false
+        bridge.model.executionDetail = "Chat storage is unavailable."
+        bridge.model.executionReason = "storage_unavailable"
         let snapshot = bridge.snapshot()
         XCTAssertEqual(snapshot["serviceRunning"] as? Bool, true)
         XCTAssertEqual(snapshot["ready"] as? Bool, false)
+        XCTAssertEqual(snapshot["executionDetail"] as? String, "Chat storage is unavailable.")
+        XCTAssertEqual(snapshot["executionReason"] as? String, "storage_unavailable")
+        XCTAssertEqual(snapshot["updatePreparing"] as? Bool, false)
         for key in ["bots", "fileAccess", "selectedBot"] { XCTAssertNil(snapshot[key]) }
     }
     @MainActor func testPairedDeviceControlDefaultsOffPersistsAcrossRelaunchAndDisables() async throws {

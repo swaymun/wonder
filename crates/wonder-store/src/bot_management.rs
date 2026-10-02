@@ -182,7 +182,7 @@ impl Store {
         if changed {
             sqlx::query("UPDATE channel_members SET role=CASE WHEN bot_id=? THEN 'coordinator' ELSE 'worker' END WHERE channel_id=?").bind(bot).bind(group).execute(&mut *tx).await?;
             sqlx::query("UPDATE conversation_metadata SET bot_id=? WHERE id=(SELECT conversation_id FROM channels WHERE id=?)").bind(bot).bind(group).execute(&mut *tx).await?;
-            sqlx::query("UPDATE automations SET bot_id=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE scope_type='group_chat' AND scope_id=?").bind(bot).bind(group).execute(&mut *tx).await?;
+            sqlx::query("UPDATE automations SET bot_id=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),revision=revision+1 WHERE scope_type='group_chat' AND scope_id=?").bind(bot).bind(group).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(changed)
@@ -204,7 +204,7 @@ impl Store {
         sqlx::query("UPDATE bots SET is_archived=? WHERE id=? AND NOT EXISTS(SELECT 1 FROM bot_deletions WHERE bot_id=? AND completed=0)")
             .bind(archived).bind(id).bind(id).execute(&mut *tx).await?;
         if archived {
-            sqlx::query("UPDATE automations SET status='paused',next_run_at=NULL WHERE bot_id=?")
+            sqlx::query("UPDATE automations SET status='paused',next_run_at=NULL,revision=revision+1 WHERE bot_id=?")
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
@@ -1073,6 +1073,7 @@ mod tests {
         store.archive_bot_safely("one", true).await.unwrap();
         let routine = store.automation_by_id("routine").await.unwrap().unwrap();
         assert_eq!(routine.status, "paused");
+        assert_eq!(routine.revision, 1);
         assert!(routine.next_run_at.is_none());
         store.archive_bot_safely("one", false).await.unwrap();
         assert_eq!(

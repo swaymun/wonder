@@ -248,6 +248,7 @@ pub(crate) struct ProjectConversationDetail {
     family: AgentFamily,
     model: Option<String>,
     effort: Option<String>,
+    service_tier: Option<String>,
     access_mode: String,
     claude_approval: String,
     plan_mode: bool,
@@ -279,6 +280,7 @@ async fn conversation_detail(
         family: conversation.family,
         model: conversation.model.clone(),
         effort: conversation.effort.clone(),
+        service_tier: conversation.service_tier.clone(),
         access_mode: conversation.access_mode.clone(),
         claude_approval: conversation.claude_approval.clone(),
         plan_mode: conversation.plan_mode,
@@ -517,7 +519,7 @@ fn validate_folder(path: &str, denied: &[String]) -> Result<ProjectRootInput, &'
 
 /// Recheck persisted paths before every execution. A replaced symlink must
 /// never redirect the agent to a folder the owner did not select.
-fn validate_execution_roots(
+pub(crate) fn validate_execution_roots(
     project: &StoredProject,
     denied: &[String],
 ) -> Result<(), &'static str> {
@@ -1645,6 +1647,7 @@ async fn attach_native(
             title: &title,
             model: None,
             effort: None,
+            service_tier: None,
             access_mode: "workspace",
             claude_approval: "ask",
             plan_mode: false,
@@ -1701,6 +1704,8 @@ pub(crate) struct UpdateConversationRequest {
     model: Option<String>,
     #[serde(default, deserialize_with = "patch_effort")]
     effort: Option<Option<String>>,
+    #[serde(default, deserialize_with = "patch_effort")]
+    service_tier: Option<Option<String>>,
     access_mode: Option<String>,
     claude_approval: Option<String>,
     plan_mode: Option<bool>,
@@ -1737,23 +1742,49 @@ fn validate_model(
     family: AgentFamily,
     model: Option<&str>,
     effort: Option<&str>,
+    service_tier: Option<&str>,
 ) -> Result<(), &'static str> {
     let Some(model) = model else {
-        return effort.map_or(Ok(()), |_| {
-            Err("Choose a model before changing its effort.")
-        });
+        return if effort.is_some() || service_tier.is_some() {
+            Err("Choose a model before changing its settings.")
+        } else {
+            Ok(())
+        };
     };
     let option = catalog
         .models
         .iter()
-        .find(|m| m.id == model && m.agent_family == family)
+        .find(|m| m.id == model && m.agent_family == family && !m.hidden)
         .ok_or("This model is not available for this conversation.")?;
     if let Some(effort) = effort {
         if !option.reasoning_efforts.iter().any(|e| e.id == effort) {
             return Err("This model does not support that effort.");
         }
     }
+    if let Some(tier) = service_tier {
+        if !option.service_tiers.iter().any(|choice| choice.id == tier)
+            && option.default_service_tier.as_deref() != Some(tier)
+        {
+            return Err("This model does not support that speed.");
+        }
+    }
     Ok(())
+}
+
+fn supports_tier(
+    catalog: &crate::RuntimeCatalog,
+    family: AgentFamily,
+    model: &str,
+    tier: &str,
+) -> bool {
+    catalog
+        .models
+        .iter()
+        .find(|option| option.agent_family == family && option.id == model)
+        .is_some_and(|option| {
+            option.service_tiers.iter().any(|choice| choice.id == tier)
+                || option.default_service_tier.as_deref() == Some(tier)
+        })
 }
 
 pub(crate) async fn update_conversation(
@@ -1771,6 +1802,7 @@ pub(crate) async fn update_conversation(
             || request.has_unread.is_some()
             || request.model.is_some()
             || request.effort.is_some()
+            || request.service_tier.is_some()
             || request.access_mode.is_some()
             || request.claude_approval.is_some()
             || request.plan_mode.is_some()
@@ -1791,20 +1823,36 @@ pub(crate) async fn update_conversation(
             ),
         };
     }
-    if request.model.is_some() || request.effort.is_some() {
-        let model = request.model.as_deref().or(existing.model.as_deref());
+    let catalog = state.runtime_catalog.read().await;
+    let model = request.model.as_deref().or(existing.model.as_deref());
+    let service_tier = request
+        .service_tier
+        .as_ref()
+        .map_or(existing.service_tier.as_deref(), |tier| tier.as_deref());
+    let clear_incompatible_tier = request.model.is_some()
+        && request.service_tier.is_none()
+        && service_tier.is_some_and(|tier| {
+            !supports_tier(&catalog, existing.family, model.unwrap_or_default(), tier)
+        });
+    if request.model.is_some() || request.effort.is_some() || request.service_tier.is_some() {
         if let Err(message) = validate_model(
-            &*state.runtime_catalog.read().await,
+            &catalog,
             existing.family,
             model,
             request
                 .effort
                 .as_ref()
                 .map_or(existing.effort.as_deref(), |effort| effort.as_deref()),
+            if clear_incompatible_tier {
+                None
+            } else {
+                service_tier
+            },
         ) {
             return error(StatusCode::UNPROCESSABLE_ENTITY, message);
         }
     }
+    drop(catalog);
     if request
         .access_mode
         .as_deref()
@@ -1820,29 +1868,51 @@ pub(crate) async fn update_conversation(
     {
         return error(StatusCode::UNPROCESSABLE_ENTITY, message);
     }
-    match state
-        .store
-        .update_project_conversation(
-            &id,
-            ProjectConversationPatch {
-                title: request.title.as_deref(),
-                pinned: request.is_pinned,
-                unread: request.has_unread,
-                model: request.model.as_deref(),
-                effort: request.effort.as_ref().map(|effort| effort.as_deref()),
-                access_mode: request.access_mode.as_deref(),
-                claude_approval: request.claude_approval.as_deref(),
-                plan_mode: request.plan_mode,
-            },
-            &now_text(),
-        )
-        .await
-    {
+    let patch = ProjectConversationPatch {
+        title: request.title.as_deref(),
+        pinned: request.is_pinned,
+        unread: request.has_unread,
+        model: request.model.as_deref(),
+        effort: request.effort.as_ref().map(|effort| effort.as_deref()),
+        service_tier: if clear_incompatible_tier {
+            Some(None)
+        } else {
+            request.service_tier.as_ref().map(|tier| tier.as_deref())
+        },
+        access_mode: request.access_mode.as_deref(),
+        claude_approval: request.claude_approval.as_deref(),
+        plan_mode: request.plan_mode,
+    };
+    let now = now_text();
+    let updated =
+        if request.model.is_some() || request.effort.is_some() || request.service_tier.is_some() {
+            state
+                .store
+                .update_project_conversation_if_settings_match(
+                    &id,
+                    patch,
+                    existing.model.as_deref(),
+                    existing.effort.as_deref(),
+                    existing.service_tier.as_deref(),
+                    &now,
+                )
+                .await
+        } else {
+            state
+                .store
+                .update_project_conversation(&id, patch, &now)
+                .await
+        };
+    match updated {
         Ok(Some(conversation)) => match conversation_detail(&state, &conversation).await {
             Ok(detail) => Json(detail).into_response(),
             Err(message) => error(StatusCode::SERVICE_UNAVAILABLE, message),
         },
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(sqlx::Error::Protocol(message)) if message == "project_settings_changed" => error(
+            StatusCode::CONFLICT,
+            "The thread settings changed on another device. Refresh and try again.",
+        ),
         Err(sqlx::Error::Protocol(message)) => error(StatusCode::UNPROCESSABLE_ENTITY, message),
         Err(_) => error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1863,6 +1933,7 @@ pub(crate) struct CreateThreadRequest {
     family: AgentFamily,
     model: String,
     effort: Option<String>,
+    service_tier: Option<String>,
     #[serde(default = "default_access")]
     access_mode: String,
     /// Claude threads only; part of the frozen creation request.
@@ -1882,6 +1953,62 @@ pub(crate) struct CreateThreadRequest {
 
 fn default_access() -> String {
     "workspace".into()
+}
+
+// Frozen request identity excludes the draft body and staged attachments:
+// prepareOnly reserves a chat before either exists. The accepted message row
+// compares both when replaying a submitted first message.
+fn creation_request_digest(project_id: &str, request: &CreateThreadRequest) -> String {
+    let intent = json!({
+        "projectId": project_id,
+        "deviceId": request.device_id,
+        "clientMessageId": request.client_message_id,
+        "family": request.family,
+        "model": request.model,
+        "effort": request.effort,
+        "serviceTier": request.service_tier,
+        "accessMode": request.access_mode,
+        "claudeApproval": request.claude_approval.as_deref().unwrap_or("ask"),
+        "planMode": request.plan_mode,
+        "folderId": request.folder_id,
+        "rootsRevision": request.roots_revision,
+    });
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(&intent).unwrap_or_default(),
+    ))
+}
+
+fn legacy_creation_matches(
+    payload: &Value,
+    project_id: &str,
+    request: &CreateThreadRequest,
+    conversation: &StoredProjectConversation,
+) -> bool {
+    let Some(fields) = payload.as_array() else {
+        return false;
+    };
+    fields.len()
+        == if request.service_tier.is_some() {
+            11
+        } else {
+            10
+        }
+        && fields[0] == json!(project_id)
+        && fields[1] == json!(request.family.as_str())
+        && fields[3] == json!(conversation.cwd)
+        && fields[4] == json!(conversation.roots_revision)
+        && fields[5] == json!(request.model)
+        && fields[6] == json!(request.effort)
+        && fields[7] == json!(request.access_mode)
+        && fields[8] == json!(request.claude_approval.as_deref().unwrap_or("ask"))
+        && fields[9] == json!(i64::from(request.plan_mode))
+        && request
+            .roots_revision
+            .is_none_or(|value| value == conversation.roots_revision)
+        && request
+            .service_tier
+            .as_ref()
+            .is_none_or(|tier| fields[10] == json!(tier))
 }
 
 #[derive(Debug, Serialize)]
@@ -1930,19 +2057,140 @@ pub(crate) async fn create_thread(
     {
         return error(StatusCode::UNPROCESSABLE_ENTITY, message);
     }
+    let request_digest = creation_request_digest(&id, &request);
+    let body_sha256 = hex::encode(Sha256::digest(request.body.as_bytes()));
+    let existing_creation = match state
+        .store
+        .project_creation_by_request(&request.client_message_id)
+        .await
+    {
+        Ok(value) => value,
+        Err(_) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The thread could not be checked. Try again.",
+            )
+        }
+    };
+    let existing_conversation = if let Some((conversation, payload)) = existing_creation {
+        if conversation.project_id != id {
+            return error(
+                StatusCode::CONFLICT,
+                "This request belongs to another Project.",
+            );
+        }
+        let matches = if payload["version"] == 2 {
+            payload["requestDigest"].as_str() == Some(request_digest.as_str())
+        } else {
+            let legacy = legacy_creation_matches(&payload, &id, &request, &conversation);
+            if legacy {
+                // Old records stored only the resolved folder path. When an
+                // explicit folder ID is gone, its original identity cannot
+                // be proven; do not silently treat a changed ID as exact.
+                if let Some(folder_id) = request.folder_id.as_deref() {
+                    let project = match state.store.project(&id).await {
+                        Ok(Some(project)) => project,
+                        _ => return error(StatusCode::CONFLICT, "The original Project folder could not be verified for this older request."),
+                    };
+                    project
+                        .roots
+                        .iter()
+                        .any(|root| root.id == folder_id && root.path == conversation.cwd)
+                } else {
+                    true
+                }
+            } else {
+                false
+            }
+        };
+        if !matches {
+            return error(
+                StatusCode::CONFLICT,
+                "This thread was already created with different settings or a different folder.",
+            );
+        }
+        let now = now_text();
+        if request.prepare_only {
+            return Json(CreateThreadResponse {
+                conversation: attached_summary(&state, &conversation, activity_seconds(&now), None)
+                    .await,
+                receipt: None,
+            })
+            .into_response();
+        }
+        let prior = match state
+            .store
+            .message_by_device_and_client_message_id(&request.device_id, &request.client_message_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The message could not be checked. Try again.",
+                )
+            }
+        };
+        if let Some(message) = prior {
+            let saved_ids = match state.store.attachment_ids_for_message(&message.id).await {
+                Ok(value) => value,
+                Err(_) => {
+                    return error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "The message attachments could not be checked. Try again.",
+                    )
+                }
+            };
+            let mut requested_ids = request.attachment_ids.clone();
+            requested_ids.sort();
+            if message.conversation_id != conversation.conversation_id
+                || message.body_sha256 != body_sha256
+                || saved_ids != requested_ids
+            {
+                return error(
+                    StatusCode::CONFLICT,
+                    "This message was already sent differently.",
+                );
+            }
+            let Some(receipt) = crate::message_receipt(message) else {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Stored message has an unknown delivery state.",
+                );
+            };
+            return (
+                StatusCode::ACCEPTED,
+                Json(CreateThreadResponse {
+                    conversation: attached_summary(
+                        &state,
+                        &conversation,
+                        activity_seconds(&now),
+                        None,
+                    )
+                    .await,
+                    receipt: Some(receipt),
+                }),
+            )
+                .into_response();
+        }
+        Some(conversation)
+    } else {
+        None
+    };
+    // The update lease fences first acceptance and fresh metadata creation.
+    // A stored receipt (or metadata-only reservation replay) above is a read,
+    // so it remains recoverable while the host prepares an update.
+    let Some(_admission) = state.update_admission.claim_guard().await else {
+        return error(
+            StatusCode::CONFLICT,
+            "Wonder is preparing to update. Try again shortly.",
+        );
+    };
     if request.family == AgentFamily::Claude && state.claude.is_none() {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Claude is not installed. Update Wonder on your Mac.",
         );
-    }
-    if let Err(message) = validate_model(
-        &*state.runtime_catalog.read().await,
-        request.family,
-        Some(&request.model),
-        request.effort.as_deref(),
-    ) {
-        return error(StatusCode::UNPROCESSABLE_ENTITY, message);
     }
     let readiness = state.ingestion.project_readiness(&state.store).await;
     if !readiness.ready {
@@ -1951,6 +2199,12 @@ pub(crate) async fn create_thread(
     let Ok(Some(project)) = state.store.project(&id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if !project.is_included {
+        return error(
+            StatusCode::CONFLICT,
+            "This Project is not included in Wonder. Restore it before starting work.",
+        );
+    }
     if request
         .roots_revision
         .is_some_and(|revision| revision != project.roots_revision)
@@ -1970,11 +2224,28 @@ pub(crate) async fn create_thread(
             "Choose one of this project's folders.",
         );
     };
-    if !FsPath::new(&root.canonical_path).is_dir() {
-        return error(
-            StatusCode::CONFLICT,
-            "This project folder is no longer available on your Mac. Edit the project.",
-        );
+    let checked_project = project.clone();
+    let denied = state.denied_roots.clone();
+    let folders_valid =
+        tokio::task::spawn_blocking(move || validate_execution_roots(&checked_project, &denied))
+            .await;
+    match folders_valid {
+        Ok(Ok(())) => {}
+        Ok(Err(detail)) => return error(StatusCode::CONFLICT, detail),
+        Err(_) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Project folders could not be checked. Try again.",
+            )
+        }
+    }
+    if let Some(existing) = &existing_conversation {
+        if existing.cwd != root.path || existing.roots_revision != project.roots_revision {
+            return error(
+                StatusCode::PRECONDITION_FAILED,
+                "The original Project folder changed. Review it before sending.",
+            );
+        }
     }
     let now = now_text();
     let title: String = request
@@ -1986,26 +2257,45 @@ pub(crate) async fn create_thread(
         .chars()
         .take(80)
         .collect();
-    let created = state
-        .store
-        .create_project_conversation(ProjectConversationInsert {
-            conversation_id: &uuid::Uuid::new_v4().to_string(),
-            project_id: &project.id,
-            family: request.family,
-            provider_store: provider_store(&state, request.family),
-            native_session_id: None,
-            cwd: &root.path,
-            roots_revision: project.roots_revision,
-            title: &title,
-            model: Some(&request.model),
-            effort: request.effort.as_deref(),
-            access_mode: &request.access_mode,
-            claude_approval: request.claude_approval.as_deref().unwrap_or("ask"),
-            plan_mode: request.plan_mode,
-            creation_request_id: Some(&request.client_message_id),
-            now: &now,
-        })
-        .await;
+    let conversation_id = uuid::Uuid::new_v4().to_string();
+    let insert = ProjectConversationInsert {
+        conversation_id: &conversation_id,
+        project_id: &project.id,
+        family: request.family,
+        provider_store: provider_store(&state, request.family),
+        native_session_id: None,
+        cwd: &root.path,
+        roots_revision: project.roots_revision,
+        title: &title,
+        model: Some(&request.model),
+        effort: request.effort.as_deref(),
+        service_tier: request.service_tier.as_deref(),
+        access_mode: &request.access_mode,
+        claude_approval: request.claude_approval.as_deref().unwrap_or("ask"),
+        plan_mode: request.plan_mode,
+        creation_request_id: Some(&request.client_message_id),
+        now: &now,
+    };
+    if existing_conversation.is_none() {
+        if let Err(message) = validate_model(
+            &*state.runtime_catalog.read().await,
+            request.family,
+            Some(&request.model),
+            request.effort.as_deref(),
+            request.service_tier.as_deref(),
+        ) {
+            return error(StatusCode::UNPROCESSABLE_ENTITY, message);
+        }
+    }
+    let created = match existing_conversation {
+        Some(conversation) => Ok(ProjectConversationCreate::Existing(conversation)),
+        None => {
+            state
+                .store
+                .create_project_conversation_with_request_digest(insert, &request_digest)
+                .await
+        }
+    };
     let conversation = match created {
         Ok(ProjectConversationCreate::Created(c) | ProjectConversationCreate::Existing(c)) => c,
         Err(sqlx::Error::Protocol(message)) => return error(StatusCode::CONFLICT, message),
@@ -2024,7 +2314,17 @@ pub(crate) async fn create_thread(
         })
         .into_response();
     }
-    let body_sha256 = hex::encode(Sha256::digest(request.body.as_bytes()));
+    if let Err((status, detail)) = crate::artifact_annotations::validate_first_acceptance(
+        &state,
+        &conversation.conversation_id,
+        &request.device_id,
+        &request.client_message_id,
+        &request.attachment_ids,
+    )
+    .await
+    {
+        return error(status, detail);
+    }
     let stored = match state
         .store
         .insert_dispatch_message_with_model_selection(
@@ -2045,6 +2345,12 @@ pub(crate) async fn create_thread(
             return error(
                 StatusCode::CONFLICT,
                 "This message was already sent differently.",
+            )
+        }
+        Err(sqlx::Error::Protocol(message)) if message == "annotation_already_sent" => {
+            return error(
+                StatusCode::CONFLICT,
+                "This annotation was already sent. Add a new annotation to send another note.",
             )
         }
         Err(_) => {
@@ -2179,7 +2485,7 @@ fn codex_turn_params(
 ) -> Value {
     let (_, approval, sandbox_policy) = codex_policy(turn.access_mode, turn.roots);
     json!({"threadId": thread_id, "clientUserMessageId": client_message_id, "input": input,
-        "model": turn.model, "effort": turn.effort, "cwd": turn.cwd,
+        "model": turn.model, "effort": turn.effort, "serviceTier": turn.service_tier, "cwd": turn.cwd,
         "approvalPolicy": approval, "sandboxPolicy": sandbox_policy, "runtimeWorkspaceRoots": turn.roots,
         "collaborationMode": {"mode": if turn.plan { "plan" } else { "default" },
             "settings": {"model": turn.model, "reasoning_effort": turn.effort, "developer_instructions": null}}})
@@ -2190,6 +2496,7 @@ struct CodexTurn<'a> {
     roots: &'a [String],
     model: &'a str,
     effort: Option<&'a str>,
+    service_tier: Option<&'a str>,
     cwd: &'a str,
     plan: bool,
 }
@@ -2365,6 +2672,9 @@ async fn dispatch_inner(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("This project is unavailable.")?;
+    if !project.is_included {
+        return Err("This Project is not included in Wonder. Restore it before continuing.".into());
+    }
     let validation_project = project.clone();
     let denied = state.denied_roots.clone();
     tokio::task::spawn_blocking(move || validate_execution_roots(&validation_project, &denied))
@@ -2380,16 +2690,38 @@ async fn dispatch_inner(
         return Err("This thread's folder is no longer available on your Mac.".into());
     }
     let catalog = state.runtime_catalog.read().await.clone();
-    let model = conversation
-        .model
+    let (selected_model, effort, selected_tier) = state
+        .store
+        .project_message_execution_settings(&message.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| {
+            (
+                conversation.model.clone(),
+                conversation.effort.clone(),
+                conversation.service_tier.clone(),
+            )
+        });
+    let model = selected_model
         .clone()
         .or_else(|| default_model(&catalog, conversation.family))
         .ok_or("Choose a model for this thread.")?;
+    let service_tier = selected_tier.or_else(|| {
+        if conversation.family == AgentFamily::Codex {
+            return Some("default".to_owned());
+        }
+        catalog
+            .models
+            .iter()
+            .find(|option| option.id == model && option.agent_family == conversation.family)
+            .and_then(|option| option.default_service_tier.clone())
+    });
     validate_model(
         &catalog,
         conversation.family,
         Some(&model),
-        conversation.effort.as_deref(),
+        effort.as_deref(),
+        service_tier.as_deref(),
     )
     .map_err(str::to_owned)?;
     let roots = project
@@ -2449,6 +2781,7 @@ async fn dispatch_inner(
             }
             let resumed = result(&rpc, "thread/resume", json!({
                 "threadId": binding.thread_id, "excludeTurns": true, "cwd": conversation.cwd, "model": model,
+                "serviceTier": service_tier,
                 "sandbox": sandbox, "approvalPolicy": approval, "runtimeWorkspaceRoots": roots,
             }))
             .await
@@ -2464,7 +2797,7 @@ async fn dispatch_inner(
             let project_id = native_codex_project(state, &rpc, &project).await;
             let (sandbox, approval, _) = codex_policy(&conversation.access_mode, &roots);
             let started = result(&rpc, "thread/start", json!({
-                "cwd": conversation.cwd, "projectId": project_id, "model": model, "sandbox": sandbox,
+                "cwd": conversation.cwd, "projectId": project_id, "model": model, "serviceTier": service_tier, "sandbox": sandbox,
                 "approvalPolicy": approval, "runtimeWorkspaceRoots": roots,
             }))
             .await?;
@@ -2498,7 +2831,7 @@ async fn dispatch_inner(
                 &rpc,
                 "thread/start",
                 json!({
-                    "cwd": conversation.cwd, "model": model,
+                    "cwd": conversation.cwd, "model": model, "serviceTier": service_tier,
                     "wonderPolicy": permission,
                     "wonderProject": claude_project(&project, &conversation.cwd),
                 }),
@@ -2534,10 +2867,23 @@ async fn dispatch_inner(
             thread
         }
     };
-    let input = crate::turn_input(&message.body, &media, &files);
+    let annotation_inputs = crate::artifact_annotations::selected_inputs(
+        state,
+        &message.conversation_id,
+        &files,
+        false,
+    )
+    .await
+    .map_err(|(_, detail)| detail)?;
+    let ordinary_files = files
+        .into_iter()
+        .filter(|file| file.mime_type.as_deref() != Some(crate::artifact_annotations::MIME))
+        .collect::<Vec<_>>();
+    let mut input = crate::turn_input(&message.body, &media, &ordinary_files);
+    input.extend(annotation_inputs);
     let context = json!({
         "schemaVersion": 1, "scope": "projects", "projectId": project.id, "rootsRevision": project.roots_revision,
-        "workingDirectory": conversation.cwd, "model": model, "effort": conversation.effort,
+        "workingDirectory": conversation.cwd, "model": model, "effort": effort, "serviceTier": service_tier,
         "accessMode": conversation.access_mode, "family": conversation.family,
         "claudeApproval": conversation.claude_approval, "planMode": conversation.plan_mode,
         "inputSha256": hex::encode(Sha256::digest(serde_json::to_vec(&input).unwrap_or_default())),
@@ -2558,14 +2904,15 @@ async fn dispatch_inner(
                 access_mode: &conversation.access_mode,
                 roots: &roots,
                 model: &model,
-                effort: conversation.effort.as_deref(),
+                effort: effort.as_deref(),
+                service_tier: service_tier.as_deref(),
                 cwd: &conversation.cwd,
                 plan: conversation.plan_mode,
             },
         ),
         AgentFamily::Claude => {
             json!({"threadId": thread_id, "clientUserMessageId": message.client_message_id,
-            "input": input, "model": model, "effort": conversation.effort,
+            "input": input, "model": model, "effort": effort, "serviceTier": service_tier,
             "wonderPolicy": permission,
             "wonderProject": claude_project(&project, &conversation.cwd)})
         }
@@ -2573,11 +2920,11 @@ async fn dispatch_inner(
     let resume = match conversation.family {
         AgentFamily::Codex => {
             let (sandbox, approval, _) = codex_policy(&conversation.access_mode, &roots);
-            json!({"threadId":thread_id,"excludeTurns":true,"cwd":conversation.cwd,"model":model,
+            json!({"threadId":thread_id,"excludeTurns":true,"cwd":conversation.cwd,"model":model,"serviceTier":service_tier,
                 "sandbox":sandbox,"approvalPolicy":approval,"runtimeWorkspaceRoots":roots})
         }
         AgentFamily::Claude => json!({"threadId":thread_id,"excludeTurns":true,
-            "cwd":conversation.cwd,"model":model,"wonderPolicy":permission,
+            "cwd":conversation.cwd,"model":model,"serviceTier":service_tier,"wonderPolicy":permission,
             "wonderProject":claude_project(&project, &conversation.cwd)}),
     };
     crate::update_handoff::remember_settings(state, &thread_id, &resume, &params).await?;
@@ -3164,6 +3511,36 @@ pub(crate) async fn continuation(
 pub(crate) mod tests {
     use super::*;
 
+    // Blank, structurally valid two-page PDF for provider-input tests. Offsets
+    // are calculated from the emitted objects so a PDF parser can check page 2.
+    #[cfg(target_os = "macos")]
+    fn two_page_pdf() -> Vec<u8> {
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>",
+        ];
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!("trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n{xref}\n").as_bytes(),
+        );
+        bytes.extend_from_slice(b"%%EOF\n");
+        bytes
+    }
+
     pub(crate) async fn handoff_fixture(
     ) -> (tempfile::TempDir, AppState, wonder_store::StoredMessage) {
         let (dir, mut state) = crate::ingestion::tests::fixture().await;
@@ -3195,6 +3572,7 @@ pub(crate) mod tests {
                 title: "Recovery",
                 model: None,
                 effort: None,
+                service_tier: None,
                 access_mode: "read_only",
                 claude_approval: "ask",
                 plan_mode: false,
@@ -3709,6 +4087,7 @@ pub(crate) mod tests {
             family: AgentFamily::Claude,
             model: Some("claude:sonnet".into()),
             effort: None,
+            service_tier: None,
             access_mode: "workspace".into(),
             claude_approval: "accept_edits".into(),
             plan_mode: true,
@@ -3897,6 +4276,21 @@ pub(crate) mod tests {
     async fn preparation_retries_one_conversation_without_starting_work() {
         use crate::permission_modes::tests::{call, fixture};
         let (dir, state) = fixture().await;
+        {
+            let mut catalog = state.runtime_catalog.write().await;
+            catalog.models[0].service_tiers = vec![
+                crate::ChoiceOption {
+                    id: "default".into(),
+                    label: "Standard".into(),
+                    description: None,
+                },
+                crate::ChoiceOption {
+                    id: "fast".into(),
+                    label: "Fast".into(),
+                    description: None,
+                },
+            ];
+        }
         let source = dir.path().join("project-source");
         std::fs::create_dir(&source).unwrap();
         let roots = validate_folders(&[source.to_string_lossy().into_owned()], &[]).unwrap();
@@ -3921,8 +4315,22 @@ pub(crate) mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let request = json!({"deviceId":"owner", "clientMessageId":uuid::Uuid::new_v4().to_string(),
-            "family":"codex", "model":"fake", "body":"First message", "rootsRevision":1, "prepareOnly":true});
+            "family":"codex", "model":"fake", "serviceTier":"fast", "body":"First message", "rootsRevision":1, "prepareOnly":true});
         crate::tests::validate_http_contract("createProjectThreadRequest", &request);
+        let mut unsupported = request.clone();
+        unsupported["clientMessageId"] = json!(uuid::Uuid::new_v4().to_string());
+        unsupported["serviceTier"] = json!("priority");
+        assert_eq!(
+            call(
+                &state,
+                "POST",
+                "/api/v1/projects/prepare-project/threads",
+                unsupported
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
         let first = call(
             &state,
             "POST",
@@ -3945,6 +4353,90 @@ pub(crate) mod tests {
             first.1["conversation"]["conversationId"],
             second.1["conversation"]["conversationId"]
         );
+        // A prepared first message must validate annotation source bytes just
+        // like an ordinary Project send. The invalid record must never be
+        // accepted for dispatch, even with the exact creation request ID.
+        let prepared_id = first.1["conversation"]["conversationId"].as_str().unwrap();
+        std::fs::write(source.join("note.txt"), b"current source\n").unwrap();
+        let annotation = json!({
+            "version": 1, "projectId": "prepare-project", "conversationId": prepared_id,
+            "rootId": "workspace", "path": "note.txt", "sourceSha256": "0".repeat(64),
+            "anchor": {"kind":"textLines", "startLine":1, "endLine":1},
+            "note": "Check this source"
+        });
+        let upload = crate::upload_conversation_file(
+            State(state.clone()),
+            Path(prepared_id.to_owned()),
+            Json(crate::CreateConversationFileRequest {
+                client_upload_id: Some(uuid::Uuid::new_v4().to_string()),
+                name: "annotation.json".into(),
+                mime_type: Some(crate::artifact_annotations::MIME.into()),
+                content_base64: {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode(annotation.to_string())
+                },
+            }),
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::OK);
+        let uploaded: Value = serde_json::from_slice(
+            &axum::body::to_bytes(upload.into_body(), 8192)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let mut invalid_first_send = request.clone();
+        invalid_first_send["prepareOnly"] = json!(false);
+        invalid_first_send["attachmentIds"] = json!([uploaded["id"]]);
+        let rejected = call(
+            &state,
+            "POST",
+            "/api/v1/projects/prepare-project/threads",
+            invalid_first_send,
+        )
+        .await;
+        assert_eq!(rejected.0, StatusCode::CONFLICT, "{}", rejected.1);
+        assert!(state
+            .store
+            .message_by_device_and_client_message_id(
+                "owner",
+                request["clientMessageId"].as_str().unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_none());
+        let original_model = {
+            let mut catalog = state.runtime_catalog.write().await;
+            let original = catalog.models[0].clone();
+            catalog.models[0].hidden = true;
+            catalog.models[0]
+                .service_tiers
+                .retain(|tier| tier.id == "default");
+            original
+        };
+        let recovered = call(
+            &state,
+            "POST",
+            "/api/v1/projects/prepare-project/threads",
+            request.clone(),
+        )
+        .await;
+        assert_eq!(recovered.0, StatusCode::OK, "{}", recovered.1);
+        assert_eq!(
+            first.1["conversation"]["conversationId"],
+            recovered.1["conversation"]["conversationId"]
+        );
+        let mut conflicting = request.clone();
+        conflicting["serviceTier"] = json!("default");
+        let conflict = call(
+            &state,
+            "POST",
+            "/api/v1/projects/prepare-project/threads",
+            conflicting,
+        )
+        .await;
+        assert_eq!(conflict.0, StatusCode::CONFLICT, "{}", conflict.1);
+        state.runtime_catalog.write().await.models[0] = original_model;
         let id = first.1["conversation"]["conversationId"].as_str().unwrap();
         // The HTTP/store boundary preserves omitted effort and clears explicit
         // null when switching to an effort-less model, avoiding a rejected Send.
@@ -3993,6 +4485,34 @@ pub(crate) mod tests {
         let cleared = call(&state, "PATCH", &path, clear).await;
         assert_eq!(cleared.0, StatusCode::OK, "{}", cleared.1);
         assert!(cleared.1["effort"].is_null());
+        assert_eq!(cleared.1["serviceTier"], "fast");
+        let mut standard_only = state
+            .runtime_catalog
+            .read()
+            .await
+            .models
+            .iter()
+            .find(|model| model.id == "fake")
+            .unwrap()
+            .clone();
+        standard_only.id = "standard-only".into();
+        standard_only
+            .service_tiers
+            .retain(|tier| tier.id == "default");
+        state
+            .runtime_catalog
+            .write()
+            .await
+            .models
+            .push(standard_only);
+        let changed = call(&state, "PATCH", &path, json!({"model":"standard-only"})).await;
+        assert_eq!(changed.0, StatusCode::OK, "{}", changed.1);
+        assert!(
+            changed.1["serviceTier"].is_null(),
+            "Model changes clear an unsupported speed"
+        );
+        let unavailable = call(&state, "PATCH", &path, json!({"serviceTier":"fast"})).await;
+        assert_eq!(unavailable.0, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(state.store.runtime_binding(id).await.unwrap().is_none());
         assert!(state
             .store
@@ -4011,7 +4531,7 @@ pub(crate) mod tests {
             stale,
         )
         .await;
-        assert_eq!(rejected.0, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(rejected.0, StatusCode::CONFLICT);
         // Plan mode is part of the frozen creation request, Claude approval
         // has no meaning for Codex, and pinned threads join the library.
         let planned = json!({"deviceId":"owner", "clientMessageId":uuid::Uuid::new_v4().to_string(),
@@ -4116,6 +4636,579 @@ pub(crate) mod tests {
         state.app_server.lock().await.shutdown().await.unwrap();
     }
 
+    // An accepted first Send has a durable receipt. Its exact retry must not
+    // depend on today's Project visibility, folders or ingestion readiness.
+    // A new request and a prepared-only first Send still use those gates.
+    #[tokio::test]
+    async fn accepted_creation_replays_receipt_after_project_changes() {
+        use crate::permission_modes::tests::{call, fixture};
+        let (dir, state) = fixture().await;
+        let source = dir.path().join("retry-source");
+        std::fs::create_dir(&source).unwrap();
+        let roots = validate_folders(&[source.to_string_lossy().into_owned()], &[]).unwrap();
+        state
+            .store
+            .create_project(
+                "retry-project",
+                "request",
+                "hash",
+                "Retry",
+                &roots,
+                0,
+                "now",
+            )
+            .await
+            .unwrap();
+        let project = state.store.project("retry-project").await.unwrap().unwrap();
+        let service = crate::ingestion::spawn(state.clone()).await;
+        for _ in 0..100 {
+            if state.ingestion.project_readiness(&state.store).await.ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(state.ingestion.project_readiness(&state.store).await.ready);
+        let path = "/api/v1/projects/retry-project/threads";
+        let request = json!({"deviceId":"owner", "clientMessageId":uuid::Uuid::new_v4().to_string(),
+            "family":"codex", "model":"fake", "body":"Review this folder", "folderId":project.primary_root_id,
+            "rootsRevision":1});
+        let accepted = call(&state, "POST", path, request.clone()).await;
+        assert_eq!(accepted.0, StatusCode::ACCEPTED, "{}", accepted.1);
+        let receipt = accepted.1["receipt"].clone();
+        assert!(!receipt.is_null());
+        let retry = call(&state, "POST", path, request.clone()).await;
+        assert_eq!(retry.0, StatusCode::ACCEPTED, "{}", retry.1);
+        assert_eq!(retry.1["receipt"], receipt);
+        assert_eq!(
+            retry.1["conversation"]["conversationId"],
+            accepted.1["conversation"]["conversationId"]
+        );
+        for (key, value) in [
+            ("body", json!("A different message")),
+            ("model", json!("different-model")),
+            ("folderId", json!(uuid::Uuid::new_v4().to_string())),
+            ("rootsRevision", json!(2)),
+            ("attachmentIds", json!([uuid::Uuid::new_v4().to_string()])),
+        ] {
+            let mut changed = request.clone();
+            changed[key] = value;
+            assert_eq!(
+                call(&state, "POST", path, changed).await.0,
+                StatusCode::CONFLICT,
+                "changed {key}"
+            );
+        }
+        let mut fresh = request.clone();
+        fresh["clientMessageId"] = json!(uuid::Uuid::new_v4().to_string());
+
+        state
+            .store
+            .update_project_metadata("retry-project", None, Some(false), None, "later")
+            .await
+            .unwrap();
+        assert_eq!(
+            call(&state, "POST", path, request.clone()).await.1["receipt"],
+            receipt
+        );
+        assert_eq!(
+            call(&state, "POST", path, fresh.clone()).await.0,
+            StatusCode::CONFLICT
+        );
+        state
+            .store
+            .update_project_metadata("retry-project", None, Some(true), None, "later")
+            .await
+            .unwrap();
+
+        state
+            .store
+            .update_project_roots("retry-project", 1, &roots, 0, "later")
+            .await
+            .unwrap();
+        assert_eq!(
+            call(&state, "POST", path, request.clone()).await.1["receipt"],
+            receipt
+        );
+        assert_eq!(
+            call(&state, "POST", path, fresh.clone()).await.0,
+            StatusCode::PRECONDITION_FAILED
+        );
+        fresh["rootsRevision"] = json!(2);
+        let mut prepared = fresh.clone();
+        prepared["clientMessageId"] = json!(uuid::Uuid::new_v4().to_string());
+        prepared["prepareOnly"] = json!(true);
+        let reservation = call(&state, "POST", path, prepared.clone()).await;
+        assert_eq!(reservation.0, StatusCode::OK, "{}", reservation.1);
+        assert!(reservation.1["receipt"].is_null());
+        std::fs::rename(&source, dir.path().join("moved-source")).unwrap();
+        assert_eq!(
+            call(&state, "POST", path, request.clone()).await.1["receipt"],
+            receipt
+        );
+        assert_eq!(
+            call(&state, "POST", path, fresh.clone()).await.0,
+            StatusCode::CONFLICT
+        );
+        #[cfg(unix)]
+        {
+            let replacement = dir.path().join("unrelated-source");
+            std::fs::create_dir(&replacement).unwrap();
+            std::os::unix::fs::symlink(&replacement, &source).unwrap();
+            assert_eq!(
+                call(&state, "POST", path, fresh.clone()).await.0,
+                StatusCode::CONFLICT,
+                "A symlink at the original path cannot redirect a new request"
+            );
+        }
+
+        drop(service);
+        for _ in 0..100 {
+            if !state.ingestion.project_readiness(&state.store).await.ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!state.ingestion.project_readiness(&state.store).await.ready);
+        assert_eq!(
+            call(&state, "POST", path, request.clone()).await.1["receipt"],
+            receipt
+        );
+        assert_eq!(
+            call(&state, "POST", path, fresh).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            call(&state, "POST", path, prepared.clone()).await.0,
+            StatusCode::OK
+        );
+        prepared["prepareOnly"] = json!(false);
+        assert_eq!(
+            call(&state, "POST", path, prepared).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        state
+            .update_admission
+            .prepare_update("retry-update", &state)
+            .await
+            .unwrap();
+        let replay_during_update = call(&state, "POST", path, request.clone()).await;
+        assert_eq!(
+            replay_during_update.0,
+            StatusCode::ACCEPTED,
+            "{}",
+            replay_during_update.1
+        );
+        assert_eq!(
+            replay_during_update.1["receipt"]["wonderMessageId"],
+            receipt["wonderMessageId"]
+        );
+        let mut new_work = request;
+        new_work["clientMessageId"] = json!(uuid::Uuid::new_v4().to_string());
+        assert_eq!(
+            call(&state, "POST", path, new_work).await.0,
+            StatusCode::CONFLICT
+        );
+        assert!(state.update_admission.cancel_lease("retry-update").await);
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    // The provider receives the speed frozen with each accepted message,
+    // including after a settings edit and when resuming an existing thread.
+    #[tokio::test]
+    async fn project_speed_reaches_exact_provider_requests() {
+        let (dir, mut state) = crate::permission_modes::tests::fixture().await;
+        let source = dir.path().join("project-source");
+        std::fs::create_dir(&source).unwrap();
+        let roots = validate_folders(&[source.to_string_lossy().into_owned()], &[]).unwrap();
+        state
+            .store
+            .create_project(
+                "speed-project",
+                "request",
+                "hash",
+                "Speed",
+                &roots,
+                0,
+                "now",
+            )
+            .await
+            .unwrap();
+        state.projects = ProjectRuntime::configured(
+            dir.path().join("codex"),
+            "test".into(),
+            &dir.path().join("home"),
+            &dir.path().join("claude"),
+            crate::ingestion::notification_sink(state.store.clone()),
+        );
+        let script = dir.path().join("runtime.py");
+        let source_code = std::fs::read_to_string(&script).unwrap().replace(
+            "else {'thread':{'status':{'type':'idle'}}}",
+            "else {'thread':{'id':'thread','status':{'type':'idle'}}}",
+        );
+        std::fs::write(script, source_code).unwrap();
+        std::fs::write(
+            dir.path().join("models.json"),
+            json!({"data":[{
+                "id":"fake","displayName":"Fake","serviceTiers":[
+                    {"id":"default","label":"Standard"},{"id":"fast","label":"Fast"}]
+            }]})
+            .to_string(),
+        )
+        .unwrap();
+        let mut catalog = state.runtime_catalog.write().await;
+        catalog.models[0].service_tiers = vec![
+            crate::ChoiceOption {
+                id: "default".into(),
+                label: "Standard".into(),
+                description: None,
+            },
+            crate::ChoiceOption {
+                id: "fast".into(),
+                label: "Fast".into(),
+                description: None,
+            },
+        ];
+        drop(catalog);
+        let conversation = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .create_project_conversation(ProjectConversationInsert {
+                conversation_id: &conversation,
+                project_id: "speed-project",
+                family: AgentFamily::Codex,
+                provider_store: &state.projects.codex_store,
+                native_session_id: None,
+                cwd: source.to_str().unwrap(),
+                roots_revision: 1,
+                title: "Speed",
+                model: Some("fake"),
+                effort: None,
+                service_tier: Some("fast"),
+                access_mode: "read_only",
+                claude_approval: "ask",
+                plan_mode: false,
+                creation_request_id: None,
+                now: "now",
+            })
+            .await
+            .unwrap();
+        let MessageInsert::Inserted(first) = state
+            .store
+            .insert_dispatch_message(
+                "owner",
+                "first",
+                "first",
+                "hash-first",
+                &conversation,
+                &[],
+                "now",
+                true,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("first message")
+        };
+        state
+            .store
+            .update_project_conversation(
+                &conversation,
+                ProjectConversationPatch {
+                    service_tier: Some(Some("default")),
+                    ..Default::default()
+                },
+                "later",
+            )
+            .await
+            .unwrap();
+        assert!(state
+            .store
+            .claim_message_for_dispatch(&first.id)
+            .await
+            .unwrap());
+        let mut submitting = false;
+        dispatch_inner(&state, &first, &mut submitting)
+            .await
+            .unwrap();
+        assert!(submitting);
+        state
+            .store
+            .update_message_delivery(&first.id, "completed", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("idle-fixture.json"),
+            json!({"thread":{"id":"thread","cwd":source,"projectId":"native-project","status":{"type":"idle"}}}).to_string()).unwrap();
+        // The second turn selects a preview note through the same immutable
+        // attachment path as the native composer. The fake runtime records
+        // the exact turn/start payload without starting model work.
+        let annotated_source = source.join("annotated.txt");
+        std::fs::write(&annotated_source, b"one\ntwo\n").unwrap();
+        let annotation = json!({
+            "version": 1, "projectId": "speed-project", "conversationId": conversation,
+            "rootId": "workspace", "path": "annotated.txt",
+            "sourceSha256": hex::encode(Sha256::digest(std::fs::read(&annotated_source).unwrap())),
+            "anchor": {"kind":"textLines","startLine":2,"endLine":2},
+            "note": "Review line two"
+        });
+        let upload = crate::upload_conversation_file(
+            State(state.clone()),
+            Path(conversation.clone()),
+            Json(crate::CreateConversationFileRequest {
+                client_upload_id: Some(uuid::Uuid::new_v4().to_string()),
+                name: "annotation.json".into(),
+                mime_type: Some(crate::artifact_annotations::MIME.into()),
+                content_base64: {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode(annotation.to_string())
+                },
+            }),
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::OK);
+        let uploaded: Value = serde_json::from_slice(
+            &axum::body::to_bytes(upload.into_body(), 8192)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let annotation_id = uploaded["id"].as_str().unwrap().to_owned();
+        let image_bytes = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;".to_vec();
+        let mut media_notes = vec![(
+            "marked.gif",
+            image_bytes,
+            json!({"kind":"imageRegion","x":0.1,"y":0.2,"width":0.3,"height":0.4}),
+            "Check image crop",
+            "image region (normalized 0-1, origin at top left) x=0.1, y=0.2, width=0.3, height=0.4",
+        )];
+        #[cfg(target_os = "macos")]
+        media_notes.push((
+            "marked.pdf",
+            two_page_pdf(),
+            json!({"kind":"pdfRegion","page":2,"x":0.25,"y":0.5,"width":0.5,"height":0.25}),
+            "Check PDF page two",
+            "PDF page 2, region (normalized 0-1, origin at top left) x=0.25, y=0.5, width=0.5, height=0.25",
+        ));
+        let mut selected_ids = vec![annotation_id.clone()];
+        let mut media_sources = Vec::new();
+        for (name, bytes, anchor, note, _) in &media_notes {
+            let source_path = source.join(name);
+            std::fs::write(&source_path, bytes).unwrap();
+            let record = json!({
+                "version":1, "projectId":"speed-project", "conversationId":conversation,
+                "rootId":"workspace", "path":name,
+                "sourceSha256":hex::encode(Sha256::digest(bytes)), "anchor":anchor, "note":note,
+            });
+            let upload = crate::upload_conversation_file(
+                State(state.clone()),
+                Path(conversation.clone()),
+                Json(crate::CreateConversationFileRequest {
+                    client_upload_id: Some(uuid::Uuid::new_v4().to_string()),
+                    name: format!("{name}.annotation.json"),
+                    mime_type: Some(crate::artifact_annotations::MIME.into()),
+                    content_base64: {
+                        use base64::Engine as _;
+                        base64::engine::general_purpose::STANDARD.encode(record.to_string())
+                    },
+                }),
+            )
+            .await;
+            assert_eq!(upload.status(), StatusCode::OK);
+            let uploaded: Value = serde_json::from_slice(
+                &axum::body::to_bytes(upload.into_body(), 8192)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            selected_ids.push(uploaded["id"].as_str().unwrap().to_owned());
+            media_sources.push(source_path);
+        }
+        // A valid PDF container is not enough: a crafted annotation cannot
+        // send a region on a page the document does not contain.
+        #[cfg(target_os = "macos")]
+        {
+            let missing_page_record = json!({
+                "version":1, "projectId":"speed-project", "conversationId":conversation,
+                "rootId":"workspace", "path":"marked.pdf",
+                "sourceSha256":hex::encode(Sha256::digest(&media_notes[1].1)),
+                "anchor":{"kind":"pdfRegion","page":3,"x":0.25,"y":0.5,"width":0.5,"height":0.25},
+                "note":"This page does not exist",
+            });
+            let upload = crate::upload_conversation_file(
+                State(state.clone()),
+                Path(conversation.clone()),
+                Json(crate::CreateConversationFileRequest {
+                    client_upload_id: Some(uuid::Uuid::new_v4().to_string()),
+                    name: "missing-page.annotation.json".into(),
+                    mime_type: Some(crate::artifact_annotations::MIME.into()),
+                    content_base64: {
+                        use base64::Engine as _;
+                        base64::engine::general_purpose::STANDARD
+                            .encode(missing_page_record.to_string())
+                    },
+                }),
+            )
+            .await;
+            assert_eq!(upload.status(), StatusCode::OK);
+            let uploaded: Value = serde_json::from_slice(
+                &axum::body::to_bytes(upload.into_body(), 8192)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::artifact_annotations::validate_first_acceptance(
+                    &state,
+                    &conversation,
+                    "owner",
+                    "invalid-page",
+                    &[uploaded["id"].as_str().unwrap().to_owned()],
+                )
+                .await
+                .unwrap_err()
+                .0,
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        crate::artifact_annotations::validate_first_acceptance(
+            &state,
+            &conversation,
+            "owner",
+            "second",
+            &selected_ids,
+        )
+        .await
+        .unwrap();
+        std::fs::write(&annotated_source, b"changed after acceptance\n").unwrap();
+        for source_path in &media_sources {
+            std::fs::remove_file(source_path).unwrap();
+        }
+        let MessageInsert::Inserted(second) = state
+            .store
+            .insert_dispatch_message(
+                "owner",
+                "second",
+                "second",
+                "hash-second",
+                &conversation,
+                &selected_ids,
+                "later",
+                true,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("second message")
+        };
+        // The accepted annotation must still dispatch from its frozen copy
+        // after an unrelated Project root edit increments roots_revision.
+        let unrelated = dir.path().join("unrelated-project-root");
+        std::fs::create_dir(&unrelated).unwrap();
+        let changed_roots = validate_folders(
+            &[
+                source.to_string_lossy().into_owned(),
+                unrelated.to_string_lossy().into_owned(),
+            ],
+            &[],
+        )
+        .unwrap();
+        let updated = state
+            .store
+            .update_project_roots("speed-project", 1, &changed_roots, 0, "after-acceptance")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.roots_revision, 2);
+        assert_eq!(
+            state
+                .store
+                .project_conversation(&conversation)
+                .await
+                .unwrap()
+                .unwrap()
+                .roots_revision,
+            1
+        );
+        assert!(state
+            .store
+            .claim_message_for_dispatch(&second.id)
+            .await
+            .unwrap());
+        submitting = false;
+        dispatch_inner(&state, &second, &mut submitting)
+            .await
+            .unwrap();
+        assert!(submitting);
+        let requests: Vec<Value> = std::fs::read_to_string(dir.path().join("requests-jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect();
+        for (method, expected) in [("thread/start", "fast"), ("thread/resume", "default")] {
+            let request = requests
+                .iter()
+                .find(|request| request["method"] == method)
+                .unwrap();
+            assert_eq!(request["params"]["serviceTier"], expected, "{method}");
+        }
+        let turns: Vec<_> = requests
+            .iter()
+            .filter(|request| request["method"] == "turn/start")
+            .collect();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0]["params"]["serviceTier"], "fast");
+        assert_eq!(turns[1]["params"]["serviceTier"], "default");
+        let second_input = turns[1]["params"]["input"].as_array().unwrap();
+        assert_eq!(
+            second_input.len(),
+            2 + media_notes.len(),
+            "body plus one text and each supported media note"
+        );
+        assert_eq!(
+            second_input
+                .iter()
+                .filter(|input| input["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Review line two")))
+                .count(),
+            1
+        );
+        let media = media_workspace(&state, &conversation).await.unwrap();
+        let source_copy_id = crate::deterministic_uuid(&format!("artifact-source:{annotation_id}"));
+        let source_copy = crate::attachment_path(&media, &source_copy_id, false)
+            .await
+            .unwrap();
+        assert!(second_input.iter().any(|input| input["text"]
+            .as_str()
+            .is_some_and(|text| text.contains(source_copy.to_str().unwrap())
+                && text.contains("Original file: workspace/annotated.txt"))));
+        assert_eq!(std::fs::read(&source_copy).unwrap(), b"one\ntwo\n");
+        for (index, (name, bytes, _, note, anchor)) in media_notes.iter().enumerate() {
+            let copy_id =
+                crate::deterministic_uuid(&format!("artifact-source:{}", selected_ids[index + 1]));
+            let copy = crate::attachment_path(&media, &copy_id, false)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&copy).unwrap(), *bytes);
+            assert_eq!(
+                second_input
+                    .iter()
+                    .filter(|input| input["text"].as_str().is_some_and(|text| text
+                        .contains(&format!("Original file: workspace/{name}"))
+                        && text.contains(copy.to_str().unwrap())
+                        && text.contains(anchor)
+                        && text.contains(note)))
+                    .count(),
+                1,
+                "{name} anchor must reach one provider text input"
+            );
+        }
+        assert!(!second_input.iter().any(|input| input["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("annotation.json"))));
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
     // The existing upload/storage boundary owns this regression: project
     // uploads must retain verified bytes under their own conversation, without
     // writing into a source folder or following a substituted media symlink.
@@ -4148,6 +5241,7 @@ pub(crate) mod tests {
                 title: "Draft",
                 model: None,
                 effort: None,
+                service_tier: None,
                 access_mode: "read_only",
                 claude_approval: "ask",
                 plan_mode: false,
@@ -4260,6 +5354,7 @@ pub(crate) mod tests {
                         roots: &roots,
                         model: "gpt-x",
                         effort,
+                        service_tier: Some("default"),
                         cwd: "/work/app",
                         plan,
                     },

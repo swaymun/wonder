@@ -222,6 +222,39 @@ struct DiagnosticLaunchView: View {
 /// production ConversationView and durable ReadStore with a
 /// synthetic URLProtocol transport, so later image/workspace fixtures can add
 /// responses without introducing successful-send branches into Release.
+/// Small, synthetic document and model samples; this file is excluded from Release.
+enum DiagnosticWorkspaceFileFixtures {
+    static let names = ["workspace-reader.epub", "triangle.usdz", "triangle.obj", "tetra.obj", "triangle.ply",
+                        "triangle-binary.stl", "triangle-ascii.stl", "sidecar.obj"]
+    private static let encoded: [String: String] = [
+        "workspace-reader.epub": "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",
+        "triangle.usdz": "UEsDBAoAAAAAAE8SQl3cJVqvRgEAAEYBAAANABUAdHJpYW5nbGUudXNkYYYZEQAAAAAAAAAAAAAAAAAAAAAAACN1c2RhIDEuMAooCiAgICBkZWZhdWx0UHJpbSA9ICJUcmlhbmdsZSIKICAgIG1ldGVyc1BlclVuaXQgPSAxCiAgICB1cEF4aXMgPSAiWSIKKQpkZWYgWGZvcm0gIlRyaWFuZ2xlIiB7CiAgICBkZWYgTWVzaCAiTWVzaCIgewogICAgICAgIGludFtdIGZhY2VWZXJ0ZXhDb3VudHMgPSBbM10KICAgICAgICBpbnRbXSBmYWNlVmVydGV4SW5kaWNlcyA9IFswLCAxLCAyXQogICAgICAgIHBvaW50M2ZbXSBwb2ludHMgPSBbKDAsIDAsIDApLCAoMSwgMCwgMCksICgwLCAxLCAwKV0KICAgICAgICB1bmlmb3JtIHRva2VuIHN1YmRpdmlzaW9uU2NoZW1lID0gIm5vbmUiCiAgICB9Cn0KUEsBAgAACgAAAAAATxJCXdwlWq9GAQAARgEAAA0AFQAAAAAAAAAAAAAAAAAAAHRyaWFuZ2xlLnVzZGGGGREAAAAAAAAAAAAAAAAAAAAAAABQSwUGAAAAAAEAAQBQAAAAhgEAAAAA",
+        "triangle.obj": "byBUcmlhbmdsZQp2IDAgMCAwCnYgMSAwIDAKdiAwIDEgMApmIDEgMiAzCg==",
+        "tetra.obj": "diAwIDAgMAp2IDEgMCAwCnYgMC41IDAuODY2IDAKdiAwLjUgMC4yODkgMC44MTYKZiAxIDIgMwpmIDEgNCAyCmYgMiA0IDMKZiAzIDQgMQo=",
+        "triangle.ply": "cGx5CmZvcm1hdCBhc2NpaSAxLjAKZWxlbWVudCB2ZXJ0ZXggMwpwcm9wZXJ0eSBmbG9hdCB4CnByb3BlcnR5IGZsb2F0IHkKcHJvcGVydHkgZmxvYXQgegplbGVtZW50IGZhY2UgMQpwcm9wZXJ0eSBsaXN0IHVjaGFyIGludCB2ZXJ0ZXhfaW5kaWNlcwplbmRfaGVhZGVyCjAgMCAwCjEgMCAwCjAgMSAwCjMgMCAxIDIK",
+        "triangle-binary.stl": "c3ludGhldGljIHRyaWFuZ2xlICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICABAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAA=",
+        "triangle-ascii.stl": "c29saWQgdHJpYW5nbGUKZmFjZXQgbm9ybWFsIDAgMCAxCm91dGVyIGxvb3AKdmVydGV4IDAgMCAwCnZlcnRleCAxIDAgMAp2ZXJ0ZXggMCAxIDAKZW5kbG9vcAplbmRmYWNldAplbmRzb2xpZCB0cmlhbmdsZQo=",
+        "sidecar.obj": "bXRsbGliIHNpZGVjYXIubXRsCm8gdHJpYW5nbGUKdiAwIDAgMAp2IDEgMCAwCnYgMCAxIDAKdnQgMCAwCnZ0IDEgMAp2dCAwIDEKdXNlbXRsIHNpZGVjYXIKZiAxLzEgMi8yIDMvMwo=",
+    ]
+    static let files: [String: Data] = encoded.compactMapValues { Data(base64Encoded: $0) }
+    static func data(name: String) -> Data? { files[name] }
+    static var entries: [WorkspaceEntry] {
+        names.compactMap { name in
+            guard let data = files[name] else { return nil }
+            let mime: String
+            switch URL(fileURLWithPath: name).pathExtension.lowercased() {
+            case "epub": mime = "application/epub+zip"
+            case "usdz": mime = "model/vnd.usdz+zip"
+            case "obj": mime = "model/obj"
+            case "stl": mime = "model/stl"
+            default: mime = "application/octet-stream"
+            }
+            return WorkspaceEntry(name: name, path: name, isDirectory: false,
+                                  byteSize: UInt64(data.count), mimeType: mime)
+        }
+    }
+}
+
 enum DiagnosticSubagentFixture {
     // Synthetic release artwork uses the real native views and transport fixture.
     // This entire file is excluded from Release. Private offline history replay
@@ -240,7 +273,10 @@ enum DiagnosticSubagentFixture {
     static var approvalDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.approval-settings")! }
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
     static var projectArchiveFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-archive") }
-    static var projectReadFixture: Bool { projectArchiveFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
+    static var projectSpeedFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-speed") }
+    static var projectSubagentFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents") }
+    static var questionResolutionFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-question-resolution") }
+    static var projectReadFixture: Bool { projectArchiveFixture || projectSpeedFixture || projectSubagentFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
     static let hostID = "diagnostic-host"
     static let parentID = "fixture-parent-conversation"
     static let childID = "fixture-child-conversation"
@@ -263,6 +299,15 @@ enum DiagnosticSubagentFixture {
     static func parentChat() -> ChatSummary {
         try! JSONDecoder().decode(ChatSummary.self, from: Data(#"{"conversationId":"fixture-parent-conversation","botId":"fixture-bot","title":"Fixture Bot","lastMessagePreview":"A verified subagent is working.","lastMessageAt":"1700000000000","messageCount":1,"deliveryState":"completed","hasUnread":false,"isArchived":false,"isPinned":false}"#.utf8))
     }
+    static func questionRequest() -> [String: Any] {
+        ["approvalId": "fixture-question", "conversationId": parentID,
+         "method": "item/tool/requestUserInput", "actionNonce": "fixture-question-nonce",
+         "params": ["threadId": parentThreadID, "isBlocking": false,
+                    "questions": [["id": "day", "question": "Which day works best?",
+                                   "options": [["label": "Saturday"], ["label": "Sunday"]]],
+                                  ["id": "fixtures", "question": "Which fixtures should I check?",
+                                   "multiSelect": true, "options": [["label": "A, B"], ["label": "C"]]]]]]
+    }
 
     @MainActor static func model() -> ConnectionModel {
         if approvalSettingsFixture && ProcessInfo.processInfo.arguments.contains("-diagnostics-approval-reset") {
@@ -275,9 +320,9 @@ enum DiagnosticSubagentFixture {
         let model = ConnectionModel(
             cameraFixtureStoreRoot: root,
             saved: savedConnection(),
-            chat: nil,
+            chat: questionResolutionFixture ? parentChat() : nil,
             api: PairingAPI(configuration: configuration), replayEnabled: !chatLayoutFixture && !approvalSettingsFixture,
-            signingIdentity: projectReadFixture ? syntheticSigningIdentity() : PhoneIdentity.signing)
+            signingIdentity: projectReadFixture || questionResolutionFixture ? syntheticSigningIdentity() : PhoneIdentity.signing)
         if chatLayoutFixture {
             model.snapshots[parentID] = try! JSONDecoder().decode(ConversationSnapshot.self, from: JSONSerialization.data(withJSONObject: chatLayoutSnapshot()))
             let entries = ChatFeedEntry.grouping(model.feedRows(for: parentChat()))
@@ -334,11 +379,13 @@ enum DiagnosticSubagentFixture {
             state.delayNextChildSend = false
             state.childRevision = 2
             state.childStatus = "completed"
+            state.projectServiceTier = "default"
             state.goalPresent = goalFixture
             state.goalObjective = "Prepare a reliable beta launch with the Scout helper."
             state.goalStatus = goalFixtureStatus
             state.goalTokenBudget = 1_000
             state.goalTimeBudgetSeconds = 600
+            state.questionResolved = false
         }
     }
     static func updateChild(status: String) {
@@ -370,7 +417,9 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var childStatus = "completed"
         var projectUnread = true
         var projectArchived = false
+        var projectServiceTier = "default"
         var archiveFailures = 1
+        var questionResolved = false
         var goalPresent = DiagnosticSubagentFixture.goalFixture
         var goalObjective = "Prepare a reliable beta launch with the Scout helper."
         var goalStatus = DiagnosticSubagentFixture.goalFixtureStatus
@@ -389,12 +438,22 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         let method = request.httpMethod ?? "GET"
         let path = url.path
         if path == "/api/v1/connected-apps" {
+            let arguments = ProcessInfo.processInfo.arguments
+            if arguments.contains("-diagnostics-connected-apps-stale") {
+                finish(status: 409, body: Data("{}".utf8)); return
+            }
+            if arguments.contains("-diagnostics-connected-apps-unsupported") {
+                finish(status: 501, body: Data("{}".utf8)); return
+            }
+            let conversation = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "conversationId" }?.value
             let family = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "agentFamily" }?.value ?? "codex"
             let names = family == "claude" ? ["Claude.ai: Claude Docs", "claude.ai Gmail", "Claude.ai Google Calendar", "claude.ai Google Drive"] : ["Gmail", "Google Drive", "GitHub", "OpenAI Platform", "Linear", "Sites", "Flashloop", "Adobe Acrobat"]
-            finish(status: 200, body: json([
+            var response: [String: Any] = [
                 "hostInstallationId": DiagnosticSubagentFixture.hostID, "agentFamily": family,
                 "apps": names.map { ["id": "\(family):\($0)", "name": $0, "status": "available"] }
-            ])); return
+            ]
+            if let conversation { response["conversationId"] = conversation }
+            finish(status: 200, body: json(response)); return
         }
         let body: Data?
         if let data = request.httpBody { body = data }
@@ -430,7 +489,8 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         if DiagnosticSubagentFixture.projectReadFixture {
             let conversation = DiagnosticSubagentFixture.parentID
             let archiveFixture = DiagnosticSubagentFixture.projectArchiveFixture
-            let family = archiveFixture ? "codex" : "claude"
+            let speedFixture = DiagnosticSubagentFixture.projectSpeedFixture
+            let family = archiveFixture || speedFixture || DiagnosticSubagentFixture.projectSubagentFixture ? "codex" : "claude"
             let archived = Self.state.lock.withLock { Self.state.projectArchived }
             switch path {
             case "/api/v1/pairing/session/refresh-challenge":
@@ -443,7 +503,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             case "/api/v1/projects":
                 finish(status: 200, body: json([
                     "projects": [["id": "read-project", "name": "Read status", "isIncluded": true, "isPinned": false,
-                                  "rootsRevision": 1, "folders": [], "createdAt": "fixture"]],
+                                  "rootsRevision": 1, "folders": speedFixture ? [["id":"fixture-folder","path":"/fixture","name":"fixture","isPrimary":true,"isAvailable":true]] : [], "createdAt": "fixture"]],
                     "families": [["family": family, "available": true]], "modesVersion": 1, "archiveVersion": 1,
                     "pinned": archived ? [] : [["projectId": "read-project", "thread": projectReadThread()]]
                 ])); return
@@ -463,14 +523,45 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                         if fail { finish(status: 503, body: Data("The archive could not be confirmed. Try again.".utf8)); return }
                     }
                     if let unread = fields["hasUnread"] as? Bool { Self.state.lock.withLock { Self.state.projectUnread = unread } }
+                    if let tier = fields["serviceTier"] as? String { Self.state.lock.withLock { Self.state.projectServiceTier = tier } }
                 }
                 finish(status: 200, body: json([
                     "conversationId": conversation, "projectId": "read-project", "projectName": "Read status",
-                    "title": "Read status fixture", "family": family, "model": archiveFixture ? "gpt-fixture" : "claude:sonnet", "effort": "high",
+                    "title": "Read status fixture", "family": family, "model": archiveFixture || speedFixture ? "gpt-fixture" : "claude:sonnet", "effort": "high",
+                    "serviceTier": speedFixture ? Self.state.lock.withLock { Self.state.projectServiceTier } as Any : NSNull(),
                     "accessMode": "read_only", "workingFolder": "/fixture", "workingFolderName": "fixture",
                     "isPinned": true, "hasUnread": Self.state.lock.withLock { Self.state.projectUnread },
-                    "hasNativeSession": archiveFixture, "folderInProject": true, "claudeApproval": "ask", "planMode": false,
+                    "hasNativeSession": archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture, "folderInProject": true, "claudeApproval": "ask", "planMode": false,
                     "isArchived": Self.state.lock.withLock { Self.state.projectArchived }
+                ])); return
+            case "/api/v1/project-conversations/\(conversation)/subagents" where DiagnosticSubagentFixture.projectSubagentFixture:
+                finish(status: 200, body: json(["available": true, "detail": NSNull(), "subagents": [[
+                    "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.childThreadID,
+                    "title": "Scout", "agentNickname": "Scout", "agentRole": "research",
+                    "status": "idle", "isArchived": false, "canAcceptDirectInput": false
+                ]]])); return
+            case "/api/v1/project-conversations/\(conversation)/subagents/\(DiagnosticSubagentFixture.childThreadID)/transcript" where DiagnosticSubagentFixture.projectSubagentFixture:
+                finish(status: 200, body: json(["subagent": [
+                    "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.childThreadID,
+                    "title": "Scout", "agentNickname": "Scout", "agentRole": "research",
+                    "status": "idle", "isArchived": false, "canAcceptDirectInput": false
+                ], "snapshot": [
+                    "conversationId": "project-agent:\(conversation):\(DiagnosticSubagentFixture.childThreadID)",
+                    "hostEpoch": "fixture", "lastSequence": 0, "messages": [], "assistantMessages": [],
+                    "thread": ["threadId": DiagnosticSubagentFixture.childThreadID, "nextCursor": NSNull(),
+                        "hydrated": true, "turns": [["id": "project-child-turn", "status": "completed",
+                            "createdAt": "1000", "updatedAt": "2000", "items": [[
+                                "id": "project-child-reply", "type": "agentMessage", "state": "completed",
+                                "createdAt": "2000", "text": "Scout found the parser issue."
+                            ]]]]]
+                ]])); return
+            case "/api/v1/bot-options" where speedFixture:
+                finish(status: 200, body: json([
+                    "models": [["id":"gpt-fixture","displayName":"Fixture model","hidden":false,"agentFamily":"codex",
+                                "reasoningEfforts":[["id":"high","label":"High"]],
+                                "serviceTiers":[["id":"default","label":"Standard","description":"Standard speed"],
+                                                ["id":"fast","label":"Fast","description":"Faster responses"]]]],
+                    "allowedApprovalPolicies": [], "timezone": "UTC"
                 ])); return
             case "/api/v1/conversations": finish(status: 200, body: Data("[]".utf8)); return
             case "/api/v1/conversations/\(conversation)" where method == "PATCH":
@@ -541,6 +632,33 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             finish(status: 200, body: json([parentSummary()]))
         case "/api/v1/group-chats": finish(status: 200, body: Data("[]".utf8))
         case "/api/v1/bots": finish(status: 200, body: json([bot()]))
+        case "/api/v1/pairing/session/refresh-challenge" where DiagnosticSubagentFixture.questionResolutionFixture:
+            let now = UInt64(Date().timeIntervalSince1970 * 1000)
+            finish(status: 200, body: json(["challengeId": "question-fixture", "deviceId": "diagnostic-device",
+                "nonce": "synthetic", "origin": "https://synthetic.invalid", "hostInstallationId": DiagnosticSubagentFixture.hostID,
+                "offerId": "", "issuedAtMs": now, "expiresAtMs": now + 60_000]))
+        case "/api/v1/pairing/session" where DiagnosticSubagentFixture.questionResolutionFixture:
+            finish(status: 200, body: try! JSONEncoder().encode(DiagnosticSubagentFixture.savedConnection().credential))
+        case "/api/v1/approvals" where DiagnosticSubagentFixture.questionResolutionFixture:
+            let resolved = Self.state.lock.withLock { Self.state.questionResolved }
+            finish(status: 200, body: json(resolved ? [] : [DiagnosticSubagentFixture.questionRequest()]))
+        case "/api/v1/approvals/fixture-question/resolve" where DiagnosticSubagentFixture.questionResolutionFixture:
+            guard method == "POST", let body,
+                  let fields = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+                  fields["actionNonce"] as? String == "fixture-question-nonce",
+                  let decision = fields["decision"] as? String,
+                  let response = fields["responseJson"] as? String,
+                  let responseData = response.data(using: .utf8),
+                  let answers = (try? JSONSerialization.jsonObject(with: responseData)) as? [String: Any],
+                  let values = answers["answers"] as? [String: [String: [String]]],
+                  let day = values["day"]?["answers"], let fixtures = values["fixtures"]?["answers"] else {
+                finish(status: 400, body: Data("{}".utf8)); return
+            }
+            let valid = decision == "respond" && day == ["Saturday"] && fixtures == ["A, B"]
+                || decision == "skip" && day.isEmpty && fixtures.isEmpty
+            guard valid else { finish(status: 400, body: Data("{}".utf8)); return }
+            Self.state.lock.withLock { Self.state.questionResolved = true }
+            finish(status: 200, body: Data("{}".utf8))
         case "/api/v1/approvals" where DiagnosticSubagentFixture.marketingApprovalFixture:
             finish(status: 200, body: json([["approvalId": "marketing-file-approval",
                 "conversationId": DiagnosticSubagentFixture.parentID,
@@ -581,7 +699,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
     }
     private func projectReadThread() -> [String: Any] {
-        let family = DiagnosticSubagentFixture.projectArchiveFixture ? "codex" : "claude"
+        let family = DiagnosticSubagentFixture.projectArchiveFixture || DiagnosticSubagentFixture.projectSpeedFixture || DiagnosticSubagentFixture.projectSubagentFixture ? "codex" : "claude"
         return ["reference": "\(family):read-fixture", "conversationId": DiagnosticSubagentFixture.parentID,
          "title": "Read status fixture", "family": family, "updatedAt": 1, "isPinned": true,
          "hasUnread": Self.state.lock.withLock { Self.state.projectUnread }, "isWorking": false]
@@ -649,7 +767,9 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
 struct DiagnosticConnectedAppsFixtureView: View {
     @StateObject private var model = DiagnosticSubagentFixture.model()
     var body: some View {
-        NavigationStack { ConnectedAppsView(model: model) }
+        NavigationStack { ConnectedAppsView(model: model,
+            conversationId: ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps-project")
+                ? DiagnosticSubagentFixture.parentID : nil) }
             .preferredColorScheme(ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps-dark") ? .dark : .light)
     }
 }
@@ -679,7 +799,10 @@ struct DiagnosticChatLayoutFixtureView: View {
 struct DiagnosticSubagentFixtureView: View {
     @StateObject private var model: ConnectionModel
     @State private var chat: ChatSummary?
-    init() { _model = StateObject(wrappedValue: DiagnosticSubagentFixture.model()) }
+    init() {
+        _model = StateObject(wrappedValue: DiagnosticSubagentFixture.model())
+        _chat = State(initialValue: DiagnosticSubagentFixture.questionResolutionFixture ? DiagnosticSubagentFixture.parentChat() : nil)
+    }
     var body: some View {
         NavigationStack {
             if let chat { ConversationView(model: model, chat: chat) }
@@ -687,8 +810,12 @@ struct DiagnosticSubagentFixtureView: View {
         }
         .task {
             model.setForeground(true)
-            await model.loadChats(force: true)
-            chat = model.chats.first { $0.id == DiagnosticSubagentFixture.parentID }
+            if DiagnosticSubagentFixture.questionResolutionFixture {
+                await model.loadAttention()
+            } else {
+                await model.loadChats(force: true)
+                chat = model.chats.first { $0.id == DiagnosticSubagentFixture.parentID }
+            }
         }
     }
 }

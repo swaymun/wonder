@@ -1,13 +1,15 @@
 import AppKit
 import Combine
 
-private struct HostStatus: Decodable {
+struct HostStatus: Decodable {
     let state: String
     let execution: ExecutionStatus
 }
 
-private struct ExecutionStatus: Decodable {
+struct ExecutionStatus: Decodable {
     let ready: Bool
+    let detail: String?
+    let reason: String?
 }
 
 enum PrivacyPane {
@@ -71,6 +73,8 @@ struct MenuStatusPresentation: Equatable {
 final class MenuModel: ObservableObject {
     @Published var serviceRunning = false
     @Published var executionReady = false
+    @Published var executionDetail = ""
+    @Published var executionReason = ""
     @Published var needsRepair = false
     private var refreshing = false
     @Published var status = "Checking Wonder…"
@@ -105,10 +109,10 @@ final class MenuModel: ObservableObject {
                 if error != nil || !(response is HTTPURLResponse) {
                     self.serviceRunning = false
                     self.executionReady = false
+                    self.executionDetail = ""
+                    self.executionReason = ""
                     self.failedPolls += 1
                     if self.failedPolls >= 3 {
-                        self.serviceRunning = false
-                    self.executionReady = false
                         self.needsRepair = true
                         self.apply(.offline)
                     } else {
@@ -120,10 +124,10 @@ final class MenuModel: ObservableObject {
                 guard response.statusCode == 200 else {
                     self.serviceRunning = false
                     self.executionReady = false
+                    self.executionDetail = ""
+                    self.executionReason = ""
                     self.failedPolls += 1
                     if self.failedPolls >= 3 {
-                        self.serviceRunning = false
-                    self.executionReady = false
                         self.needsRepair = true
                         self.apply(.offline)
                     } else {
@@ -136,15 +140,21 @@ final class MenuModel: ObservableObject {
                     self.serviceRunning = true
                     self.failedPolls = 0
                     self.executionReady = host.execution.ready
+                    self.executionDetail = host.execution.detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    self.executionReason = host.execution.reason ?? ""
                     self.needsRepair = !self.executionReady
                     self.apply(self.executionReady ? .ready : .starting)
                     if !host.execution.ready {
                         self.status = "Needs attention"
-                        self.statusDetail = "Your Bots need attention. Open setup to reconnect your account or repair Wonder."
+                        self.statusDetail = self.executionDetail.isEmpty
+                            ? "Agent work is unavailable. Check the installed runtime."
+                            : self.executionDetail
                     }
                 } else {
                     self.serviceRunning = false
                     self.executionReady = false
+                    self.executionDetail = ""
+                    self.executionReason = ""
                     self.needsRepair = true
                     self.apply(.offline)
                 }

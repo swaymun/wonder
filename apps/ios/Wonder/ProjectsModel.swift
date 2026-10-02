@@ -25,6 +25,7 @@ import WonderPairing
     @Published var failure: String?
     /// Model catalog for project composer settings, per connection scope.
     @Published var options: BotOptions?
+    var widgetSnapshotChanged: (() -> Void)?
     var owner: ConnectionModel? { model }
     private var scope: String?
     private var threadTasks: [String: Task<Void, Never>] = [:]
@@ -45,10 +46,36 @@ import WonderPairing
     private var readRevisions: [String: Int] = [:]
     /// In-memory detail cache bound; open, recent, pinned and first-page threads always stay.
     private static let detailLimit = 120
+    #if WONDER_DIAGNOSTICS
+    private var previewFilesDetail: ProjectConversationDetail?
+    func installPreviewFilesConversation(_ detail: ProjectConversationDetail) {
+        previewFilesDetail = detail
+        details[detail.conversationId] = detail
+        model?.registerProjectConversation(detail)
+    }
+    #endif
 
     init(model: ConnectionModel) {
         self.model = model
         restoreCache()
+        installPreviewFilesProject()
+    }
+
+    private func installPreviewFilesProject() {
+        #if WONDER_DIAGNOSTICS
+        if model?.previewMode == true && (ProcessInfo.processInfo.arguments.contains("-project-files-preview") ||
+            ProcessInfo.processInfo.arguments.contains("-project-files-conversation-preview")) {
+            // A read-only new-chat destination for the Files UI fixture.
+            supportsProjects = true
+            projects = [ProjectSummary(id: "preview-project", name: "Preview project", folders: [
+                ProjectFolder(id: "preview-folder", path: "/preview", name: "Preview", isPrimary: true, isAvailable: true)
+            ])]
+        }
+        if let previewFilesDetail {
+            details[previewFilesDetail.conversationId] = previewFilesDetail
+            model?.registerProjectConversation(previewFilesDetail)
+        }
+        #endif
     }
 
     var includedProjects: [ProjectSummary] { SidebarProjection.sorted(projects.filter(\.isIncluded)) }
@@ -72,6 +99,7 @@ import WonderPairing
             archivedReferences = []
             pendingPins = [:]; detailRevisions = [:]; updatingDetails = []; readRevisions = [:]
             restoreCache()
+            installPreviewFilesProject()
         }
         return current
     }
@@ -133,6 +161,7 @@ import WonderPairing
         } catch PairingFailure.response(404) {
             guard isCurrent(scope) else { return }
             supportsProjects = false
+            saveCache()
         } catch is CancellationError {
         } catch {
             guard isCurrent(scope) else { return }
@@ -280,6 +309,7 @@ import WonderPairing
         catch PairingFailure.response(404) {
             guard isCurrent(scope) else { return }
             unavailable.insert(conversationID)
+            widgetSnapshotChanged?()
         } catch {}
     }
 
@@ -366,6 +396,7 @@ import WonderPairing
         if model?.previewMode == false, let recentKey, let data = try? JSONEncoder().encode(recentlyOpened) {
             UserDefaults.standard.set(data, forKey: recentKey)
         }
+        widgetSnapshotChanged?()
     }
 
     /// Conversations whose saved history must survive the conversation list's
@@ -501,6 +532,7 @@ import WonderPairing
         var fields: [String: Any] = ["deviceId": deviceID, "clientMessageId": draft.requestID, "family": family.rawValue,
                                      "model": modelID, "accessMode": draft.accessMode.rawValue, "body": body, "prepareOnly": true]
         if let effort = draft.effort { fields["effort"] = effort }
+        if let serviceTier = draft.serviceTier { fields["serviceTier"] = serviceTier }
         if supportsModes {
             if family == .claude, let approval = draft.claudeApproval { fields["claudeApproval"] = approval.rawValue }
             if draft.planMode == true { fields["planMode"] = true }
@@ -539,6 +571,7 @@ import WonderPairing
         let details: [String: ProjectConversationDetail]?
         let pinned: [PinnedProjectThread]?
         let supportsModes: Bool?
+        let supportsProjects: Bool?
     }
     private func hostKey() -> String? { model?.connection.map { Data($0.credential.hostInstallationId.utf8).base64EncodedString() } }
     private var cacheKey: String? { hostKey().map { "wonder.projects." + $0 } }
@@ -549,7 +582,10 @@ import WonderPairing
         let persisted = detailIDsToPersist()
         if let data = try? JSONEncoder().encode(Cache(projects: projects, threads: firstPages,
             details: details.filter { persisted.contains($0.key) },
-            pinned: pinned, supportsModes: supportsModes)) { UserDefaults.standard.set(data, forKey: cacheKey) }
+            pinned: pinned, supportsModes: supportsModes, supportsProjects: supportsProjects)) {
+            UserDefaults.standard.set(data, forKey: cacheKey)
+        }
+        widgetSnapshotChanged?()
     }
     private func restoreCache() {
         if let recentKey, let data = UserDefaults.standard.data(forKey: recentKey),
@@ -562,6 +598,7 @@ import WonderPairing
         details = cache.details ?? [:]
         pinned = cache.pinned ?? []
         supportsModes = cache.supportsModes ?? false
+        supportsProjects = cache.supportsProjects
         details.values.forEach { model?.registerProjectConversation($0) }
         for (project, rows) in cache.threads where threads[project] == nil {
             var state = ProjectThreadsState()
@@ -572,6 +609,7 @@ import WonderPairing
     func forgetCache() {
         if let cacheKey { UserDefaults.standard.removeObject(forKey: cacheKey) }
         if let recentKey { UserDefaults.standard.removeObject(forKey: recentKey) }
+        widgetSnapshotChanged?()
     }
 }
 

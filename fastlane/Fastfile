@@ -34,7 +34,7 @@ end
 
 def wonder_app_identifiers(channel)
   bundle = wonder_bundle_identifier(channel)
-  [bundle, "#{bundle}.NotificationService", "#{bundle}.Share"]
+  [bundle, "#{bundle}.NotificationService", "#{bundle}.Share", "#{bundle}.Widget"]
 end
 
 def wonder_upload_config(channel)
@@ -99,14 +99,15 @@ def wonder_lock_signing_keychain
 end
 
 def wonder_manual_signing_arguments(channel)
-  app, push, share = wonder_app_identifiers(channel)
+  app, push, share, widget = wonder_app_identifiers(channel)
   [
     "CODE_SIGN_STYLE=Manual",
     "DEVELOPMENT_TEAM=#{WONDER_TEAM_ID}",
     "CODE_SIGN_IDENTITY=Apple Distribution",
     "WONDER_MAIN_PROFILE=match AppStore #{app}",
     "WONDER_PUSH_PROFILE=match AppStore #{push}",
-    "WONDER_SHARE_PROFILE=match AppStore #{share}"
+    "WONDER_SHARE_PROFILE=match AppStore #{share}",
+    "WONDER_WIDGET_PROFILE=match AppStore #{widget}"
   ]
 end
 

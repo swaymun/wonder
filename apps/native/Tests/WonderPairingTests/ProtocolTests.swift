@@ -27,7 +27,43 @@ private final class ComputerControlResponseProtocol: URLProtocol, @unchecked Sen
     override func stopLoading() {}
 }
 
+private final class AnnotationRejectionProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool {
+        ["annotation-test.invalid", "ordinary-conflict.invalid"].contains(request.url?.host ?? "")
+    }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let isAnnotation = request.url?.host == "annotation-test.invalid"
+        let message = isAnnotation
+            ? "This file changed since you annotated it. Reopen the preview and update the annotation."
+            : "The conversation changed."
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 409,
+            httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/plain; charset=utf-8"])!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(message.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 final class ProtocolTests: XCTestCase {
+    func testOnlyAnnotationMessageConflictCarriesReannotationRecovery() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AnnotationRejectionProtocol.self]
+        let api = PairingAPI(configuration: configuration)
+        do {
+            let _: SendReceipt = try await api.request("/api/v1/conversations/chat/messages",
+                origin: "https://annotation-test.invalid", body: Data("{}".utf8))
+            XCTFail("The stale annotation must be rejected.")
+        } catch PairingFailure.annotationRejected(let status, let detail) {
+            XCTAssertEqual(status, 409)
+            XCTAssertTrue(detail.contains("Reopen the preview"))
+        }
+        do {
+            let _: SendReceipt = try await api.request("/api/v1/conversations/chat/messages",
+                origin: "https://ordinary-conflict.invalid", body: Data("{}".utf8))
+            XCTFail("The ordinary conflict must be rejected.")
+        } catch PairingFailure.response(let status) { XCTAssertEqual(status, 409) }
+    }
     func testComputerSignalingFixturesRoundTripAndKeepIceServerShape() throws {
         let binding = ComputerSignalingBinding(
             generation: 7,

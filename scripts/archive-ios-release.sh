@@ -60,6 +60,11 @@ WEBRTC_LICENSE_SHA256="843529896bae499c92af3ecade86855128f930334ba97530695ccecef
   echo 'Archive WebRTC-LICENSE.md does not match the reviewed WebRTC license' >&2
   exit 1
 }
+EPUB_LICENSE="$APP/EPUB-LICENSES.md"
+[[ -s "$EPUB_LICENSE" ]] && cmp -s apps/ios/Wonder/EPUB-LICENSES.md "$EPUB_LICENSE" || {
+  echo 'Archive is missing the reviewed EPUB dependency notices' >&2
+  exit 1
+}
 if find "$APP/Frameworks" -maxdepth 1 -type d -name '*.framework' -print -quit 2>/dev/null | grep -q .; then
   [[ "$(otool -l "$APP/Wonder")" == *"path @executable_path/Frameworks "* ]] || {
     echo 'Archive embeds dynamic frameworks but Wonder is missing @executable_path/Frameworks from LC_RPATH' >&2
@@ -68,18 +73,45 @@ if find "$APP/Frameworks" -maxdepth 1 -type d -name '*.framework' -print -quit 2
 fi
 xcrun dwarfdump --uuid "$OUT/Wonder.xcarchive/dSYMs/Wonder.app.dSYM" > "$OUT/symbol-uuids.txt"
 python3 - "$APP/Info.plist" "$BUILD" "$OUT/build.json" "$PROFILE" "$OUT" "$BUNDLE_ID" "$CHANNEL" <<'PY'
-import json, plistlib, sys
+import json, plistlib, subprocess, sys
 from pathlib import Path
 info = plistlib.loads(Path(sys.argv[1]).read_bytes())
 if info.get('CFBundleIdentifier') != sys.argv[6] or info.get('CFBundleVersion') != sys.argv[2]:
     raise SystemExit('Archive identity/build does not match the requested Release build')
-for bundle, suffix in [('WonderNotificationService', '.NotificationService'), ('WonderShare', '.Share')]:
+app = Path(sys.argv[1]).parent
+def entitlements(bundle):
+    signed = subprocess.check_output(
+        ['codesign', '-d', '--entitlements', ':-', str(bundle)], stderr=subprocess.DEVNULL)
+    return plistlib.loads(signed)
+group = 'group.' + info['CFBundleIdentifier']
+main = entitlements(app)
+if (main.get('application-identifier') != '8KKNVD7758.' + info['CFBundleIdentifier']
+    or main.get('com.apple.developer.team-identifier') != '8KKNVD7758'
+    or main.get('aps-environment') != 'production'
+    or main.get('get-task-allow') is not False
+    or main.get('com.apple.security.application-groups') != [group]
+    or main.get('keychain-access-groups') != [
+        '8KKNVD7758.' + info['CFBundleIdentifier'],
+        '8KKNVD7758.' + info['CFBundleIdentifier'] + '.push']):
+    raise SystemExit('Archive main-app signing, push or channel isolation is invalid')
+for bundle, suffix, extension_point in [
+    ('WonderNotificationService', '.NotificationService', 'com.apple.usernotifications.service'),
+    ('WonderShare', '.Share', 'com.apple.share-services'),
+    ('WonderWidget', '.Widget', 'com.apple.widgetkit-extension'),
+]:
     extension_info = plistlib.loads((Path(sys.argv[1]).parent / f'PlugIns/{bundle}.appex/Info.plist').read_bytes())
     if (not extension_info.get('CFBundleDisplayName')
         or extension_info.get('CFBundleIdentifier') != info['CFBundleIdentifier'] + suffix
         or extension_info.get('CFBundleVersion') != info['CFBundleVersion']
-        or extension_info.get('CFBundleShortVersionString') != info['CFBundleShortVersionString']):
-        raise SystemExit(f'{bundle} display name, identity or version is invalid')
+        or extension_info.get('CFBundleShortVersionString') != info['CFBundleShortVersionString']
+        or extension_info.get('NSExtension', {}).get('NSExtensionPointIdentifier') != extension_point):
+        raise SystemExit(f'{bundle} display name, identity, version or extension point is invalid')
+widget = entitlements(app / 'PlugIns/WonderWidget.appex')
+if (widget.get('application-identifier') != '8KKNVD7758.' + info['CFBundleIdentifier'] + '.Widget'
+    or widget.get('com.apple.developer.team-identifier') != '8KKNVD7758'
+    or widget.get('get-task-allow') is not False
+    or widget.get('com.apple.security.application-groups') != [group]):
+    raise SystemExit('Archive Widget signing or App Group is invalid')
 if info.get('ITSAppUsesNonExemptEncryption') is not False:
     raise SystemExit('Archive must declare its encryption exemption; review encryption use before changing this check')
 Path(sys.argv[3]).write_text(json.dumps({

@@ -2,7 +2,7 @@
 use crate::{AppState, OwnerAuthority};
 use axum::{
     extract::{Extension, Path as AxumPath, Query, State},
-    http::StatusCode,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -10,25 +10,27 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::{
     ffi::OsStrExt,
-    fs::OpenOptionsExt,
+    fs::{MetadataExt, OpenOptionsExt},
     io::{AsRawFd, FromRawFd},
 };
 use std::{
     ffi::{CStr, CString},
     fs, io,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::Duration,
 };
-use wonder_store::StoredConversationFile;
+use wonder_store::{StoredConversationFile, StoredProject};
 
 const PAGE_SIZE: usize = 200;
 const MAX_ENTRIES: usize = 20_000;
 const MAX_WORKSPACE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MEDIA_RANGE_BYTES: u64 = 1024 * 1024;
 const MAX_DIFF_BYTES: usize = 1024 * 1024;
 const TOO_MANY_ENTRIES_DETAIL: &str =
     "This folder has too many entries to browse. Open a more specific subfolder.";
 static BROWSE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+static MEDIA_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -480,12 +482,146 @@ fn attachment_summary(file: StoredConversationFile) -> serde_json::Value {
     })
 }
 
+async fn project_workspace_roots(
+    state: &crate::AppState,
+    project: StoredProject,
+    cwd_root_id: &str,
+    attachment_conversation_id: Option<&str>,
+    denied: &[PathBuf],
+) -> Result<(Vec<WorkspaceRoot>, Vec<StoredConversationFile>), (StatusCode, String)> {
+    if !project.is_included {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This project is no longer included in Wonder.".into(),
+        ));
+    }
+    if !project.roots.iter().any(|root| root.id == cwd_root_id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This working folder is no longer in the project.".to_owned(),
+        ));
+    }
+    let checked = project.clone();
+    let denied_roots = state.denied_roots.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::projects::validate_execution_roots(&checked, &denied_roots)
+    })
+    .await
+    .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+    .map_err(|message| (StatusCode::FORBIDDEN, message.to_owned()))?;
+    let mut roots = Vec::new();
+    for root in project
+        .roots
+        .iter()
+        .filter(|root| root.id == cwd_root_id)
+        .chain(project.roots.iter().filter(|root| root.id != cwd_root_id))
+    {
+        let working = root.id == cwd_root_id;
+        let canonical = Path::new(&root.canonical_path);
+        let (current, metadata) = canonical_existing(canonical)
+            .map_err(|(_, message)| (StatusCode::FORBIDDEN, message.to_owned()))?;
+        if current != canonical
+            || !metadata.is_dir()
+            || protected_by_denies(canonical, denied, None)
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "A project folder changed on your Mac. Review its folders before browsing.".into(),
+            ));
+        }
+        // Keep the persisted canonical identity. A fresh add_root
+        // canonicalization could otherwise switch to a different folder
+        // if the selected path were replaced after validation.
+        roots.push(WorkspaceRoot {
+            id: if working {
+                "workspace".to_owned()
+            } else {
+                format!("project-{}", root.id)
+            },
+            label: if working {
+                "Workspace".to_owned()
+            } else {
+                applied_grant_label(canonical)
+            },
+            path: canonical.to_owned(),
+            is_directory: true,
+            kind: if working {
+                "workingDirectory"
+            } else {
+                "projectRoot"
+            },
+        });
+    }
+    let attachments = if let Some(conversation_id) = attachment_conversation_id {
+        state
+            .store
+            .list_conversation_files(conversation_id)
+            .await
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+    } else {
+        Vec::new()
+    };
+    Ok((roots, attachments))
+}
+
 async fn conversation_workspace_roots(
     state: &crate::AppState,
     conversation_id: &str,
+    include_attachments: bool,
 ) -> Result<(Vec<WorkspaceRoot>, Vec<StoredConversationFile>), (StatusCode, String)> {
     let denied = denied_paths(&state.denied_roots)
         .map_err(|(_, message)| (StatusCode::SERVICE_UNAVAILABLE, message.to_owned()))?;
+    if let Some(conversation) = state
+        .store
+        .project_conversation(conversation_id)
+        .await
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+    {
+        let project = state
+            .store
+            .project(&conversation.project_id)
+            .await
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+            .ok_or((
+                StatusCode::NOT_FOUND,
+                "This project was removed.".to_owned(),
+            ))?;
+        let root_id = project
+            .root_for(&conversation.cwd)
+            .ok_or((
+                StatusCode::FORBIDDEN,
+                "This conversation's working folder is no longer in the project.".to_owned(),
+            ))?
+            .id
+            .clone();
+        return project_workspace_roots(
+            state,
+            project,
+            &root_id,
+            include_attachments.then_some(conversation_id),
+            &denied,
+        )
+        .await;
+    }
+    // A new Project draft has a selected folder but no conversation yet. This
+    // read-only scope uses the same current Project checks and exposes no files
+    // or runtime bindings from another conversation.
+    if let Some(scope) = conversation_id.strip_prefix("project-files:") {
+        let (project_id, root_id) = scope.split_once(':').ok_or((
+            StatusCode::NOT_FOUND,
+            "This project folder is unavailable.".to_owned(),
+        ))?;
+        let project = state
+            .store
+            .project(project_id)
+            .await
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+            .ok_or((
+                StatusCode::NOT_FOUND,
+                "This project was removed.".to_owned(),
+            ))?;
+        return project_workspace_roots(state, project, root_id, None, &denied).await;
+    }
     let ownership = state
         .store
         .subagent_ownership_for_conversation(conversation_id)
@@ -637,11 +773,15 @@ async fn conversation_workspace_roots(
             .map_err(|message| (StatusCode::FORBIDDEN, message))?;
         }
     }
-    let attachments = state
-        .store
-        .list_conversation_files(conversation_id)
-        .await
-        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let attachments = if include_attachments {
+        state
+            .store
+            .list_conversation_files(conversation_id)
+            .await
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+    } else {
+        Vec::new()
+    };
     Ok((roots, attachments))
 }
 
@@ -695,6 +835,12 @@ fn resolve_workspace_path(
         Err(error) => return Err(disk_error(error)),
     };
     let canonical_root = fs::canonicalize(&root.path).map_err(disk_error)?;
+    if canonical_root != root.path {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This workspace location changed on your Mac.",
+        ));
+    }
     if !canonical.starts_with(&canonical_root)
         || protected_by_denies(&canonical, denied, own_workspace)
     {
@@ -822,7 +968,9 @@ fn open_file_at(directory: &fs::File, name: &std::ffi::OsStr) -> Result<fs::File
             "This workspace path contains an invalid name.",
         )
     })?;
-    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // A FIFO named like a media file must not hold a blocking worker or its
+    // admission slot while open(2) waits for an unrelated writer.
+    let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
     if fd < 0 {
         return Err(secure_open_error(io::Error::last_os_error()));
@@ -957,6 +1105,15 @@ fn mime_for_path(path: &Path) -> Option<String> {
             "gif" => "image/gif",
             "webp" => "image/webp",
             "pdf" => "application/pdf",
+            "epub" => "application/epub+zip",
+            "usdz" => "model/vnd.usdz+zip",
+            "obj" => "model/obj",
+            "stl" => "model/stl",
+            "mp4" => "video/mp4",
+            "mov" => "video/quicktime",
+            "m4a" => "audio/mp4",
+            "mp3" => "audio/mpeg",
+            "wav" => "audio/wav",
             "html" | "htm" => "text/html",
             "md" => "text/markdown",
             "txt" | "log" | "json" | "toml" | "yaml" | "yml" | "swift" | "rs" | "ts" => {
@@ -1075,6 +1232,92 @@ fn open_workspace_bounded_file(
     read_bounded_file(file)
 }
 
+/// Reopen the exact Project file the owner previewed. Annotation validation
+/// uses the same current root, deny and no-follow boundary as Files, then
+/// hashes the bytes from the verified descriptor rather than a path supplied
+/// by the client.
+pub(crate) async fn verified_project_preview_file(
+    state: &crate::AppState,
+    project_id: &str,
+    conversation_id: &str,
+    root_id: &str,
+    path: &str,
+) -> Result<(Vec<u8>, &'static str), (StatusCode, String)> {
+    let conversation = state
+        .store
+        .project_conversation(conversation_id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The Project could not be checked.".into(),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "This Project chat is unavailable.".into(),
+        ))?;
+    if conversation.project_id != project_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This file belongs to another Project.".into(),
+        ));
+    }
+    let project = state
+        .store
+        .project(project_id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The Project could not be checked.".into(),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "This Project was removed.".into()))?;
+    let cwd_root_id = project
+        .root_for(&conversation.cwd)
+        .ok_or((
+            StatusCode::FORBIDDEN,
+            "This conversation's working folder is no longer in the Project.".into(),
+        ))?
+        .id
+        .clone();
+    let denied = denied_paths(&state.denied_roots)
+        .map_err(|(status, detail)| (status, detail.to_owned()))?;
+    // Preview validation needs only the verified Project roots. Loading every
+    // historical attachment here made each annotation send grow with chat age.
+    let (roots, _) = project_workspace_roots(state, project, &cwd_root_id, None, &denied).await?;
+    let root = root_for(&roots, root_id)
+        .map_err(|(status, detail)| (status, detail.to_owned()))?
+        .clone();
+    let relative =
+        relative_path(Some(path)).map_err(|(status, detail)| (status, detail.to_owned()))?;
+    if relative.as_os_str().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Choose a file to annotate.".into()));
+    }
+    tokio::task::spawn_blocking(move || {
+        let bytes =
+            open_workspace_bounded_file(&root, &relative, &denied, Some(root.path.as_path()))
+                .map_err(|(status, detail)| (status, detail.to_owned()))?;
+        let name = relative.file_name().and_then(|name| name.to_str()).ok_or((
+            StatusCode::BAD_REQUEST,
+            "This file name cannot be annotated.".to_owned(),
+        ))?;
+        let mime = crate::artifact_mime_type(name, &bytes).ok_or((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "This file format cannot be annotated.".to_owned(),
+        ))?;
+        Ok((bytes, mime))
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The preview could not be checked.".into(),
+        )
+    })?
+}
+
 fn git_state(index: u8, worktree: u8) -> &'static str {
     if index == b'?' && worktree == b'?' {
         "untracked"
@@ -1138,7 +1381,7 @@ async fn git_repository(root: &Path) -> Option<PathBuf> {
 fn git_pathspec(repository: &Path, root: &Path) -> Option<String> {
     let relative = root.strip_prefix(repository).ok()?.to_string_lossy();
     if relative.is_empty() {
-        Some(":(top,literal).".into())
+        Some(":(top,literal)".into())
     } else {
         Some(format!(":(top,literal){relative}/"))
     }
@@ -1166,6 +1409,22 @@ fn synthetic_untracked_diff(path: &str, bytes: Vec<u8>) -> Result<String, Browse
         diff.push('\n');
     }
     Ok(diff)
+}
+
+fn validated_git_path(
+    root: &WorkspaceRoot,
+    relative: &Path,
+    denied: &[PathBuf],
+    own_workspace: Option<&Path>,
+) -> Result<PathBuf, BrowseError> {
+    let lexical = root.path.join(relative);
+    if protected_by_denies(&lexical, denied, own_workspace) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This path is outside the conversation's verified workspace.",
+        ));
+    }
+    resolve_workspace_path(root, relative, denied, own_workspace, true)
 }
 
 async fn read_workspace_git_status(
@@ -1244,27 +1503,32 @@ async fn read_workspace_git_status(
     };
     let mut changes = Vec::new();
     for (path, original, state, index_status, worktree_status) in parse_git_status(&bytes) {
+        let Ok(path) = relative_path(Some(&path)) else {
+            continue;
+        };
         let full = repository.join(&path);
-        let allowed = full.starts_with(&directory)
-            || (directory.starts_with(&repository) && full.starts_with(&directory));
-        if !allowed || protected_by_denies(&full, denied, own_workspace) {
+        let Ok(relative) = full.strip_prefix(&directory) else {
+            continue;
+        };
+        if validated_git_path(root, relative, denied, own_workspace).is_err() {
             continue;
         }
-        let display_path = full
-            .strip_prefix(&directory)
-            .unwrap_or(Path::new(&path))
-            .to_string_lossy()
-            .trim_start_matches('/')
-            .to_owned();
-        let original_path = original.map(|value| {
-            repository
-                .join(&value)
-                .strip_prefix(&directory)
-                .unwrap_or(Path::new(&value))
-                .to_string_lossy()
-                .trim_start_matches('/')
-                .to_owned()
-        });
+        let display_path = relative.to_string_lossy().into_owned();
+        let original_path = if let Some(original) = original {
+            let Ok(original) = relative_path(Some(&original)) else {
+                continue;
+            };
+            let original_full = repository.join(original);
+            let Ok(original_relative) = original_full.strip_prefix(&directory) else {
+                continue;
+            };
+            if validated_git_path(root, original_relative, denied, own_workspace).is_err() {
+                continue;
+            }
+            Some(original_relative.to_string_lossy().into_owned())
+        } else {
+            None
+        };
         changes.push(WorkspaceGitChange {
             path: display_path,
             original_path,
@@ -1296,7 +1560,7 @@ pub(super) async fn workspace_roots(
     Extension(_authority): Extension<OwnerAuthority>,
     AxumPath(conversation_id): AxumPath<String>,
 ) -> Response {
-    match conversation_workspace_roots(&state, &conversation_id).await {
+    match conversation_workspace_roots(&state, &conversation_id, true).await {
         Ok((roots, attachments)) => Json(WorkspaceRootsResponse {
             available: true,
             detail: None,
@@ -1345,7 +1609,7 @@ pub(super) async fn workspace_directory(
             "This folder page is invalid. Reload the folder.",
         );
     }
-    let (roots, _) = match conversation_workspace_roots(&state, &conversation_id).await {
+    let (roots, _) = match conversation_workspace_roots(&state, &conversation_id, false).await {
         Ok(value) => value,
         Err((status, detail)) => return workspace_error(status, detail),
     };
@@ -1383,7 +1647,7 @@ pub(super) async fn workspace_file(
     AxumPath(conversation_id): AxumPath<String>,
     Query(query): Query<WorkspaceQuery>,
 ) -> Response {
-    let (roots, _) = match conversation_workspace_roots(&state, &conversation_id).await {
+    let (roots, _) = match conversation_workspace_roots(&state, &conversation_id, false).await {
         Ok(value) => value,
         Err((status, detail)) => return workspace_error(status, detail),
     };
@@ -1402,13 +1666,23 @@ pub(super) async fn workspace_file(
         Ok(value) => value,
         Err((status, detail)) => return workspace_error(status, detail),
     };
-    let bytes =
-        match open_workspace_bounded_file(root, &relative, &denied, Some(root.path.as_path())) {
-            Ok(bytes) => bytes,
-            Err((status, detail)) => return workspace_error(status, detail),
-        };
     let mime = mime_for_path(&root.path.join(&relative))
         .unwrap_or_else(|| "application/octet-stream".into());
+    let root = root.clone();
+    let bytes = match tokio::task::spawn_blocking(move || {
+        open_workspace_bounded_file(&root, &relative, &denied, Some(root.path.as_path()))
+    })
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err((status, detail))) => return workspace_error(status, detail),
+        Err(_) => {
+            return workspace_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "This file could not be read. Try again.",
+            )
+        }
+    };
     let mut response = bytes.into_response();
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
@@ -1418,13 +1692,305 @@ pub(super) async fn workspace_file(
     response
 }
 
+#[derive(Debug)]
+struct MediaRange {
+    bytes: Vec<u8>,
+    start: u64,
+    end: u64,
+    total: u64,
+    mime: &'static str,
+    revision: String,
+}
+
+fn media_revision(metadata: &fs::Metadata) -> String {
+    use sha2::{Digest, Sha256};
+    let fields = format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec()
+    );
+    hex::encode(Sha256::digest(fields.as_bytes()))
+}
+
+fn media_mime(path: &Path, head: &[u8]) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "mp4" if head.get(4..8) == Some(b"ftyp") => Some("video/mp4"),
+        "mov" if head.get(4..8) == Some(b"ftyp") => Some("video/quicktime"),
+        "m4a" if head.get(4..8) == Some(b"ftyp") => Some("audio/mp4"),
+        "mp3"
+            if head.starts_with(b"ID3")
+                || head.len() >= 2 && head[0] == 0xff && head[1] & 0xe0 == 0xe0 =>
+        {
+            Some("audio/mpeg")
+        }
+        "wav" if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WAVE") => Some("audio/wav"),
+        _ => None,
+    }
+}
+
+fn parse_media_range(value: &str, total: u64) -> Result<(u64, u64), StatusCode> {
+    let value = value
+        .strip_prefix("bytes=")
+        .ok_or(StatusCode::RANGE_NOT_SATISFIABLE)?;
+    if value.contains(',') || total == 0 {
+        return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+    let (first, last) = value
+        .split_once('-')
+        .ok_or(StatusCode::RANGE_NOT_SATISFIABLE)?;
+    let (start, end) = if first.is_empty() {
+        let count = last
+            .parse::<u64>()
+            .map_err(|_| StatusCode::RANGE_NOT_SATISFIABLE)?;
+        if count == 0 || count > MAX_MEDIA_RANGE_BYTES {
+            return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+        }
+        (total.saturating_sub(count), total - 1)
+    } else {
+        let start = first
+            .parse::<u64>()
+            .map_err(|_| StatusCode::RANGE_NOT_SATISFIABLE)?;
+        if start >= total {
+            return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+        }
+        let end = if last.is_empty() {
+            start
+                .saturating_add(MAX_MEDIA_RANGE_BYTES - 1)
+                .min(total - 1)
+        } else {
+            last.parse::<u64>()
+                .map_err(|_| StatusCode::RANGE_NOT_SATISFIABLE)?
+                .min(total - 1)
+        };
+        (start, end)
+    };
+    if end < start || end - start + 1 > MAX_MEDIA_RANGE_BYTES {
+        return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+    Ok((start, end))
+}
+
+fn read_media_range(
+    root: &WorkspaceRoot,
+    relative: &Path,
+    denied: &[PathBuf],
+    range: Option<&str>,
+    expected_revision: Option<&str>,
+) -> Result<MediaRange, (StatusCode, &'static str, Option<u64>)> {
+    let failure = |status, detail| (status, detail, None);
+    let lexical = root.path.join(relative);
+    if protected_by_denies(&lexical, denied, Some(root.path.as_path())) {
+        return Err(failure(
+            StatusCode::FORBIDDEN,
+            "This path is outside the conversation's verified workspace.",
+        ));
+    }
+    let mut file =
+        open_workspace_file(root, relative).map_err(|(status, detail)| failure(status, detail))?;
+    let metadata = file.metadata().map_err(|_| {
+        failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The media file could not be read.",
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(failure(
+            StatusCode::BAD_REQUEST,
+            "Choose a regular media file.",
+        ));
+    }
+    let total = metadata.len();
+    let mut head = [0_u8; 16];
+    let head_len = file.read(&mut head).map_err(|_| {
+        failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The media file could not be read.",
+        )
+    })?;
+    let mime = media_mime(&lexical, &head[..head_len]).ok_or_else(|| {
+        failure(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "This media format cannot be previewed here.",
+        )
+    })?;
+    let range = range.ok_or_else(|| {
+        failure(
+            StatusCode::BAD_REQUEST,
+            "A byte range is required for media.",
+        )
+    })?;
+    let (start, end) = parse_media_range(range, total).map_err(|status| {
+        (
+            status,
+            "Choose a valid media byte range of at most 1 MiB.",
+            Some(total),
+        )
+    })?;
+    let revision = media_revision(&metadata);
+    if (start, end) != (0, 0) && expected_revision.is_none() {
+        return Err(failure(
+            StatusCode::PRECONDITION_REQUIRED,
+            "Refresh this media preview before seeking.",
+        ));
+    }
+    if expected_revision.is_some_and(|value| value != revision) {
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "This media file changed. Reopen its preview.",
+        ));
+    }
+    file.seek(SeekFrom::Start(start)).map_err(|_| {
+        failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The media file could not be read.",
+        )
+    })?;
+    let mut bytes = vec![0_u8; (end - start + 1) as usize];
+    file.read_exact(&mut bytes).map_err(|_| {
+        failure(
+            StatusCode::CONFLICT,
+            "This media file changed while loading.",
+        )
+    })?;
+    let after = file.metadata().map_err(|_| {
+        failure(
+            StatusCode::CONFLICT,
+            "This media file changed while loading.",
+        )
+    })?;
+    if media_revision(&after) != revision {
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "This media file changed while loading.",
+        ));
+    }
+    Ok(MediaRange {
+        bytes,
+        start,
+        end,
+        total,
+        mime,
+        revision,
+    })
+}
+
+pub(super) async fn workspace_media(
+    State(state): State<crate::AppState>,
+    Extension(_authority): Extension<OwnerAuthority>,
+    AxumPath(conversation_id): AxumPath<String>,
+    Query(query): Query<WorkspaceQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let permit = match MEDIA_SLOTS.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return workspace_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Media is still loading. Try again shortly.",
+            )
+        }
+    };
+    let (roots, _) = match conversation_workspace_roots(&state, &conversation_id, false).await {
+        Ok(value) => value,
+        Err((status, detail)) => return workspace_error(status, detail),
+    };
+    let Some(root_id) = query.root.as_deref() else {
+        return workspace_error(StatusCode::BAD_REQUEST, "Choose a workspace location.");
+    };
+    let root = match root_for(&roots, root_id) {
+        Ok(root) => root.clone(),
+        Err((status, detail)) => return workspace_error(status, detail),
+    };
+    let denied = match denied_paths(&state.denied_roots) {
+        Ok(value) => value,
+        Err((status, detail)) => return workspace_error(status, detail),
+    };
+    let relative = match relative_path(query.path.as_deref()) {
+        Ok(value) => value,
+        Err((status, detail)) => return workspace_error(status, detail),
+    };
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let revision = headers
+        .get("x-wonder-revision")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let read = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            read_media_range(
+                &root,
+                &relative,
+                &denied,
+                range.as_deref(),
+                revision.as_deref(),
+            )
+        }),
+    )
+    .await;
+    match read {
+        Ok(Ok(Ok(media))) => {
+            let mut response = (StatusCode::PARTIAL_CONTENT, media.bytes).into_response();
+            let headers = response.headers_mut();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(media.mime));
+            headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            headers.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!(
+                    "bytes {}-{}/{}",
+                    media.start, media.end, media.total
+                ))
+                .unwrap(),
+            );
+            headers.insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&(media.end - media.start + 1).to_string()).unwrap(),
+            );
+            headers.insert(
+                "x-wonder-revision",
+                HeaderValue::from_str(&media.revision).unwrap(),
+            );
+            response
+        }
+        Ok(Ok(Err((status, detail, total)))) => {
+            let mut response = workspace_error(status, detail);
+            if status == StatusCode::RANGE_NOT_SATISFIABLE {
+                if let Some(total) = total {
+                    response.headers_mut().insert(
+                        header::CONTENT_RANGE,
+                        HeaderValue::from_str(&format!("bytes */{total}")).unwrap(),
+                    );
+                }
+            }
+            response
+        }
+        Ok(Err(_)) => workspace_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The media file could not be read.",
+        ),
+        Err(_) => workspace_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "This media file is taking too long to respond.",
+        ),
+    }
+}
+
 pub(super) async fn workspace_git_status(
     State(state): State<crate::AppState>,
     Extension(_authority): Extension<OwnerAuthority>,
     AxumPath(conversation_id): AxumPath<String>,
     Query(query): Query<WorkspaceQuery>,
 ) -> Response {
-    let (roots, _) = match conversation_workspace_roots(&state, &conversation_id).await {
+    let (roots, _) = match conversation_workspace_roots(&state, &conversation_id, false).await {
         Ok(value) => value,
         Err((status, detail)) => return workspace_error(status, detail),
     };
@@ -1448,7 +2014,7 @@ pub(super) async fn workspace_git_diff(
     AxumPath(conversation_id): AxumPath<String>,
     Query(query): Query<WorkspaceDiffQuery>,
 ) -> Response {
-    let (roots, _) = match conversation_workspace_roots(&state, &conversation_id).await {
+    let (roots, _) = match conversation_workspace_roots(&state, &conversation_id, false).await {
         Ok(value) => value,
         Err((status, detail)) => return workspace_error(status, detail),
     };
@@ -1467,11 +2033,10 @@ pub(super) async fn workspace_git_diff(
         Ok(value) => value,
         Err((status, detail)) => return workspace_error(status, detail),
     };
-    let path =
-        match resolve_workspace_path(root, &relative, &denied, Some(root.path.as_path()), true) {
-            Ok(path) => path,
-            Err((status, detail)) => return workspace_error(status, detail),
-        };
+    let path = match validated_git_path(root, &relative, &denied, Some(root.path.as_path())) {
+        Ok(path) => path,
+        Err((status, detail)) => return workspace_error(status, detail),
+    };
     let status = read_workspace_git_status(root, &denied, Some(root.path.as_path())).await;
     if !status.available {
         return workspace_error(
@@ -1521,26 +2086,37 @@ pub(super) async fn workspace_git_diff(
         }
     };
     let pathspec = format!(":(literal,top){repo_relative}");
-    let args = if query.staged {
-        vec![
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--cached",
-            "--",
-            pathspec.as_str(),
-        ]
+    let original_pathspec = if let Some(original) = change.original_path.as_deref() {
+        let original = match relative_path(Some(original)).and_then(|relative| {
+            validated_git_path(root, &relative, &denied, Some(root.path.as_path()))
+        }) {
+            Ok(path) => path,
+            Err((status, detail)) => return workspace_error(status, detail),
+        };
+        let Ok(original) = original.strip_prefix(&repository) else {
+            return workspace_error(
+                StatusCode::FORBIDDEN,
+                "This file is outside the verified repository.",
+            );
+        };
+        Some(format!(":(literal,top){}", original.to_string_lossy()))
     } else {
-        vec![
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--",
-            pathspec.as_str(),
-        ]
+        None
     };
+    let mut args = vec![
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--find-renames",
+    ];
+    if query.staged {
+        args.push("--cached");
+    }
+    args.extend(["--", pathspec.as_str()]);
+    if let Some(original) = original_pathspec.as_deref() {
+        args.push(original);
+    }
     let output = match crate::project_assignments::read_only_git_bytes(
         repository.to_str().unwrap_or_default(),
         &args,
@@ -1588,6 +2164,20 @@ pub(super) async fn workspace_git_diff(
 mod tests {
     use super::*;
     use std::os::unix::{ffi::OsStringExt, fs::symlink, net::UnixListener};
+    use wonder_store::{AgentFamily, ProjectConversationInsert, ProjectRootInput};
+
+    #[test]
+    fn publication_and_model_files_advertise_registered_media_types() {
+        for (name, mime) in [
+            ("book.epub", "application/epub+zip"),
+            ("object.usdz", "model/vnd.usdz+zip"),
+            ("object.obj", "model/obj"),
+            ("object.stl", "model/stl"),
+            ("object.ply", "application/octet-stream"),
+        ] {
+            assert_eq!(mime_for_path(Path::new(name)).as_deref(), Some(mime));
+        }
+    }
 
     #[tokio::test]
     async fn filesystem_browse_http_requires_owner_and_respects_protection() {
@@ -1953,7 +2543,7 @@ mod tests {
         );
         assert_eq!(
             git_pathspec(Path::new("/repo"), Path::new("/repo")),
-            Some(":(top,literal).".into())
+            Some(":(top,literal)".into())
         );
     }
 
@@ -2070,6 +2660,143 @@ mod tests {
         (status, bytes.to_vec())
     }
 
+    async fn media_route(
+        state: &crate::AppState,
+        uri: &str,
+        authenticated: bool,
+        range: &str,
+        revision: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        use axum::{body::to_bytes, body::Body, http::Request};
+        use tower::ServiceExt;
+        let mut request = Request::builder().uri(uri).header(header::RANGE, range);
+        if authenticated {
+            request = request.header("x-wonder-loopback-capability", &state.loopback_capability);
+        }
+        if let Some(revision) = revision {
+            request = request.header("x-wonder-revision", revision);
+        }
+        let response = crate::router(state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        (status, headers, bytes.to_vec())
+    }
+
+    #[test]
+    fn media_ranges_are_bounded_and_descriptor_revision_detects_changes() {
+        let folder = tempfile::tempdir().unwrap();
+        let bytes = b"\0\0\0\x18ftypisomabcdefghijkl";
+        fs::write(folder.path().join("clip.mp4"), bytes).unwrap();
+        fs::write(folder.path().join("false.mp4"), b"not a movie").unwrap();
+        let fifo = folder.path().join("pipe.mp4");
+        let fifo_name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.mp4"), bytes).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.mp4"),
+            folder.path().join("link.mp4"),
+        )
+        .unwrap();
+        let root = WorkspaceRoot {
+            id: "root".into(),
+            label: "Root".into(),
+            path: folder.path().canonicalize().unwrap(),
+            is_directory: true,
+            kind: "workingDirectory",
+        };
+        // If the read-only open regresses to blocking, a delayed writer lets
+        // the test fail by elapsed time instead of hanging the suite.
+        let delayed_fifo = fifo.clone();
+        let delayed_writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            let mut options = fs::OpenOptions::new();
+            options.write(true).custom_flags(libc::O_NONBLOCK);
+            let _ = options.open(delayed_fifo);
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(
+            read_media_range(&root, Path::new("pipe.mp4"), &[], Some("bytes=0-0"), None)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(started.elapsed() < Duration::from_millis(150));
+        delayed_writer.join().unwrap();
+        let first =
+            read_media_range(&root, Path::new("clip.mp4"), &[], Some("bytes=0-0"), None).unwrap();
+        assert_eq!(first.bytes, bytes[..1]);
+        assert_eq!(first.mime, "video/mp4");
+        let tail = read_media_range(
+            &root,
+            Path::new("clip.mp4"),
+            &[],
+            Some("bytes=-4"),
+            Some(&first.revision),
+        )
+        .unwrap();
+        assert_eq!(tail.bytes, bytes[bytes.len() - 4..]);
+        assert_eq!(
+            parse_media_range("bytes=0-1048576", 2 * MAX_MEDIA_RANGE_BYTES).unwrap_err(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+        for invalid in ["bytes=0-1,3-4", "bytes=999-", "bytes=-0", "units=0-1"] {
+            assert_eq!(
+                read_media_range(
+                    &root,
+                    Path::new("clip.mp4"),
+                    &[],
+                    Some(invalid),
+                    Some(&first.revision)
+                )
+                .unwrap_err()
+                .0,
+                StatusCode::RANGE_NOT_SATISFIABLE
+            );
+        }
+        assert_eq!(
+            read_media_range(&root, Path::new("clip.mp4"), &[], Some("bytes=1-2"), None)
+                .unwrap_err()
+                .0,
+            StatusCode::PRECONDITION_REQUIRED
+        );
+        assert_eq!(
+            read_media_range(&root, Path::new("link.mp4"), &[], Some("bytes=0-0"), None)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            read_media_range(&root, Path::new("false.mp4"), &[], Some("bytes=0-0"), None)
+                .unwrap_err()
+                .0,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        fs::write(
+            folder.path().join("clip.mp4"),
+            b"\0\0\0\x18ftypisomchanged-content",
+        )
+        .unwrap();
+        assert_eq!(
+            read_media_range(
+                &root,
+                Path::new("clip.mp4"),
+                &[],
+                Some("bytes=1-2"),
+                Some(&first.revision)
+            )
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+    }
+
     #[tokio::test]
     async fn workspace_routes_are_authenticated_scoped_and_support_group_and_grant_roots() {
         let (dir, mut state) = crate::ingestion::tests::fixture().await;
@@ -2077,6 +2804,11 @@ mod tests {
         let private_workspace = PathBuf::from(&bot.workspace_path).canonicalize().unwrap();
         let selected_workspace = tempfile::tempdir().unwrap();
         fs::write(selected_workspace.path().join("visible.txt"), b"visible").unwrap();
+        fs::write(
+            selected_workspace.path().join("clip.mp4"),
+            b"\0\0\0\x18ftypisommedia-tail",
+        )
+        .unwrap();
         fs::write(selected_workspace.path().join(".hidden"), b"hidden").unwrap();
         bot.working_directory = Some(selected_workspace.path().to_string_lossy().into_owned());
         state
@@ -2091,7 +2823,12 @@ mod tests {
 
         let (status, bytes) =
             workspace_route(&state, "/api/v1/conversations/bot/workspace/roots", true).await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         let roots: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(roots["roots"][0]["id"], "workspace");
         assert_eq!(roots["roots"][0]["label"], "Workspace");
@@ -2136,6 +2873,53 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(bytes, b"visible");
+        let (status, headers, bytes) = media_route(
+            &state,
+            "/api/v1/conversations/bot/workspace/file?root=workspace&path=visible.txt",
+            true,
+            "bytes=0-0",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(bytes, b"visible");
+        let media_uri = "/api/v1/conversations/bot/workspace/media?root=workspace&path=clip.mp4";
+        assert_ne!(
+            media_route(&state, media_uri, false, "bytes=0-0", None)
+                .await
+                .0,
+            StatusCode::PARTIAL_CONTENT
+        );
+        let (status, headers, bytes) =
+            media_route(&state, media_uri, true, "bytes=0-0", None).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(bytes, [0]);
+        assert_eq!(headers[header::CONTENT_RANGE], "bytes 0-0/22");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        let revision = headers["x-wonder-revision"].to_str().unwrap().to_owned();
+        assert_eq!(
+            media_route(&state, media_uri, true, "bytes=-4", None)
+                .await
+                .0,
+            StatusCode::PRECONDITION_REQUIRED
+        );
+        let (status, headers, bytes) =
+            media_route(&state, media_uri, true, "bytes=-4", Some(&revision)).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(headers[header::CONTENT_TYPE], "video/mp4");
+        assert_eq!(bytes, b"tail");
+        fs::write(
+            selected_workspace.path().join("clip.mp4"),
+            b"\0\0\0\x18ftypisomchanged-tail",
+        )
+        .unwrap();
+        assert_eq!(
+            media_route(&state, media_uri, true, "bytes=1-4", Some(&revision))
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
         assert_eq!(
             workspace_route(
                 &state,
@@ -2248,6 +3032,489 @@ mod tests {
             .await
             .0,
             StatusCode::NOT_FOUND
+        );
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_workspace_uses_current_verified_roots_without_a_bot() {
+        let (_fixture, state) = crate::ingestion::tests::fixture().await;
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("project-source");
+        let other = workspace.path().join("other-source");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&other).unwrap();
+        fs::write(source.join("note.txt"), b"project note").unwrap();
+        fs::write(other.join("other.txt"), b"other root").unwrap();
+        fs::write(other.join("other.mp4"), b"\0\0\0\x18ftypisomproject-media").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&source)
+            .status()
+            .unwrap()
+            .success());
+        let source_path = source.to_string_lossy().into_owned();
+        let other_path = other.to_string_lossy().into_owned();
+        let source_canonical = source
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let other_canonical = other.canonicalize().unwrap().to_string_lossy().into_owned();
+        let inputs = [
+            ProjectRootInput {
+                path: source_path.clone(),
+                canonical_path: source_canonical.clone(),
+            },
+            ProjectRootInput {
+                path: other_path.clone(),
+                canonical_path: other_canonical.clone(),
+            },
+        ];
+        let project = state
+            .store
+            .create_project(
+                "files-project",
+                "request",
+                "hash",
+                "Files",
+                &inputs,
+                0,
+                "now",
+            )
+            .await
+            .unwrap();
+        let project = match project {
+            wonder_store::ProjectCreate::Created(project) => project,
+            _ => panic!("new project"),
+        };
+        state
+            .store
+            .create_project_conversation(ProjectConversationInsert {
+                conversation_id: "project-files",
+                project_id: &project.id,
+                family: AgentFamily::Codex,
+                provider_store: "owner",
+                native_session_id: Some("thread"),
+                cwd: &source_path,
+                roots_revision: project.roots_revision,
+                title: "Files",
+                model: None,
+                effort: None,
+                service_tier: None,
+                access_mode: "workspace",
+                claude_approval: "ask",
+                plan_mode: false,
+                creation_request_id: None,
+                now: "now",
+            })
+            .await
+            .unwrap();
+
+        let (preview, mime) = verified_project_preview_file(
+            &state,
+            &project.id,
+            "project-files",
+            "workspace",
+            "note.txt",
+        )
+        .await
+        .unwrap();
+        assert_eq!(preview, b"project note");
+        assert_eq!(mime, "text/plain");
+        assert_eq!(
+            verified_project_preview_file(
+                &state,
+                "another-project",
+                "project-files",
+                "workspace",
+                "note.txt"
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(other.join("other.txt"), source.join("escaped.txt"))
+                .unwrap();
+            assert_ne!(
+                verified_project_preview_file(
+                    &state,
+                    &project.id,
+                    "project-files",
+                    "workspace",
+                    "escaped.txt"
+                )
+                .await
+                .unwrap_err()
+                .0,
+                StatusCode::OK
+            );
+        }
+
+        assert_ne!(
+            workspace_route(
+                &state,
+                "/api/v1/conversations/project-files/workspace/roots",
+                false
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (status, bytes) = workspace_route(
+            &state,
+            "/api/v1/conversations/project-files/workspace/roots",
+            true,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let roots: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(roots["roots"].as_array().unwrap().len(), 2);
+        assert_eq!(roots["roots"][0]["id"], "workspace");
+        assert_eq!(roots["roots"][0]["path"], source_canonical);
+        assert_eq!(roots["roots"][1]["kind"], "projectRoot");
+        let other_id = roots["roots"][1]["id"].as_str().unwrap();
+        let draft_scope = format!(
+            "/api/v1/conversations/project-files:{}:{}/workspace/roots",
+            project.id, project.primary_root_id
+        );
+        assert_eq!(
+            workspace_route(&state, &draft_scope, true).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            workspace_route(
+                &state,
+                "/api/v1/conversations/project-files:files-project:wrong-root/workspace/roots",
+                true
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, bytes) = workspace_route(
+            &state,
+            "/api/v1/conversations/project-files/workspace/directory?root=workspace",
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let page: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "note.txt"));
+        let (status, bytes) = workspace_route(
+            &state,
+            "/api/v1/conversations/project-files/workspace/file?root=workspace&path=note.txt",
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"project note");
+        let (status, bytes) = workspace_route(
+            &state,
+            &format!(
+                "/api/v1/conversations/project-files/workspace/file?root={other_id}&path=other.txt"
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"other root");
+        let media_uri = format!(
+            "/api/v1/conversations/project-files/workspace/media?root={other_id}&path=other.mp4"
+        );
+        assert_eq!(
+            media_route(&state, &media_uri, true, "bytes=0-0", None)
+                .await
+                .0,
+            StatusCode::PARTIAL_CONTENT
+        );
+        let (status, bytes) = workspace_route(
+            &state,
+            "/api/v1/conversations/project-files/workspace/git/status?root=workspace",
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let git: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(git["available"], true);
+        assert!(
+            git["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|change| change["path"] == "note.txt"),
+            "{git}"
+        );
+        let (status, bytes) = workspace_route(
+            &state,
+            "/api/v1/conversations/project-files/workspace/git/diff?root=workspace&path=note.txt",
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(String::from_utf8(bytes).unwrap().contains("+project note"));
+
+        // A real staged rename needs both verified paths. With only the new
+        // pathspec Git reports a new file and loses its source and edited lines.
+        fs::create_dir(source.join("private")).unwrap();
+        let original = (0..20)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        fs::write(source.join("private/rename-old.txt"), &original).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["add", "--", "private/rename-old.txt"]);
+        git(&[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=Wonder Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "baseline",
+        ]);
+        fs::rename(
+            source.join("private/rename-old.txt"),
+            source.join("rename-new.txt"),
+        )
+        .unwrap();
+        let staged = original.replace("line 10\n", "line ten changed\n");
+        fs::write(source.join("rename-new.txt"), &staged).unwrap();
+        git(&[
+            "add",
+            "-A",
+            "--",
+            "private/rename-old.txt",
+            "rename-new.txt",
+        ]);
+        fs::write(
+            source.join("rename-new.txt"),
+            staged.replace("line 11\n", "line eleven changed\n"),
+        )
+        .unwrap();
+        let (status, bytes) = workspace_route(
+            &state,
+            "/api/v1/conversations/project-files/workspace/git/status?root=workspace",
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let git_status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            git_status["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|change| change["path"] == "rename-new.txt"
+                    && change["originalPath"] == "private/rename-old.txt"),
+            "{git_status}"
+        );
+        let rename_uri = "/api/v1/conversations/project-files/workspace/git/diff?root=workspace&path=rename-new.txt";
+        let (status, bytes) =
+            workspace_route(&state, &format!("{rename_uri}&staged=true"), true).await;
+        assert_eq!(status, StatusCode::OK);
+        let staged_diff: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let staged_diff = staged_diff["diff"].as_str().unwrap();
+        assert!(
+            staged_diff.contains("rename from private/rename-old.txt"),
+            "{staged_diff}"
+        );
+        assert!(
+            staged_diff.contains("rename to rename-new.txt"),
+            "{staged_diff}"
+        );
+        assert!(staged_diff.contains("+line ten changed"), "{staged_diff}");
+        let (status, bytes) = workspace_route(&state, rename_uri, true).await;
+        assert_eq!(status, StatusCode::OK);
+        let unstaged_diff: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(unstaged_diff["diff"]
+            .as_str()
+            .unwrap()
+            .contains("+line eleven changed"));
+
+        // A denied rename source must not be exposed by status or used in a diff.
+        let git_root = WorkspaceRoot {
+            id: "workspace".into(),
+            label: "Workspace".into(),
+            path: source.canonicalize().unwrap(),
+            is_directory: true,
+            kind: "workingDirectory",
+        };
+        let denied = vec![source.join("private").canonicalize().unwrap()];
+        let hidden = read_workspace_git_status(&git_root, &denied, Some(&git_root.path)).await;
+        assert!(hidden.available);
+        assert!(!hidden
+            .changes
+            .iter()
+            .any(|change| change.path == "rename-new.txt"));
+        assert_eq!(
+            validated_git_path(
+                &git_root,
+                Path::new("private/rename-old.txt"),
+                &denied,
+                Some(&git_root.path)
+            )
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        symlink(
+            other.join("other.txt"),
+            source.join("private/rename-old.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            validated_git_path(
+                &git_root,
+                Path::new("private/rename-old.txt"),
+                &[],
+                Some(&git_root.path)
+            )
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let symlink_status = read_workspace_git_status(&git_root, &[], Some(&git_root.path)).await;
+        assert!(!symlink_status
+            .changes
+            .iter()
+            .any(|change| change.path == "rename-new.txt"));
+        fs::remove_file(source.join("private/rename-old.txt")).unwrap();
+        assert_eq!(
+            workspace_route(
+                &state,
+                "/api/v1/conversations/not-project-files/workspace/roots",
+                true
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+
+        // A later Project folder edit does not invalidate the retained cwd.
+        let updated = state
+            .store
+            .update_project_roots(
+                &project.id,
+                project.roots_revision,
+                &inputs[..1],
+                0,
+                "later",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(updated.roots_revision > project.roots_revision);
+        assert_eq!(
+            workspace_route(
+                &state,
+                "/api/v1/conversations/project-files/workspace/roots",
+                true
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(workspace_route(&state, &format!("/api/v1/conversations/project-files/workspace/file?root={other_id}&path=other.txt"), true).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            media_route(&state, &media_uri, true, "bytes=0-0", None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let updated = state
+            .store
+            .update_project_roots(
+                &project.id,
+                updated.roots_revision,
+                &inputs[1..],
+                0,
+                "later",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(updated.root_for(&source_path).is_none());
+        assert_eq!(
+            workspace_route(
+                &state,
+                "/api/v1/conversations/project-files/workspace/roots",
+                true
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+
+        let restored = state
+            .store
+            .update_project_roots(&project.id, updated.roots_revision, &inputs, 0, "later")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(restored.root_for(&source_path).is_some());
+        let mut denied_state = state.clone();
+        denied_state.denied_roots.push(source_path.clone());
+        assert_eq!(
+            workspace_route(
+                &denied_state,
+                "/api/v1/conversations/project-files/workspace/roots",
+                true
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        fs::rename(&source, workspace.path().join("moved-source")).unwrap();
+        symlink(&other, &source).unwrap();
+        assert_eq!(
+            workspace_route(
+                &state,
+                "/api/v1/conversations/project-files/workspace/roots",
+                true
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let prior_root = WorkspaceRoot {
+            id: "workspace".into(),
+            label: "Workspace".into(),
+            path: PathBuf::from(source_canonical),
+            is_directory: true,
+            kind: "workingDirectory",
+        };
+        assert_eq!(
+            resolve_workspace_path(&prior_root, Path::new("other.txt"), &[], None, false)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
         );
         state.app_server.lock().await.shutdown().await.unwrap();
     }

@@ -90,6 +90,7 @@ apps/ios/Wonder/Assets.xcassets/ProviderClaude.imageset/claude.png
 apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/Contents.json
 apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex-dark.png
 apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex.png
+apps/ios/Wonder/AutomationsView.swift
 apps/ios/Wonder/BuildInfo.plist
 apps/ios/Wonder/CameraCapture.swift
 apps/ios/Wonder/ComposerApprovalSettings.swift
@@ -99,6 +100,7 @@ apps/ios/Wonder/ConnectionModel.swift
 apps/ios/Wonder/DiagnosticScenarios.swift
 apps/ios/Wonder/Diagnostics.swift
 apps/ios/Wonder/DictationViews.swift
+apps/ios/Wonder/EPUB-LICENSES.md
 apps/ios/Wonder/GroupCollaborationViews.swift
 apps/ios/Wonder/Identity.swift
 apps/ios/Wonder/MacFileAccess.swift
@@ -107,6 +109,7 @@ apps/ios/Wonder/NativeChats.swift
 apps/ios/Wonder/NewChatView.swift
 apps/ios/Wonder/PhoneIdentity.swift
 apps/ios/Wonder/ProjectViews.swift
+apps/ios/Wonder/ProjectWidgetSnapshotPublisher.swift
 apps/ios/Wonder/ProjectsModel.swift
 apps/ios/Wonder/PushNotifications.swift
 apps/ios/Wonder/ScienceAvatar.swift
@@ -115,14 +118,26 @@ apps/ios/Wonder/SubagentDock.swift
 apps/ios/Wonder/WebRTC-LICENSE.md
 apps/ios/Wonder/Wonder.entitlements
 apps/ios/Wonder/WonderApp.swift
+apps/ios/Wonder/WorkspaceArchivePreflight.swift
+apps/ios/Wonder/WorkspaceModelPreview.swift
+apps/ios/Wonder/WorkspacePublicationPreview.swift
+apps/ios/WonderDiagnosticsTests/ProjectWidgetSnapshotTests.swift
 apps/ios/WonderDiagnosticsTests/WonderDiagnosticsTests.swift
+apps/ios/WonderDiagnosticsTests/WorkspacePreviewPolicyTests.swift
 apps/ios/WonderNotificationService/Info.plist
 apps/ios/WonderNotificationService/NotificationService.swift
 apps/ios/WonderNotificationService/WonderNotificationService.entitlements
 apps/ios/WonderShare/Info.plist
 apps/ios/WonderShare/ShareViewController.swift
 apps/ios/WonderShare/WonderShare.entitlements
+apps/ios/WonderUITests/AutomationUITests.swift
+apps/ios/WonderUITests/DeepLinkUITests.swift
 apps/ios/WonderUITests/WonderUITests.swift
+apps/ios/WonderUITests/WorkspacePreviewUITests.swift
+apps/ios/WonderWidget/Info.plist
+apps/ios/WonderWidget/ProjectWidgetSnapshot.swift
+apps/ios/WonderWidget/WonderProjectWidget.swift
+apps/ios/WonderWidget/WonderWidget.entitlements
 apps/menubar/Launcher/main.swift
 apps/menubar/Package.resolved
 apps/menubar/Package.swift
@@ -180,6 +195,7 @@ apps/native/Sources/WonderPairing/SavedConnections.swift
 apps/native/Sources/WonderPairing/Search.swift
 apps/native/Sources/WonderPairing/SendIntent.swift
 apps/native/Sources/WonderPairing/SigningIdentity.swift
+apps/native/Sources/WonderPairing/WorkspaceMediaResourceLoader.swift
 apps/native/Tests/WonderComputerViewTests/ComputerReceiverTests.swift
 apps/native/Tests/WonderPairingTests/ActivityDisclosurePolicyTests.swift
 apps/native/Tests/WonderPairingTests/ActivityLayoutTests.swift
@@ -209,6 +225,7 @@ apps/native/Tests/WonderPairingTests/SendIntentTests.swift
 apps/native/Tests/WonderPairingTests/SendTransportTests.swift
 apps/native/Tests/WonderPairingTests/SigningIdentityTests.swift
 apps/native/Tests/WonderPairingTests/TurnLifecycleTests.swift
+apps/native/Tests/WonderPairingTests/WorkspaceMediaTransportTests.swift
 assets/bot-avatars/science/README.md
 assets/bot-avatars/science/animated/atom.svg
 assets/bot-avatars/science/animated/comet.svg
@@ -358,6 +375,9 @@ crates/wonder-store/migrations/0080_project_creation_payload.sql
 crates/wonder-store/migrations/0081_update_handoff.sql
 crates/wonder-store/migrations/0082_computer_video_quality.sql
 crates/wonder-store/migrations/0083_computer_video_quality_1080.sql
+crates/wonder-store/migrations/0084_project_service_tier.sql
+crates/wonder-store/migrations/0085_project_automation_targets.sql
+crates/wonder-store/migrations/0086_automation_revisions.sql
 crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs
@@ -385,6 +405,7 @@ crates/wonder-store/src/update_handoff.rs
 crates/wonderd/Cargo.toml
 crates/wonderd/src/account_usage.rs
 crates/wonderd/src/approval_routing_tests.rs
+crates/wonderd/src/artifact_annotations.rs
 crates/wonderd/src/asr.rs
 crates/wonderd/src/asr_tests.rs
 crates/wonderd/src/automation_schedule.rs
@@ -420,6 +441,7 @@ crates/wonderd/src/permission_modes.rs
 crates/wonderd/src/phone_approval_tests.rs
 crates/wonderd/src/pm_tools.rs
 crates/wonderd/src/project_assignments.rs
+crates/wonderd/src/project_subagents.rs
 crates/wonderd/src/projects.rs
 crates/wonderd/src/push.rs
 crates/wonderd/src/questions.rs

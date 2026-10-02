@@ -43,6 +43,25 @@
 		BA9F00000000000000000001 /* SubagentDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA9F00000000000000000002 /* SubagentDock.swift */; };
 		BA9F00000000000000000003 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA9F00000000000000000004 /* PushNotifications.swift */; };
 		BA9F00000000000000000005 /* ComposerApprovalSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA9F00000000000000000006 /* ComposerApprovalSettings.swift */; };
+		C30000000000000000000001 /* AutomationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30000000000000000000002 /* AutomationsView.swift */; };
+		C30000000000000000000003 /* AutomationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30000000000000000000004 /* AutomationUITests.swift */; };
+		F30000000000000000000001 /* WorkspaceArchivePreflight.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000000000000000000011 /* WorkspaceArchivePreflight.swift */; };
+		F30000000000000000000002 /* WorkspaceModelPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000000000000000000012 /* WorkspaceModelPreview.swift */; };
+		F30000000000000000000003 /* WorkspacePublicationPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000000000000000000013 /* WorkspacePublicationPreview.swift */; };
+		F30000000000000000000004 /* ReadiumShared in Frameworks */ = {isa = PBXBuildFile; productRef = F30000000000000000000021 /* ReadiumShared */; };
+		F30000000000000000000005 /* ReadiumStreamer in Frameworks */ = {isa = PBXBuildFile; productRef = F30000000000000000000022 /* ReadiumStreamer */; };
+		F30000000000000000000006 /* ReadiumNavigator in Frameworks */ = {isa = PBXBuildFile; productRef = F30000000000000000000023 /* ReadiumNavigator */; };
+		F30000000000000000000007 /* ReadiumZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = F30000000000000000000024 /* ReadiumZIPFoundation */; };
+		F30000000000000000000008 /* EPUB-LICENSES.md in Resources */ = {isa = PBXBuildFile; fileRef = F30000000000000000000014 /* EPUB-LICENSES.md */; };
+		F30000000000000000000009 /* WorkspacePreviewUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000000000000000000015 /* WorkspacePreviewUITests.swift */; };
+		F3000000000000000000000A /* WorkspacePreviewPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000000000000000000016 /* WorkspacePreviewPolicyTests.swift */; };
+		D10000000000000000000001 /* DeepLinkUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000002 /* DeepLinkUITests.swift */; };
+		E10000000000000000000001 /* ProjectWidgetSnapshot.swift in Wonder Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000008 /* ProjectWidgetSnapshot.swift */; };
+		E10000000000000000000002 /* ProjectWidgetSnapshot.swift in Widget Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000008 /* ProjectWidgetSnapshot.swift */; };
+		E10000000000000000000003 /* WonderProjectWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000009 /* WonderProjectWidget.swift */; };
+		E10000000000000000000004 /* ProjectWidgetSnapshotPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1000000000000000000000A /* ProjectWidgetSnapshotPublisher.swift */; };
+		E10000000000000000000005 /* ProjectWidgetSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1000000000000000000000B /* ProjectWidgetSnapshotTests.swift */; };
+		E10000000000000000000006 /* WonderWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = E1000000000000000000000C /* WonderWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BFCD92EE5E10E7535685F137 /* WonderUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6140834B9A9F3D15FF06833A /* WonderUITests.swift */; };
 		C811A5ED247214E881943599 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4E2F05DCDF1EF93891E66147 /* Foundation.framework */; };
 		C892AA779665CB03113835C1 /* PhoneIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 346332EBDE310F6CD014B601 /* PhoneIdentity.swift */; };
@@ -78,6 +97,13 @@
 			remoteGlobalIDString = 000000000000000000000006;
 			remoteInfo = Wonder;
 		};
+		E1000000000000000000000D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 000000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E10000000000000000000012;
+			remoteInfo = WonderWidget;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -89,6 +115,7 @@
 			files = (
 				E0A5EF4DFCCBEF6F54DBD6B7 /* WonderNotificationService.appex in Embed App Extensions */,
 				8965B6DD8CEBFECA966B332D /* WonderShare.appex in Embed App Extensions */,
+				E10000000000000000000006 /* WonderWidget.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -133,6 +160,22 @@
 		BA9F00000000000000000002 /* SubagentDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubagentDock.swift; sourceTree = "<group>"; };
 		BA9F00000000000000000004 /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotifications.swift; sourceTree = "<group>"; };
 		BA9F00000000000000000006 /* ComposerApprovalSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerApprovalSettings.swift; sourceTree = "<group>"; };
+		C30000000000000000000002 /* AutomationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsView.swift; sourceTree = "<group>"; };
+		C30000000000000000000004 /* AutomationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationUITests.swift; sourceTree = "<group>"; };
+		F30000000000000000000011 /* WorkspaceArchivePreflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceArchivePreflight.swift; sourceTree = "<group>"; };
+		F30000000000000000000012 /* WorkspaceModelPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceModelPreview.swift; sourceTree = "<group>"; };
+		F30000000000000000000013 /* WorkspacePublicationPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacePublicationPreview.swift; sourceTree = "<group>"; };
+		F30000000000000000000014 /* EPUB-LICENSES.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = "EPUB-LICENSES.md"; sourceTree = "<group>"; };
+		F30000000000000000000015 /* WorkspacePreviewUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacePreviewUITests.swift; sourceTree = "<group>"; };
+		F30000000000000000000016 /* WorkspacePreviewPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacePreviewPolicyTests.swift; sourceTree = "<group>"; };
+		D10000000000000000000002 /* DeepLinkUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepLinkUITests.swift; sourceTree = "<group>"; };
+		E10000000000000000000008 /* ProjectWidgetSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectWidgetSnapshot.swift; sourceTree = "<group>"; };
+		E10000000000000000000009 /* WonderProjectWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WonderProjectWidget.swift; sourceTree = "<group>"; };
+		E1000000000000000000000A /* ProjectWidgetSnapshotPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectWidgetSnapshotPublisher.swift; sourceTree = "<group>"; };
+		E1000000000000000000000B /* ProjectWidgetSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectWidgetSnapshotTests.swift; sourceTree = "<group>"; };
+		E1000000000000000000000C /* WonderWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WonderWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		E1000000000000000000000E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		E1000000000000000000000F /* WonderWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WonderWidget.entitlements; sourceTree = "<group>"; };
 		BC9D631263C10B783E48F521 /* WonderShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WonderShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		BFA70C66124A72503DDC9554 /* WonderNotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WonderNotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		F5AA3A14AB81C67C8DDCB7B6 /* DiagnosticScenarios.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DiagnosticScenarios.swift; sourceTree = "<group>"; };
@@ -145,6 +188,10 @@
 			files = (
 				000000000000000000000023 /* WonderPairing in Frameworks */,
 				000000000000000000000025 /* WonderComputerView in Frameworks */,
+				F30000000000000000000004 /* ReadiumShared in Frameworks */,
+				F30000000000000000000005 /* ReadiumStreamer in Frameworks */,
+				F30000000000000000000006 /* ReadiumNavigator in Frameworks */,
+				F30000000000000000000007 /* ReadiumZIPFoundation in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -180,6 +227,12 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E10000000000000000000015 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -194,6 +247,7 @@
 				296AC4FB7739A5313CEA6FD9 /* PushShared */,
 				C518C0B5DCD7ECA8129E4916 /* WonderNotificationService */,
 				CE2104FC1D46538F31EBDB85 /* WonderShare */,
+				E10000000000000000000010 /* WonderWidget */,
 			);
 			sourceTree = "<group>";
 		};
@@ -204,9 +258,14 @@
 				00000000000000000000000B /* Identity.swift */,
 				00000000000000000000000C /* ConnectionModel.swift */,
 				00000000000000000000000D /* NativeChats.swift */,
+				F30000000000000000000011 /* WorkspaceArchivePreflight.swift */,
+				F30000000000000000000012 /* WorkspaceModelPreview.swift */,
+				F30000000000000000000013 /* WorkspacePublicationPreview.swift */,
+				F30000000000000000000014 /* EPUB-LICENSES.md */,
 				BA9F00000000000000000002 /* SubagentDock.swift */,
 				BA9F00000000000000000004 /* PushNotifications.swift */,
 				BA9F00000000000000000006 /* ComposerApprovalSettings.swift */,
+				C30000000000000000000002 /* AutomationsView.swift */,
 				A10000000000000000000013 /* CameraCapture.swift */,
 				A10000000000000000000018 /* ComputerSessionView.swift */,
 				A10000000000000000000094 /* ComputerInput.swift */,
@@ -219,6 +278,7 @@
 				B20000000000000000000005 /* ProjectViews.swift */,
 				B20000000000000000000003 /* NewChatView.swift */,
 				B20000000000000000000001 /* AppShell.swift */,
+				E1000000000000000000000A /* ProjectWidgetSnapshotPublisher.swift */,
 				A10000000000000000000011 /* GroupCollaborationViews.swift */,
 				A10000000000000000000016 /* ScienceAvatar.swift */,
 				A10000000000000000000092 /* ScienceAvatarGeometry.swift */,
@@ -237,6 +297,7 @@
 				8FF492D188DF8F08262C744B /* WonderDiagnosticsTests.xctest */,
 				BFA70C66124A72503DDC9554 /* WonderNotificationService.appex */,
 				BC9D631263C10B783E48F521 /* WonderShare.appex */,
+				E1000000000000000000000C /* WonderWidget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -245,6 +306,8 @@
 			isa = PBXGroup;
 			children = (
 				47E82AB093AAA04EBEBABC57 /* WonderDiagnosticsTests.swift */,
+				E1000000000000000000000B /* ProjectWidgetSnapshotTests.swift */,
+				F30000000000000000000016 /* WorkspacePreviewPolicyTests.swift */,
 			);
 			name = WonderDiagnosticsTests;
 			path = WonderDiagnosticsTests;
@@ -263,6 +326,9 @@
 			isa = PBXGroup;
 			children = (
 				6140834B9A9F3D15FF06833A /* WonderUITests.swift */,
+				C30000000000000000000004 /* AutomationUITests.swift */,
+				D10000000000000000000002 /* DeepLinkUITests.swift */,
+				F30000000000000000000015 /* WorkspacePreviewUITests.swift */,
 			);
 			name = WonderUITests;
 			path = WonderUITests;
@@ -306,6 +372,18 @@
 			path = WonderShare;
 			sourceTree = "<group>";
 		};
+		E10000000000000000000010 /* WonderWidget */ = {
+			isa = PBXGroup;
+			children = (
+				E10000000000000000000008 /* ProjectWidgetSnapshot.swift */,
+				E10000000000000000000009 /* WonderProjectWidget.swift */,
+				E1000000000000000000000E /* Info.plist */,
+				E1000000000000000000000F /* WonderWidget.entitlements */,
+			);
+			name = WonderWidget;
+			path = WonderWidget;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -323,11 +401,16 @@
 			dependencies = (
 				D4C677FDC1238FF238B59ACA /* PBXTargetDependency */,
 				1827FA59B83879158B6527B4 /* PBXTargetDependency */,
+				E10000000000000000000017 /* PBXTargetDependency */,
 			);
 			name = Wonder;
 			packageProductDependencies = (
 				000000000000000000000022 /* WonderPairing */,
 				000000000000000000000024 /* WonderComputerView */,
+				F30000000000000000000021 /* ReadiumShared */,
+				F30000000000000000000022 /* ReadiumStreamer */,
+				F30000000000000000000023 /* ReadiumNavigator */,
+				F30000000000000000000024 /* ReadiumZIPFoundation */,
 			);
 			productName = Wonder;
 			productReference = 000000000000000000000005 /* Wonder.app */;
@@ -406,6 +489,21 @@
 			productReference = 8FF492D188DF8F08262C744B /* WonderDiagnosticsTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		E10000000000000000000012 /* WonderWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E10000000000000000000018 /* Build configuration list for PBXNativeTarget "WonderWidget" */;
+			buildPhases = (
+				E10000000000000000000014 /* Sources */,
+				E10000000000000000000015 /* Frameworks */,
+				E10000000000000000000016 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = WonderWidget;
+			productName = WonderWidget;
+			productReference = E1000000000000000000000C /* WonderWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -425,6 +523,8 @@
 			mainGroup = 000000000000000000000002;
 			packageReferences = (
 				000000000000000000000021 /* XCLocalSwiftPackageReference "native" */,
+				F30000000000000000000031 /* XCRemoteSwiftPackageReference "swift-toolkit" */,
+				F30000000000000000000032 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
 			);
 			productRefGroup = 000000000000000000000004 /* Products */;
 			projectDirPath = "";
@@ -435,6 +535,7 @@
 				CE8362DBD6510DADD2E8CF36 /* WonderDiagnosticsTests */,
 				A67491E68CB3DB9929A9EBEE /* WonderNotificationService */,
 				6BB589EAEEA42379EF5BCA0C /* WonderShare */,
+				E10000000000000000000012 /* WonderWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -444,6 +545,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F30000000000000000000008 /* EPUB-LICENSES.md in Resources */,
 				000000000000000000000018 /* Assets.xcassets in Resources */,
 				A1000000000000000000001A /* WebRTC-LICENSE.md in Resources */,
 			);
@@ -477,6 +579,12 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E10000000000000000000016 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -486,11 +594,17 @@
 			files = (
 				000000000000000000000014 /* WonderApp.swift in Sources */,
 				000000000000000000000015 /* Identity.swift in Sources */,
+				E10000000000000000000001 /* ProjectWidgetSnapshot.swift in Wonder Sources */,
+				E10000000000000000000004 /* ProjectWidgetSnapshotPublisher.swift in Sources */,
 				000000000000000000000016 /* ConnectionModel.swift in Sources */,
 				000000000000000000000017 /* NativeChats.swift in Sources */,
+				F30000000000000000000001 /* WorkspaceArchivePreflight.swift in Sources */,
+				F30000000000000000000002 /* WorkspaceModelPreview.swift in Sources */,
+				F30000000000000000000003 /* WorkspacePublicationPreview.swift in Sources */,
 				BA9F00000000000000000001 /* SubagentDock.swift in Sources */,
 				BA9F00000000000000000003 /* PushNotifications.swift in Sources */,
 				BA9F00000000000000000005 /* ComposerApprovalSettings.swift in Sources */,
+				C30000000000000000000001 /* AutomationsView.swift in Sources */,
 				A10000000000000000000014 /* CameraCapture.swift in Sources */,
 				A10000000000000000000017 /* ComputerSessionView.swift in Sources */,
 				A10000000000000000000093 /* ComputerInput.swift in Sources */,
@@ -516,6 +630,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				9704A6C8BA26214D46834682 /* WonderDiagnosticsTests.swift in Sources */,
+				E10000000000000000000005 /* ProjectWidgetSnapshotTests.swift in Sources */,
+				F3000000000000000000000A /* WorkspacePreviewPolicyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -542,6 +658,18 @@
 			buildActionMask = 2147483647;
 			files = (
 				BFCD92EE5E10E7535685F137 /* WonderUITests.swift in Sources */,
+				F30000000000000000000009 /* WorkspacePreviewUITests.swift in Sources */,
+				C30000000000000000000003 /* AutomationUITests.swift in Sources */,
+				D10000000000000000000001 /* DeepLinkUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E10000000000000000000014 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E10000000000000000000002 /* ProjectWidgetSnapshot.swift in Widget Sources */,
+				E10000000000000000000003 /* WonderProjectWidget.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -571,6 +699,12 @@
 			name = WonderNotificationService;
 			target = A67491E68CB3DB9929A9EBEE /* WonderNotificationService */;
 			targetProxy = 9D20F23E49E47E1D56751C78 /* PBXContainerItemProxy */;
+		};
+		E10000000000000000000017 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = WonderWidget;
+			target = E10000000000000000000012 /* WonderWidget */;
+			targetProxy = E1000000000000000000000D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -610,8 +744,10 @@
 				WONDER_APNS_ENVIRONMENT = sandbox;
 				WONDER_APP_BUNDLE_IDENTIFIER = com.saimun.wonder.native;
 				WONDER_APP_DISPLAY_NAME = Wonder;
+				WONDER_WIDGET_APP_GROUP = group.com.saimun.wonder.native;
 				WONDER_BUILD_PROFILE = debug;
 				WONDER_DISTRIBUTION_CHANNEL = production;
+				WONDER_DEEP_LINK_SCHEME = wonder;
 			};
 			name = Debug;
 		};
@@ -650,8 +786,10 @@
 				WONDER_APNS_ENVIRONMENT = production;
 				WONDER_APP_BUNDLE_IDENTIFIER = com.swaymun.wonder;
 				WONDER_APP_DISPLAY_NAME = Wonder;
+				WONDER_WIDGET_APP_GROUP = group.com.swaymun.wonder;
 				WONDER_BUILD_PROFILE = release;
 				WONDER_DISTRIBUTION_CHANNEL = production;
+				WONDER_DEEP_LINK_SCHEME = wonder;
 			};
 			name = Release;
 		};
@@ -739,8 +877,10 @@
 				WONDER_APNS_ENVIRONMENT = sandbox;
 				WONDER_APP_BUNDLE_IDENTIFIER = com.swaymun.wonder.testing;
 				WONDER_APP_DISPLAY_NAME = "Wonder Testing";
+				WONDER_WIDGET_APP_GROUP = group.com.swaymun.wonder.testing;
 				WONDER_BUILD_PROFILE = diagnostics;
 				WONDER_DISTRIBUTION_CHANNEL = testing;
+				WONDER_DEEP_LINK_SCHEME = "wonder-testing";
 			};
 			name = TestingDiagnostics;
 		};
@@ -1059,8 +1199,10 @@
 				WONDER_APNS_ENVIRONMENT = sandbox;
 				WONDER_APP_BUNDLE_IDENTIFIER = com.swaymun.wonder;
 				WONDER_APP_DISPLAY_NAME = Wonder;
+				WONDER_WIDGET_APP_GROUP = group.com.swaymun.wonder;
 				WONDER_BUILD_PROFILE = diagnostics;
 				WONDER_DISTRIBUTION_CHANNEL = production;
+				WONDER_DEEP_LINK_SCHEME = wonder;
 			};
 			name = Diagnostics;
 		};
@@ -1280,8 +1422,10 @@
 				WONDER_APNS_ENVIRONMENT = production;
 				WONDER_APP_BUNDLE_IDENTIFIER = com.swaymun.wonder.testing;
 				WONDER_APP_DISPLAY_NAME = "Wonder Testing";
+				WONDER_WIDGET_APP_GROUP = group.com.swaymun.wonder.testing;
 				WONDER_BUILD_PROFILE = release;
 				WONDER_DISTRIBUTION_CHANNEL = testing;
+				WONDER_DEEP_LINK_SCHEME = "wonder-testing";
 			};
 			name = Testing;
 		};
@@ -1424,6 +1568,145 @@
 			};
 			name = TestingDiagnostics;
 		};
+		E10000000000000000000020 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = WonderWidget/WonderWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8KKNVD7758;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = WonderWidget/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(WONDER_APP_BUNDLE_IDENTIFIER).Widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(WONDER_WIDGET_PROFILE)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				WONDER_APP_BUNDLE_IDENTIFIER = com.saimun.wonder.native;
+				WONDER_APP_DISPLAY_NAME = Wonder;
+				WONDER_WIDGET_APP_GROUP = group.com.saimun.wonder.native;
+			};
+			name = Debug;
+		};
+		E10000000000000000000021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = WonderWidget/WonderWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8KKNVD7758;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = WonderWidget/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(WONDER_APP_BUNDLE_IDENTIFIER).Widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(WONDER_WIDGET_PROFILE)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				WONDER_APP_BUNDLE_IDENTIFIER = com.swaymun.wonder;
+				WONDER_APP_DISPLAY_NAME = Wonder;
+				WONDER_WIDGET_APP_GROUP = group.com.swaymun.wonder;
+			};
+			name = Release;
+		};
+		E10000000000000000000022 /* Diagnostics */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = WonderWidget/WonderWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8KKNVD7758;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = WonderWidget/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(WONDER_APP_BUNDLE_IDENTIFIER).Widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(WONDER_WIDGET_PROFILE)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				WONDER_APP_BUNDLE_IDENTIFIER = com.swaymun.wonder;
+				WONDER_APP_DISPLAY_NAME = Wonder;
+				WONDER_WIDGET_APP_GROUP = group.com.swaymun.wonder;
+			};
+			name = Diagnostics;
+		};
+		E10000000000000000000023 /* Testing */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = WonderWidget/WonderWidget.entitlements;
+				CODE_SIGN_STYLE = "$(WONDER_APP_SIGNING_STYLE)";
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8KKNVD7758;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = WonderWidget/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(WONDER_APP_BUNDLE_IDENTIFIER).Widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(WONDER_WIDGET_PROFILE)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				WONDER_APP_BUNDLE_IDENTIFIER = com.swaymun.wonder.testing;
+				WONDER_APP_DISPLAY_NAME = "Wonder Testing";
+				WONDER_WIDGET_APP_GROUP = group.com.swaymun.wonder.testing;
+			};
+			name = Testing;
+		};
+		E10000000000000000000024 /* TestingDiagnostics */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = WonderWidget/WonderWidget.entitlements;
+				CODE_SIGN_STYLE = "$(WONDER_APP_SIGNING_STYLE)";
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8KKNVD7758;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = WonderWidget/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(WONDER_APP_BUNDLE_IDENTIFIER).Widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(WONDER_WIDGET_PROFILE)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				WONDER_APP_BUNDLE_IDENTIFIER = com.swaymun.wonder.testing;
+				WONDER_APP_DISPLAY_NAME = "Wonder Testing";
+				WONDER_WIDGET_APP_GROUP = group.com.swaymun.wonder.testing;
+			};
+			name = TestingDiagnostics;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1499,6 +1782,18 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		E10000000000000000000018 /* Build configuration list for PBXNativeTarget "WonderWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E10000000000000000000020 /* Debug */,
+				E10000000000000000000021 /* Release */,
+				E10000000000000000000022 /* Diagnostics */,
+				E10000000000000000000023 /* Testing */,
+				E10000000000000000000024 /* TestingDiagnostics */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -1507,6 +1802,19 @@
 			relativePath = ../native;
 		};
 /* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		F30000000000000000000031 /* XCRemoteSwiftPackageReference "swift-toolkit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/readium/swift-toolkit.git";
+			requirement = {kind = exactVersion; version = 3.11.0; };
+		};
+		F30000000000000000000032 /* XCRemoteSwiftPackageReference "ZIPFoundation" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/readium/ZIPFoundation.git";
+			requirement = {kind = exactVersion; version = 3.0.1; };
+		};
+/* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		000000000000000000000022 /* WonderPairing */ = {
@@ -1524,6 +1832,10 @@
 			package = 000000000000000000000021 /* XCLocalSwiftPackageReference "native" */;
 			productName = WonderPairing;
 		};
+		F30000000000000000000021 /* ReadiumShared */ = {isa = XCSwiftPackageProductDependency; package = F30000000000000000000031 /* XCRemoteSwiftPackageReference "swift-toolkit" */; productName = ReadiumShared; };
+		F30000000000000000000022 /* ReadiumStreamer */ = {isa = XCSwiftPackageProductDependency; package = F30000000000000000000031 /* XCRemoteSwiftPackageReference "swift-toolkit" */; productName = ReadiumStreamer; };
+		F30000000000000000000023 /* ReadiumNavigator */ = {isa = XCSwiftPackageProductDependency; package = F30000000000000000000031 /* XCRemoteSwiftPackageReference "swift-toolkit" */; productName = ReadiumNavigator; };
+		F30000000000000000000024 /* ReadiumZIPFoundation */ = {isa = XCSwiftPackageProductDependency; package = F30000000000000000000032 /* XCRemoteSwiftPackageReference "ZIPFoundation" */; productName = ReadiumZIPFoundation; };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 000000000000000000000001 /* Project object */;

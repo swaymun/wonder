@@ -8,10 +8,19 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
     state.store.recover_group_runs().await?;
     Ok(tokio::spawn(async move {
         let mut groups = tokio::task::JoinSet::new();
+        let mut goal_checks = tokio::task::JoinSet::new();
+        let mut next_goal_check = tokio::time::Instant::now();
         let mut next_project_recovery = tokio::time::Instant::now();
         let mut next_update_recovery = tokio::time::Instant::now();
         loop {
             while groups.try_join_next().is_some() {}
+            while goal_checks.try_join_next().is_some() {}
+            if goal_checks.is_empty() && tokio::time::Instant::now() >= next_goal_check {
+                let goal_state = state.clone();
+                goal_checks
+                    .spawn(async move { crate::goals::enforce_time_limits(&goal_state).await });
+                next_goal_check = tokio::time::Instant::now() + Duration::from_secs(5);
+            }
             let Some(_admission) = state.update_admission.claim_guard().await else {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 continue;
@@ -27,7 +36,6 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
                 next_update_recovery = tokio::time::Instant::now() + Duration::from_secs(5);
             }
             let _ = crate::questions::expire_optional(&state).await;
-            crate::goals::enforce_time_limits(&state).await;
             let bots_ready = state.ingestion.readiness(&state.store).await.ready;
             if bots_ready {
                 let _ = crate::groups::tick(&state, &mut groups).await;

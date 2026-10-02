@@ -35,6 +35,12 @@ class HandoffTests(unittest.TestCase):
         test = self
         class Host(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
+            def do_GET(self):
+                if test.redirect:
+                    self.send_response(302); self.send_header('Location','/leak'); self.end_headers(); return
+                if self.path == '/healthz':
+                    self.send_response(200); self.end_headers()
+                    self.wfile.write(b'{"status":"ok"}')
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 test.assertEqual(self.headers['x-wonder-loopback-capability'],'private-capability')
@@ -99,6 +105,56 @@ class HandoffTests(unittest.TestCase):
             stop.assert_called_once_with(self.app,[123]); launch.assert_called_once_with(self.app)
         self.assertEqual((self.app/'version').read_text(),'new')
         self.assertEqual(len(self.requests),1)
+
+    def test_failed_replacement_health_restores_signed_previous_bundle(self):
+        def check_health(_origin):
+            self.assertEqual((self.app/'version').read_text(),'new')
+            raise RuntimeError('new host failed health check')
+        with patch.object(installer,'verify'), patch.object(installer,'verify_update'), \
+             patch.object(installer,'running_pids',return_value=[123]), \
+             patch.object(installer,'stop') as stop, patch.object(installer,'launch') as launch, \
+             patch.object(installer,'wait_for_health',side_effect=check_health):
+            with self.assertRaisesRegex(RuntimeError,'new host failed health check'):
+                installer.install(self.source,self.app.parent)
+        self.assertEqual((self.app/'version').read_text(),'old')
+        self.assertEqual(stop.call_count,2)
+        self.assertEqual(launch.call_count,2)
+        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in self.requests],['prepare','cancel'])
+
+    def test_failed_replacement_launch_restores_signed_previous_bundle(self):
+        attempts = []
+        def launch(app):
+            attempts.append((app/'version').read_text())
+            if attempts[-1] == 'new':
+                raise OSError('replacement launch failed')
+        with patch.object(installer,'verify'), patch.object(installer,'verify_update'), \
+             patch.object(installer,'running_pids',return_value=[123]), \
+             patch.object(installer,'stop'), patch.object(installer,'launch',side_effect=launch):
+            with self.assertRaisesRegex(OSError,'replacement launch failed'):
+                installer.install(self.source,self.app.parent)
+        self.assertEqual(attempts,['new','old'])
+        self.assertEqual((self.app/'version').read_text(),'old')
+
+    def test_failed_candidate_move_restores_previous_bundle(self):
+        real_rename = Path.rename
+        def fail_candidate_move(path, target):
+            if path.name == 'Wonder.app' and path.parent.name.startswith('.Wonder-install-'):
+                raise OSError('candidate move failed')
+            return real_rename(path, target)
+        with patch.object(installer,'verify'), patch.object(installer,'verify_update'), \
+             patch.object(installer,'running_pids',return_value=[123]), \
+             patch.object(installer,'stop'), patch.object(installer,'launch') as launch, \
+             patch.object(Path,'rename',fail_candidate_move):
+            with self.assertRaisesRegex(OSError,'candidate move failed'):
+                installer.install(self.source,self.app.parent)
+        self.assertEqual((self.app/'version').read_text(),'old')
+        launch.assert_called_once_with(self.app)
+
+    def test_health_probe_rejects_unhealthy_and_redirected_host(self):
+        installer.wait_for_health(f'http://127.0.0.1:{self.host.server_port}', timeout=1)
+        self.redirect = True
+        with self.assertRaisesRegex(RuntimeError,'did not become healthy'):
+            installer.wait_for_health(f'http://127.0.0.1:{self.host.server_port}', timeout=.1)
 
 
 if __name__ == '__main__': unittest.main()

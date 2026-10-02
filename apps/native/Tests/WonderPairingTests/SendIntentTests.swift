@@ -3,6 +3,35 @@ import CryptoKit
 @testable import WonderPairing
 
 final class SendIntentTests: XCTestCase {
+    func testRejectedStaleAnnotationRestoresBodyAndUploadedAttachmentAfterRestart() throws {
+        let source = Data("one\ntwo\n".utf8)
+        let annotation = try ArtifactAnnotation(projectId: "project", conversationId: "chat",
+            rootId: "workspace", path: "Plan.md", source: source,
+            startLine: 2, endLine: 2, note: "Check this line")
+        var staged = try annotation.stagedFile()
+        staged.uploaded = ConversationFile(id: "uploaded-annotation", name: staged.name,
+            mimeType: staged.mimeType, byteSize: staged.data.count,
+            sha256: ConversationFile.digest(staged.data), state: "available", updatedAt: "now")
+        var intent = ComposerIntent()
+        intent.draft = "Please review this"
+        intent.stagedFiles = [staged]
+        try intent.begin(device: "phone", clientMessageID: "stale-send")
+        XCTAssertEqual(intent.pending?.request.attachmentIds, ["uploaded-annotation"])
+        intent.markRejected()
+        try intent.restoreRejected()
+        XCTAssertEqual(intent.draft, "Please review this")
+        XCTAssertEqual(intent.draftAttachmentIds, ["uploaded-annotation"])
+        XCTAssertNil(intent.pending)
+        XCTAssertEqual(source, Data("one\ntwo\n".utf8))
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ReadStore(root: root, host: "host", device: "phone")
+        try store.saveComposer(intent, conversation: "chat")
+        let restarted = try store.loadComposer(conversation: "chat")
+        XCTAssertEqual(restarted.draft, intent.draft)
+        XCTAssertEqual(restarted.draftAttachmentIds, ["uploaded-annotation"])
+    }
     func receipt(_ intent: ComposerIntent, conversation: String = "chat", state: String = "accepted_by_wonder") -> SendReceipt {
         let request = intent.pending!.request
         return SendReceipt(clientMessageId: request.clientMessageId, wonderMessageId: "server-id",

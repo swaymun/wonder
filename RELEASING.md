@@ -35,6 +35,13 @@ app has a different designated requirement from a Developer ID app; a test of a
 development-to-development upgrade does not prove permission retention across
 that signing transition. Do not edit TCC databases to claim a pass.
 
+For an in-place signed update, `install-signed-app.py` retains the previous
+bundle and requires the replacement host to answer `/healthz` after relaunch;
+it restores the previous bundle if launch or that health check fails. Keep the
+retained backup until the installed app also answers `/readyz` and its normal
+window, history and pairing have been checked. `/healthz` alone proves process
+startup, not provider readiness or user-data acceptance.
+
 ## Keeping Mac privacy grants across updates
 
 macOS keeps Screen Recording and Accessibility for Wonder while each update

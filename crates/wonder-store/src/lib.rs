@@ -25,6 +25,8 @@ use std::{cmp::Ordering, collections::HashMap, time::Duration};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use wonder_api::{HostEventEnvelope, WonderEvent};
 
+pub const ARTIFACT_ANNOTATION_MIME: &str = "application/vnd.wonder.artifact-annotation+json";
+
 pub const MIGRATION_NAMES: [&str; 74] = [
     "0001_initial.sql",
     "0002_message_body.sql",
@@ -443,11 +445,45 @@ pub struct StoredConversationFile {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "scope_type", rename_all = "snake_case")]
+pub enum AutomationTarget {
+    Bot { scope_id: String, bot_id: String },
+    GroupChat { scope_id: String, bot_id: String },
+    ProjectThread { scope_id: String },
+}
+
+impl AutomationTarget {
+    pub fn scope_type(&self) -> &'static str {
+        match self {
+            Self::Bot { .. } => "bot",
+            Self::GroupChat { .. } => "group_chat",
+            Self::ProjectThread { .. } => "project_thread",
+        }
+    }
+    pub fn scope_id(&self) -> &str {
+        match self {
+            Self::Bot { scope_id, .. }
+            | Self::GroupChat { scope_id, .. }
+            | Self::ProjectThread { scope_id } => scope_id,
+        }
+    }
+    pub fn bot_id(&self) -> Option<&str> {
+        match self {
+            Self::Bot { bot_id, .. } | Self::GroupChat { bot_id, .. } => Some(bot_id),
+            Self::ProjectThread { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredAutomation {
     pub id: String,
+    #[serde(default)]
+    pub revision: i64,
     pub name: String,
     pub kind: String,
-    pub bot_id: String,
+    #[serde(flatten)]
+    pub target: AutomationTarget,
     pub conversation_id: Option<String>,
     pub prompt: String,
     pub rrule: String,
@@ -456,8 +492,6 @@ pub struct StoredAutomation {
     pub notification_policy: String,
     pub model_id: Option<String>,
     pub reasoning_effort: Option<String>,
-    pub scope_type: String,
-    pub scope_id: String,
     pub next_run_at: Option<String>,
     pub last_run_at: Option<String>,
     #[serde(default)]
@@ -1622,25 +1656,32 @@ impl Store {
             .bind(conversation_id)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| StoredConversationFile {
-                id: row.get("id"),
-                conversation_id: row.get("conversation_id"),
-                kind: row.get("kind"),
-                name: row.get("name"),
-                mime_type: row.get("mime_type"),
-                byte_size: row.get("byte_size"),
-                sha256: row.get("sha256"),
-                relative_path: row.get("relative_path"),
-                state: row.get("state"),
-                additions: row.get("additions"),
-                deletions: row.get("deletions"),
-                source_id: row.get("source_id"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-            })
-            .collect())
+        Ok(rows.iter().map(stored_conversation_file).collect())
+    }
+
+    pub async fn conversation_files_by_ids(
+        &self,
+        conversation_id: &str,
+        file_ids: &[String],
+    ) -> Result<Vec<StoredConversationFile>, sqlx::Error> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if file_ids.len() > 32 {
+            return Err(sqlx::Error::Protocol("too_many_file_ids".into()));
+        }
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT id, conversation_id, kind, name, mime_type, byte_size, sha256, relative_path, state, additions, deletions, source_id, created_at, updated_at FROM conversation_files WHERE conversation_id = ",
+        );
+        query.push_bind(conversation_id);
+        query.push(" AND id IN (");
+        let mut separated = query.separated(", ");
+        for file_id in file_ids {
+            separated.push_bind(file_id);
+        }
+        separated.push_unseparated(") ORDER BY updated_at DESC LIMIT 32");
+        let rows = query.build().fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(stored_conversation_file).collect())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1692,7 +1733,7 @@ impl Store {
             kind,
             "bot",
             bot_id,
-            bot_id,
+            Some(bot_id),
             conversation_id,
             prompt,
             rrule,
@@ -1715,7 +1756,7 @@ impl Store {
         kind: &str,
         scope_type: &str,
         scope_id: &str,
-        bot_id: &str,
+        bot_id: Option<&str>,
         conversation_id: Option<&str>,
         prompt: &str,
         rrule: &str,
@@ -1728,12 +1769,30 @@ impl Store {
         now: &str,
     ) -> Result<StoredAutomation, sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
+        match scope_type {
+            "bot" if bot_id == Some(scope_id) => {}
+            "group_chat" if bot_id.is_some() => {}
+            "project_thread"
+                if bot_id.is_none()
+                    && kind == "continuation"
+                    && conversation_id == Some(scope_id) =>
+            {
+                let bound: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM project_conversations c JOIN projects p ON p.id=c.project_id JOIN runtime_bindings r ON r.conversation_id=c.conversation_id AND r.execution_scope='projects' AND r.agent_family=c.agent_family AND r.runtime_thread_id=c.native_session_id WHERE c.conversation_id=? AND c.native_session_id IS NOT NULL AND p.is_included=1)")
+                    .bind(scope_id).fetch_one(&mut *transaction).await?;
+                if bound == 0 {
+                    return Err(sqlx::Error::Protocol(
+                        "Project automation target is not a bound, included thread".into(),
+                    ));
+                }
+            }
+            _ => return Err(sqlx::Error::Protocol("Invalid automation target".into())),
+        }
         sqlx::query("INSERT INTO automations (id, name, kind, bot_id, conversation_id, prompt, rrule, timezone, status, notification_policy, model_id, reasoning_effort, scope_type, scope_id, next_run_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING")
             .bind(id).bind(name).bind(kind).bind(bot_id).bind(conversation_id).bind(prompt)
             .bind(rrule).bind(timezone).bind(status).bind(notification_policy).bind(model_id)
             .bind(reasoning_effort).bind(scope_type).bind(scope_id).bind(next_run_at).bind(now).bind(now)
             .execute(&mut *transaction).await?;
-        if let Some(conversation_id) = conversation_id {
+        if let (Some(conversation_id), Some(bot_id)) = (conversation_id, bot_id) {
             sqlx::query("INSERT INTO conversation_metadata (id, bot_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING")
                 .bind(conversation_id)
                 .bind(bot_id)
@@ -1750,17 +1809,17 @@ impl Store {
     }
 
     pub async fn list_automations(&self) -> Result<Vec<StoredAutomation>, sqlx::Error> {
-        let rows = sqlx::query("SELECT id, name, kind, bot_id, conversation_id, prompt, rrule, timezone, status, notification_policy, model_id, reasoning_effort, scope_type, scope_id, next_run_at, last_run_at, (SELECT MAX(started_at) FROM automation_runs WHERE automation_id = automations.id) AS last_attempt_at, (SELECT MAX(finished_at) FROM automation_runs WHERE automation_id = automations.id AND status = 'completed') AS last_success_at, created_at, updated_at FROM automations ORDER BY created_at ASC")
+        let rows = sqlx::query("SELECT automations.*, (SELECT MAX(started_at) FROM automation_runs WHERE automation_id = automations.id) AS last_attempt_at, (SELECT MAX(finished_at) FROM automation_runs WHERE automation_id = automations.id AND status = 'completed') AS last_success_at FROM automations ORDER BY created_at ASC")
             .fetch_all(&self.pool).await?;
-        Ok(rows.iter().map(stored_automation).collect())
+        rows.iter().map(stored_automation).collect()
     }
 
     pub async fn automation_by_id(
         &self,
         id: &str,
     ) -> Result<Option<StoredAutomation>, sqlx::Error> {
-        sqlx::query("SELECT id, name, kind, bot_id, conversation_id, prompt, rrule, timezone, status, notification_policy, model_id, reasoning_effort, scope_type, scope_id, next_run_at, last_run_at, (SELECT MAX(started_at) FROM automation_runs WHERE automation_id = automations.id) AS last_attempt_at, (SELECT MAX(finished_at) FROM automation_runs WHERE automation_id = automations.id AND status = 'completed') AS last_success_at, created_at, updated_at FROM automations WHERE id = ?")
-            .bind(id).fetch_optional(&self.pool).await.map(|row| row.map(|row| stored_automation(&row)))
+        sqlx::query("SELECT automations.*, (SELECT MAX(started_at) FROM automation_runs WHERE automation_id = automations.id) AS last_attempt_at, (SELECT MAX(finished_at) FROM automation_runs WHERE automation_id = automations.id AND status = 'completed') AS last_success_at FROM automations WHERE id = ?")
+            .bind(id).fetch_optional(&self.pool).await?.map(|row| stored_automation(&row)).transpose()
     }
 
     pub async fn set_automation_status(
@@ -1769,7 +1828,7 @@ impl Store {
         status: &str,
         now: &str,
     ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query("UPDATE automations SET status = ?, updated_at = ? WHERE id = ?")
+        let result = sqlx::query("UPDATE automations SET status = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
             .bind(status)
             .bind(now)
             .bind(id)
@@ -1790,11 +1849,11 @@ impl Store {
         &self,
         now: &str,
     ) -> Result<Vec<StoredAutomation>, sqlx::Error> {
-        let rows = sqlx::query("SELECT id, name, kind, bot_id, conversation_id, prompt, rrule, timezone, status, notification_policy, model_id, reasoning_effort, scope_type, scope_id, next_run_at, last_run_at, (SELECT MAX(started_at) FROM automation_runs WHERE automation_id = automations.id) AS last_attempt_at, (SELECT MAX(finished_at) FROM automation_runs WHERE automation_id = automations.id AND status = 'completed') AS last_success_at, created_at, updated_at FROM automations WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC")
+        let rows = sqlx::query("SELECT automations.*, (SELECT MAX(started_at) FROM automation_runs WHERE automation_id = automations.id) AS last_attempt_at, (SELECT MAX(finished_at) FROM automation_runs WHERE automation_id = automations.id AND status = 'completed') AS last_success_at FROM automations WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC")
             .bind(now)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().map(stored_automation).collect())
+        rows.iter().map(stored_automation).collect()
     }
 
     pub async fn claim_automation_run(
@@ -1866,7 +1925,7 @@ impl Store {
         last_run_at: Option<&str>,
         now: &str,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE automations SET next_run_at = ?, last_run_at = COALESCE(?, last_run_at), updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE automations SET next_run_at = ?, last_run_at = COALESCE(?, last_run_at), updated_at = ?, revision = revision + 1 WHERE id = ?")
             .bind(next_run_at)
             .bind(last_run_at)
             .bind(now)
@@ -2215,6 +2274,30 @@ impl Store {
                 transaction.commit().await?;
                 return Ok(MessageInsert::Conflict);
             }
+            // A preview note is a single draft action. Its immutable upload
+            // can be retried with the same message identity, but cannot be
+            // selected for a second message. BEGIN IMMEDIATE serializes this
+            // check with the message_attachments insert below.
+            let mut reused = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT COUNT(*) AS count FROM conversation_files f WHERE f.conversation_id = ",
+            );
+            reused.push_bind(conversation_id);
+            reused.push(" AND f.mime_type = ");
+            reused.push_bind(ARTIFACT_ANNOTATION_MIME);
+            reused.push(" AND EXISTS (SELECT 1 FROM message_attachments ma WHERE ma.file_id = f.id) AND f.id IN (");
+            let mut separated = reused.separated(", ");
+            for file_id in &requested_attachments {
+                separated.push_bind(file_id);
+            }
+            separated.push_unseparated(")");
+            let reused_count = reused
+                .build()
+                .fetch_one(&mut *transaction)
+                .await?
+                .get::<i64, _>("count");
+            if reused_count != 0 {
+                return Err(sqlx::Error::Protocol("annotation_already_sent".into()));
+            }
         }
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -2279,6 +2362,10 @@ impl Store {
             // Freeze the owner's selected settings when accepting a direct message.
             // Later composer edits must not rewrite previously queued work.
             sqlx::query("INSERT INTO message_execution_settings(message_id,model,reasoning_effort,service_tier,permission_mode,approval_mode,permission_profile,working_directory) SELECT ?,COALESCE(s.model,b.model),COALESCE(s.reasoning_effort,b.reasoning_effort),COALESCE(s.service_tier,b.service_tier),b.permission_mode,b.approval_mode,COALESCE(s.permission_profile,b.permission_profile),COALESCE(b.working_directory,b.workspace_path) FROM conversation_metadata m JOIN bots b ON b.id=m.bot_id LEFT JOIN conversation_settings s ON s.conversation_id=m.id WHERE m.id=? AND NOT EXISTS(SELECT 1 FROM channels WHERE conversation_id=m.id) AND NOT EXISTS(SELECT 1 FROM subagent_ownership WHERE conversation_id=m.id)")
+                .bind(&id).bind(conversation_id).execute(&mut *transaction).await?;
+            // Project sends use the same acceptance boundary as Bot sends.
+            // A later settings edit cannot change a queued message's speed.
+            sqlx::query("INSERT INTO message_execution_settings(message_id,model,reasoning_effort,service_tier,permission_mode,approval_mode,permission_profile,working_directory) SELECT ?,p.model,p.effort,p.service_tier,NULL,NULL,'project',p.cwd FROM project_conversations p WHERE p.conversation_id=?")
                 .bind(&id).bind(conversation_id).execute(&mut *transaction).await?;
         }
         if durable_dispatch {
@@ -3821,6 +3908,25 @@ fn stored_assistant_message(row: &sqlx::sqlite::SqliteRow) -> StoredAssistantMes
     }
 }
 
+fn stored_conversation_file(row: &sqlx::sqlite::SqliteRow) -> StoredConversationFile {
+    StoredConversationFile {
+        id: row.get("id"),
+        conversation_id: row.get("conversation_id"),
+        kind: row.get("kind"),
+        name: row.get("name"),
+        mime_type: row.get("mime_type"),
+        byte_size: row.get("byte_size"),
+        sha256: row.get("sha256"),
+        relative_path: row.get("relative_path"),
+        state: row.get("state"),
+        additions: row.get("additions"),
+        deletions: row.get("deletions"),
+        source_id: row.get("source_id"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
 fn stored_subagent_ownership(row: &sqlx::sqlite::SqliteRow) -> StoredSubagentOwnership {
     StoredSubagentOwnership {
         conversation_id: row.get("conversation_id"),
@@ -3858,12 +3964,33 @@ fn stored_approval(row: &sqlx::sqlite::SqliteRow) -> StoredApproval {
     }
 }
 
-fn stored_automation(row: &sqlx::sqlite::SqliteRow) -> StoredAutomation {
-    StoredAutomation {
+fn stored_automation(row: &sqlx::sqlite::SqliteRow) -> Result<StoredAutomation, sqlx::Error> {
+    // Migration tests load pre-0086 rows before upgrading their database.
+    let revision = match row.try_get("revision") {
+        Ok(revision) => revision,
+        Err(sqlx::Error::ColumnNotFound(_)) => 0,
+        Err(error) => return Err(error),
+    };
+    let scope_type: String = row.get("scope_type");
+    let bot_id: Option<String> = row.get("bot_id");
+    let scope_id: Option<String> = row.get("scope_id");
+    let target = match (scope_type.as_str(), scope_id, bot_id) {
+        ("bot", scope_id, Some(bot_id)) => AutomationTarget::Bot {
+            scope_id: scope_id.unwrap_or_else(|| bot_id.clone()),
+            bot_id,
+        },
+        ("group_chat", Some(scope_id), Some(bot_id)) => {
+            AutomationTarget::GroupChat { scope_id, bot_id }
+        }
+        ("project_thread", Some(scope_id), None) => AutomationTarget::ProjectThread { scope_id },
+        _ => return Err(sqlx::Error::Protocol("Invalid automation target".into())),
+    };
+    Ok(StoredAutomation {
         id: row.get("id"),
+        revision,
         name: row.get("name"),
         kind: row.get("kind"),
-        bot_id: row.get("bot_id"),
+        target,
         conversation_id: row.get("conversation_id"),
         prompt: row.get("prompt"),
         rrule: row.get("rrule"),
@@ -3872,15 +3999,13 @@ fn stored_automation(row: &sqlx::sqlite::SqliteRow) -> StoredAutomation {
         notification_policy: row.get("notification_policy"),
         model_id: row.get("model_id"),
         reasoning_effort: row.get("reasoning_effort"),
-        scope_type: row.get("scope_type"),
-        scope_id: row.get("scope_id"),
         next_run_at: row.get("next_run_at"),
         last_run_at: row.get("last_run_at"),
         last_attempt_at: row.get("last_attempt_at"),
         last_success_at: row.get("last_success_at"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
-    }
+    })
 }
 
 fn stored_automation_run(row: &sqlx::sqlite::SqliteRow) -> StoredAutomationRun {
@@ -5712,6 +5837,106 @@ mod tests {
             .expect("file row");
         assert_eq!(file.relative_path.as_deref(), Some("src/main.rs"));
         assert_eq!(file.additions, Some(4));
+        let attachment_hash = "a".repeat(64);
+        store
+            .upsert_conversation_file(
+                "file-2",
+                "default",
+                "attachment",
+                "note.txt",
+                Some("text/plain"),
+                Some(4),
+                Some(&attachment_hash),
+                Some(".wonder/attachments/file-2"),
+                "available",
+                None,
+                None,
+                None,
+                "later",
+            )
+            .await
+            .expect("second file");
+        store
+            .upsert_conversation_file(
+                "foreign",
+                "another-conversation",
+                "attachment",
+                "other.txt",
+                None,
+                None,
+                None,
+                None,
+                "available",
+                None,
+                None,
+                None,
+                "later",
+            )
+            .await
+            .expect("foreign file");
+        assert!(store
+            .conversation_files_by_ids("default", &[])
+            .await
+            .unwrap()
+            .is_empty());
+        let selected = store
+            .conversation_files_by_ids(
+                "default",
+                &[
+                    "file-1".into(),
+                    "foreign".into(),
+                    "missing".into(),
+                    "file-2".into(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected.iter().find(|row| row.id == "file-1").unwrap(),
+            &file
+        );
+        let attachment = selected.iter().find(|row| row.id == "file-2").unwrap();
+        assert_eq!(attachment.kind, "attachment");
+        assert_eq!(attachment.mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(attachment.sha256.as_deref(), Some(attachment_hash.as_str()));
+        assert_eq!(attachment.state, "available");
+        let mut bounded_ids = vec!["file-1".to_owned(), "file-2".to_owned()];
+        for index in 0..30 {
+            let id = format!("batch-{index}");
+            store
+                .upsert_conversation_file(
+                    &id,
+                    "default",
+                    "attachment",
+                    &id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "available",
+                    None,
+                    None,
+                    None,
+                    "later",
+                )
+                .await
+                .unwrap();
+            bounded_ids.push(id);
+        }
+        assert_eq!(
+            store
+                .conversation_files_by_ids("default", &bounded_ids)
+                .await
+                .unwrap()
+                .len(),
+            32
+        );
+        bounded_ids.push("missing".into());
+        assert!(
+            matches!(store.conversation_files_by_ids("default", &bounded_ids).await,
+            Err(sqlx::Error::Protocol(message)) if message == "too_many_file_ids")
+        );
     }
 
     #[tokio::test]

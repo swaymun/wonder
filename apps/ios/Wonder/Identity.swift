@@ -15,6 +15,8 @@ import WonderPairing
     private var models: [String: ConnectionModel] = [:]
     private var leases: [String: UUID] = [:]
     private var observations: [String: AnyCancellable] = [:]
+    private var widgetPublishTask: Task<Void, Never>?
+    private var widgetPublishNeedsRefresh = false
     private(set) var isPreview = false
 
     #if WONDER_DIAGNOSTICS
@@ -66,6 +68,7 @@ import WonderPairing
             try? identity.forgetConnection()
             loaded = true
             error = nil
+            publishWidgetSnapshotNow()
         } catch { self.error = "Saved connections could not be opened. Try again when your device is unlocked." }
     }
 
@@ -98,7 +101,11 @@ import WonderPairing
         models[host] = model
         // Views reading a model's own state observe it directly. The library
         // re-renders the list and root only for list-visible changes.
-        observations[host] = model.$listRevision.dropFirst().sink { [weak self] _ in self?.objectWillChange.send() }
+        observations[host] = model.$listRevision.dropFirst().sink { [weak self] _ in
+            self?.objectWillChange.send()
+            self?.scheduleWidgetSnapshot()
+        }
+        model.projects.widgetSnapshotChanged = { [weak self] in self?.scheduleWidgetSnapshot(refresh: true) }
         return model
     }
 
@@ -154,5 +161,24 @@ import WonderPairing
     private func commit(_ next: SavedConnections) throws {
         if !isPreview { try identity.save(JSONEncoder().encode(next), account: "connections-v1") }
         saved = next
+        publishWidgetSnapshotNow()
+    }
+
+    @discardableResult func publishWidgetSnapshotNow() -> Bool {
+        widgetPublishTask?.cancel()
+        widgetPublishTask = nil
+        let refresh = widgetPublishNeedsRefresh
+        widgetPublishNeedsRefresh = false
+        return ProjectWidgetSnapshotPublisher.publish(from: self, refreshIfUnchanged: refresh)
+    }
+
+    private func scheduleWidgetSnapshot(refresh: Bool = false) {
+        widgetPublishNeedsRefresh = widgetPublishNeedsRefresh || refresh
+        widgetPublishTask?.cancel()
+        widgetPublishTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
+            self?.publishWidgetSnapshotNow()
+        }
     }
 }

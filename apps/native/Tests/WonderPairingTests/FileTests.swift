@@ -1,6 +1,77 @@
 import XCTest
 @testable import WonderPairing
 final class FileTests: XCTestCase {
+    func testTextPreviewAnnotationPersistsExactBindingAndEditableNoteWithoutChangingSource() throws {
+        let source = Data("first\nsecond\nthird\n".utf8)
+        let annotation = try ArtifactAnnotation(projectId: "project", conversationId: "chat",
+            rootId: "workspace", path: "Sources/Plan.md", source: source,
+            startLine: 2, endLine: 3, note: "Check this decision")
+        let staged = try annotation.stagedFile()
+        XCTAssertEqual(staged.mimeType, ArtifactAnnotation.mimeType)
+        let decoded = try ArtifactAnnotation.read(staged.data)
+        XCTAssertEqual(decoded.sourceSha256, ConversationFile.digest(source))
+        XCTAssertEqual(decoded.anchor, .textLines(startLine: 2, endLine: 3))
+        XCTAssertEqual(decoded.note, "Check this decision")
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: staged.data) as? [String: Any])
+        XCTAssertEqual(json["version"] as? Int, 1)
+        XCTAssertEqual(json["projectId"] as? String, "project")
+        XCTAssertEqual(json["conversationId"] as? String, "chat")
+        XCTAssertEqual(json["rootId"] as? String, "workspace")
+        XCTAssertEqual(json["path"] as? String, "Sources/Plan.md")
+        XCTAssertEqual((json["anchor"] as? [String: Any])?["kind"] as? String, "textLines")
+        let edited = try decoded.replacingNote("A revised note")
+        XCTAssertEqual(edited.sourceSha256, decoded.sourceSha256)
+        XCTAssertEqual(edited.anchor, decoded.anchor)
+        XCTAssertEqual(source, Data("first\nsecond\nthird\n".utf8))
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ReadStore(root: root, host: "mac", device: "phone")
+        var intent = ComposerIntent()
+        intent.draft = "Review this section"
+        intent.stagedFiles = [staged]
+        try store.saveComposer(intent, conversation: "chat")
+        let restored = try store.loadComposer(conversation: "chat")
+        XCTAssertEqual(try ArtifactAnnotation.read(XCTUnwrap(restored.stagedFiles?.first?.data)), annotation)
+    }
+
+    func testTextPreviewAnnotationRejectsInvalidRegionPathAndNote() throws {
+        let source = Data("one\ntwo".utf8)
+        XCTAssertThrowsError(try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "r",
+            path: "../secret", source: source, startLine: 1, endLine: 1, note: "Review"))
+        XCTAssertThrowsError(try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "r",
+            path: "a.txt", source: source, startLine: 2, endLine: 3, note: "Review"))
+        XCTAssertThrowsError(try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "r",
+            path: "a.txt", source: source, startLine: 1, endLine: 1, note: "  "))
+        XCTAssertThrowsError(try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "r",
+            path: "a.txt", source: Data([0xff]), startLine: 1, endLine: 1, note: "Review"))
+    }
+
+    func testImageAndPDFRegionsEncodeExactNormalizedAnchorsAndRejectInvalidBounds() throws {
+        let image = Data([137, 80, 78, 71, 13, 10, 26, 10, 0])
+        let imageNote = try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "r",
+            path: "images/diagram.png", source: image, imageX: 0.125, y: 0.25,
+            width: 0.5, height: 0.5, note: "Inspect this diagram")
+        XCTAssertEqual(try ArtifactAnnotation.read(imageNote.stagedFile().data).anchor,
+                       .imageRegion(x: 0.125, y: 0.25, width: 0.5, height: 0.5))
+        let imageJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(imageNote)) as? [String: Any])
+        XCTAssertEqual((imageJSON["anchor"] as? [String: Any])?["kind"] as? String, "imageRegion")
+        XCTAssertEqual(imageNote.sourceSha256, ConversationFile.digest(image))
+
+        let pdf = Data("%PDF-1.7\nfixture".utf8)
+        let pdfNote = try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "r",
+            path: "documents/report.pdf", source: pdf, pdfPage: 2, x: 0.2, y: 0.1,
+            width: 0.7, height: 0.8, note: "Review this chart")
+        XCTAssertEqual(try ArtifactAnnotation.read(pdfNote.stagedFile().data).anchor,
+                       .pdfRegion(page: 2, x: 0.2, y: 0.1, width: 0.7, height: 0.8))
+        let pdfJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(pdfNote)) as? [String: Any])
+        XCTAssertEqual((pdfJSON["anchor"] as? [String: Any])?["kind"] as? String, "pdfRegion")
+        XCTAssertThrowsError(try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "r",
+            path: "a.png", source: image, imageX: 0.8, y: 0.1, width: 0.3, height: 0.2, note: "Bad"))
+        XCTAssertThrowsError(try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "r",
+            path: "a.pdf", source: pdf, pdfPage: 0, x: 0, y: 0, width: 1, height: 1, note: "Bad"))
+    }
+
     func testStagedBytesSurviveCacheReplacementAndSendRequiresVerifiedUpload() throws {
         let data = Data("Actual text file 🌍".utf8)
         let staged = try StagedFile(name: "notes.txt", mimeType: "text/plain", data: data)

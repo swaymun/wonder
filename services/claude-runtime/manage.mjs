@@ -12,6 +12,10 @@ if (action === "login") {
   child.once("exit", code => { process.exitCode = code ?? 1; });
 } else if (action === "check") {
   const status = await inspectSdk(runtime);
-  if (!status.connected) throw new Error("Sign in to your Claude subscription on this Mac.");
-  console.log("Claude subscription connected. Compatible SDK updates install automatically between requests.");
+  if (!status.connected) {
+    process.stderr.write("Sign in to your Claude subscription on this Mac.\n");
+    process.exitCode = 42; // Distinct from runtime/transport failures.
+  } else {
+    console.log("Claude subscription connected. Compatible SDK updates install automatically between requests.");
+  }
 } else throw new Error("Choose login or check.");

@@ -39,3 +39,15 @@ September 30, 2026 and scaled to 96 px for the 32-point slot:
   `Contents/Resources/icon-codex-light.png` and `icon-codex-dark-color.png`.
 - Claude: installed Claude for Mac 2.16120.0, `Contents/Resources/electron.icns`
   (128 px representation).
+
+Checked October 2, 2026 against installed ChatGPT for Mac 26.928.40906 and
+Claude for Mac 2.19675.0. The current Codex light asset is byte-identical to
+the bundled 96 px image, and the dark variant is visually unchanged. The
+Claude icon is visually unchanged at the 32-point display size (96 px exports
+have a 0.7% mean absolute pixel difference), so no provider artwork was
+replaced. These images identify the selected provider inside Wonder; they are
+not Wonder branding or an endorsement claim. OpenAI's current
+[brand guidelines](https://openai.com/brand/) permit service-related logo use
+subject to their terms and prohibit implying endorsement. Anthropic's current
+installed app is the source of the Claude icon; no broader reuse license is
+claimed here.

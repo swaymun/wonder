@@ -1,7 +1,151 @@
 import Foundation
 import CryptoKit
 
-public enum FileFailure: Error { case tooLarge, integrity, unsupported, notUploaded }
+public enum FileFailure: Error { case tooLarge, integrity, stale, unsupported, notUploaded }
+
+/// A note about exact preview bytes. The host validates the Project, path,
+/// source hash and selected region again before accepting the attachment.
+public struct ArtifactAnnotation: Codable, Sendable, Equatable {
+    public static let mimeType = "application/vnd.wonder.artifact-annotation+json"
+    public enum Anchor: Codable, Sendable, Equatable {
+        case textLines(startLine: Int, endLine: Int)
+        case imageRegion(x: Double, y: Double, width: Double, height: Double)
+        case pdfRegion(page: Int, x: Double, y: Double, width: Double, height: Double)
+
+        private enum CodingKeys: String, CodingKey { case kind, startLine, endLine, page, x, y, width, height }
+        public init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            switch try values.decode(String.self, forKey: .kind) {
+            case "textLines":
+                self = .textLines(startLine: try values.decode(Int.self, forKey: .startLine),
+                                  endLine: try values.decode(Int.self, forKey: .endLine))
+            case "imageRegion":
+                self = .imageRegion(x: try values.decode(Double.self, forKey: .x),
+                                    y: try values.decode(Double.self, forKey: .y),
+                                    width: try values.decode(Double.self, forKey: .width),
+                                    height: try values.decode(Double.self, forKey: .height))
+            case "pdfRegion":
+                self = .pdfRegion(page: try values.decode(Int.self, forKey: .page),
+                                  x: try values.decode(Double.self, forKey: .x),
+                                  y: try values.decode(Double.self, forKey: .y),
+                                  width: try values.decode(Double.self, forKey: .width),
+                                  height: try values.decode(Double.self, forKey: .height))
+            default:
+                throw DecodingError.dataCorruptedError(forKey: .kind, in: values, debugDescription: "Unsupported preview anchor")
+            }
+        }
+        public func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .textLines(let start, let end):
+                try values.encode("textLines", forKey: .kind)
+                try values.encode(start, forKey: .startLine)
+                try values.encode(end, forKey: .endLine)
+            case .imageRegion(let x, let y, let width, let height):
+                try values.encode("imageRegion", forKey: .kind)
+                try values.encode(x, forKey: .x); try values.encode(y, forKey: .y)
+                try values.encode(width, forKey: .width); try values.encode(height, forKey: .height)
+            case .pdfRegion(let page, let x, let y, let width, let height):
+                try values.encode("pdfRegion", forKey: .kind)
+                try values.encode(page, forKey: .page)
+                try values.encode(x, forKey: .x); try values.encode(y, forKey: .y)
+                try values.encode(width, forKey: .width); try values.encode(height, forKey: .height)
+            }
+        }
+    }
+    public let version: Int
+    public let projectId: String
+    public let conversationId: String
+    public let rootId: String
+    public let path: String
+    public let sourceSha256: String
+    public let anchor: Anchor
+    public var note: String
+
+    public init(projectId: String, conversationId: String, rootId: String, path: String,
+                source: Data, startLine: Int, endLine: Int, note: String) throws {
+        version = 1
+        self.projectId = projectId; self.conversationId = conversationId
+        self.rootId = rootId; self.path = path
+        sourceSha256 = ConversationFile.digest(source)
+        anchor = .textLines(startLine: startLine, endLine: endLine)
+        self.note = note
+        guard let text = String(data: source, encoding: .utf8) else { throw FileFailure.integrity }
+        let lines = max(1, text.split(separator: "\n", omittingEmptySubsequences: false).count - (text.hasSuffix("\n") ? 1 : 0))
+        try validate(sourceLineCount: lines)
+    }
+
+    public init(projectId: String, conversationId: String, rootId: String, path: String,
+                source: Data, imageX x: Double, y: Double, width: Double, height: Double,
+                note: String) throws {
+        version = 1; self.projectId = projectId; self.conversationId = conversationId
+        self.rootId = rootId; self.path = path
+        sourceSha256 = ConversationFile.digest(source)
+        anchor = .imageRegion(x: x, y: y, width: width, height: height)
+        self.note = note
+        guard !source.isEmpty else { throw FileFailure.integrity }
+        try validate()
+    }
+
+    public init(projectId: String, conversationId: String, rootId: String, path: String,
+                source: Data, pdfPage page: Int, x: Double, y: Double, width: Double,
+                height: Double, note: String) throws {
+        version = 1; self.projectId = projectId; self.conversationId = conversationId
+        self.rootId = rootId; self.path = path
+        sourceSha256 = ConversationFile.digest(source)
+        anchor = .pdfRegion(page: page, x: x, y: y, width: width, height: height)
+        self.note = note
+        guard source.starts(with: Data("%PDF-".utf8)) else { throw FileFailure.integrity }
+        try validate()
+    }
+
+    private static func validRegion(_ x: Double, _ y: Double, _ width: Double, _ height: Double) -> Bool {
+        [x, y, width, height].allSatisfy(\.isFinite) && x >= 0 && y >= 0 &&
+        width > 0 && height > 0 && x + width <= 1 && y + height <= 1
+    }
+
+    public func validate(sourceLineCount: Int? = nil) throws {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard version == 1, !projectId.isEmpty, !conversationId.isEmpty,
+              !rootId.isEmpty, rootId.utf8.count <= 128,
+              !path.isEmpty, path.utf8.count <= 4096, !path.hasPrefix("/"),
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
+              sourceSha256.utf8.count == 64,
+              sourceSha256.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              note.utf8.count <= 4096,
+              !note.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) && $0 != "\n" && $0 != "\t" })
+        else { throw FileFailure.integrity }
+        switch anchor {
+        case .textLines(let start, let end):
+            guard start > 0, end >= start, sourceLineCount.map({ end <= $0 }) ?? true else { throw FileFailure.integrity }
+        case .imageRegion(let x, let y, let width, let height):
+            guard Self.validRegion(x, y, width, height) else { throw FileFailure.integrity }
+        case .pdfRegion(let page, let x, let y, let width, let height):
+            guard page > 0, page <= 10_000, Self.validRegion(x, y, width, height) else { throw FileFailure.integrity }
+        }
+    }
+
+    public static func read(_ data: Data) throws -> Self {
+        let value = try JSONDecoder().decode(Self.self, from: data)
+        try value.validate()
+        return value
+    }
+
+    public func replacingNote(_ note: String) throws -> Self {
+        var copy = self
+        copy.note = note
+        try copy.validate()
+        return copy
+    }
+
+    public func stagedFile() throws -> StagedFile {
+        try validate()
+        let name = String((path.split(separator: "/").last ?? "File").prefix(48)) + ".annotation.json"
+        return try StagedFile(name: name, mimeType: Self.mimeType, data: JSONEncoder().encode(self))
+    }
+}
+
 public struct ConversationFile: Codable, Identifiable, Sendable {
     public let id: String
     public let name: String

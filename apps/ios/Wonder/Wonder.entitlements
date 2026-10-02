@@ -3,4 +3,4 @@
 <plist version="1.0"><dict><key>aps-environment</key><string>development</string><key>keychain-access-groups</key><array>
 <string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 <string>$(AppIdentifierPrefix)$(WONDER_APP_BUNDLE_IDENTIFIER).push</string>
-</array></dict></plist>
+</array><key>com.apple.security.application-groups</key><array><string>$(WONDER_WIDGET_APP_GROUP)</string></array></dict></plist>

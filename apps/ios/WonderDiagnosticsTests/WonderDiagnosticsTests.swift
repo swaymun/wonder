@@ -5,10 +5,58 @@ import SwiftUI
 import ImageIO
 import UniformTypeIdentifiers
 import Vision
+import PDFKit
 import WonderPairing
 @testable import Wonder
 
 final class WonderDiagnosticsTests: XCTestCase {
+    @MainActor func testPDFPreviewRetainsPageReadingPointAndZoomAcrossRevision() throws {
+        func document(_ label: String) -> Data {
+            UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 400, height: 3000)).pdfData { context in
+                for page in 1...2 {
+                    context.beginPage()
+                    ("\(label) page \(page)" as NSString).draw(at: CGPoint(x: 24, y: 24),
+                        withAttributes: [.font: UIFont.systemFont(ofSize: 22)])
+                }
+            }
+        }
+        func pdfView(in view: UIView) -> PDFView? {
+            if let view = view as? PDFView { return view }
+            return view.subviews.lazy.compactMap { pdfView(in: $0) }.first
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: PDFPreview(data: document("Old"), revision: "old"))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKey()
+        }
+        host.view.layoutIfNeeded()
+        let viewer = try XCTUnwrap(pdfView(in: host.view))
+        let original = try XCTUnwrap(viewer.document)
+        let second = try XCTUnwrap(original.page(at: 1))
+        viewer.go(to: second)
+        viewer.scaleFactor = min(viewer.maxScaleFactor, max(viewer.minScaleFactor, viewer.scaleFactor * 1.4))
+        viewer.go(to: PDFDestination(page: second, at: CGPoint(x: 80, y: 1800)))
+        let before = try XCTUnwrap(viewer.currentDestination)
+        let scale = viewer.scaleFactor
+        XCTAssertEqual(original.index(for: try XCTUnwrap(before.page)), 1)
+
+        host.rootView = PDFPreview(data: document("Revised"), revision: "revised")
+        host.view.layoutIfNeeded()
+        let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            viewer.document !== original && viewer.currentPage.flatMap { viewer.document?.index(for: $0) } == 1
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 5), .completed)
+        let after = try XCTUnwrap(viewer.currentDestination)
+        XCTAssertEqual(viewer.document?.index(for: try XCTUnwrap(after.page)), 1)
+        XCTAssertEqual(after.point.y, before.point.y, accuracy: 5)
+        XCTAssertEqual(viewer.scaleFactor, scale, accuracy: 0.05)
+    }
     // Observe rendered opening frames inside the app process: an external
     // XCTest query waits for idleness and misses the brief wrong-position flash.
     // The existing fixture owns both saved-anchor and unsaved-bottom content.

@@ -213,6 +213,24 @@ def launch(app):
     subprocess.run(['open', '-n', str(app)], check=True)
 
 
+def wait_for_health(origin, timeout=45):
+    """Confirm the replacement host is serving before accepting an update."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with opener.open(origin + '/healthz', timeout=2) as response:
+                if response.status == 200 and json.load(response).get('status') == 'ok':
+                    return
+        except urllib.error.HTTPError as error:
+            error.close()
+        except (OSError, ValueError, urllib.error.URLError):
+            pass
+        if time.monotonic() >= deadline:
+            raise RuntimeError('The replacement Wonder host did not become healthy')
+        time.sleep(.5)
+
+
 def inside_wonder():
     """An updater invoked by an agent must outlive that agent's Stop."""
     pid = os.getppid()
@@ -243,6 +261,8 @@ def install(source, directory):
     handoff = None
     stopped = False
     was_running = False
+    backup = None
+    replacement_installed = False
     try:
         candidate = stage / 'Wonder.app'
         subprocess.run(['ditto', str(source), str(candidate)], check=True)
@@ -256,35 +276,43 @@ def install(source, directory):
             handoff.prepare()
         stopped = was_running
         stop(destination, pids)
-        backup = None
         if destination.exists():
             root = data_directory() / 'Backups'
             root.mkdir(parents=True, exist_ok=True)
             backup = Path(tempfile.mkdtemp(prefix=datetime.datetime.now().strftime('signed-update-%Y%m%d-%H%M%S-'), dir=root)) / 'Wonder.app'
             shutil.move(str(destination), str(backup))
-        try:
-            candidate.rename(destination)
-            verify(destination)
-        except Exception:
-            if destination.exists():
-                shutil.move(str(destination), str(stage / 'failed.app'))
-            if backup:
-                shutil.move(str(backup), str(destination))
-            raise
+        candidate.rename(destination)
+        replacement_installed = True
+        verify(destination)
+        if was_running:
+            launch(destination)
+            wait_for_health(handoff.origin)
         print(f'Installed and verified {destination}')
         if backup:
             print(f'Previous bundle: {backup}')
-        if was_running:
-            launch(destination)
     except Exception:
+        rollback_error = None
+        if backup and backup.exists():
+            # Never leave a failed replacement in place when a signed previous
+            # bundle is available. Keep that backup if stopping fails.
+            try:
+                if replacement_installed:
+                    stop(destination)
+                    shutil.move(str(destination), str(stage / 'failed.app'))
+                shutil.move(str(backup), str(destination))
+                replacement_installed = False
+            except Exception as error:
+                rollback_error = error
         if handoff:
             try:
                 handoff.cancel()
             except Exception:
                 # A replacement/rollback host also recovers the durable roster.
                 pass
-        if stopped and destination.exists():
+        if stopped and destination.exists() and not replacement_installed:
             launch(destination)
+        if rollback_error:
+            raise RuntimeError('Wonder update failed and automatic rollback also failed; previous bundle retained') from rollback_error
         raise
     finally:
         shutil.rmtree(stage)

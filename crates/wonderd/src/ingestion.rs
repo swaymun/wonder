@@ -91,6 +91,7 @@ impl RuntimeRoute {
 pub struct Readiness {
     pub ready: bool,
     pub detail: &'static str,
+    pub reason: &'static str,
 }
 
 impl Ingestion {
@@ -198,12 +199,15 @@ impl Ingestion {
 
     /// Projects need durable ingestion, not a healthy private Bot runtime.
     pub(crate) async fn project_readiness(&self, store: &Store) -> Readiness {
-        let detail = {
+        let issue = {
             let status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if status.error.is_some()
-                || status.runtimes.values().any(|r| r.health.storage_blocked())
-            {
-                Some("Chat updates could not be saved. Wonder is retrying; check available disk space if this continues.")
+            if status.runtimes.values().any(|r| r.health.storage_blocked()) {
+                Some(("Chat updates could not be saved. Wonder is retrying; check available disk space if this continues.", "storage_unavailable"))
+            } else if status.error.is_some() {
+                Some((
+                    "Wonder is recovering chat updates. Please wait before sending again.",
+                    "recovering",
+                ))
             } else if status
                 .consumer
                 .as_ref()
@@ -212,30 +216,37 @@ impl Ingestion {
                     .heartbeat
                     .is_none_or(|time| time.elapsed() > Duration::from_secs(5))
             {
-                Some("Wonder is recovering chat updates. Please wait before sending again.")
+                Some((
+                    "Wonder is recovering chat updates. Please wait before sending again.",
+                    "recovering",
+                ))
             } else {
                 None
             }
         };
-        if let Some(detail) = detail {
+        if let Some((detail, reason)) = issue {
             return Readiness {
                 ready: false,
                 detail,
+                reason,
             };
         }
         match store.notification_backlog().await {
             Ok(0..=256) => Readiness {
                 ready: true,
                 detail: "Ready",
+                reason: "ready",
             },
             Ok(_) => Readiness {
                 ready: false,
                 detail: "Wonder is catching up on chat updates. Please wait.",
+                reason: "backlog",
             },
             Err(_) => Readiness {
                 ready: false,
                 detail:
                     "Chat storage is unavailable. Wonder is retrying; check available disk space.",
+                reason: "storage_unavailable",
             },
         }
     }
@@ -318,7 +329,7 @@ impl Ingestion {
     }
 
     async fn provider_readiness(&self, store: &Store, family: Option<AgentFamily>) -> Readiness {
-        let detail = {
+        let issue = {
             let status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let available = (family.is_none()
                 && status
@@ -336,12 +347,24 @@ impl Ingestion {
                                 && (!r.health.is_alive() || r.health.storage_blocked())
                         })
                 });
-            if status.error.is_some()
-                || status.runtimes.values().any(|r| r.health.storage_blocked())
-            {
-                Some("Chat updates could not be saved. Wonder is retrying; check available disk space if this continues.")
+            let runtime_healthy = (family.is_none()
+                && status
+                    .runtimes
+                    .values()
+                    .any(|r| r.project && r.health.is_alive()))
+                || status.providers.iter().any(|(id, p)| {
+                    family.is_none_or(|family| family == *id)
+                        && p.health.as_ref().is_some_and(RuntimeHealth::is_alive)
+                });
+            if status.runtimes.values().any(|r| r.health.storage_blocked()) {
+                Some(("Chat updates could not be saved. Wonder is retrying; check available disk space if this continues.", "storage_unavailable"))
+            } else if status.error.is_some() {
+                Some((
+                    "Wonder is recovering chat updates. Please wait before sending again.",
+                    "recovering",
+                ))
             } else if !available {
-                Some("This agent is reconnecting. Check its sign-in and runtime in Wonder on your Mac if this continues.")
+                Some(("This agent is reconnecting. Check its sign-in and runtime in Wonder on your Mac if this continues.", if runtime_healthy { "recovering" } else { "runtime_unavailable" }))
             } else if status
                 .consumer
                 .as_ref()
@@ -350,30 +373,37 @@ impl Ingestion {
                     .heartbeat
                     .is_none_or(|time| time.elapsed() > Duration::from_secs(5))
             {
-                Some("Wonder is recovering chat updates. Please wait before sending again.")
+                Some((
+                    "Wonder is recovering chat updates. Please wait before sending again.",
+                    "recovering",
+                ))
             } else {
                 None
             }
         };
-        if let Some(detail) = detail {
+        if let Some((detail, reason)) = issue {
             return Readiness {
                 ready: false,
                 detail,
+                reason,
             };
         }
         match store.notification_backlog().await {
             Ok(0..=256) => Readiness {
                 ready: true,
                 detail: "Ready",
+                reason: "ready",
             },
             Ok(_) => Readiness {
                 ready: false,
                 detail: "Wonder is catching up on chat updates. Please wait.",
+                reason: "backlog",
             },
             Err(_) => Readiness {
                 ready: false,
                 detail:
                     "Chat storage is unavailable. Wonder is retrying; check available disk space.",
+                reason: "storage_unavailable",
             },
         }
     }
@@ -1141,6 +1171,8 @@ for line in sys.stdin:
     if method == 'initialized': continue
     with open(root + '/requests', 'a') as log: log.write(method + '\n')
     with open(root + '/requests-jsonl', 'a') as log: log.write(json.dumps(r) + '\n')
+    with open(root + '/routing-requests-jsonl', 'a') as log:
+        log.write(json.dumps({'scope':os.getenv('WONDER_FIXTURE_SCOPE','bot'),'method':method,'params':r.get('params',{})}) + '\n')
     result = {}
     if os.path.exists(root + '/update-fixture.json') and method in ('thread/resume','thread/read','thread/list','thread/loaded/list','thread/turns/list','thread/items/list','turn/interrupt','turn/start'):
         checkpoint = json.load(open(root + '/update-fixture.json'))
@@ -1176,7 +1208,31 @@ for line in sys.stdin:
         print(json.dumps({'id':r['id'],'result':result}),flush=True)
         continue
     idle = json.load(open(root + '/idle-fixture.json')) if os.path.exists(root + '/idle-fixture.json') else {}
+    if os.path.exists(root + '/project-subagents-fixture.json') and method in ('thread/read','thread/list','thread/items/list'):
+        fixture = json.load(open(root + '/project-subagents-fixture.json'))
+        params = r.get('params',{})
+        if method == 'thread/read':
+            thread = fixture['threads'].get(params.get('threadId'))
+            if thread is None:
+                print(json.dumps({'id':r['id'],'error':{'code':-32000,'message':'Thread not found'}}),flush=True)
+                continue
+            result = {'thread':thread}
+        elif method == 'thread/list':
+            result = {'data':[thread for thread in fixture['threads'].values() if thread.get('parentThreadId') == params.get('parentThreadId') and thread.get('isArchived',False) == params.get('archived',False)],'nextCursor':fixture.get('listNextCursor') if not params.get('archived',False) else None}
+        else:
+            result = {'data':fixture.get('items',{}).get(params.get('threadId'),[]),'nextCursor':None}
+        print(json.dumps({'id':r['id'],'result':result}),flush=True)
+        continue
     if method == 'initialize': result = {'capabilities': {'experimentalApi': True}}
+    elif method == 'account/rateLimits/read' and os.path.exists(root + '/unsupported-usage'):
+        print(json.dumps({'id':r['id'],'error':{'code':-32601,'message':'Method not found'}}),flush=True)
+        continue
+    elif method == 'account/rateLimits/read' and os.path.exists(root + '/usage-fixture.json'):
+        result = json.load(open(root + '/usage-fixture.json'))
+    elif method == 'app/installed' and os.path.exists(root + '/apps-fixture.json'):
+        result = json.load(open(root + '/apps-fixture.json'))
+    elif method == 'app/read' and os.path.exists(root + '/apps-fixture.json'):
+        result = {'apps':[{'id':'app-fixture','name':'Fixture app'}]}
     elif method == 'thread/loaded/list': result = {'data':list(idle), 'nextCursor':None}
     elif method == 'thread/backgroundTerminals/list': result = {'data':idle.get(r['params']['threadId'],{}).get('background',[]), 'nextCursor':None}
     elif method == 'thread/read' and r.get('params',{}).get('threadId') in idle:
@@ -1633,6 +1689,15 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn readiness_reason_separates_missing_runtime_from_recovery() {
+        let (_dir, state) = fixture().await;
+        let readiness = state.ingestion.readiness(&state.store).await;
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, "runtime_unavailable");
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn overflow_while_projection_is_blocked_preserves_messages_and_approval() {
         let (_dir, state) = fixture().await;
         let _service = spawn(state.clone()).await;
@@ -1681,6 +1746,7 @@ for line in sys.stdin:
         crate::tests::validate_http_contract("hostStatus", &host);
         crate::tests::validate_http_contract("executionReadiness", &host["execution"]);
         assert_eq!(host["execution"]["ready"], false);
+        assert!(host["execution"]["reason"].as_str().is_some());
         assert_eq!(host["state"], "degraded");
         let rejected = crate::router(state.clone())
             .oneshot(
@@ -1753,7 +1819,9 @@ for line in sys.stdin:
             .unwrap()
             .abort();
         tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(!state.ingestion.readiness(&state.store).await.ready);
+        let readiness = state.ingestion.readiness(&state.store).await;
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, "recovering");
         drop(guard);
         ready(&state).await;
         assert_eq!(
@@ -2057,7 +2125,9 @@ for line in sys.stdin:
                 .await
         });
         tokio::time::sleep(Duration::from_millis(350)).await;
-        assert!(!state.ingestion.readiness(&state.store).await.ready);
+        let readiness = state.ingestion.readiness(&state.store).await;
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, "storage_unavailable");
         assert!(state
             .ingestion
             .inner

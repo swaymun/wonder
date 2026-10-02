@@ -30,12 +30,27 @@ pub(super) async fn read(
     Extension(_authority): Extension<OwnerAuthority>,
     Query(query): Query<UsageQuery>,
 ) -> Response {
-    let client = match claude::client(&state, query.agent_family) {
-        Ok(client) => client,
+    // Account usage belongs to the owner's provider home. Bot conversations
+    // retain their private runtime, but its account view is not the Project
+    // account the owner sees in Codex.
+    let rpc = match projects::rpc_for(&state, query.agent_family).await {
+        Ok(rpc) => rpc,
         Err(_) => return unavailable(query.agent_family),
     };
-    let rpc = client.lock().await.rpc();
     let result = rpc.request("account/rateLimits/read", json!({})).await;
+    if result
+        .as_ref()
+        .ok()
+        .and_then(|response| response.error.as_ref())
+        .is_some_and(|error| error.code == -32601)
+    {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            [(header::CACHE_CONTROL, "no-store")],
+            "This provider does not offer usage details in Wonder yet.",
+        )
+            .into_response();
+    }
     let Some(runtime) = result
         .ok()
         .filter(|response| response.error.is_none())
@@ -137,10 +152,24 @@ fn project_windows(runtime: &Value) -> Option<Vec<UsageWindow>> {
             return Some(windows);
         }
     }
-    runtime
+    if let Some(source) = runtime
         .get("rateLimits")
+        .filter(|source| source.is_object() || source.is_array())
+    {
+        let windows = project_source(source);
+        if !windows.is_empty()
+            || source.as_array().is_some_and(Vec::is_empty)
+            || source.as_object().is_some_and(serde_json::Map::is_empty)
+        {
+            return Some(windows);
+        }
+    }
+    preferred
+        .filter(|source| {
+            source.as_array().is_some_and(Vec::is_empty)
+                || source.as_object().is_some_and(serde_json::Map::is_empty)
+        })
         .map(project_source)
-        .filter(|windows| !windows.is_empty())
 }
 
 fn project_source(source: &Value) -> Vec<UsageWindow> {
@@ -272,6 +301,26 @@ mod tests {
     }
 
     #[test]
+    fn explicit_empty_usage_is_distinct_from_unrecognized_shape() {
+        assert_eq!(
+            project_windows(&json!({"rateLimits": {}})).unwrap().len(),
+            0
+        );
+        assert_eq!(
+            project_windows(&json!({"rateLimits": []})).unwrap().len(),
+            0
+        );
+        assert!(
+            project_windows(&json!({"rateLimits": {"credits": {"hasCredits": true}}})).is_none()
+        );
+        assert!(
+            project_windows(&json!({"rateLimits": {"primary": {"usedPercent": "wrong"}}}))
+                .is_none()
+        );
+        assert!(project_windows(&json!({"unrelated": []})).is_none());
+    }
+
+    #[test]
     fn prefers_codex_limit_id_over_generic_limits() {
         let windows = project(json!({
             "rateLimits": {"primary": {"usedPercent": 90}},
@@ -349,8 +398,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_or_malformed_limits() {
-        assert!(project_windows(&json!({"rateLimits": []})).is_none());
+    fn accepts_explicit_empty_but_rejects_malformed_limits() {
+        assert!(project_windows(&json!({"rateLimits": []}))
+            .unwrap()
+            .is_empty());
         assert!(project_windows(&json!({"rateLimits": {"other": {}}})).is_none());
         assert!(project_windows(&json!({"rateLimits": "unavailable"})).is_none());
         assert!(project_windows(&json!({})).is_none());

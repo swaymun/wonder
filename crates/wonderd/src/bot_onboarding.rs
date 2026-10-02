@@ -415,9 +415,10 @@ mod tests {
         let conversation = bot["conversationId"].as_str().unwrap();
         assert!(automation_target_available(
             &state,
-            &id,
-            "bot",
-            &id,
+            &wonder_store::AutomationTarget::Bot {
+                bot_id: id.clone(),
+                scope_id: id.clone()
+            },
             "continuation",
             Some(conversation)
         )

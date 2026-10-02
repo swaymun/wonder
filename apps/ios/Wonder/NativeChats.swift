@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 import ImageIO
 import PhotosUI
 import WonderPairing
@@ -409,6 +410,8 @@ struct ConversationView: View {
     let readOnly: Bool
     @State private var selectedSubagent: SubagentSummary?
     @State private var showingSubagents = false
+    @State private var selectedProjectSubagent: ProjectSubagentSummary?
+    @State private var showingProjectSubagents = false
     @State private var showingGoal = false
     @State private var showingComputer = false
     @State private var implementingPlan = false
@@ -425,7 +428,9 @@ struct ConversationView: View {
     @State private var workspaceRequest: WorkspaceBrowserRequest?
     @State private var showingApps = false
     @State private var showingDetails = false
+    @State private var showingUsage = false
     @State private var composerPhoto: ComposerAttachment?
+    @State private var annotationEdit: ComposerAttachment?
     @State private var imagePasteTask: Task<Void, Never>?
     @State private var messagePhotoGallery: MessagePhotoGallery?
     @State private var surfaceVisible = false
@@ -443,7 +448,7 @@ struct ConversationView: View {
         model.cameraContextID.uuidString + ":" + chat.id
     }
     private var conversationCovered: Bool {
-        showingDetails || showingApps || workspaceRequest != nil || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents || showingGoal || showingComputer
+        showingDetails || showingApps || showingUsage || workspaceRequest != nil || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents || selectedProjectSubagent != nil || showingProjectSubagents || showingGoal || showingComputer
     }
     private var avatarMotionState: ScienceAvatarMotionState {
         guard let turnID = model.activeTurn(chat.id),
@@ -828,6 +833,8 @@ struct ConversationView: View {
         }
         .toolbar(.hidden, for: .tabBar)
         .navigationTitle(chat.title)
+        .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .onChange(of: disclosureRevision, initial: true) { _, _ in
             activityDisclosure = ActivityDisclosurePolicy.reconciled(
                 activityDisclosure,
@@ -859,25 +866,10 @@ struct ConversationView: View {
         }
         #endif
         .toolbar {
-            if let botID = chat.botId {
-                ToolbarItem(placement: .principal) {
-                    ConversationAvatarHeader(
-                        name: chat.title,
-                        identity: botID,
-                        hexColor: headerBot?.avatarColor,
-                        avatarShape: headerBot?.avatarShape,
-                        avatarPalette: headerBot?.avatarPalette,
-                        motion: avatarMotion.output,
-                        isLoaded: headerBot != nil
-                    )
-                }
+            ToolbarItem(placement: .principal) {
+                if readOnly { conversationHeader }
+                else { conversationTitleMenu }
             }
-            if let detail = model.projectDetail(chat) {
-                ToolbarItem(placement: .principal) { ProjectConversationHeader(detail: detail) }
-            }
-            if !readOnly { ToolbarItem(placement: .primaryAction) {
-                Button("Conversation details", systemImage: "ellipsis.circle") { showingDetails = true }
-            } }
         }
         .sheet(isPresented: $showingDetails) {
             if model.isProject(chat) { ProjectConversationDetailsView(model: model, library: model.projects, chat: chat) }
@@ -888,6 +880,7 @@ struct ConversationView: View {
         }
 
         .sheet(isPresented: $showingApps) { NavigationStack { ConnectedAppsView(model: model, conversationId: chat.id).toolbar { Button("Done") { showingApps = false } } } }
+        .sheet(isPresented: $showingUsage) { ProviderUsageView(model: model, family: model.agentFamily(chat)) }
         .modifier(PhotoAttachmentPicker(model: model, chat: chat, isPresented: $selectingPhoto, scope: importScope))
         .sheet(isPresented: $showingCamera, onDismiss: { cameraScope = nil }) {
             if let cameraScope {
@@ -901,7 +894,20 @@ struct ConversationView: View {
             }
         }
         .sheet(item: $workspaceRequest) { request in
-            WorkspaceBrowser(model: model, chat: chat, attachmentIDs: request.attachmentIDs, initialFilePath: request.initialFilePath)
+            WorkspaceBrowser(model: model, chat: chat, attachmentIDs: request.attachmentIDs,
+                             initialFilePath: request.initialFilePath, preferredRootID: request.preferredRootID,
+                             reanchor: request.reanchor, replacingAnnotationID: request.replacingAnnotationID)
+        }
+        .sheet(item: $annotationEdit) { attachment in
+            ArtifactNoteEditor(model: model, chat: chat, attachment: attachment) { annotation in
+                annotationEdit = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    workspaceRequest = WorkspaceBrowserRequest(initialFilePath: annotation.path,
+                        preferredRootID: annotation.rootId, reanchor: annotation,
+                        replacingAnnotationID: attachment.id)
+                }
+            }
         }
         .fullScreenCover(item: $messagePhotoGallery) { gallery in
             PhotoViewer(model: model, chat: chat, galleryFiles: gallery.files, initialFileID: gallery.initialFileID)
@@ -947,6 +953,13 @@ struct ConversationView: View {
             }
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $selectedProjectSubagent, onDismiss: {
+            model.presentConversation(chat, root: rootChat)
+        }) { child in
+            ProjectSubagentTranscriptView(model: model, parent: chat, child: child)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { surfaceVisible = true; model.presentConversation(chat, root: rootChat) }
@@ -997,7 +1010,7 @@ struct ConversationView: View {
             if model.previewMode, ProcessInfo.processInfo.arguments.contains("-preview-document") { workspaceRequest = WorkspaceBrowserRequest() }
         }
         .task(id: chat.id + ":" + model.agentFamily(chat).rawValue) {
-            guard !readOnly, chat.botId != nil, model.agentFamily(chat) == .codex else { return }
+            guard !readOnly, (chat.botId != nil || model.isProject(chat)), model.agentFamily(chat) == .codex else { return }
             while !Task.isCancelled {
                 await model.loadGoal(chat)
                 try? await Task.sleep(for: .seconds(5))
@@ -1009,6 +1022,57 @@ struct ConversationView: View {
             guard !request.ids.isEmpty else { return }
             await model.loadFilesIfNeeded(chat, attachmentIDs: request.ids)
         }
+    }
+    @ViewBuilder private var conversationHeader: some View {
+        if let botID = chat.botId {
+            ConversationAvatarHeader(
+                name: chat.title,
+                identity: botID,
+                hexColor: headerBot?.avatarColor,
+                avatarShape: headerBot?.avatarShape,
+                avatarPalette: headerBot?.avatarPalette,
+                motion: avatarMotion.output,
+                isLoaded: headerBot != nil
+            )
+        } else if let detail = model.projectDetail(chat) {
+            ProjectConversationHeader(detail: detail)
+        } else {
+            Text(chat.title).font(.headline).lineLimit(1)
+        }
+    }
+    private var conversationTitleAccessibilityLabel: String {
+        if let botID = chat.botId {
+            guard let bot = headerBot else { return "\(chat.title), conversation options" }
+            let shape = ScienceAvatarPresentation.shape(rawValue: bot.avatarShape, identity: botID)
+            let palette = ScienceAvatarPresentation.palette(rawValue: bot.avatarPalette, legacyColor: bot.avatarColor)
+            return "\(chat.title), \(shape.title) character, \(palette.name) palette, conversation options"
+        }
+        if let detail = model.projectDetail(chat) {
+            return "\(detail.title), \(detail.projectName) project, \(detail.family.title), conversation options"
+        }
+        return "\(chat.title), Group Chat options"
+    }
+    private var conversationTitleMenu: some View {
+        Menu {
+            Button("Conversation details", systemImage: "info.circle") { showingDetails = true }
+            if chat.botId != nil || model.isProject(chat) {
+                Button("Connected apps", systemImage: "square.grid.2x2") { showingApps = true }
+                Button("\(model.agentFamily(chat).title) usage", systemImage: "chart.bar") { showingUsage = true }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                conversationHeader
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel(conversationTitleAccessibilityLabel)
+        .accessibilityValue(chat.botId != nil ? avatarMotion.output.state.title : "")
+        .accessibilityHint("Show conversation actions")
+        .accessibilityIdentifier("conversation-title-menu")
     }
     private var composer: some View {
             let attachments = composerAttachments
@@ -1030,6 +1094,10 @@ struct ConversationView: View {
                     if let error = model.composerErrors[chat.id] {
                         FailureDetails("Message not saved", message: error)
                     }
+                    if model.isProject(chat), (model.projectSubagents[chat.id] ?? []).isEmpty,
+                       let detail = model.projectSubagentErrors[chat.id] {
+                        Text(detail).font(.caption).foregroundStyle(.secondary)
+                    }
                     if !model.botWorking(chat.id), let issue = model.snapshots[chat.id]?.latestRequestIssue {
                         Text(issue)
                             .font(.caption).foregroundStyle(.secondary)
@@ -1041,8 +1109,9 @@ struct ConversationView: View {
                     VStack(spacing: 4) {
                         HStack(alignment: .bottom, spacing: 4) {
                             ComputerDock(isPresented: $showingComputer)
+                            FilesDock { workspaceRequest = WorkspaceBrowserRequest() }
                             Spacer(minLength: 0)
-                            if let goal = model.goals[chat.id], chat.botId != nil,
+                            if let goal = model.goals[chat.id], (chat.botId != nil || model.isProject(chat)),
                                model.groups[chat.id] == nil, !model.isSubagent(chat) {
                                 GoalDock(goal: goal, error: model.goalErrors[chat.id], isPresented: $showingGoal,
                                     save: { objective, budget, timeBudget in
@@ -1066,6 +1135,16 @@ struct ConversationView: View {
                                     }
                                 }
                             }
+                            if model.isProject(chat), !(model.projectSubagents[chat.id] ?? []).isEmpty {
+                                ProjectSubagentDock(agents: model.projectSubagents[chat.id] ?? [],
+                                    detail: model.projectSubagentErrors[chat.id], isPresented: $showingProjectSubagents) { child in
+                                    showingProjectSubagents = false
+                                    Task { @MainActor in
+                                        await Task.yield()
+                                        selectedProjectSubagent = child
+                                    }
+                                }
+                            }
                         }
                         .frame(maxWidth: .infinity)
                     DictationComposerSurface(controller: model.dictation, conversationID: chat.id) {
@@ -1076,10 +1155,12 @@ struct ConversationView: View {
                             imagePreviews: model.imagePreviews,
                             imagePreviewScope: model.imagePreviewScope,
                             chatID: chat.id,
+                            staleAnnotationIDs: Set(attachments.filter { model.isAnnotationStale($0.id, chat: chat.id) }.map(\.id)),
                             removalDisabled: model.preparingSends.contains(chat.id) || model.uploading.contains(chat.id) || model.sending.contains(chat.id) || model.composers[chat.id]?.pending != nil,
                             loadRemoteData: { [model, chat] file in try await model.download(file, chat: chat) },
                             openPhoto: { composerPhoto = $0 },
-                            remove: { model.removeStaged($0, chat: chat.id) }
+                            remove: { model.removeStaged($0, chat: chat.id) },
+                            editAnnotation: { annotationEdit = $0 }
                         )
                     }
                     if let message = model.usageLimitMessage(chat) {
@@ -1283,6 +1364,7 @@ struct ComposerAttachment: Identifiable, Sendable {
     let updatedAt: String
 
     var showsImage: Bool { mimeType.hasPrefix("image/") }
+    var isAnnotation: Bool { mimeType == ArtifactAnnotation.mimeType }
     var iconName: String {
         if mimeType.hasPrefix("image/") { return "photo" }
         if mimeType == "application/pdf" { return "doc.richtext" }
@@ -1298,10 +1380,12 @@ struct ComposerAttachmentStrip: View {
     let imagePreviews: ToolImagePreviews
     let imagePreviewScope: UUID
     let chatID: String
+    var staleAnnotationIDs: Set<String> = []
     let removalDisabled: Bool
     let loadRemoteData: @Sendable (ConversationFile) async throws -> Data
     let openPhoto: (ComposerAttachment) -> Void
     let remove: (String) -> Void
+    var editAnnotation: ((ComposerAttachment) -> Void)? = nil
 
     private var containsImage: Bool { attachments.contains { $0.showsImage } }
 
@@ -1314,10 +1398,12 @@ struct ComposerAttachmentStrip: View {
                         imagePreviews: imagePreviews,
                         imagePreviewScope: imagePreviewScope,
                         chatID: chatID,
+                        isStale: staleAnnotationIDs.contains(attachment.id),
                         removalDisabled: removalDisabled,
                         loadRemoteData: loadRemoteData,
                         openPhoto: openPhoto,
-                        remove: remove
+                        remove: remove,
+                        editAnnotation: editAnnotation
                     )
                 }
             }
@@ -1334,10 +1420,12 @@ private struct ComposerAttachmentItem: View {
     let imagePreviews: ToolImagePreviews
     let imagePreviewScope: UUID
     let chatID: String
+    let isStale: Bool
     let removalDisabled: Bool
     let loadRemoteData: @Sendable (ConversationFile) async throws -> Data
     let openPhoto: (ComposerAttachment) -> Void
     let remove: (String) -> Void
+    let editAnnotation: ((ComposerAttachment) -> Void)?
     @State private var thumbnail: UIImage?
     @State private var failed = false
 
@@ -1355,7 +1443,7 @@ private struct ComposerAttachmentItem: View {
         )
     }
     private var removalLabel: String {
-        "Remove \(attachment.showsImage ? "photo" : "file") \(attachment.name)"
+        "Remove \(attachment.isAnnotation ? "preview note" : attachment.showsImage ? "photo" : "file") \(attachment.name)"
     }
 
     var body: some View {
@@ -1419,10 +1507,11 @@ private struct ComposerAttachmentItem: View {
 
     private var fileChip: some View {
         ZStack(alignment: .topTrailing) {
-            HStack(spacing: 6) {
+            let label = HStack(spacing: 6) {
                 Image(systemName: attachment.iconName)
                     .foregroundStyle(.secondary)
-                Text(attachment.name)
+                if isStale { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+                Text(attachment.isAnnotation ? "\(isStale ? "Source changed · " : "Preview note · ")\(attachment.name.replacingOccurrences(of: ".annotation.json", with: ""))" : attachment.name)
                     .font(.subheadline)
                     .lineLimit(1)
             }
@@ -1434,6 +1523,12 @@ private struct ComposerAttachmentItem: View {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
             }
+            if attachment.isAnnotation, let editAnnotation {
+                Button { editAnnotation(attachment) } label: { label }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(isStale ? "Source changed. Re-anchor preview note" : "Edit preview note") for \(attachment.name)")
+                    .accessibilityIdentifier("composer-annotation-edit")
+            } else { label }
             removeButton
                 .offset(x: 8, y: -8)
         }
@@ -1936,12 +2031,66 @@ struct MessageRow: View {
     }
 }
 
-private struct ChatBubbleSurface: ViewModifier {
+enum ChatBubblePalette: String, CaseIterable {
+    case standard, ocean, violet
+    static let storageKey = "chatBubblePalette"
+    var title: String {
+        switch self {
+        case .standard: "Standard"
+        case .ocean: "Ocean"
+        case .violet: "Violet"
+        }
+    }
+    func fill(isUser: Bool) -> Color {
+        switch self {
+        case .standard:
+            Color(uiColor: isUser ? .systemGray4 : .secondarySystemBackground)
+        case .ocean:
+            isUser ? Self.oceanUser : Self.oceanAgent
+        case .violet:
+            isUser ? Self.violetUser : Self.violetAgent
+        }
+    }
+    private static let oceanUser = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.10, green: 0.25, blue: 0.36, alpha: 1)
+            : UIColor(red: 0.84, green: 0.92, blue: 0.97, alpha: 1)
+    })
+    private static let oceanAgent = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.15, green: 0.20, blue: 0.24, alpha: 1)
+            : UIColor(red: 0.94, green: 0.97, blue: 0.99, alpha: 1)
+    })
+    private static let violetUser = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.29, green: 0.19, blue: 0.35, alpha: 1)
+            : UIColor(red: 0.93, green: 0.86, blue: 0.97, alpha: 1)
+    })
+    private static let violetAgent = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.22, green: 0.18, blue: 0.25, alpha: 1)
+            : UIColor(red: 0.97, green: 0.95, blue: 0.98, alpha: 1)
+    })
+}
+
+private struct ChatBubblePaletteKey: EnvironmentKey {
+    static let defaultValue: ChatBubblePalette = .standard
+}
+
+extension EnvironmentValues {
+    var chatBubblePalette: ChatBubblePalette {
+        get { self[ChatBubblePaletteKey.self] }
+        set { self[ChatBubblePaletteKey.self] = newValue }
+    }
+}
+
+struct ChatBubbleSurface: ViewModifier {
     var isUser = false
+    @Environment(\.chatBubblePalette) private var palette
     func body(content: Content) -> some View {
         content.padding(.horizontal, 14).padding(.vertical, 10)
             .foregroundStyle(.primary)
-            .background(Color(uiColor: isUser ? .systemGray4 : .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(palette.fill(isUser: isUser), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -2229,7 +2378,7 @@ struct AttentionRow: View {
                 Text("A reply is saved. Check whether it was received.")
                 Button("Check saved reply") { Task { await model.resolve(request, decision: saved.decision) } }.frame(minHeight: 44)
             } else if request.isQuestion {
-                ScrollView { VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 8) {
                 QuestionNavigation(index: $questionIndex, count: request.params.questions?.count ?? 0)
                 ForEach(Array((request.params.questions ?? []).enumerated()).filter { $0.offset == questionIndex }, id: \.element.id) { _, question in
                     Text(question.question).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
@@ -2247,7 +2396,7 @@ struct AttentionRow: View {
                         .textFieldStyle(.roundedBorder).accessibilityLabel(question.question) }
                     }
                 }
-                }.frame(maxWidth: .infinity, alignment: .leading) }.frame(minHeight: 44, maxHeight: 180)
+                }.frame(maxWidth: .infinity, alignment: .leading)
                 if request.params.isBlocking != false {
                     Text("Answer needed to continue").font(.caption).foregroundStyle(.secondary)
                 }
@@ -2440,6 +2589,7 @@ private struct PhotoViewerItem: Identifiable {
     let mimeType: String
     let sourceFile: ConversationFile?
     let localData: Data?
+    var localRevision: String? = nil
 }
 
 private struct PhotoViewerPage: View {
@@ -2452,6 +2602,7 @@ private struct PhotoViewerPage: View {
     @State private var image: UIImage?
     @State private var failure: String?
     @State private var zoomScale: CGFloat = 1
+    @State private var loadedRequest: PhotoViewerRequest?
 
     private var request: PhotoViewerRequest {
         PhotoViewerRequest(
@@ -2460,7 +2611,7 @@ private struct PhotoViewerPage: View {
             name: item.name,
             mimeType: item.mimeType,
             state: item.sourceFile?.state ?? "local",
-            revision: item.sourceFile?.updatedAt ?? "local"
+            revision: item.localRevision ?? item.sourceFile?.updatedAt ?? "local"
         )
     }
 
@@ -2470,9 +2621,10 @@ private struct PhotoViewerPage: View {
             if let image {
                 PhotoZoomView(
                     image: image,
-                    imageID: request.sourceID + ":" + request.revision,
+                    imageID: request.sourceID + ":" + (loadedRequest?.revision ?? request.revision),
                     zoomScale: $zoomScale,
-                    reduceMotion: reduceMotion
+                    reduceMotion: reduceMotion,
+                    preservePosition: item.localRevision != nil
                 )
                 .accessibilityElement(children: .ignore)
                 .accessibilityIdentifier("photo-viewer-image:\(item.id)")
@@ -2506,11 +2658,11 @@ private struct PhotoViewerPage: View {
             }
         }
         .task(id: request) { await load(request) }
-        .onChange(of: request) { _, _ in
-            // A new verified source gets a new viewing session. The UIKit bridge
-            // itself remains idempotent for ordinary zoom updates.
-            zoomScale = 1
-            image = nil
+        .onChange(of: request) { previous, next in
+            if previous.sourceID != next.sourceID || previous.scope != next.scope {
+                zoomScale = 1
+                image = nil
+            }
             failure = nil
         }
         .onDisappear {
@@ -2520,7 +2672,7 @@ private struct PhotoViewerPage: View {
     }
 
     private func load(_ request: PhotoViewerRequest) async {
-        image = nil
+        if loadedRequest?.sourceID != request.sourceID || loadedRequest?.scope != request.scope { image = nil }
         failure = nil
         guard PhotoViewerRouting.isImage(mimeType: request.mimeType) else {
             failure = "This file is not an image."
@@ -2556,11 +2708,13 @@ private struct PhotoViewerPage: View {
             guard model.imagePreviewScope == request.scope else { return }
             guard let decoded else { throw FileFailure.unsupported }
             image = decoded
+            loadedRequest = request
             onVerifiedData(item.id, data)
         } catch is CancellationError {
             // The viewer was dismissed or its conversation scope changed.
         } catch {
             guard !Task.isCancelled, model.imagePreviewScope == request.scope else { return }
+            image = nil
             failure = "This image could not be verified or decoded. Close and try again."
             onVerifiedData(item.id, nil)
         }
@@ -2595,10 +2749,10 @@ struct PhotoViewer: View {
         _selectedIndex = State(initialValue: bounded.index)
     }
 
-    init(model: ConnectionModel, chat: ChatSummary, name: String, mimeType: String, sourceID: String, localData: Data?, file: ConversationFile?) {
+    init(model: ConnectionModel, chat: ChatSummary, name: String, mimeType: String, sourceID: String, localData: Data?, file: ConversationFile?, revision: String? = nil) {
         self.model = model
         self.chat = chat
-        self.items = [PhotoViewerItem(id: sourceID, name: name, mimeType: mimeType, sourceFile: file, localData: localData)]
+        self.items = [PhotoViewerItem(id: sourceID, name: name, mimeType: mimeType, sourceFile: file, localData: localData, localRevision: revision)]
         _selectedIndex = State(initialValue: 0)
     }
 
@@ -2702,6 +2856,18 @@ private struct WorkspacePreviewSelection: Identifiable {
     let name: String
     let mimeType: String
     let data: Data
+    let sha256: String
+    var rootID: String? = nil
+    var path: String? = nil
+    var scope: String? = nil
+}
+
+struct ArtifactPreviewContext {
+    let projectID: String
+    let conversationID: String
+    let rootID: String
+    let path: String
+    let scope: String
 }
 
 /// Keep the destination with the sheet's identity so its first presentation
@@ -2710,6 +2876,23 @@ struct WorkspaceBrowserRequest: Identifiable {
     let id = UUID()
     var attachmentIDs: [String]? = nil
     var initialFilePath: String? = nil
+    var preferredRootID: String? = nil
+    var reanchor: ArtifactAnnotation? = nil
+    var replacingAnnotationID: String? = nil
+}
+
+private struct WorkspaceMediaSelection: Identifiable {
+    let id: String
+    let name: String
+    let loader: WorkspaceMediaResourceLoader
+    let asset: AVURLAsset
+
+    init(id: String, name: String, loader: WorkspaceMediaResourceLoader) throws {
+        self.id = id
+        self.name = name
+        self.loader = loader
+        asset = try loader.asset(filename: name)
+    }
 }
 
 struct WorkspaceBrowser: View {
@@ -2717,26 +2900,40 @@ struct WorkspaceBrowser: View {
     let chat: ChatSummary
     let attachmentIDs: [String]?
     var initialFilePath: String? = nil
+    var preferredRootID: String? = nil
+    var reanchor: ArtifactAnnotation? = nil
+    var replacingAnnotationID: String? = nil
     @State private var openedInitialFile = false
     @Environment(\.dismiss) private var dismiss
     @State private var response: WorkspaceRootsResponse?
     @State private var selectedRootID: String?
     @State private var directoryPath = ""
     @State private var directory: WorkspaceDirectoryPage?
+    @State private var missingDirectory = false
     @State private var git: WorkspaceGitStatusResponse?
     @State private var viewMode = "all"
     @State private var showHidden = false
-    @State private var loading = false
+    @State private var loadingRequests: Set<UUID> = []
+    @State private var locationGeneration = UUID()
+    @State private var rootsRequestID = UUID()
+    @State private var directoryRequestID = UUID()
+    @State private var gitRequestID = UUID()
+    @State private var diffRequestID = UUID()
+    @State private var fileRequestID = UUID()
+    @State private var attachmentRequestID = UUID()
     @State private var failure: String?
     @State private var selection: WorkspacePreviewSelection?
     @State private var documentSelection: WorkspacePreviewSelection?
+    @State private var mediaSelection: WorkspaceMediaSelection?
     @State private var attachmentPhoto: ConversationFile?
     @State private var attachmentSelection: ConversationFile?
     @State private var attachmentData: Data?
+    @State private var attachmentDigest: String?
     @State private var selectedDiff: WorkspaceGitChange?
     @State private var diffChoice: WorkspaceGitChange?
     @State private var diffText: String?
 
+    private var loading: Bool { !loadingRequests.isEmpty }
     private var selectedRoot: WorkspaceRoot? { response?.roots.first(where: { $0.id == selectedRootID }) }
     private var visibleAttachments: [ConversationFile] {
         let files = response?.attachments ?? []
@@ -2746,7 +2943,7 @@ struct WorkspaceBrowser: View {
     // Hidden-file changes are explicitly reloaded by the action below. Keeping
     // this task identity scoped to navigation prevents one tap from starting
     // both the implicit task and the explicit refresh.
-    private var directoryTaskID: String { "\(selectedRootID ?? ""):\(directoryPath)" }
+    private var directoryTaskID: String { "\(model.assignmentScope):\(selectedRootID ?? ""):\(directoryPath)" }
 
     var body: some View {
         NavigationStack {
@@ -2780,12 +2977,14 @@ struct WorkspaceBrowser: View {
                 if let failure {
                     VStack(spacing: 12) {
                         ContentUnavailableView("Files unavailable", systemImage: "externaldrive.badge.xmark", description: Text(failure))
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Files unavailable. \(failure)")
+                            .accessibilityIdentifier("workspace-unavailable")
                         Button("Try again") { Task { await retryWorkspace() } }
                             .buttonStyle(.bordered)
                             .accessibilityIdentifier("workspace-retry")
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("workspace-unavailable")
                 } else if viewMode == "modified" {
                     modifiedView
                 } else {
@@ -2799,18 +2998,41 @@ struct WorkspaceBrowser: View {
                     WorkspaceBrowserDoneButton { dismiss() }
                 }
             }
-            .task { await loadRoots() }
+            .task(id: model.assignmentScope) {
+                invalidateLocation()
+                response = nil; selectedRootID = nil; directoryPath = ""; directory = nil; git = nil
+                _ = await loadRoots()
+            }
             .task(id: directoryTaskID) {
                 guard viewMode == "all", selectedRoot?.isDirectory == true else { return }
-                await loadDirectory(reset: true)
+                guard await loadDirectory(reset: true) else { return }
                 await openInitialFileIfNeeded()
             }
             .onChange(of: viewMode) { _, next in
+                invalidateLocation()
                 failure = nil
-                if next == "modified" { Task { await loadGit() } }
+                if next == "modified" { git = nil; Task { await loadGit() } }
+                else if selectedRoot?.isDirectory == true { Task { await loadDirectory(reset: true) } }
             }
-            .fullScreenCover(item: $selection) { item in
-                PhotoViewer(model: model, chat: chat, name: item.name, mimeType: item.mimeType, sourceID: item.id, localData: item.data, file: nil)
+            .sheet(item: $selection) { item in
+                Group {
+                    if let context = annotationContext(for: item) {
+                        let replacement = reanchorDraft(for: item)
+                        WorkspaceImagePreview(model: model, chat: chat, item: item, context: context,
+                                              refresh: revisionRefresh(for: item),
+                                              onRevision: revisionNotice(for: item),
+                                              refreshSequence: model.snapshots[chat.id]?.lastSequence,
+                                              initialNote: replacement?.note ?? "") { annotation in
+                            try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
+                                                      replacing: replacement?.id)
+                            selection = nil
+                            dismiss()
+                        }
+                    } else {
+                        PhotoViewer(model: model, chat: chat, name: item.name, mimeType: item.mimeType, sourceID: item.id, localData: item.data, file: nil)
+                    }
+                }
+                .presentationCompactAdaptation(.fullScreenCover)
             }
             .fullScreenCover(item: $attachmentPhoto) { file in
                 PhotoViewer(
@@ -2822,14 +3044,43 @@ struct WorkspaceBrowser: View {
                 )
             }
             .sheet(item: $documentSelection) { item in
-                WorkspaceDocumentPreview(name: item.name, mimeType: item.mimeType, data: item.data)
-            }
-            .sheet(isPresented: Binding(get: { attachmentSelection != nil && attachmentData != nil }, set: { if !$0 { attachmentSelection = nil; attachmentData = nil } })) {
-                if let attachmentSelection, let attachmentData {
-                    WorkspaceDocumentPreview(name: attachmentSelection.name, mimeType: attachmentSelection.mimeType ?? "application/octet-stream", data: attachmentData)
+                if WorkspaceModelPreview.supports(item.name) {
+                    WorkspaceModelPreview(name: item.name, data: item.data, revision: item.sha256)
+                } else if WorkspacePublicationPreview.supports(item.name) {
+                    WorkspacePublicationPreview(name: item.name, data: item.data,
+                                                origin: "workspace:\(model.assignmentScope):\(chat.id):\(item.id)")
+                } else {
+                    let context = annotationContext(for: item)
+                    let replacement = reanchorDraft(for: item)
+                    WorkspaceDocumentPreview(name: item.name, mimeType: item.mimeType, data: item.data,
+                                             annotationContext: context, onAnnotation: { annotation in
+                        guard let context else { throw FileFailure.integrity }
+                        try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
+                                                  replacing: replacement?.id)
+                        documentSelection = nil
+                        dismiss()
+                    }, refresh: revisionRefresh(for: item), onRevision: revisionNotice(for: item),
+                                             refreshSequence: model.snapshots[chat.id]?.lastSequence,
+                                             initialNote: replacement?.note ?? "", initialSha256: item.sha256)
                 }
             }
-            .sheet(isPresented: Binding(get: { selectedDiff != nil && diffText != nil }, set: { if !$0 { selectedDiff = nil; diffText = nil } })) {
+            .sheet(item: $mediaSelection) { item in
+                WorkspaceMediaPreview(selection: item)
+            }
+            .sheet(isPresented: Binding(get: { attachmentSelection != nil && attachmentData != nil && attachmentDigest != nil }, set: { if !$0 { attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil } })) {
+                if let attachmentSelection, let attachmentData, let attachmentDigest {
+                    if WorkspaceModelPreview.supports(attachmentSelection.name) {
+                        WorkspaceModelPreview(name: attachmentSelection.name, data: attachmentData,
+                                              revision: attachmentDigest)
+                    } else if WorkspacePublicationPreview.supports(attachmentSelection.name) {
+                        WorkspacePublicationPreview(name: attachmentSelection.name, data: attachmentData,
+                                                    origin: "attachment:\(model.assignmentScope):\(chat.id):\(attachmentSelection.id)")
+                    } else {
+                        WorkspaceDocumentPreview(name: attachmentSelection.name, mimeType: attachmentSelection.mimeType ?? "application/octet-stream", data: attachmentData)
+                    }
+                }
+            }
+            .sheet(isPresented: Binding(get: { selectedDiff != nil && diffText != nil }, set: { if !$0 { diffRequestID = UUID(); selectedDiff = nil; diffText = nil } })) {
                 if let selectedDiff, let diffText {
                     WorkspaceDiffPreview(path: selectedDiff.path, state: selectedDiff.state, diff: diffText)
                 }
@@ -2849,9 +3100,13 @@ struct WorkspaceBrowser: View {
         if loading && directory == nil && visibleAttachments.isEmpty { ProgressView("Loading files…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         else {
             List {
+                if loading && directory != nil {
+                    ProgressView("Loading files…")
+                        .accessibilityIdentifier("workspace-refreshing")
+                }
                 if let root = selectedRoot {
                     if !directoryPath.isEmpty {
-                        Button { directoryPath = directory?.parentPath ?? "" } label: { Label("Back", systemImage: "chevron.left") }
+                        Button { navigate(to: directory?.parentPath ?? "") } label: { Label("Back", systemImage: "chevron.left") }
                             .accessibilityIdentifier("workspace-back")
                     }
                     if root.isDirectory && directoryPath.isEmpty {
@@ -2876,7 +3131,7 @@ struct WorkspaceBrowser: View {
                         if root.isDirectory {
                             ForEach(directory?.entries ?? []) { entry in
                                 Button { open(entry) } label: {
-                                    Label(entry.name, systemImage: entry.isDirectory ? "folder" : (entry.mimeType?.hasPrefix("image/") == true ? "photo" : "doc.text"))
+                                    Label(entry.name, systemImage: entry.isDirectory ? "folder" : (entry.mimeType?.hasPrefix("image/") == true ? "photo" : (Self.isMedia(entry) ? "play.rectangle" : "doc.text")))
                                 }
                                 .accessibilityIdentifier("workspace-\(entry.isDirectory ? "directory" : "file")-entry:\(entry.path)")
                             }
@@ -2935,41 +3190,113 @@ struct WorkspaceBrowser: View {
         }
     }
 
+    private struct Location: Equatable {
+        let scope: String
+        let generation: UUID
+        let rootID: String?
+        let path: String
+        let mode: String
+        let hidden: Bool
+    }
+    private var location: Location {
+        Location(scope: model.assignmentScope, generation: locationGeneration,
+                 rootID: selectedRootID, path: directoryPath, mode: viewMode, hidden: showHidden)
+    }
+    private func isCurrent(_ captured: Location) -> Bool {
+        !Task.isCancelled && !model.accessEnded && captured == location
+    }
+    private func beginLoading() -> UUID {
+        let id = UUID()
+        loadingRequests.insert(id)
+        return id
+    }
+    private func invalidateLocation() {
+        locationGeneration = UUID()
+        rootsRequestID = UUID()
+        directoryRequestID = UUID()
+        gitRequestID = UUID()
+        diffRequestID = UUID()
+        fileRequestID = UUID()
+        attachmentRequestID = UUID()
+        loadingRequests.removeAll()
+        selectedDiff = nil; diffChoice = nil; diffText = nil
+        selection = nil; documentSelection = nil; mediaSelection = nil
+        attachmentPhoto = nil; attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil
+    }
+    private func navigate(to path: String) {
+        guard directoryPath != path else { return }
+        invalidateLocation()
+        directoryPath = path
+        directory = nil
+        missingDirectory = false
+        failure = nil
+    }
     private func selectRoot(_ root: WorkspaceRoot) {
+        invalidateLocation()
         selectedRootID = root.id
         directoryPath = ""
         directory = nil
+        missingDirectory = false
         git = nil
         failure = nil
         viewMode = "all"
     }
-    private func loadRoots() async {
-        loading = true; failure = nil
+    @discardableResult private func loadRoots() async -> Bool {
+        let scope = model.assignmentScope
+        let generation = locationGeneration
+        let requestID = UUID()
+        rootsRequestID = requestID
+        let loadingID = beginLoading()
+        failure = nil
+        defer { loadingRequests.remove(loadingID) }
         do {
             let next = try await model.loadWorkspaceRoots(chat)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, !model.accessEnded, scope == model.assignmentScope,
+                  generation == locationGeneration, requestID == rootsRequestID else { return false }
+            let previousRootID = selectedRootID
+            let previousPath = directoryPath
+            invalidateLocation()
             directoryPath = ""
             directory = nil
             git = nil
             response = next
             if !openedInitialFile, let path = FileChangeSummary.relativePath(initialFilePath) {
-                guard let root = next.roots.first(where: { ["workingDirectory", "groupWorkspace", "childWorkingDirectory"].contains($0.kind) && $0.isDirectory }) else {
-                    failure = "This conversation’s workspace is unavailable. Check its Bot workspace settings and try again."
-                    loading = false
-                    return
+                let root: WorkspaceRoot?
+                if let preferredRootID {
+                    root = next.roots.first(where: { $0.id == preferredRootID && $0.isDirectory })
+                } else {
+                    root = next.roots.first(where: { ["workingDirectory", "groupWorkspace", "childWorkingDirectory"].contains($0.kind) && $0.isDirectory })
+                }
+                guard let root else {
+                    failure = "This conversation’s working folder is unavailable. Check its project or workspace settings on your Mac."
+                    return true
                 }
                 selectedRootID = root.id
                 directoryPath = path.split(separator: "/").dropLast().joined(separator: "/")
-            } else if selectedRootID == nil { selectedRootID = next.roots.first?.id }
+            } else if let previousRootID, next.roots.contains(where: { $0.id == previousRootID }) {
+                selectedRootID = previousRootID
+                directoryPath = previousPath
+            } else { selectedRootID = next.roots.first?.id }
             if next.roots.isEmpty { failure = next.detail ?? "No verified workspace locations are available." }
-        } catch { failure = workspaceBrowserError(error) }
-        loading = false
+            return true
+        } catch {
+            guard !Task.isCancelled, !model.accessEnded, scope == model.assignmentScope,
+                  generation == locationGeneration, requestID == rootsRequestID else { return false }
+            failure = workspaceBrowserError(error)
+            return false
+        }
     }
     private func retryWorkspace() async {
         failure = nil
-        if response == nil || selectedRootID == nil { await loadRoots() }
+        if missingDirectory {
+            navigate(to: "")
+        }
+        guard await loadRoots(), failure == nil else { return }
         if viewMode == "modified" { await loadGit() }
-        else if selectedRoot?.isDirectory == true { await loadDirectory(reset: true); await openInitialFileIfNeeded() }
+        else if selectedRoot?.isDirectory == true {
+            guard await loadDirectory(reset: true) else { return }
+            await openInitialFileIfNeeded()
+        }
     }
     private func openInitialFileIfNeeded() async {
         guard !Task.isCancelled, !openedInitialFile, failure == nil,
@@ -2978,35 +3305,58 @@ struct WorkspaceBrowser: View {
         let entry = directory?.entries.first(where: { $0.path == path && !$0.isDirectory })
             ?? WorkspaceEntry(name: name, path: path, isDirectory: false, byteSize: nil,
                               mimeType: UTType(filenameExtension: URL(fileURLWithPath: name).pathExtension)?.preferredMIMEType)
-        await loadWorkspaceFile(entry)
-        if !Task.isCancelled, failure == nil { openedInitialFile = true }
+        let captured = location
+        if await loadWorkspaceFile(entry), isCurrent(captured) { openedInitialFile = true }
     }
     private func toggleHiddenFiles() {
-        let nextValue = !showHidden
-        showHidden = nextValue
-        Task { await loadDirectory(reset: true, showHiddenOverride: nextValue) }
+        invalidateLocation()
+        showHidden.toggle()
+        Task { await loadDirectory(reset: true, preserveUntilLoaded: true) }
     }
-    private func loadDirectory(reset: Bool, offset: Int = 0, showHiddenOverride: Bool? = nil) async {
-        guard let root = selectedRoot, root.isDirectory else { return }
-        if reset { directory = nil }
-        loading = true
+    @discardableResult private func loadDirectory(reset: Bool, offset: Int = 0,
+                                                   preserveUntilLoaded: Bool = false) async -> Bool {
+        guard let root = selectedRoot, root.isDirectory else { return false }
+        let captured = location
+        let requestID = UUID()
+        directoryRequestID = requestID
+        if reset && !preserveUntilLoaded { directory = nil }
+        let loadingID = beginLoading()
+        defer { loadingRequests.remove(loadingID) }
         do {
-            let page = try await model.loadWorkspaceDirectory(chat, root: root, path: directoryPath, showHidden: showHiddenOverride ?? showHidden, offset: offset)
-            guard !Task.isCancelled else { return }
+            let page = try await model.loadWorkspaceDirectory(chat, root: root, path: captured.path,
+                                                              showHidden: captured.hidden, offset: offset)
+            guard isCurrent(captured), requestID == directoryRequestID else { return false }
             failure = nil
+            missingDirectory = false
             if reset || directory == nil { directory = page }
             else if let current = directory { directory = WorkspaceDirectoryPage(rootId: page.rootId, path: page.path, parentPath: page.parentPath, entries: current.entries + page.entries, nextOffset: page.nextOffset) }
-        } catch { failure = workspaceBrowserError(error) }
-        loading = false
+            return true
+        } catch {
+            guard isCurrent(captured), requestID == directoryRequestID else { return false }
+            if case PairingFailure.response(404) = error, !captured.path.isEmpty {
+                missingDirectory = true
+                failure = "This folder moved or was deleted. Try again to return to the workspace root."
+            } else { failure = workspaceBrowserError(error) }
+            return false
+        }
     }
     private func loadGit() async {
         guard let root = selectedRoot else { return }
-        loading = true
-        do { git = try await model.loadWorkspaceGitStatus(chat, root: root); failure = nil }
-        catch { failure = workspaceBrowserError(error) }
-        loading = false
+        let captured = location
+        let requestID = UUID()
+        gitRequestID = requestID
+        let loadingID = beginLoading()
+        defer { loadingRequests.remove(loadingID) }
+        do {
+            let next = try await model.loadWorkspaceGitStatus(chat, root: root)
+            guard isCurrent(captured), requestID == gitRequestID else { return }
+            git = next; failure = nil
+        } catch {
+            guard isCurrent(captured), requestID == gitRequestID else { return }
+            failure = workspaceBrowserError(error)
+        }
     }
-    private func open(_ entry: WorkspaceEntry) { if entry.isDirectory { directoryPath = entry.path } else { Task { await loadWorkspaceFile(entry) } } }
+    private func open(_ entry: WorkspaceEntry) { if entry.isDirectory { navigate(to: entry.path) } else { Task { await loadWorkspaceFile(entry) } } }
     private func openRootFile(_ root: WorkspaceRoot) {
         let name = URL(fileURLWithPath: root.path).lastPathComponent
         let mime: String
@@ -3019,29 +3369,95 @@ struct WorkspaceBrowser: View {
         }
         Task { await loadWorkspaceFile(WorkspaceEntry(name: name, path: "", isDirectory: false, byteSize: root.byteSize, mimeType: mime)) }
     }
-    private func loadWorkspaceFile(_ entry: WorkspaceEntry) async {
-        guard let root = selectedRoot else { return }
-        loading = true; failure = nil
+    @discardableResult private func loadWorkspaceFile(_ entry: WorkspaceEntry) async -> Bool {
+        guard let root = selectedRoot else { return false }
+        let captured = location
+        let requestID = UUID()
+        fileRequestID = requestID
+        let loadingID = beginLoading()
+        failure = nil
+        defer { loadingRequests.remove(loadingID) }
         do {
+            if Self.isMedia(entry) {
+                let loader = try model.workspaceMediaLoader(chat, root: root, entry: entry)
+                guard isCurrent(captured), requestID == fileRequestID else { loader.cancelAll(); return false }
+                mediaSelection = try WorkspaceMediaSelection(id: root.id + ":" + entry.path,
+                                                              name: entry.name, loader: loader)
+                return true
+            }
             let data = try await model.downloadWorkspaceFile(chat, root: root, entry: entry)
-            guard !Task.isCancelled else { return }
-            if PhotoViewerRouting.isImage(mimeType: entry.mimeType) { selection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "image/*", data: data) }
-            else { attachmentSelection = nil; attachmentData = nil; selection = nil; selectedDiff = nil; diffText = nil; documentSelection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "application/octet-stream", data: data) }
+            let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
+            guard isCurrent(captured), requestID == fileRequestID else { return false }
+            if PhotoViewerRouting.isImage(mimeType: entry.mimeType) { selection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "image/*", data: data, sha256: sha256, rootID: root.id, path: entry.path, scope: captured.scope) }
+            else { attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil; selection = nil; selectedDiff = nil; diffText = nil; documentSelection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "application/octet-stream", data: data, sha256: sha256, rootID: root.id, path: entry.path, scope: captured.scope) }
+            return true
         } catch {
-            guard !Task.isCancelled else { return }
+            guard isCurrent(captured), requestID == fileRequestID else { return false }
             failure = "This file could not be opened. It may have moved, been deleted, or need workspace access."
+            return false
         }
-        loading = false
+    }
+    private static func isMedia(_ entry: WorkspaceEntry) -> Bool {
+        guard let ext = entry.name.split(separator: ".").last?.lowercased() else { return false }
+        return ["mp4", "mov", "m4a", "mp3", "wav"].contains(ext)
+    }
+    private func annotationContext(for item: WorkspacePreviewSelection) -> ArtifactPreviewContext? {
+        guard let rootID = item.rootID, let path = item.path, !path.isEmpty,
+              let scope = item.scope, scope == model.assignmentScope,
+              let projectID = model.projects.details[chat.id]?.projectId,
+              model.canAnnotate(chat, replacing: reanchorDraft(for: item)?.id) else { return nil }
+        return ArtifactPreviewContext(projectID: projectID, conversationID: chat.id,
+                                      rootID: rootID, path: path, scope: scope)
+    }
+    private func reanchorDraft(for item: WorkspacePreviewSelection) -> (id: String, note: String)? {
+        guard let reanchor, let replacingAnnotationID,
+              reanchor.conversationId == chat.id,
+              reanchor.projectId == model.projects.details[chat.id]?.projectId,
+              reanchor.rootId == item.rootID, reanchor.path == item.path else { return nil }
+        return (replacingAnnotationID, reanchor.note)
+    }
+    private func revisionRefresh(for item: WorkspacePreviewSelection) -> (() async throws -> Data)? {
+        guard let rootID = item.rootID, let path = item.path,
+              let scope = item.scope, scope == model.assignmentScope,
+              let root = response?.roots.first(where: { $0.id == rootID }) else { return nil }
+        let entry = WorkspaceEntry(name: item.name, path: path, isDirectory: false,
+                                   byteSize: nil, mimeType: item.mimeType)
+        return {
+            guard scope == model.assignmentScope, !model.accessEnded else { throw CancellationError() }
+            let data = try await model.refreshWorkspaceFile(chat, root: root, entry: entry)
+            guard scope == model.assignmentScope, !model.accessEnded else { throw CancellationError() }
+            return data
+        }
+    }
+    private func revisionNotice(for item: WorkspacePreviewSelection) -> ((String) async -> Void)? {
+        guard let rootID = item.rootID, let path = item.path, let scope = item.scope else { return nil }
+        return { sha256 in
+            guard scope == model.assignmentScope else { return }
+            await model.noteWorkspaceRevision(chat, rootID: rootID, path: path, currentSha256: sha256)
+        }
     }
     private func openAttachment(_ file: ConversationFile) {
         if PhotoViewerRouting.isImage(file) { attachmentPhoto = file }
         else { Task { await loadAttachment(file) } }
     }
     private func loadAttachment(_ file: ConversationFile) async {
-        loading = true; failure = nil
-        do { attachmentSelection = file; attachmentData = try await model.download(file, chat: chat) }
-        catch { failure = workspaceBrowserError(error) }
-        loading = false
+        let captured = location
+        let requestID = UUID()
+        attachmentRequestID = requestID
+        let loadingID = beginLoading()
+        failure = nil
+        defer { loadingRequests.remove(loadingID) }
+        do {
+            let data = try await model.download(file, chat: chat)
+            let digest = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
+            guard isCurrent(captured), requestID == attachmentRequestID,
+                  visibleAttachments.contains(where: { $0.id == file.id }) else { return }
+            attachmentSelection = file; attachmentData = data; attachmentDigest = digest
+        }
+        catch {
+            guard isCurrent(captured), requestID == attachmentRequestID else { return }
+            failure = workspaceBrowserError(error)
+        }
     }
     private func openDiff(_ change: WorkspaceGitChange) {
         let staged = change.indexStatus != " " && change.indexStatus != "?"
@@ -3050,21 +3466,100 @@ struct WorkspaceBrowser: View {
     }
     private func loadDiff(_ change: WorkspaceGitChange, staged: Bool) {
         guard let root = selectedRoot else { return }
+        let captured = location
+        let requestID = UUID()
+        diffRequestID = requestID
         selectedDiff = change
         diffText = nil
         Task {
             do {
                 let response = try await model.loadWorkspaceGitDiff(chat, root: root, path: change.path, staged: staged)
+                guard isCurrent(captured), requestID == diffRequestID,
+                      selectedDiff?.id == change.id else { return }
                 diffText = response.diff
             } catch {
+                guard isCurrent(captured), requestID == diffRequestID,
+                      selectedDiff?.id == change.id else { return }
                 failure = workspaceBrowserError(error)
                 selectedDiff = nil
             }
         }
     }
     private func workspaceBrowserError(_ error: Error) -> String {
-        if case PairingFailure.response(let code) = error, [404, 409, 503].contains(code) { return "Workspace browsing requires a newer Wonder host. Update Wonder on your Mac, then reconnect." }
+        if case PairingFailure.response(let code) = error {
+            switch code {
+            case 403: return "Access to this folder changed. Review the Project's folders on your Mac, then try again."
+            case 404: return "This conversation or Project folder is unavailable. Check it on your Mac, or update Wonder there if Files is missing."
+            case 409: return "These files changed while you were browsing. Close Files, then open it again."
+            case 501: return "Update Wonder on your Mac to browse these files."
+            case 503: return "Your Mac couldn't verify this folder. Check the connection, then try again."
+            default: break
+            }
+        }
         return "Files could not be loaded. Check your Mac and try again."
+    }
+}
+
+private struct WorkspaceMediaPreview: View {
+    let selection: WorkspaceMediaSelection
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer?
+    @State private var failure: String?
+    private let changedMessage = "File changed. Close and reopen the preview."
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let failure {
+                    ContentUnavailableView("Playback unavailable", systemImage: "play.slash",
+                                           description: Text(failure))
+                        .accessibilityIdentifier("workspace-media-unavailable")
+                } else if let player {
+                    VideoPlayer(player: player)
+                        .accessibilityIdentifier("workspace-media-player")
+                } else {
+                    ProgressView("Loading media…")
+                        .accessibilityIdentifier("workspace-media-loading")
+                }
+            }
+            .navigationTitle(selection.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                Button("Done") { dismiss() }
+                    .accessibilityIdentifier("workspace-media-close")
+            }
+            .task {
+                do {
+                    guard try await selection.asset.load(.isPlayable) else {
+                        failure = "This audio or video format cannot be played on this device."
+                        return
+                    }
+                    guard !Task.isCancelled else { return }
+                    let item = AVPlayerItem(asset: selection.asset)
+                    player = AVPlayer(playerItem: item)
+                    while !Task.isCancelled {
+                        if item.status == .failed {
+                            failure = selection.loader.fileChanged ? changedMessage :
+                                "Playback stopped. Check your Mac connection or try a different file."
+                            player?.pause()
+                            player = nil
+                            return
+                        }
+                        try await Task.sleep(for: .milliseconds(500))
+                    }
+                } catch is CancellationError {
+                    // Closing the preview cancels its outstanding range request.
+                } catch {
+                    failure = selection.loader.fileChanged ? changedMessage :
+                        "This file could not be streamed. Check your Mac connection and try again."
+                }
+            }
+            .onDisappear {
+                player?.pause()
+                player?.replaceCurrentItem(with: nil)
+                selection.loader.cancelAll()
+            }
+        }
     }
 }
 
@@ -3087,24 +3582,659 @@ private struct WorkspaceBrowserDoneButton: View {
     }
 }
 
+private struct WorkspaceImagePreview: View {
+    @ObservedObject var model: ConnectionModel
+    let chat: ChatSummary
+    let item: WorkspacePreviewSelection
+    let context: ArtifactPreviewContext
+    let refresh: (() async throws -> Data)?
+    let onRevision: ((String) async -> Void)?
+    let refreshSequence: UInt64?
+    let initialNote: String
+    let onAnnotation: (ArtifactAnnotation) throws -> Void
+    @State private var showingRegion = false
+    @State private var currentData: Data
+    @State private var currentSha256: String
+    @State private var offeredData: Data?
+    @State private var offeredSha256: String?
+    @State private var refreshFailure: String?
+    @State private var refreshing = false
+    @State private var observedSequence: UInt64?
+    @State private var manualRefreshTask: Task<Void, Never>?
+
+    init(model: ConnectionModel, chat: ChatSummary, item: WorkspacePreviewSelection,
+         context: ArtifactPreviewContext, refresh: (() async throws -> Data)?,
+         onRevision: ((String) async -> Void)?, refreshSequence: UInt64?,
+         initialNote: String,
+         onAnnotation: @escaping (ArtifactAnnotation) throws -> Void) {
+        self.model = model; self.chat = chat; self.item = item; self.context = context
+        self.refresh = refresh; self.onRevision = onRevision; self.refreshSequence = refreshSequence
+        self.initialNote = initialNote
+        self.onAnnotation = onAnnotation
+        _currentData = State(initialValue: item.data)
+        _currentSha256 = State(initialValue: item.sha256)
+    }
+
+    var body: some View {
+        PhotoViewer(model: model, chat: chat, name: item.name, mimeType: item.mimeType,
+                    sourceID: item.id, localData: currentData, file: nil, revision: currentSha256)
+            .overlay(alignment: .top) {
+                if refresh != nil {
+                    VStack(alignment: .trailing, spacing: 8) {
+                        Button("Check for changes", systemImage: "arrow.clockwise") {
+                            manualRefreshTask?.cancel()
+                            manualRefreshTask = Task { await checkForRevision() }
+                        }
+                            .disabled(refreshing)
+                            .accessibilityIdentifier("workspace-image-refresh")
+                        if offeredData != nil {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("New image version available. Preview notes on the old version need a new selection.")
+                                    .accessibilityIdentifier("workspace-image-revision-warning")
+                                Button("Show new version") {
+                                    guard let offeredData, let offeredSha256 else { return }
+                                    currentData = offeredData; currentSha256 = offeredSha256
+                                    self.offeredData = nil; self.offeredSha256 = nil
+                                }
+                                .accessibilityIdentifier("workspace-image-show-revision")
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                            .background(Color.orange.opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
+                        } else if let refreshFailure {
+                            Text(refreshFailure).frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("workspace-image-refresh-error")
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .font(.footnote).foregroundStyle(.white)
+                    .padding(.horizontal, 16).padding(.top, 76)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                Button("Annotate region", systemImage: "square.dashed") { showingRegion = true }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.bottom, 18)
+                    .accessibilityIdentifier("annotation-image-open")
+            }
+            .sheet(isPresented: $showingRegion) {
+                WorkspaceRegionEditor(name: item.name, source: currentData, context: context,
+                                      format: .image, onAnnotation: onAnnotation, initialNote: initialNote)
+                    .presentationCompactAdaptation(.fullScreenCover)
+            }
+            .task(id: refreshSequence) {
+                guard let refreshSequence, refresh != nil else { return }
+                if let observedSequence, observedSequence != refreshSequence { await checkForRevision() }
+                observedSequence = refreshSequence
+            }
+            .onDisappear { manualRefreshTask?.cancel() }
+    }
+
+    private func checkForRevision() async {
+        guard let refresh, !refreshing else { return }
+        refreshing = true; refreshFailure = nil
+        defer { refreshing = false }
+        do {
+            let data = try await refresh()
+            guard !Task.isCancelled else { return }
+            let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
+            guard !Task.isCancelled else { return }
+            if sha256 != currentSha256 {
+                offeredData = data; offeredSha256 = sha256
+                await onRevision?(sha256)
+            } else { offeredData = nil; offeredSha256 = nil }
+        } catch is CancellationError {
+        } catch {
+            guard !Task.isCancelled else { return }
+            refreshFailure = "Could not check this image. Check your Mac or workspace access and try again."
+        }
+    }
+}
+
+private enum WorkspaceRegionFormat: Sendable { case image, pdf }
+
+private struct WorkspaceRegionEditor: View {
+    let name: String
+    let source: Data
+    let context: ArtifactPreviewContext
+    let format: WorkspaceRegionFormat
+    let onAnnotation: (ArtifactAnnotation) throws -> Void
+    var initialNote: String = ""
+    @Environment(\.dismiss) private var dismiss
+    @State private var page = 1
+    @State private var pageCount = 0
+    @State private var preview: UIImage?
+    @State private var region: CGRect?
+    @State private var note = ""
+    @State private var failure: String?
+    @State private var loading = true
+    @State private var showingAreaControls = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if format == .pdf, pageCount > 0 {
+                    HStack {
+                        Button("Previous page", systemImage: "chevron.left") { page -= 1 }
+                            .disabled(page <= 1).accessibilityIdentifier("annotation-previous-page")
+                        Spacer()
+                        Text("Page \(page) of \(pageCount)").accessibilityIdentifier("annotation-page-position")
+                        Spacer()
+                        Button("Next page", systemImage: "chevron.right") { page += 1 }
+                            .disabled(page >= pageCount).accessibilityIdentifier("annotation-next-page")
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                }
+                if loading { ProgressView("Preparing preview…").frame(maxWidth: .infinity, maxHeight: .infinity) }
+                else if let preview {
+                    WorkspaceRegionCanvas(image: preview, region: $region)
+                    Text(regionSummary)
+                        .font(.footnote).foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .accessibilityIdentifier("annotation-region-status")
+                } else {
+                    ContentUnavailableView("Preview unavailable", systemImage: "doc", description: Text("This file could not be prepared for annotation."))
+                }
+            }
+            .navigationTitle(name).navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            }
+            .safeAreaInset(edge: .bottom) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(format == .pdf ? "Select whole page" : "Select whole image") {
+                        region = CGRect(x: 0, y: 0, width: 1, height: 1)
+                    }
+                    .disabled(preview == nil)
+                    .accessibilityIdentifier("annotation-region-all")
+                    DisclosureGroup("Adjust selected area", isExpanded: $showingAreaControls) {
+                        Slider(value: regionValue(\.minX), in: 0...0.99, step: 0.01) { Text("Left") }
+                        Slider(value: regionValue(\.minY), in: 0...0.99, step: 0.01) { Text("Top") }
+                        Slider(value: regionValue(\.width), in: 0.01...1, step: 0.01) { Text("Width") }
+                        Slider(value: regionValue(\.height), in: 0.01...1, step: 0.01) { Text("Height") }
+                    }
+                    .disabled(preview == nil)
+                    .onChange(of: showingAreaControls) { _, expanded in
+                        if expanded && region == nil { region = CGRect(x: 0, y: 0, width: 1, height: 1) }
+                    }
+                    .accessibilityIdentifier("annotation-region-adjust")
+                    TextField("What should the agent notice?", text: $note, axis: .vertical)
+                        .lineLimit(2...4)
+                        .accessibilityIdentifier("annotation-region-note")
+                    if note.utf8.count > 4096 { Text("Keep the note under 4,096 bytes.").font(.footnote).foregroundStyle(.red) }
+                    if let failure { Text(failure).font(.footnote).foregroundStyle(.red).accessibilityIdentifier("annotation-region-error") }
+                    Button("Add to message") { addAnnotation() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(region == nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
+                        .accessibilityIdentifier("annotation-region-add")
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.regularMaterial)
+            }
+            .task(id: page) { await preparePreview() }
+            .onAppear { if note.isEmpty { note = initialNote } }
+        }
+    }
+
+    private func preparePreview() async {
+        preview = nil; region = nil; showingAreaControls = false; loading = true; failure = nil
+        let source = source
+        let page = page
+        let format = format
+        let rendering = Task.detached(priority: .userInitiated) { () -> (UIImage?, Int) in
+            switch format {
+            case .image:
+                return (ToolPreviewImage.decode(source), 1)
+            case .pdf:
+                guard let document = PDFDocument(data: source), document.pageCount > 0,
+                      page <= min(document.pageCount, 10_000), let pdfPage = document.page(at: page - 1) else { return (nil, 0) }
+                return (pdfPage.thumbnail(of: CGSize(width: 1200, height: 1600), for: .cropBox), min(document.pageCount, 10_000))
+            }
+        }
+        let result = await withTaskCancellationHandler(operation: { await rendering.value }, onCancel: { rendering.cancel() })
+        guard !Task.isCancelled else { return }
+        preview = result.0
+        pageCount = result.1
+        loading = false
+        if result.0 == nil { failure = "The selected page could not be rendered." }
+    }
+
+    private func addAnnotation() {
+        guard let region else { return }
+        do {
+            let x = Double(region.minX), y = Double(region.minY)
+            let width = Double(region.width), height = Double(region.height)
+            let annotation: ArtifactAnnotation
+            switch format {
+            case .image:
+                annotation = try ArtifactAnnotation(projectId: context.projectID, conversationId: context.conversationID,
+                    rootId: context.rootID, path: context.path, source: source,
+                    imageX: x, y: y, width: width, height: height, note: note)
+            case .pdf:
+                annotation = try ArtifactAnnotation(projectId: context.projectID, conversationId: context.conversationID,
+                    rootId: context.rootID, path: context.path, source: source,
+                    pdfPage: page, x: x, y: y, width: width, height: height, note: note)
+            }
+            try onAnnotation(annotation)
+            dismiss()
+        } catch { failure = "The preview note could not be saved. Reopen the file and try again." }
+    }
+
+    private var regionSummary: String {
+        guard let region else { return "Drag on the preview to select an area." }
+        let x = Int((region.minX * 100).rounded()), y = Int((region.minY * 100).rounded())
+        let width = Int((region.width * 100).rounded()), height = Int((region.height * 100).rounded())
+        return "Selected area: \(x)% from left, \(y)% from top; \(width)% wide, \(height)% high."
+    }
+
+    private func regionValue(_ key: KeyPath<CGRect, CGFloat>) -> Binding<Double> {
+        Binding(get: { Double((region ?? CGRect(x: 0, y: 0, width: 1, height: 1))[keyPath: key]) }, set: { value in
+            var current = region ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+            if key == \.minX { current.origin.x = CGFloat(min(0.99, max(0, value))) }
+            else if key == \.minY { current.origin.y = CGFloat(min(0.99, max(0, value))) }
+            else if key == \.width { current.size.width = CGFloat(min(1, max(0.01, value))) }
+            else { current.size.height = CGFloat(min(1, max(0.01, value))) }
+            current.size.width = min(current.width, 1 - current.minX)
+            current.size.height = min(current.height, 1 - current.minY)
+            region = current
+        })
+    }
+}
+
+private struct WorkspaceRegionCanvas: View {
+    let image: UIImage
+    @Binding var region: CGRect?
+    @State private var dragOrigin: CGPoint?
+
+    var body: some View {
+        GeometryReader { geometry in
+            let fit = fittedRect(in: geometry.size)
+            ZStack(alignment: .topLeading) {
+                Color(uiColor: .secondarySystemBackground)
+                Image(uiImage: image)
+                    .resizable()
+                    .frame(width: fit.width, height: fit.height)
+                    .offset(x: fit.minX, y: fit.minY)
+                    .accessibilityLabel("Preview page or image")
+                    .accessibilityIdentifier("annotation-preview-image")
+                if let region {
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.18))
+                        .overlay { Rectangle().strokeBorder(Color.accentColor, lineWidth: 3) }
+                        .frame(width: fit.width * region.width, height: fit.height * region.height)
+                        .offset(x: fit.minX + fit.width * region.minX,
+                                y: fit.minY + fit.height * region.minY)
+                        .accessibilityHidden(true)
+                }
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .frame(width: fit.width, height: fit.height)
+                    .offset(x: fit.minX, y: fit.minY)
+                    .gesture(DragGesture(minimumDistance: 1)
+                        .onChanged { value in
+                            let point = normalized(value.location, in: fit)
+                            if dragOrigin == nil { dragOrigin = point }
+                            if let dragOrigin { region = selection(from: dragOrigin, to: point) }
+                        }
+                        .onEnded { value in
+                            let point = normalized(value.location, in: fit)
+                            if let dragOrigin { region = selection(from: dragOrigin, to: point) }
+                            dragOrigin = nil
+                        })
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Preview region selection")
+                    .accessibilityHint("Drag across the image to select an area, or use Select whole image or page.")
+                    .accessibilityIdentifier("annotation-region-canvas")
+            }
+            .clipped()
+        }
+    }
+
+    private func fittedRect(in size: CGSize) -> CGRect {
+        guard image.size.width > 0, image.size.height > 0, size.width > 0, size.height > 0 else { return .zero }
+        let scale = min(size.width / image.size.width, size.height / image.size.height)
+        let width = image.size.width * scale, height = image.size.height * scale
+        return CGRect(x: (size.width - width) / 2, y: (size.height - height) / 2, width: width, height: height)
+    }
+    private func normalized(_ point: CGPoint, in rect: CGRect) -> CGPoint {
+        guard rect.width > 0, rect.height > 0 else { return .zero }
+        return CGPoint(x: min(1, max(0, point.x / rect.width)), y: min(1, max(0, point.y / rect.height)))
+    }
+    private func selection(from start: CGPoint, to end: CGPoint) -> CGRect? {
+        let x = min(start.x, end.x), y = min(start.y, end.y)
+        let width = min(abs(end.x - start.x), 1 - x), height = min(abs(end.y - start.y), 1 - y)
+        guard width > 0.005, height > 0.005 else { return nil }
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
 struct WorkspaceDocumentPreview: View {
     let name: String
     let mimeType: String
-    let data: Data
+    let annotationContext: ArtifactPreviewContext?
+    let onAnnotation: ((ArtifactAnnotation) throws -> Void)?
+    let refresh: (() async throws -> Data)?
+    let onRevision: ((String) async -> Void)?
+    let refreshSequence: UInt64?
+    @State private var currentData: Data
+    @State private var currentSha256: String
+    @State private var preparedText: String?
+    @State private var preparedLines: [String] = []
+    @State private var preparingText = true
+    init(name: String, mimeType: String, data: Data,
+         annotationContext: ArtifactPreviewContext? = nil,
+         onAnnotation: ((ArtifactAnnotation) throws -> Void)? = nil,
+         refresh: (() async throws -> Data)? = nil,
+         onRevision: ((String) async -> Void)? = nil,
+         refreshSequence: UInt64? = nil,
+         initialNote: String = "", initialSha256: String? = nil) {
+        self.name = name; self.mimeType = mimeType
+        self.annotationContext = annotationContext; self.onAnnotation = onAnnotation
+        self.refresh = refresh; self.onRevision = onRevision; self.refreshSequence = refreshSequence
+        _currentData = State(initialValue: data)
+        // Only workspace previews refresh. Keep attachment previews cheap to create.
+        _currentSha256 = State(initialValue: initialSha256 ?? "")
+        _note = State(initialValue: initialNote)
+    }
     @Environment(\.dismiss) private var dismiss
+    @State private var selectingLines = false
+    @State private var firstLine: Int?
+    @State private var lastLine: Int?
+    @State private var note = ""
+    @State private var annotationError: String?
+    @State private var showingPDFRegion = false
+    @State private var offeredData: Data?
+    @State private var offeredSha256: String?
+    @State private var refreshFailure: String?
+    @State private var refreshing = false
+    @State private var observedSequence: UInt64?
+    @State private var manualRefreshTask: Task<Void, Never>?
     var body: some View {
         NavigationStack {
             Group {
-                if mimeType == "application/pdf" { PDFPreview(data: data).ignoresSafeArea(edges: .bottom) }
-                else if mimeType == "text/html", let html = String(data: data, encoding: .utf8) { ConstrainedHTML(html: html) }
-                else if let text = String(data: data, encoding: .utf8) { ScrollView { Text(text).font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding() } }
+                if mimeType == "application/pdf" { PDFPreview(data: currentData, revision: currentSha256).ignoresSafeArea(edges: .bottom) }
+                else if preparingText && preparedText == nil { ProgressView("Preparing preview…") }
+                else if mimeType == "text/html", let html = preparedText { ConstrainedHTML(html: html) }
+                else if let text = preparedText {
+                    ScrollView {
+                        if selectingLines {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(preparedLines.indices, id: \.self) { index in
+                                    let number = index + 1
+                                    Button { select(number) } label: {
+                                        HStack(alignment: .top, spacing: 10) {
+                                            Text("\(number)").foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
+                                            Text(preparedLines[index].isEmpty ? " " : preparedLines[index]).frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                        .font(.system(.footnote, design: .monospaced))
+                                        .padding(.vertical, 7)
+                                        .padding(.horizontal, 10)
+                                        .frame(minHeight: 44)
+                                        .background(isSelected(number) ? Color.accentColor.opacity(0.18) : Color.clear)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("Line \(number): \(preparedLines[index])")
+                                    .accessibilityAddTraits(isSelected(number) ? .isSelected : [])
+                                    .accessibilityIdentifier("annotation-line:\(number)")
+                                }
+                            }
+                        } else {
+                            Text(text).font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding()
+                        }
+                    }
+                }
                 else { ContentUnavailableView("Preview unavailable", systemImage: "doc", description: Text("This file type does not have a preview in Wonder.")) }
             }
             .navigationTitle(name).navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                Button("Done") { dismiss() }
-                    .accessibilityIdentifier("workspace-document-close")
+                ToolbarItem(placement: .topBarLeading) {
+                    if mimeType == "application/pdf", annotationContext != nil, onAnnotation != nil {
+                        Button("Annotate region") { showingPDFRegion = true }
+                            .accessibilityIdentifier("annotation-pdf-open")
+                    } else if canAnnotate {
+                        Button(selectingLines ? "Cancel selection" : "Annotate lines") {
+                            selectingLines.toggle(); firstLine = nil; lastLine = nil; annotationError = nil
+                        }
+                        .accessibilityIdentifier("annotation-select-lines")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }.accessibilityIdentifier("workspace-document-close")
+                }
+                if refresh != nil {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Check for changes", systemImage: "arrow.clockwise") {
+                            manualRefreshTask?.cancel()
+                            manualRefreshTask = Task { await checkForRevision() }
+                        }
+                            .disabled(refreshing)
+                            .accessibilityIdentifier("workspace-document-refresh")
+                    }
+                }
             }
+            .safeAreaInset(edge: .top) {
+                if offeredData != nil {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("New file version available. Preview notes on the old version need a new selection.")
+                            .font(.footnote)
+                            .accessibilityIdentifier("workspace-document-revision-warning")
+                        Button("Show new version") { Task { await showOfferedRevision() } }
+                            .accessibilityIdentifier("workspace-document-show-revision")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                    .background(Color.orange.opacity(0.16))
+                } else if let refreshFailure {
+                    Text(refreshFailure).font(.footnote).foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                        .accessibilityIdentifier("workspace-document-refresh-error")
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if selectingLines {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(selectedLabel).font(.footnote).foregroundStyle(.secondary)
+                        TextField("What should the agent notice?", text: $note, axis: .vertical)
+                            .lineLimit(2...4)
+                            .accessibilityIdentifier("annotation-note")
+                        if note.utf8.count > 4096 { Text("Keep the note under 4,096 bytes.").font(.footnote).foregroundStyle(.red) }
+                        if let annotationError { Text(annotationError).font(.footnote).foregroundStyle(.red) }
+                        Button("Add to message") { addAnnotation() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(firstLine == nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
+                            .accessibilityIdentifier("annotation-add")
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.regularMaterial)
+                }
+            }
+            .fullScreenCover(isPresented: $showingPDFRegion) {
+                if let annotationContext, let onAnnotation {
+                    WorkspaceRegionEditor(name: name, source: currentData, context: annotationContext,
+                                          format: .pdf, onAnnotation: onAnnotation, initialNote: note)
+                }
+            }
+            .task(id: refreshSequence) {
+                guard let refreshSequence, refresh != nil else { return }
+                if let observedSequence, observedSequence != refreshSequence { await checkForRevision() }
+                observedSequence = refreshSequence
+            }
+            .task(id: currentSha256) { await prepareText() }
+            .onDisappear { manualRefreshTask?.cancel() }
+        }
+    }
+
+    private var canAnnotate: Bool {
+        !preparingText && annotationContext != nil && onAnnotation != nil && mimeType != "text/html" &&
+        (mimeType.hasPrefix("text/") || ["application/json", "application/yaml", "application/xml", "application/sql"].contains(mimeType)) &&
+        preparedText != nil && !preparedLines.isEmpty
+    }
+    private var selectedLabel: String {
+        guard let firstLine else { return "Select the first line in the preview." }
+        guard let lastLine else { return "Line \(firstLine) selected. Select an end line, or add this line." }
+        return "Lines \(min(firstLine, lastLine))–\(max(firstLine, lastLine)) selected."
+    }
+    private func isSelected(_ number: Int) -> Bool {
+        guard let firstLine else { return false }
+        return (min(firstLine, lastLine ?? firstLine)...max(firstLine, lastLine ?? firstLine)).contains(number)
+    }
+    private func select(_ number: Int) {
+        if firstLine == nil || lastLine != nil { firstLine = number; lastLine = nil }
+        else { lastLine = number }
+    }
+    private func addAnnotation() {
+        guard let annotationContext, let onAnnotation, let firstLine else { return }
+        do {
+            let annotation = try ArtifactAnnotation(projectId: annotationContext.projectID,
+                conversationId: annotationContext.conversationID, rootId: annotationContext.rootID,
+                path: annotationContext.path, source: currentData,
+                startLine: min(firstLine, lastLine ?? firstLine), endLine: max(firstLine, lastLine ?? firstLine), note: note)
+            try onAnnotation(annotation)
+        } catch { annotationError = "The preview note could not be saved. Reopen the file and try again." }
+    }
+
+    private func checkForRevision() async {
+        guard let refresh, !refreshing else { return }
+        refreshing = true; refreshFailure = nil
+        defer { refreshing = false }
+        do {
+            let data = try await refresh()
+            guard !Task.isCancelled else { return }
+            let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
+            guard !Task.isCancelled else { return }
+            if sha256 != currentSha256 {
+                offeredData = data; offeredSha256 = sha256
+                await onRevision?(sha256)
+            } else { offeredData = nil; offeredSha256 = nil }
+        } catch is CancellationError {
+        } catch {
+            guard !Task.isCancelled else { return }
+            refreshFailure = "Could not check this file. Check your Mac or workspace access and try again."
+        }
+    }
+
+    private func showOfferedRevision() async {
+        guard let data = offeredData, let sha256 = offeredSha256 else { return }
+        // Keep the existing scroll view and reading offset until the new text
+        // has been prepared. Selection stays disabled during that transition.
+        currentData = data; currentSha256 = sha256
+        preparingText = true
+        offeredData = nil; offeredSha256 = nil
+        selectingLines = false; firstLine = nil; lastLine = nil
+        annotationError = nil
+    }
+
+    private func prepareText() async {
+        guard mimeType != "application/pdf" else { return }
+        let data = currentData
+        let sha256 = currentSha256
+        let prepared = await Task.detached(priority: .userInitiated) { () -> (String?, [String]) in
+            let text = String(data: data, encoding: .utf8)
+            guard let text else { return (nil, []) }
+            var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            if text.hasSuffix("\n") { lines.removeLast() }
+            return (text, lines.count <= 4_000 ? (lines.isEmpty ? [""] : lines) : [])
+        }.value
+        guard !Task.isCancelled, currentSha256 == sha256 else { return }
+        preparedText = prepared.0; preparedLines = prepared.1; preparingText = false
+    }
+}
+
+private struct ArtifactNoteEditor: View {
+    @ObservedObject var model: ConnectionModel
+    let chat: ChatSummary
+    let attachment: ComposerAttachment
+    let expectedScope: String
+    let onReanchor: (ArtifactAnnotation) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var annotation: ArtifactAnnotation?
+    @State private var note = ""
+    @State private var failure: String?
+    @State private var loading = true
+
+    init(model: ConnectionModel, chat: ChatSummary, attachment: ComposerAttachment,
+         onReanchor: @escaping (ArtifactAnnotation) -> Void) {
+        self.model = model; self.chat = chat; self.attachment = attachment
+        self.onReanchor = onReanchor
+        expectedScope = model.assignmentScope
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if loading { ProgressView("Opening preview note…") }
+                else if let annotation {
+                    Section("Selected preview") {
+                        Text(annotation.path).lineLimit(2)
+                        Text(anchorDescription(annotation.anchor)).foregroundStyle(.secondary)
+                        if model.isAnnotationStale(attachment.id, chat: chat.id) {
+                            Text("The source changed. This selection belongs to an older version; choose a new area or lines before sending.")
+                                .foregroundStyle(.orange)
+                                .accessibilityIdentifier("annotation-edit-stale")
+                        }
+                        Button("Choose a new selection in Files") {
+                            onReanchor(annotation)
+                            dismiss()
+                        }
+                        .accessibilityIdentifier("annotation-edit-reanchor")
+                    }
+                    Section("Note for the agent") {
+                        TextEditor(text: $note)
+                            .frame(minHeight: 110)
+                            .accessibilityIdentifier("annotation-edit-note")
+                        if note.utf8.count > 4096 { Text("Keep the note under 4,096 bytes.").foregroundStyle(.red) }
+                    }
+                }
+                if let failure { Text(failure).foregroundStyle(.red).accessibilityIdentifier("annotation-edit-error") }
+            }
+            .navigationTitle("Preview note")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { save() }
+                        .disabled(annotation == nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
+                        .accessibilityIdentifier("annotation-edit-save")
+                }
+            }
+            .task(id: attachment.id) { await load() }
+        }
+    }
+
+    private func load() async {
+        loading = true
+        defer { loading = false }
+        do {
+            let data: Data
+            if let local = attachment.data { data = local }
+            else if let remote = attachment.remoteFile { data = try await model.download(remote, chat: chat) }
+            else { throw FileFailure.notUploaded }
+            guard !Task.isCancelled, !model.accessEnded,
+                  expectedScope == model.assignmentScope else { throw FileFailure.integrity }
+            let value = try ArtifactAnnotation.read(data)
+            guard value.conversationId == chat.id,
+                  value.projectId == model.projects.details[chat.id]?.projectId else { throw FileFailure.integrity }
+            annotation = value
+            note = value.note
+        } catch { failure = "This preview note could not be opened. Reopen Files to create a new one." }
+    }
+    private func save() {
+        guard let annotation else { return }
+        do {
+            try model.stageAnnotation(annotation.replacingNote(note), chat: chat,
+                                      expectedScope: expectedScope, replacing: attachment.id,
+                                      preserveStaleOnReplace: true)
+            dismiss()
+        } catch { failure = "This preview note could not be saved. Reopen Files to create a new one." }
+    }
+    private func anchorDescription(_ anchor: ArtifactAnnotation.Anchor) -> String {
+        switch anchor {
+        case .textLines(let start, let end): "Lines \(start)–\(end)"
+        case .imageRegion: "Selected image area"
+        case .pdfRegion(let page, _, _, _, _): "Selected area on page \(page)"
         }
     }
 }
@@ -3116,7 +4246,7 @@ struct WorkspaceDiffPreview: View {
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
-            ScrollView { Text(diff.isEmpty ? "No textual diff is available for this change." : diff).font(.system(.footnote, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding() }
+            ScrollView { Text(diff.isEmpty ? "No textual diff is available for this change." : diff).font(.system(.footnote, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding().accessibilityIdentifier("workspace-diff-text") }
                 .navigationTitle(path).navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
@@ -3151,7 +4281,7 @@ struct PreviewDeck: View {
                 else if let selected, let bytes, !PhotoViewerRouting.isImage(selected) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
-                            if selected.mimeType == "application/pdf" { PDFPreview(data: bytes).frame(minHeight: 550) }
+                            if selected.mimeType == "application/pdf" { PDFPreview(data: bytes, revision: selected.sha256).frame(minHeight: 550) }
                             else if selected.mimeType == "text/html", let html = String(data: bytes, encoding: .utf8) { ConstrainedHTML(html: html).frame(minHeight: 550) }
                             else if selected.mimeType?.hasPrefix("text/") == true, let text = String(data: bytes, encoding: .utf8) { Text(text).textSelection(.enabled) }
                             else { ContentUnavailableView("Preview unavailable", systemImage: "doc", description: Text("This file type does not have a preview in Wonder.")) }
@@ -3220,8 +4350,49 @@ struct PreviewDeck: View {
 }
 struct PDFPreview: UIViewRepresentable {
     let data: Data
-    func makeUIView(context: Context) -> PDFView { let view = PDFView(); view.autoScales = true; view.document = PDFDocument(data: data); return view }
-    func updateUIView(_ view: PDFView, context: Context) {}
+    var revision: String? = nil
+    final class Coordinator {
+        var revision: String?
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.document = PDFDocument(data: data)
+        context.coordinator.revision = revision ?? ConversationFile.digest(data)
+        return view
+    }
+    func updateUIView(_ view: PDFView, context: Context) {
+        let nextRevision = revision ?? ConversationFile.digest(data)
+        guard context.coordinator.revision != nextRevision,
+              let document = PDFDocument(data: data) else { return }
+        let destination = view.currentDestination
+        let oldPage = destination?.page ?? view.currentPage
+        let pageIndex = oldPage.flatMap { view.document?.index(for: $0) } ?? 0
+        let scale = view.scaleFactor
+        view.document = document
+        if scale.isFinite, scale > 0 {
+            view.scaleFactor = min(view.maxScaleFactor, max(view.minScaleFactor, scale))
+        }
+        if document.pageCount > 0,
+           let page = document.page(at: min(pageIndex, document.pageCount - 1)) {
+            if let destination, let oldPage {
+                let oldBounds = oldPage.bounds(for: view.displayBox)
+                let newBounds = page.bounds(for: view.displayBox)
+                if oldBounds.width > 0, oldBounds.height > 0 {
+                    let x = (destination.point.x - oldBounds.minX) / oldBounds.width
+                    let y = (destination.point.y - oldBounds.minY) / oldBounds.height
+                    // PDFKit treats a destination's Y as the top edge of the
+                    // viewport; currentDestination reports its bottom edge.
+                    let viewportHeight = view.convert(view.bounds, to: page).height
+                    view.go(to: PDFDestination(page: page, at: CGPoint(
+                        x: newBounds.minX + x * newBounds.width,
+                        y: newBounds.minY + y * newBounds.height + viewportHeight)))
+                } else { view.go(to: page) }
+            } else { view.go(to: page) }
+        }
+        context.coordinator.revision = nextRevision
+    }
 }
 struct ConstrainedHTML: UIViewRepresentable {
     let html: String
@@ -3512,7 +4683,7 @@ struct AsyncQuestionRow: View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             VStack(alignment: .leading, spacing: 8) {
                 if question.canAnswer(now: UInt64(context.date.timeIntervalSince1970 * 1000)) {
-                    ScrollView { VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 8) {
                     QuestionNavigation(index: $questionIndex, count: question.questions.count)
                     ForEach(Array(question.questions.enumerated()).filter { $0.offset == questionIndex }, id: \.offset) { index, prompt in
                         Text(prompt.title).font(.subheadline.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
@@ -3521,7 +4692,7 @@ struct AsyncQuestionRow: View {
                         }
                         TextField("Type an answer", text: Binding(get: { answers[String(index)] ?? "" }, set: { answers[String(index)] = $0; save() }), axis: .vertical).textFieldStyle(.roundedBorder).accessibilityLabel(prompt.title)
                     }
-                    }.frame(maxWidth: .infinity, alignment: .leading) }.frame(minHeight: 44, maxHeight: 180)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
                     if let error = answerValidation, error != .answerRequired {
                         Text(error.localizedDescription).font(.footnote).foregroundStyle(.secondary)
                     }
@@ -3572,12 +4743,12 @@ struct AsyncQuestionRow: View {
     private func save() { model.saveAnswerDraft(answers, id: question.id) }
 }
 
-/// Questions stay reachable without replacing the message draft. The bounded
-/// viewport scrolls for long forms and Dynamic Type; collapsing never skips.
+/// A stable notice keeps questions reachable without replacing the message
+/// draft. The sheet owns scrolling, including long forms at large text sizes.
 struct QuestionDock: View {
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
-    @State private var expanded = true
+    @State private var showingSheet = false
     @State private var requestIndex = 0
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -3587,31 +4758,42 @@ struct QuestionDock: View {
             }
             let count = requests.count + async.count
             if count > 0 {
-                VStack(alignment: .leading, spacing: 0) {
-                    Button { expanded.toggle() } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "questionmark.bubble").font(.system(size: 20)).foregroundStyle(.secondary)
-                            Text(count == 1 ? "Question" : "Questions (\(count))").font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Image(systemName: expanded ? "chevron.down" : "chevron.up").font(.system(size: 14, weight: .semibold))
-                        }.foregroundStyle(.primary).frame(minHeight: 44).contentShape(Rectangle())
-                    }.buttonStyle(.plain).accessibilityLabel(expanded ? "Collapse questions" : "Expand questions")
-                    if expanded {
-                        Divider()
-                        if count > 1 { QuestionNavigation(index: $requestIndex, count: count) }
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(Array(requests.enumerated()).filter { $0.offset == min(requestIndex, count - 1) }, id: \.element.id) { _, request in
-                                AttentionRow(model: model, request: request)
+                Button { showingSheet = true } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "questionmark.bubble").foregroundStyle(.secondary)
+                        Text(count == 1 ? "Question to review" : "\(count) questions to review")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.up").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(.primary).padding(.horizontal, 12).frame(minHeight: 44)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("question-dock-open")
+                .sheet(isPresented: $showingSheet) {
+                    NavigationStack {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 12) {
+                                if count > 1 { QuestionNavigation(index: $requestIndex, count: count) }
+                                ForEach(Array(requests.enumerated()).filter { $0.offset == min(requestIndex, count - 1) }, id: \.element.id) { _, request in
+                                    AttentionRow(model: model, request: request)
+                                }
+                                ForEach(Array(async.enumerated()).filter { $0.offset + requests.count == min(requestIndex, count - 1) }, id: \.element.id) { _, question in
+                                    AsyncQuestionRow(model: model, chat: chat, question: question)
+                                }
                             }
-                            ForEach(Array(async.enumerated()).filter { $0.offset + requests.count == min(requestIndex, count - 1) }, id: \.element.id) { _, question in
-                                AsyncQuestionRow(model: model, chat: chat, question: question)
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                        }
+                        .navigationTitle(count == 1 ? "Question" : "Questions")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar { Button("Done") { showingSheet = false } }
                         .onChange(of: count) { _, value in requestIndex = min(requestIndex, max(0, value - 1)) }
                     }
-                }.padding(.horizontal, 12)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(uiColor: .separator).opacity(0.5), lineWidth: 0.5))
+                    .presentationDetents([.large])
+                }
             }
         }
     }
@@ -4303,6 +5485,7 @@ private struct PhotoZoomView: UIViewRepresentable {
     let imageID: String
     @Binding var zoomScale: CGFloat
     let reduceMotion: Bool
+    var preservePosition = false
 
     func makeCoordinator() -> Coordinator {
         Coordinator(zoomScale: $zoomScale, reduceMotion: reduceMotion)
@@ -4335,7 +5518,7 @@ private struct PhotoZoomView: UIViewRepresentable {
         // Do not touch zoomScale or contentOffset for an ordinary SwiftUI update.
         // The source ID is the only event that starts a new viewing session.
         if view.imageID != imageID {
-            context.coordinator.install(image: image, id: imageID, in: view)
+            context.coordinator.install(image: image, id: imageID, in: view, preservePosition: preservePosition)
         }
     }
 
@@ -4349,16 +5532,28 @@ private struct PhotoZoomView: UIViewRepresentable {
             self.reduceMotion = reduceMotion
         }
 
-        func install(image: UIImage, id: String, in scrollView: PhotoZoomScrollView) {
+        func install(image: UIImage, id: String, in scrollView: PhotoZoomScrollView,
+                     preservePosition: Bool = false) {
             isInstallingImage = true
             defer { isInstallingImage = false }
+            let oldSize = scrollView.contentSize
+            let oldCenter = CGPoint(x: (scrollView.contentOffset.x + scrollView.bounds.midX) / max(oldSize.width, 1),
+                                    y: (scrollView.contentOffset.y + scrollView.bounds.midY) / max(oldSize.height, 1))
+            let oldZoom = scrollView.zoomScale
             scrollView.imageID = id
             scrollView.photoImageView?.image = image
             scrollView.minimumZoomScale = 1
             scrollView.maximumZoomScale = 4
-            scrollView.setZoomScale(1, animated: false)
             scrollView.photoImageView?.frame = scrollView.bounds
             scrollView.contentSize = scrollView.bounds.size
+            scrollView.setZoomScale(preservePosition ? min(4, max(1, oldZoom)) : 1, animated: false)
+            if preservePosition {
+                let width = max(0, scrollView.contentSize.width - scrollView.bounds.width)
+                let height = max(0, scrollView.contentSize.height - scrollView.bounds.height)
+                scrollView.contentOffset = CGPoint(
+                    x: min(width, max(0, oldCenter.x * scrollView.contentSize.width - scrollView.bounds.midX)),
+                    y: min(height, max(0, oldCenter.y * scrollView.contentSize.height - scrollView.bounds.midY)))
+            }
         }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {

@@ -22,6 +22,7 @@ mod sync;
 use sync::stream_events;
 
 mod account_usage;
+mod artifact_annotations;
 pub mod claude;
 mod computer_runtime;
 pub mod computer_sessions;
@@ -41,6 +42,7 @@ mod permission_modes;
 mod phone_approval_tests;
 mod pm_tools;
 mod project_assignments;
+mod project_subagents;
 pub mod projects;
 pub mod push;
 mod questions;
@@ -901,6 +903,14 @@ pub fn router(state: AppState) -> Router {
             get(projects::conversation).patch(projects::update_conversation),
         )
         .route(
+            "/api/v1/project-conversations/{conversation_id}/subagents",
+            get(project_subagents::list),
+        )
+        .route(
+            "/api/v1/project-conversations/{conversation_id}/subagents/{thread_id}/transcript",
+            get(project_subagents::transcript),
+        )
+        .route(
             "/api/v1/conversations/{conversation_id}/desktop-continuation",
             get(projects::continuation),
         )
@@ -935,6 +945,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/conversations/{conversation_id}/workspace/file",
             get(filesystem::workspace_file),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/workspace/media",
+            get(filesystem::workspace_media),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/workspace/git/status",
@@ -4050,9 +4064,11 @@ struct CreateConversationFileRequest {
 #[serde(rename_all = "camelCase")]
 struct AutomationSummary {
     id: String,
+    revision: i64,
     name: String,
     kind: String,
-    bot_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bot_id: Option<String>,
     conversation_id: Option<String>,
     prompt: String,
     rrule: String,
@@ -4090,7 +4106,7 @@ struct AutomationRunSummary {
 struct CreateAutomationRequest {
     name: String,
     kind: String,
-    bot_id: String,
+    bot_id: Option<String>,
     conversation_id: Option<String>,
     prompt: String,
     rrule: String,
@@ -4107,6 +4123,7 @@ struct CreateAutomationRequest {
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateAutomationRequest {
+    expected_revision: Option<i64>,
     name: Option<String>,
     prompt: Option<String>,
     kind: Option<String>,
@@ -4158,12 +4175,72 @@ fn automation_request_id(prefix: &str, client_id: Option<&str>) -> Result<String
 
 async fn automation_target_available(
     state: &AppState,
-    bot_id: &str,
-    scope_type: &str,
-    scope_id: &str,
+    target: &wonder_store::AutomationTarget,
     kind: &str,
     conversation_id: Option<&str>,
 ) -> Result<(), (StatusCode, &'static str)> {
+    if let wonder_store::AutomationTarget::ProjectThread { scope_id } = target {
+        if kind != "continuation" || conversation_id != Some(scope_id) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Choose a Project thread to continue.",
+            ));
+        }
+        let conversation = state
+            .store
+            .project_conversation(scope_id)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Project thread could not be loaded.",
+                )
+            })?
+            .ok_or((StatusCode::BAD_REQUEST, "The Project thread was not found."))?;
+        let project = state
+            .store
+            .project(&conversation.project_id)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Project could not be loaded.",
+                )
+            })?
+            .ok_or((StatusCode::BAD_REQUEST, "The Project was not found."))?;
+        if !project.is_included || project.root_for(&conversation.cwd).is_none() {
+            return Err((
+                StatusCode::CONFLICT,
+                "Restore this Project and its folder before enabling automations.",
+            ));
+        }
+        let binding = state.store.runtime_binding(scope_id).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Project thread binding could not be loaded.",
+            )
+        })?;
+        if !binding.as_ref().is_some_and(|binding| {
+            binding.execution_scope == wonder_store::EXECUTION_SCOPE_PROJECTS
+                && binding.family == conversation.family
+                && conversation.native_session_id.as_deref() == Some(binding.thread_id.as_str())
+        }) {
+            return Err((
+                StatusCode::CONFLICT,
+                "Open this Project thread on your Mac before scheduling it.",
+            ));
+        }
+        return Ok(());
+    }
+    let (bot_id, scope_id, is_group) = match target {
+        wonder_store::AutomationTarget::Bot { bot_id, scope_id } => {
+            (bot_id.as_str(), scope_id.as_str(), false)
+        }
+        wonder_store::AutomationTarget::GroupChat { bot_id, scope_id } => {
+            (bot_id.as_str(), scope_id.as_str(), true)
+        }
+        wonder_store::AutomationTarget::ProjectThread { .. } => unreachable!(),
+    };
     let bot = state
         .store
         .bot(bot_id)
@@ -4181,13 +4258,13 @@ async fn automation_target_available(
             "Restore this Bot before running or enabling its automations.",
         ));
     }
-    if scope_type == "bot" && bot.model_selection_revision.is_some() {
+    if !is_group && bot.model_selection_revision.is_some() {
         return Err((
             StatusCode::CONFLICT,
             "Send this Bot its first message before enabling automations.",
         ));
     }
-    if scope_type == "group_chat" {
+    if is_group {
         let group = state
             .store
             .channel(scope_id)
@@ -4214,7 +4291,7 @@ async fn automation_target_available(
                 "Group automations must continue in their Group Chat using its lead Bot.",
             ));
         }
-    } else if scope_type != "bot" || scope_id != bot_id {
+    } else if scope_id != bot_id {
         return Err((StatusCode::BAD_REQUEST, "Choose a valid automation scope."));
     } else if kind == "continuation" {
         let Some(id) = conversation_id.filter(|id| !id.trim().is_empty()) else {
@@ -4246,11 +4323,15 @@ async fn automation_target_available(
 }
 
 fn automation_summary(automation: wonder_store::StoredAutomation) -> AutomationSummary {
+    let scope_type = automation.target.scope_type().to_owned();
+    let scope_id = automation.target.scope_id().to_owned();
+    let bot_id = automation.target.bot_id().map(str::to_owned);
     AutomationSummary {
         id: automation.id,
+        revision: automation.revision,
         name: automation.name,
         kind: automation.kind,
-        bot_id: automation.bot_id,
+        bot_id,
         conversation_id: automation.conversation_id,
         prompt: automation.prompt,
         rrule: automation.rrule,
@@ -4259,8 +4340,8 @@ fn automation_summary(automation: wonder_store::StoredAutomation) -> AutomationS
         notification_policy: automation.notification_policy,
         model_id: automation.model_id,
         reasoning_effort: automation.reasoning_effort,
-        scope_type: automation.scope_type,
-        scope_id: automation.scope_id,
+        scope_type,
+        scope_id,
         next_run_at: automation.next_run_at,
         last_run_at: automation.last_run_at,
         last_attempt_at: automation.last_attempt_at,
@@ -4339,22 +4420,39 @@ async fn create_automation(
     {
         return (StatusCode::BAD_REQUEST, "invalid automation").into_response();
     }
-    let now_utc = Utc::now();
-    let preview = match next_automation_run(rrule, timezone, now_utc) {
-        Ok(next) => next,
-        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
-    };
-    let next_run_at = if status == "active" { preview } else { None };
     let scope_type = request.scope_type.as_deref().unwrap_or("bot").trim();
+    let bot_id = request
+        .bot_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
     let scope_id = request
         .scope_id
         .as_deref()
-        .unwrap_or(&request.bot_id)
-        .trim();
-    if !matches!(scope_type, "bot" | "group_chat") || scope_id.is_empty() {
-        return (StatusCode::BAD_REQUEST, "invalid automation scope").into_response();
-    }
-    if scope_type == "group_chat"
+        .map(str::trim)
+        .or(bot_id)
+        .unwrap_or("");
+    let target = match (scope_type, bot_id, scope_id) {
+        ("bot", Some(bot_id), scope_id) if scope_id == bot_id => {
+            wonder_store::AutomationTarget::Bot {
+                scope_id: scope_id.to_owned(),
+                bot_id: bot_id.to_owned(),
+            }
+        }
+        ("group_chat", Some(bot_id), scope_id) if !scope_id.is_empty() => {
+            wonder_store::AutomationTarget::GroupChat {
+                scope_id: scope_id.to_owned(),
+                bot_id: bot_id.to_owned(),
+            }
+        }
+        ("project_thread", None, scope_id) if !scope_id.is_empty() => {
+            wonder_store::AutomationTarget::ProjectThread {
+                scope_id: scope_id.to_owned(),
+            }
+        }
+        _ => return (StatusCode::BAD_REQUEST, "invalid automation target").into_response(),
+    };
+    if matches!(&target, wonder_store::AutomationTarget::GroupChat { .. })
         && (request.model_id.is_some() || request.reasoning_effort.is_some())
     {
         return (
@@ -4363,19 +4461,72 @@ async fn create_automation(
         )
             .into_response();
     }
-    if let Err(error) = automation_target_available(
-        &state,
-        &request.bot_id,
-        scope_type,
-        scope_id,
-        kind,
-        request.conversation_id.as_deref(),
-    )
-    .await
+    if matches!(
+        &target,
+        wonder_store::AutomationTarget::ProjectThread { .. }
+    ) && (request.model_id.is_some() || request.reasoning_effort.is_some())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Project automations use the thread's model settings.",
+        )
+            .into_response();
+    }
+    let id = match automation_request_id("automation", request.client_request_id.as_deref()) {
+        Ok(id) => id,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let conversation_id = automation_conversation_id(kind, &id, request.conversation_id.as_deref());
+    // A retry may arrive after the first response was lost. The request ID
+    // identifies one immutable create intent, even if the editor changed.
+    let same_intent = |existing: &wonder_store::StoredAutomation| {
+        existing.name == name
+            && existing.kind == kind
+            && existing.target == target
+            && existing.conversation_id == conversation_id
+            && existing.prompt == prompt
+            && existing.rrule == rrule
+            && existing.timezone == timezone
+            && existing.status == status
+            && existing.notification_policy == notification_policy
+            && existing.model_id.as_deref() == request.model_id.as_deref()
+            && existing.reasoning_effort.as_deref() == request.reasoning_effort.as_deref()
+    };
+    let changed_retry = || {
+        (
+            StatusCode::CONFLICT,
+            "This request already created an automation with different details. Review the existing task before saving another.",
+        )
+            .into_response()
+    };
+    match state.store.automation_by_id(&id).await {
+        Ok(Some(existing)) => {
+            return if same_intent(&existing) {
+                Json(automation_summary(existing)).into_response()
+            } else {
+                changed_retry()
+            };
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Automation could not be loaded.",
+            )
+                .into_response()
+        }
+        Ok(None) => {}
+    }
+    // Availability and model catalogs can change after the first insert. An
+    // exact retry still returns that accepted create without starting work.
+    if let Err(error) =
+        automation_target_available(&state, &target, kind, request.conversation_id.as_deref()).await
     {
         return error.into_response();
     }
-    {
+    if !matches!(
+        &target,
+        wonder_store::AutomationTarget::ProjectThread { .. }
+    ) {
         let catalog = state.runtime_catalog.read().await;
         if let Err(error) = validate_bot_runtime_settings(
             &catalog,
@@ -4386,22 +4537,12 @@ async fn create_automation(
             return (StatusCode::BAD_REQUEST, error).into_response();
         }
     }
-    let id = match automation_request_id("automation", request.client_request_id.as_deref()) {
-        Ok(id) => id,
+    let now_utc = Utc::now();
+    let preview = match next_automation_run(rrule, timezone, now_utc) {
+        Ok(next) => next,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    match state.store.automation_by_id(&id).await {
-        Ok(Some(existing)) => return Json(automation_summary(existing)).into_response(),
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Automation could not be loaded.",
-            )
-                .into_response()
-        }
-        Ok(None) => {}
-    }
-    let conversation_id = automation_conversation_id(kind, &id, request.conversation_id.as_deref());
+    let next_run_at = if status == "active" { preview } else { None };
     let now = now_utc.to_rfc3339_opts(SecondsFormat::Millis, true);
     match state
         .store
@@ -4409,9 +4550,9 @@ async fn create_automation(
             &id,
             name,
             kind,
-            scope_type,
-            scope_id,
-            &request.bot_id,
+            target.scope_type(),
+            target.scope_id(),
+            target.bot_id(),
             conversation_id.as_deref(),
             prompt,
             rrule,
@@ -4425,9 +4566,10 @@ async fn create_automation(
         )
         .await
     {
-        Ok(automation) => {
+        Ok(automation) if same_intent(&automation) => {
             (StatusCode::CREATED, Json(automation_summary(automation))).into_response()
         }
+        Ok(_) => changed_retry(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "automation could not be saved",
@@ -4452,19 +4594,42 @@ async fn update_automation(
                 .into_response()
         }
     };
-    if value.scope_type == "group_chat"
-        && (request
-            .model_id
+    if request
+        .expected_revision
+        .is_some_and(|revision| revision != value.revision)
+    {
+        return (
+            StatusCode::CONFLICT,
+            "This automation changed. Refresh it before saving.",
+        )
+            .into_response();
+    }
+    if matches!(
+        &value.target,
+        wonder_store::AutomationTarget::GroupChat { .. }
+    ) && (request
+        .model_id
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty())
+        || request
+            .reasoning_effort
             .as_deref()
-            .is_some_and(|v| !v.trim().is_empty())
-            || request
-                .reasoning_effort
-                .as_deref()
-                .is_some_and(|v| !v.trim().is_empty()))
+            .is_some_and(|v| !v.trim().is_empty()))
     {
         return (
             StatusCode::BAD_REQUEST,
             "Group automations use each Bot's own model settings. Edit those in Bot settings.",
+        )
+            .into_response();
+    }
+    if matches!(
+        &value.target,
+        wonder_store::AutomationTarget::ProjectThread { .. }
+    ) && (request.model_id.is_some() || request.reasoning_effort.is_some())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Project automations use the thread's model settings.",
         )
             .into_response();
     }
@@ -4517,9 +4682,7 @@ async fn update_automation(
     }
     if let Err(error) = automation_target_available(
         &state,
-        &value.bot_id,
-        &value.scope_type,
-        &value.scope_id,
+        &value.target,
         &value.kind,
         value.conversation_id.as_deref(),
     )
@@ -4530,7 +4693,10 @@ async fn update_automation(
             return error.into_response();
         }
     }
-    {
+    if !matches!(
+        &value.target,
+        wonder_store::AutomationTarget::ProjectThread { .. }
+    ) {
         let catalog = state.runtime_catalog.read().await;
         if let Err(error) = validate_bot_runtime_settings(
             &catalog,
@@ -4553,10 +4719,17 @@ async fn update_automation(
     }
     value.updated_at = now.to_rfc3339_opts(SecondsFormat::Millis, true);
     match state.store.update_automation(&value).await {
-        Ok(true) => Json(automation_summary(value)).into_response(),
+        Ok(true) => match state.store.automation_by_id(&automation_id).await {
+            Ok(Some(updated)) => Json(automation_summary(updated)).into_response(),
+            _ => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The automation was saved but could not be reloaded. Refresh to check it.",
+            )
+                .into_response(),
+        },
         Ok(false) => (
             StatusCode::CONFLICT,
-            "The automation changed or its Bot was archived. Refresh before saving.",
+            "The automation changed or its target is unavailable. Refresh before saving.",
         )
             .into_response(),
         Err(_) => (
@@ -4631,15 +4804,24 @@ async fn run_automation_now(
     }
     if let Err(error) = automation_target_available(
         &state,
-        &automation.bot_id,
-        &automation.scope_type,
-        &automation.scope_id,
+        &automation.target,
         &automation.kind,
         automation.conversation_id.as_deref(),
     )
     .await
     {
         return error.into_response();
+    }
+    if matches!(
+        &automation.target,
+        wonder_store::AutomationTarget::ProjectThread { .. }
+    ) && !projects::ready(&state).await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The selected agent is offline. Connect its Mac and try again.",
+        )
+            .into_response();
     }
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     match state.store.claim_scheduled_automation(&run_id,&automation,&now,&now,None,false).await {
@@ -8129,9 +8311,20 @@ async fn resolve_conversation_file(
 async fn attachment_path(workspace: &str, file_id: &str, create_root: bool) -> Option<PathBuf> {
     let uuid = uuid::Uuid::parse_str(file_id).ok()?;
     let root = tokio::fs::canonicalize(workspace).await.ok()?;
-    let attachments = root.join(".wonder").join("attachments");
-    if create_root {
-        tokio::fs::create_dir_all(&attachments).await.ok()?;
+    let mut attachments = root.clone();
+    for component in [".wonder", "attachments"] {
+        attachments.push(component);
+        if create_root {
+            match tokio::fs::create_dir(&attachments).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return None,
+            }
+        }
+        let metadata = tokio::fs::symlink_metadata(&attachments).await.ok()?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return None;
+        }
     }
     let canonical_attachments = tokio::fs::canonicalize(&attachments).await.ok()?;
     if !canonical_attachments.starts_with(&root) || !canonical_attachments.is_dir() {
@@ -9133,6 +9326,19 @@ async fn send_message_inner(
         }
     };
     let body_sha256 = hex::encode(Sha256::digest(request.body.as_bytes()));
+    if is_project && !request.attachment_ids.is_empty() {
+        if let Err((status, detail)) = artifact_annotations::validate_first_acceptance(
+            &state,
+            &conversation_id,
+            &request.device_id,
+            &request.client_message_id,
+            &request.attachment_ids,
+        )
+        .await
+        {
+            return (status, detail).into_response();
+        }
+    }
     let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let insert = match state
         .store
@@ -9154,6 +9360,13 @@ async fn send_message_inner(
             return (
                 StatusCode::PRECONDITION_FAILED,
                 "Model settings changed. Your message was not sent. Reload and send again.",
+            )
+                .into_response();
+        }
+        Err(sqlx::Error::Protocol(message)) if message == "annotation_already_sent" => {
+            return (
+                StatusCode::CONFLICT,
+                "This annotation was already sent. Add a new annotation to send another note.",
             )
                 .into_response();
         }
@@ -9763,9 +9976,6 @@ pub fn spawn_automation_scheduler(state: AppState) -> tokio::task::JoinHandle<()
         let mut recovered = false;
         loop {
             interval.tick().await;
-            if !state.ingestion.readiness(&state.store).await.ready {
-                continue;
-            }
             let Some(_admission) = state.update_admission.claim_guard().await else {
                 continue;
             };
@@ -9783,8 +9993,20 @@ pub fn spawn_automation_scheduler(state: AppState) -> tokio::task::JoinHandle<()
                 let Ok(runs) = state.store.recoverable_automation_runs().await else {
                     continue;
                 };
-                recovered = true;
+                let mut deferred = false;
                 for (run, automation) in runs {
+                    let ready = if matches!(
+                        &automation.target,
+                        wonder_store::AutomationTarget::ProjectThread { .. }
+                    ) {
+                        projects::ready(&state).await
+                    } else {
+                        state.ingestion.readiness(&state.store).await.ready
+                    };
+                    if !ready {
+                        deferred = true;
+                        continue;
+                    }
                     tokio::spawn(run_automation(
                         state.clone(),
                         automation,
@@ -9792,6 +10014,7 @@ pub fn spawn_automation_scheduler(state: AppState) -> tokio::task::JoinHandle<()
                         run.id,
                     ));
                 }
+                recovered = !deferred;
             }
             let Ok(due) = state.store.list_due_automations(&now_string).await else {
                 continue;
@@ -9800,11 +10023,20 @@ pub fn spawn_automation_scheduler(state: AppState) -> tokio::task::JoinHandle<()
                 let Some(scheduled_for) = automation.next_run_at.clone() else {
                     continue;
                 };
+                let ready = if matches!(
+                    &automation.target,
+                    wonder_store::AutomationTarget::ProjectThread { .. }
+                ) {
+                    projects::ready(&state).await
+                } else {
+                    state.ingestion.readiness(&state.store).await.ready
+                };
+                if !ready {
+                    continue;
+                }
                 if automation_target_available(
                     &state,
-                    &automation.bot_id,
-                    &automation.scope_type,
-                    &automation.scope_id,
+                    &automation.target,
                     &automation.kind,
                     automation.conversation_id.as_deref(),
                 )
@@ -9855,9 +10087,7 @@ async fn run_automation(
 ) {
     if let Err((_, error)) = automation_target_available(
         &state,
-        &automation.bot_id,
-        &automation.scope_type,
-        &automation.scope_id,
+        &automation.target,
         &automation.kind,
         automation.conversation_id.as_deref(),
     )
@@ -9875,16 +10105,23 @@ async fn run_automation(
             .await;
         return;
     }
-    if automation.scope_type == "group_chat" {
+    if matches!(
+        &automation.target,
+        wonder_store::AutomationTarget::GroupChat { .. }
+    ) {
         run_group_chat_automation(state, automation, scheduled_for, run_id).await;
         return;
     }
-    let conversation_id = automation_conversation_id(
-        &automation.kind,
-        &automation.id,
-        automation.conversation_id.as_deref(),
-    )
-    .unwrap_or_else(|| automation.bot_id.clone());
+    let conversation_id = match &automation.target {
+        wonder_store::AutomationTarget::ProjectThread { scope_id } => scope_id.clone(),
+        wonder_store::AutomationTarget::Bot { bot_id, .. } => automation_conversation_id(
+            &automation.kind,
+            &automation.id,
+            automation.conversation_id.as_deref(),
+        )
+        .unwrap_or_else(|| bot_id.clone()),
+        wonder_store::AutomationTarget::GroupChat { .. } => unreachable!(),
+    };
     let Some(device_id) = state
         .store
         .automation_message_device_id()
@@ -9920,7 +10157,15 @@ async fn run_automation(
         Ok(message) => message,
         Err(_) => return, // The durable accepted run is recoverable on restart.
     };
-    dispatch_to_codex_inner(state, message, Some(automation.bot_id), Some(run_id)).await;
+    match automation.target {
+        wonder_store::AutomationTarget::ProjectThread { .. } => {
+            projects::dispatch(state, message).await
+        }
+        wonder_store::AutomationTarget::Bot { bot_id, .. } => {
+            dispatch_to_codex_inner(state, message, Some(bot_id), Some(run_id)).await
+        }
+        wonder_store::AutomationTarget::GroupChat { .. } => unreachable!(),
+    }
 }
 
 async fn run_group_chat_automation(
@@ -9929,13 +10174,10 @@ async fn run_group_chat_automation(
     scheduled_for: String,
     run_id: String,
 ) {
-    let Some(channel) = state
-        .store
-        .channel(&automation.scope_id)
-        .await
-        .ok()
-        .flatten()
-    else {
+    let wonder_store::AutomationTarget::GroupChat { scope_id, .. } = &automation.target else {
+        return;
+    };
+    let Some(channel) = state.store.channel(scope_id).await.ok().flatten() else {
         let _ = state
             .store
             .finish_automation_run(
@@ -10030,9 +10272,15 @@ async fn dispatch_to_codex(state: AppState, message: wonder_store::StoredMessage
     };
     if let Some(run) = run {
         match state.store.automation_snapshot_for_run(&run.id).await {
-            Ok(Some(automation)) => {
-                dispatch_to_codex_inner(state, message, Some(automation.bot_id), Some(run.id)).await
-            }
+            Ok(Some(automation)) => match automation.target {
+                wonder_store::AutomationTarget::ProjectThread { .. } => {
+                    projects::dispatch(state, message).await
+                }
+                wonder_store::AutomationTarget::Bot { bot_id, .. }
+                | wonder_store::AutomationTarget::GroupChat { bot_id, .. } => {
+                    dispatch_to_codex_inner(state, message, Some(bot_id), Some(run.id)).await
+                }
+            },
             Ok(None) => dispatch_to_codex_inner(state, message, None, Some(run.id)).await,
             Err(_) => {}
         }
@@ -10759,6 +11007,17 @@ async fn rediscover_runtime(
             .request(method, serde_json::json!({}))
             .await
             .map_err(|e| e.to_string())?;
+        if method == "account/rateLimits/read"
+            && !verify_bot_profiles
+            && response
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == -32601)
+        {
+            // Project turns do not require account usage support. Let the
+            // settings endpoint report that optional capability accurately.
+            continue;
+        }
         if response.error.is_some() || response.result.is_none() {
             return Err(format!("{method} is unavailable"));
         }
@@ -16207,6 +16466,24 @@ for line in sys.stdin:
         )
         .await
         .is_none());
+        #[cfg(unix)]
+        {
+            let redirected = tempfile::tempdir().expect("redirected workspace");
+            let outside = tempfile::tempdir().expect("outside workspace");
+            std::os::unix::fs::symlink(outside.path(), redirected.path().join(".wonder"))
+                .expect("redirected attachment parent");
+            assert!(attachment_path(
+                redirected.path().to_str().expect("redirected path"),
+                file_id,
+                true,
+            )
+            .await
+            .is_none());
+            assert!(
+                !outside.path().join("attachments").exists(),
+                "an attachment lookup must not create a directory through a symlink"
+            );
+        }
 
         let content = b"hello";
         let sha256 = hex::encode(Sha256::digest(content));

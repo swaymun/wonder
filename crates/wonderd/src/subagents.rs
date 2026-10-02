@@ -28,14 +28,14 @@ pub(crate) struct ChildRuntime {
 }
 
 #[derive(Clone, Debug)]
-struct VerifiedThread {
-    child_thread_id: String,
-    parent_thread_id: String,
-    agent_nickname: Option<String>,
-    agent_role: Option<String>,
+pub(crate) struct VerifiedThread {
+    pub(crate) child_thread_id: String,
+    pub(crate) parent_thread_id: String,
+    pub(crate) agent_nickname: Option<String>,
+    pub(crate) agent_role: Option<String>,
     agent_path: Option<String>,
     source: Value,
-    status: String,
+    pub(crate) status: String,
     can_accept_direct_input: Option<bool>,
 }
 
@@ -95,7 +95,10 @@ fn string_field(value: &Value, camel: &str, snake: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn verified_thread(parent_thread_id: &str, thread: &Value) -> Result<VerifiedThread, String> {
+pub(crate) fn verified_thread(
+    parent_thread_id: &str,
+    thread: &Value,
+) -> Result<VerifiedThread, String> {
     let child_thread_id = string_field(thread, "id", "id")
         .ok_or_else(|| "Runtime returned a child thread without an id".to_owned())?;
     let declared_parent = string_field(thread, "parentThreadId", "parent_thread_id")

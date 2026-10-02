@@ -1313,7 +1313,8 @@ private struct ComputerSessionHeader: View {
     @State private var requestedConnection: SavedConnection?
 
     private var statusTitle: String {
-        model.macConnected == false ? "Reconnecting" : session?.state == .unavailable ? "Unavailable" : receiverState.title
+        let mac = model.accessEnded ? "Access ended" : model.macConnected == true ? "Connected" : model.macConnected == false ? "Offline" : "Connecting"
+        return "\(mac), screen \(session?.state == .unavailable ? "unavailable" : receiverState.title.lowercased())"
     }
 
     private var sourceDescription: String {
@@ -1331,11 +1332,11 @@ private struct ComputerSessionHeader: View {
                 showingConnections = true
             } label: {
                 HStack(spacing: 6) {
+                    Text(model.macName).lineLimit(1)
                     Circle()
-                        .fill(model.macConnected != false && session?.state == .live && receiverState == .live ? Color.green : Color.red)
+                        .fill(model.macConnected == true && !model.accessEnded ? Color.green : Color.secondary.opacity(0.6))
                         .frame(width: 8, height: 8)
                         .accessibilityHidden(true)
-                    Text(model.macName).lineLimit(1)
                     if switching { ProgressView().controlSize(.small) }
                     else { Image(systemName: "chevron.down").font(.caption.weight(.semibold)) }
                 }
@@ -1364,7 +1365,7 @@ private struct ComputerSessionHeader: View {
                                     HStack(spacing: 10) {
                                         Image(systemName: "checkmark").opacity(selected ? 1 : 0).frame(width: 16)
                                         Text(candidate.macName).lineLimit(2)
-                                        Circle().fill(connected ? Color.green : Color.red)
+                                        Circle().fill(connected ? Color.green : Color.secondary.opacity(0.6))
                                             .frame(width: 7, height: 7).accessibilityHidden(true)
                                         Spacer(minLength: 12)
                                     }

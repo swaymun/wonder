@@ -210,11 +210,14 @@ struct ManagedBotListMutationState {
     @Published var busy = false
     @Published var verification: String?
     @Published var error: String?
-    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
+    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; projectSubagentLoadTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
     @Published var chats: [ChatSummary] = [] { didSet { noteListChange() } }
     @Published var subagents: [String: [SubagentSummary]] = [:] { didSet { noteListChange() } }
     @Published var subagentAvailability: [String: Bool] = [:]
     @Published var subagentErrors: [String: String] = [:]
+    @Published var projectSubagents: [String: [ProjectSubagentSummary]] = [:]
+    @Published var projectSubagentErrors: [String: String] = [:]
+    private var projectSubagentLoadTokens: [String: UUID] = [:]
     @Published var goals: [String: ConversationGoal] = [:]
     @Published var goalErrors: [String: String] = [:]
     private var goalMutationTokens: [String: UUID] = [:]
@@ -289,6 +292,8 @@ struct ManagedBotListMutationState {
         return connection.credential.hostInstallationId + ":" + connection.credential.deviceId
     }
     @Published var composers: [String: ComposerIntent] = [:]
+    @Published private(set) var staleAnnotationIDs: [String: Set<String>] = [:]
+    private var staleAnnotationScope: String?
     @Published var composerErrors: [String: String] = [:]
     @Published var sending: Set<String> = []
     @Published private(set) var preparingSends: Set<String> = []
@@ -336,6 +341,8 @@ struct ManagedBotListMutationState {
     private var foreground = false
     #if WONDER_DIAGNOSTICS
     private var diagnosticReplayEnabled = true
+    private var previewProjectFilesRootReads = 0
+    private var previewWorkspaceFileReads: [String: Int] = [:]
     #endif
     var previewMode: Bool {
         #if DEBUG || WONDER_DIAGNOSTICS
@@ -425,12 +432,32 @@ struct ManagedBotListMutationState {
                         "assistantMessages": assistantMessages,
                         "thread": thread
                     ]
-                    let summary: [String: Any] = ["conversationId": "preview", "botId": "ada", "title": "Ada", "lastMessagePreview": "Leave the afternoon open so the day stays flexible.", "messageCount": 2, "hasUnread": false, "isArchived": false, "isPinned": false]
+                    let projectFilesConversation = arguments.contains("-project-files-conversation-preview")
+                    var summary: [String: Any] = ["conversationId": "preview", "botId": "ada", "title": "Ada", "lastMessagePreview": "Leave the afternoon open so the day stays flexible.", "messageCount": 2, "hasUnread": false, "isArchived": false, "isPinned": false]
+                    if projectFilesConversation { summary["botId"] = nil; summary["title"] = "Project notes" }
                     if let data = try? JSONSerialization.data(withJSONObject: fixture),
                        let snapshot = try? JSONDecoder().decode(ConversationSnapshot.self, from: data),
                        let data = try? JSONSerialization.data(withJSONObject: summary),
                        let chat = try? JSONDecoder().decode(ChatSummary.self, from: data) {
                         groups = [:]; snapshots = ["preview": snapshot]; chats = [chat]
+                        if projectFilesConversation {
+                            let projectDetail: [String: Any] = [
+                                "conversationId": "preview", "projectId": "preview-project", "projectName": "Preview project",
+                                "title": "Project notes", "family": "codex", "accessMode": "workspace",
+                                "workingFolder": "/preview", "workingFolderName": "Preview", "isPinned": false,
+                                "hasUnread": false, "hasNativeSession": true, "folderInProject": true
+                            ]
+                            if let data = try? JSONSerialization.data(withJSONObject: projectDetail),
+                               let detail = try? JSONDecoder().decode(ProjectConversationDetail.self, from: data) {
+                                #if WONDER_DIAGNOSTICS
+                                projects.installPreviewFilesConversation(detail)
+                                #endif
+                            }
+                            if arguments.contains("-project-goal-preview"),
+                               let goal = try? JSONDecoder().decode(ConversationGoal.self, from: Data(#"{"objective":"Review the Project plan","status":"active","timeBudgetSeconds":600,"timeUsedSeconds":60}"#.utf8)) {
+                                goals["preview"] = goal
+                            }
+                        }
                         let botFixture: [String: Any] = ["id":"ada", "name":"Ada", "role":"Planning", "systemPrompt":"", "workspacePath":"/preview", "permissionProfile":":workspace", "permissionMode":"workspace", "approvalMode":"ask-for-approval", "model":"preview-model", "reasoningEffort":"medium", "serviceTier":"priority", "isArchived":false, "conversationId":"preview"]
                         if let data = try? JSONSerialization.data(withJSONObject: botFixture), let bot = try? JSONDecoder().decode(ManagedBot.self, from: data) { managedBots = [bot] }
 
@@ -444,6 +471,10 @@ struct ManagedBotListMutationState {
                             let pdf = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 300, height: 420)).pdfData { context in
                                 context.beginPage()
                                 ("Weekend notes\n\nSaturday: breakfast and a walk.\nSunday: free time." as NSString).draw(in: CGRect(x: 24, y: 24, width: 252, height: 360), withAttributes: [.font: UIFont.systemFont(ofSize: 16)])
+                                if arguments.contains("-artifact-annotation-preview") {
+                                    context.beginPage()
+                                    ("Second page\n\nReview the schedule." as NSString).draw(in: CGRect(x: 24, y: 24, width: 252, height: 360), withAttributes: [.font: UIFont.systemFont(ofSize: 16)])
+                                }
                             }
                             let image = UIGraphicsImageRenderer(size: CGSize(width: 300, height: 180)).pngData { context in
                                 UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0,y: 0,width: 300,height: 180))
@@ -713,12 +744,22 @@ struct ManagedBotListMutationState {
         }
 
         #if WONDER_DIAGNOSTICS
+        if family == .codex, force, ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-refresh-fails") {
+            throw PairingFailure.response(503)
+        }
+        if family == .codex, ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-unsupported") {
+            throw PairingFailure.response(501)
+        }
+        if family == .codex, ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-unavailable") {
+            throw PairingFailure.response(503)
+        }
         if ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-fixture") {
             let exhausted = ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-exhausted")
+            let empty = family == .codex && ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-empty")
             let fixture = CodexUsageResponse(
                 agentFamily: family.rawValue,
                 checkedAtMs: 1_700_000_000_000,
-                windows: [
+                windows: empty ? [] : [
                     CodexUsageWindow(id: family == .claude ? "five_hour" : "five-hours", label: "5 hours", usedPercent: exhausted ? 100 : (family == .claude ? 14 : 27), remainingPercent: exhausted ? 0 : (family == .claude ? 86 : 73), windowDurationMins: 300, resetsAt: 1_700_018_000_000),
                     CodexUsageWindow(id: family == .claude ? "seven_day" : "weekly", label: "Weekly", usedPercent: family == .claude ? 8 : 41, remainingPercent: family == .claude ? 92 : 59, windowDurationMins: 10_080, resetsAt: 1_700_604_800_000)
                 ]
@@ -894,7 +935,8 @@ struct ManagedBotListMutationState {
         guard partition != key else { await preparation?.value; return }
         stopReading()
         partition = key
-        subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]; loadingConversationIDs = []; loadingTokens = [:]; conversationLoadFailures = [:]
+        projectSubagentLoadTokens = [:]
+        subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]; loadingConversationIDs = []; loadingTokens = [:]; conversationLoadFailures = [:]
         let store = Self.readStore(for: saved)
         self.store = store
         writer?.retire(); writer = nil
@@ -988,7 +1030,10 @@ struct ManagedBotListMutationState {
         do {
             try await refreshList(saved, run: run)
             if refreshVisibleConversation, let chat = visibleChat {
-                if let parent = selectedChat, parent.botId != nil { await loadSubagents(parent) }
+                if let parent = selectedChat {
+                    if parent.botId != nil { await loadSubagents(parent) }
+                    else if isProject(parent) { await loadProjectSubagents(parent) }
+                }
                 await refreshConversation(chat)
                 await loadAsyncQuestions(chat)
                 // Project sends use the same queue even though they have no Bot ID.
@@ -1065,7 +1110,7 @@ struct ManagedBotListMutationState {
     }
 
     func loadGoal(_ chat: ChatSummary) async {
-        guard chat.botId != nil, agentFamily(chat) == .codex, !isSubagent(chat), !previewMode,
+        guard (chat.botId != nil || isProject(chat)), agentFamily(chat) == .codex, !isSubagent(chat), !previewMode,
               let saved = connection, !accessEnded else { return }
         let key = partition
         let mutation = goalMutationTokens[chat.id]
@@ -1086,7 +1131,8 @@ struct ManagedBotListMutationState {
     }
 
     @discardableResult private func mutateGoal(_ chat: ChatSummary, body: [String: Any]) async -> Bool {
-        guard chat.botId != nil, !isSubagent(chat), let saved = connection, !accessEnded else { return false }
+        guard (chat.botId != nil || isProject(chat)), agentFamily(chat) == .codex,
+              !isSubagent(chat), let saved = connection, !accessEnded else { return false }
         let key = partition
         let token = UUID()
         goalMutationTokens[chat.id] = token
@@ -1121,7 +1167,8 @@ struct ManagedBotListMutationState {
     func resumeGoal(_ chat: ChatSummary) async { await mutateGoal(chat, body: ["status": "active"]) }
 
     func clearGoal(_ chat: ChatSummary) async {
-        guard chat.botId != nil, !isSubagent(chat), let saved = connection, !accessEnded else { return }
+        guard (chat.botId != nil || isProject(chat)), agentFamily(chat) == .codex,
+              !isSubagent(chat), let saved = connection, !accessEnded else { return }
         let key = partition
         let token = UUID()
         goalMutationTokens[chat.id] = token
@@ -1179,6 +1226,47 @@ struct ManagedBotListMutationState {
         }
     }
 
+    func loadProjectSubagents(_ parent: ChatSummary) async {
+        guard isProject(parent), !previewMode, let saved = connection, !accessEnded else { return }
+        let key = partition
+        let token = UUID()
+        projectSubagentLoadTokens[parent.id] = token
+        do {
+            let path = try ProjectSubagentPaths.roster(parentConversationId: parent.id)
+            let response: ProjectSubagentList = try await api.request(path,
+                origin: saved.origin, credential: saved.credential)
+            guard key == partition, projectSubagentLoadTokens[parent.id] == token, !Task.isCancelled else { return }
+            projectSubagents[parent.id] = response.subagents.filter { $0.parentConversationId == parent.id }
+            projectSubagentErrors[parent.id] = response.detail
+        } catch PairingFailure.response(let status) where [403, 404, 409].contains(status) {
+            guard key == partition, projectSubagentLoadTokens[parent.id] == token, !Task.isCancelled else { return }
+            projectSubagents[parent.id] = []
+            projectSubagentErrors[parent.id] = status == 404
+                ? "Agent tasks need a newer Wonder on your computer. Update it, then refresh this Project thread."
+                : "Agent tasks are no longer available in this Project thread. Refresh the Project to try again."
+        } catch {
+            guard key == partition, projectSubagentLoadTokens[parent.id] == token, !Task.isCancelled else { return }
+            projectSubagentErrors[parent.id] = "Agent tasks could not be loaded. Refresh this Project thread to try again."
+        }
+    }
+
+    func projectSubagentTranscript(parent: ChatSummary, child: ProjectSubagentSummary,
+                                   cursor: String? = nil) async throws -> ProjectSubagentTranscript {
+        guard isProject(parent), child.parentConversationId == parent.id,
+              projectSubagents[parent.id]?.contains(where: { $0.threadId == child.threadId }) == true,
+              let saved = connection, !accessEnded else { throw PairingFailure.invalidLink }
+        let key = partition
+        let path = try ProjectSubagentPaths.transcript(parentConversationId: parent.id,
+                                                       threadId: child.threadId, cursor: cursor)
+        let response: ProjectSubagentTranscript = try await api.request(path,
+            origin: saved.origin, credential: saved.credential)
+        guard key == partition, !Task.isCancelled else { throw CancellationError() }
+        guard response.subagent.parentConversationId == parent.id,
+              response.subagent.threadId == child.threadId,
+              response.snapshot.thread.threadId == child.threadId else { throw ReadFailure.resync }
+        return response
+    }
+
     private func connectionReady() async -> Bool {
         await preparation?.value
         if let connectionCheck { await connectionCheck.value }
@@ -1229,6 +1317,7 @@ struct ManagedBotListMutationState {
         // Helpers load first: their pill resizes the composer, and a helper
         // route needs its parent's ownership record before its history.
         if chat.botId != nil { await loadSubagents(chat) }
+        else if isProject(chat) { await loadProjectSubagents(chat) }
         await refreshConversation(chat)
         await loadAttention()
         try? await loadQueue(chat)
@@ -1550,6 +1639,16 @@ struct ManagedBotListMutationState {
             if foreground { await refreshConversation(chat) }
         } catch {
             guard partition == key else { return }
+            if case PairingFailure.annotationRejected(_, let detail) = error, var intent = composers[chat.id],
+               intent.pending?.request.clientMessageId == pending.request.clientMessageId {
+                intent.markRejected()
+                if intent.draft.isEmpty { try? intent.restoreRejected() }
+                do { try saveComposer(intent, chat: chat.id) }
+                catch { composerErrors[chat.id] = "The unsent message could not be restored. Free some storage and reopen the chat." }
+                controlErrors[chat.id] = detail + " Reopen the file preview to select its current version, then send again."
+                try? await loadFiles(chat)
+                return
+            }
             if case PairingFailure.response(412) = error, pending.request.expectedTurnId == nil, var intent = composers[chat.id] {
                 intent.markRejected()
                 if intent.draft.isEmpty { try? intent.restoreRejected() }
@@ -1886,8 +1985,95 @@ struct ManagedBotListMutationState {
     func removeStaged(_ id: String, chat: String) {
         guard !uploading.contains(chat), !preparingSends.contains(chat) else { return }
         guard composers[chat]?.pending == nil else { return }
-        do { var intent = composers[chat] ?? ComposerIntent(); intent.removeAttachment(id: id); try saveComposer(intent, chat: chat) }
+        do {
+            var intent = composers[chat] ?? ComposerIntent()
+            intent.removeAttachment(id: id)
+            try saveComposer(intent, chat: chat)
+            staleAnnotationIDs[chat]?.remove(id)
+        }
         catch { controlErrors[chat] = "Could not save the attachment change." }
+    }
+    func canAnnotate(_ chat: ChatSummary, replacing oldID: String? = nil) -> Bool {
+        let replacesAnnotation = oldID.map { id in
+            composers[chat.id]?.stagedFiles?.contains(where: { $0.id == id && $0.mimeType == ArtifactAnnotation.mimeType }) == true ||
+            ((composers[chat.id]?.draftAttachmentIds ?? []).contains(id) &&
+             files[chat.id]?.contains(where: { $0.id == id && $0.mimeType == ArtifactAnnotation.mimeType }) == true)
+        } ?? false
+        guard projects.details[chat.id] != nil, !chat.isArchived, !accessEnded,
+              macConnected == true, composers[chat.id]?.pending == nil,
+              (attachmentCount(chat.id) < 4 || replacesAnnotation), !uploading.contains(chat.id),
+              !preparingSends.contains(chat.id) else { return false }
+        if !previewMode { return connection != nil }
+        #if WONDER_DIAGNOSTICS
+        return ProcessInfo.processInfo.arguments.contains("-artifact-annotation-preview")
+        #else
+        return false
+        #endif
+    }
+
+    func stageAnnotation(_ annotation: ArtifactAnnotation, chat: ChatSummary,
+                         expectedScope: String, replacing oldID: String? = nil,
+                         preserveStaleOnReplace: Bool = false) throws {
+        guard canAnnotate(chat, replacing: oldID),
+              expectedScope == assignmentScope,
+              let detail = projects.details[chat.id], detail.projectId == annotation.projectId,
+              annotation.conversationId == chat.id, !chat.isArchived, !accessEnded,
+              (connection != nil || previewMode),
+              !uploading.contains(chat.id), !preparingSends.contains(chat.id) else { throw FileFailure.integrity }
+        loadComposer(chat.id)
+        guard !intentLoadFailures.contains(chat.id) else { throw ReadFailure.resync }
+        var intent = composers[chat.id] ?? ComposerIntent()
+        guard intent.pending == nil else { throw SendFailure.pending }
+        let replacedStale = preserveStaleOnReplace && oldID.map { isAnnotationStale($0, chat: chat.id) } == true
+        if let oldID {
+            let local = intent.stagedFiles?.contains(where: { $0.id == oldID && $0.mimeType == ArtifactAnnotation.mimeType }) == true
+            let remote = (intent.draftAttachmentIds ?? []).contains(oldID) && files[chat.id]?.contains(where: {
+                $0.id == oldID && $0.mimeType == ArtifactAnnotation.mimeType
+            }) == true
+            guard local || remote else { throw FileFailure.integrity }
+            intent.removeAttachment(id: oldID)
+        }
+        guard intent.attachmentCount < 4 else { throw FileFailure.tooLarge }
+        let staged = try annotation.stagedFile()
+        intent.stagedFiles = (intent.stagedFiles ?? []) + [staged]
+        try saveComposer(intent, chat: chat.id)
+        if let oldID {
+            staleAnnotationIDs[chat.id]?.remove(oldID)
+            if replacedStale { staleAnnotationIDs[chat.id, default: []].insert(staged.id) }
+        }
+        controlErrors[chat.id] = nil
+    }
+
+    func isAnnotationStale(_ id: String, chat: String) -> Bool {
+        staleAnnotationScope == assignmentScope && staleAnnotationIDs[chat]?.contains(id) == true
+    }
+
+    /// The host still validates the source hash at send. This early check gives
+    /// an open draft a useful warning as soon as a refreshed preview changes.
+    func noteWorkspaceRevision(_ chat: ChatSummary, rootID: String, path: String,
+                               currentSha256: String) async {
+        let scope = assignmentScope
+        let intent = composers[chat.id] ?? ComposerIntent()
+        var candidates: [(String, Data)] = (intent.stagedFiles ?? [])
+            .filter { $0.mimeType == ArtifactAnnotation.mimeType }
+            .map { ($0.id, $0.data) }
+        for id in intent.draftAttachmentIds ?? [] {
+            guard let file = files[chat.id]?.first(where: { $0.id == id && $0.mimeType == ArtifactAnnotation.mimeType }),
+                  let data = try? await download(file, chat: chat) else { continue }
+            candidates.append((id, data))
+        }
+        guard !Task.isCancelled, scope == assignmentScope, !accessEnded else { return }
+        var stale = staleAnnotationScope == scope ? (staleAnnotationIDs[chat.id] ?? []) : []
+        for (id, data) in candidates {
+            guard let annotation = try? ArtifactAnnotation.read(data),
+                  annotation.conversationId == chat.id,
+                  annotation.projectId == projects.details[chat.id]?.projectId,
+                  annotation.rootId == rootID, annotation.path == path else { continue }
+            if annotation.sourceSha256 == currentSha256 { stale.remove(id) }
+            else { stale.insert(id) }
+        }
+        staleAnnotationScope = scope
+        staleAnnotationIDs[chat.id] = stale
     }
     private func uploadStaged(_ chat: ChatSummary) async throws {
         guard let saved = connection, !accessEnded else { throw PairingFailure.missingIdentity }
@@ -1932,7 +2118,23 @@ struct ManagedBotListMutationState {
         }
     }
     func loadWorkspaceRoots(_ chat: ChatSummary) async throws -> WorkspaceRootsResponse {
-        if previewMode { return previewWorkspaceRoots(chat) }
+        if previewMode {
+            #if WONDER_DIAGNOSTICS
+            if chat.id.hasPrefix("project-files:") {
+                if ProcessInfo.processInfo.arguments.contains("-project-files-root-revoked") { throw PairingFailure.response(403) }
+                if ProcessInfo.processInfo.arguments.contains("-project-files-project-removed") { throw PairingFailure.response(404) }
+                if ProcessInfo.processInfo.arguments.contains("-project-files-root-changed") {
+                    previewProjectFilesRootReads += 1
+                    if previewProjectFilesRootReads == 1 {
+                        return WorkspaceRootsResponse(available: true, detail: nil, roots: [
+                            WorkspaceRoot(id: "removed-root", label: "Workspace", path: "/preview-old", isDirectory: true, kind: "workingDirectory", readOnly: true)
+                        ], attachments: [])
+                    }
+                }
+            }
+            #endif
+            return previewWorkspaceRoots(chat)
+        }
         guard let saved = connection, !accessEnded else { throw PairingFailure.missingIdentity }
         let response: WorkspaceRootsResponse = try await api.request(
             "/api/v1/conversations/\(Self.escape(chat.id))/workspace/roots",
@@ -1952,7 +2154,21 @@ struct ManagedBotListMutationState {
         Self.workspaceComponents(conversationID: conversationID, operation: operation).string
     }
     func loadWorkspaceDirectory(_ chat: ChatSummary, root: WorkspaceRoot, path: String, showHidden: Bool, offset: Int = 0) async throws -> WorkspaceDirectoryPage {
-        if previewMode { return previewWorkspaceDirectory(root: root, path: path, showHidden: showHidden, offset: offset) }
+        if previewMode {
+            #if WONDER_DIAGNOSTICS
+            if ProcessInfo.processInfo.arguments.contains("-workspace-delayed-hidden"),
+               path.isEmpty, showHidden {
+                try await Task.sleep(for: .seconds(3))
+            }
+            if root.id == "removed-root" && ProcessInfo.processInfo.arguments.contains("-project-files-root-changed") {
+                throw PairingFailure.response(404)
+            }
+            if path == "Projects" && ProcessInfo.processInfo.arguments.contains("-project-files-directory-moved") {
+                throw PairingFailure.response(404)
+            }
+            #endif
+            return previewWorkspaceDirectory(root: root, path: path, showHidden: showHidden, offset: offset)
+        }
         guard let saved = connection, !accessEnded else { throw PairingFailure.missingIdentity }
         var components = Self.workspaceComponents(conversationID: chat.id, operation: "directory")
         components.queryItems = [URLQueryItem(name: "root", value: root.id), URLQueryItem(name: "path", value: path), URLQueryItem(name: "showHidden", value: showHidden ? "true" : "false"), URLQueryItem(name: "offset", value: String(offset))]
@@ -1960,17 +2176,66 @@ struct ManagedBotListMutationState {
         return try await api.request(endpoint, origin: saved.origin, credential: saved.credential)
     }
     func downloadWorkspaceFile(_ chat: ChatSummary, root: WorkspaceRoot, entry: WorkspaceEntry) async throws -> Data {
-        if previewMode { return previewWorkspaceData(entry: entry) }
+        if previewMode {
+            #if WONDER_DIAGNOSTICS
+            if ProcessInfo.processInfo.arguments.contains("-artifact-revision-preview") {
+                let key = root.id + ":" + entry.path
+                previewWorkspaceFileReads[key, default: 0] += 1
+                let initialReads = entry.path == "README.md" ? 2 : 1
+                if previewWorkspaceFileReads[key, default: 0] > initialReads {
+                    return previewWorkspaceRevisionData(entry: entry)
+                }
+            }
+            #endif
+            return previewWorkspaceData(entry: entry)
+        }
         guard let saved = connection, !accessEnded else { throw PairingFailure.missingIdentity }
+        let scope = assignmentScope
         var components = Self.workspaceComponents(conversationID: chat.id, operation: "file")
         components.queryItems = [URLQueryItem(name: "root", value: root.id), URLQueryItem(name: "path", value: entry.path)]
         guard let endpoint = components.string else { throw PairingFailure.invalidLink }
         let data = try await api.downloadWorkspaceBytes(endpoint, connection: saved, byteSize: entry.byteSize.map(Int.init), sha256: nil, mimeType: entry.mimeType)
-        guard !accessEnded else { throw CancellationError() }
+        guard scope == assignmentScope, !accessEnded else { throw CancellationError() }
         return data
     }
+
+    func refreshWorkspaceFile(_ chat: ChatSummary, root: WorkspaceRoot, entry: WorkspaceEntry) async throws -> Data {
+        // Listing size belongs to the previous revision. Fetch the same path
+        // without that expectation, then validate the advertised format again.
+        let current = WorkspaceEntry(name: entry.name, path: entry.path, isDirectory: false,
+                                     byteSize: nil, mimeType: entry.mimeType)
+        let data = try await downloadWorkspaceFile(chat, root: root, entry: current)
+        if let mime = current.mimeType { try ConversationFile.validateContent(data, mime: mime) }
+        return data
+    }
+    func workspaceMediaLoader(_ chat: ChatSummary, root: WorkspaceRoot, entry: WorkspaceEntry) throws -> WorkspaceMediaResourceLoader {
+        var components = Self.workspaceComponents(conversationID: chat.id, operation: "media")
+        components.queryItems = [URLQueryItem(name: "root", value: root.id), URLQueryItem(name: "path", value: entry.path)]
+        guard let endpoint = components.string else { throw PairingFailure.invalidLink }
+        #if WONDER_DIAGNOSTICS
+        if previewMode, ProcessInfo.processInfo.arguments.contains("-workspace-media-preview") {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [DiagnosticWorkspaceMediaProtocol.self]
+            let credential = try JSONDecoder().decode(Credential.self, from: Data(
+                #"{"sessionToken":"fixture-only","deviceId":"fixture","csrfToken":"fixture","hostInstallationId":"fixture"}"#.utf8))
+            let fixture = SavedConnection(origin: "https://workspace-media.invalid", credential: credential)
+            return WorkspaceMediaResourceLoader(api: PairingAPI(configuration: configuration),
+                                                connection: fixture, path: endpoint)
+        }
+        #endif
+        guard let saved = connection, !accessEnded, !previewMode else { throw PairingFailure.missingIdentity }
+        return WorkspaceMediaResourceLoader(api: api, connection: saved, path: endpoint)
+    }
     func loadWorkspaceGitStatus(_ chat: ChatSummary, root: WorkspaceRoot) async throws -> WorkspaceGitStatusResponse {
-        if previewMode { return previewWorkspaceGitStatus() }
+        if previewMode {
+            #if WONDER_DIAGNOSTICS
+            if ProcessInfo.processInfo.arguments.contains("-workspace-delayed-git") {
+                try await Task.sleep(for: .seconds(3))
+                throw PairingFailure.response(503)
+            }
+            #endif
+            return previewWorkspaceGitStatus()
+        }
         guard let saved = connection, !accessEnded else { throw PairingFailure.missingIdentity }
         var components = Self.workspaceComponents(conversationID: chat.id, operation: "git/status")
         components.queryItems = [URLQueryItem(name: "root", value: root.id)]
@@ -1978,7 +2243,14 @@ struct ManagedBotListMutationState {
         return try await api.request(endpoint, origin: saved.origin, credential: saved.credential)
     }
     func loadWorkspaceGitDiff(_ chat: ChatSummary, root: WorkspaceRoot, path: String, staged: Bool) async throws -> WorkspaceDiffResponse {
-        if previewMode { return WorkspaceDiffResponse(path: path, staged: staged, diff: "diff --git a/\(path) b/\(path)\n--- a/\(path)\n+++ b/\(path)\n@@\n-fixture line\n+updated fixture line\n") }
+        if previewMode {
+            #if WONDER_DIAGNOSTICS
+            if ProcessInfo.processInfo.arguments.contains("-workspace-delayed-diff"), path == "README.md" {
+                try await Task.sleep(for: .seconds(3))
+            }
+            #endif
+            return WorkspaceDiffResponse(path: path, staged: staged, diff: "diff --git a/\(path) b/\(path)\n--- a/\(path)\n+++ b/\(path)\n@@\n-fixture line\n+updated fixture line\n")
+        }
         guard let saved = connection, !accessEnded else { throw PairingFailure.missingIdentity }
         var components = Self.workspaceComponents(conversationID: chat.id, operation: "git/diff")
         components.queryItems = [URLQueryItem(name: "root", value: root.id), URLQueryItem(name: "path", value: path), URLQueryItem(name: "staged", value: staged ? "true" : "false")]
@@ -2003,15 +2275,54 @@ struct ManagedBotListMutationState {
                 WorkspaceEntry(name: "diagram.png", path: "diagram.png", isDirectory: false, byteSize: UInt64(previewBytes["Saturday.png"]?.count ?? 0), mimeType: "image/png")
             ]
             if showHidden { rootEntries.append(WorkspaceEntry(name: ".gitignore", path: ".gitignore", isDirectory: false, byteSize: 12, mimeType: "text/plain")) }
+            if ProcessInfo.processInfo.arguments.contains("-artifact-annotation-preview") {
+                rootEntries.append(WorkspaceEntry(name: "Weekend.pdf", path: "Weekend.pdf", isDirectory: false,
+                                                   byteSize: UInt64(previewBytes["notes.pdf"]?.count ?? 0), mimeType: "application/pdf"))
+            }
+            #if WONDER_DIAGNOSTICS
+            if ProcessInfo.processInfo.arguments.contains("-workspace-media-preview") {
+                rootEntries.append(WorkspaceEntry(name: "black.mp4", path: "black.mp4", isDirectory: false,
+                                                   byteSize: UInt64(DiagnosticWorkspaceMediaProtocol.video.count), mimeType: "video/mp4"))
+            }
+            if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview") {
+                rootEntries += DiagnosticWorkspaceFileFixtures.entries
+            }
+            #endif
             values = rootEntries
         }
         return WorkspaceDirectoryPage(rootId: root.id, path: path, parentPath: path.isEmpty ? nil : "", entries: Array(values.dropFirst(offset).prefix(200)), nextOffset: nil)
     }
     private func previewWorkspaceData(entry: WorkspaceEntry) -> Data {
+        #if WONDER_DIAGNOSTICS
+        if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview"),
+           let data = DiagnosticWorkspaceFileFixtures.data(name: entry.name) { return data }
+        #endif
         if entry.mimeType?.hasPrefix("image/") == true, let data = previewBytes["Saturday.png"] { return data }
+        if entry.name == "Weekend.pdf", let data = previewBytes["notes.pdf"] { return data }
         if entry.name == ".gitignore" { return Data(".DS_Store\n".utf8) }
         return Data("Fixture workspace file: \(entry.name)\n".utf8)
     }
+    #if WONDER_DIAGNOSTICS
+    private func previewWorkspaceRevisionData(entry: WorkspaceEntry) -> Data {
+        if entry.mimeType?.hasPrefix("image/") == true {
+            return UIGraphicsImageRenderer(size: CGSize(width: 300, height: 180)).pngData { context in
+                UIColor.systemIndigo.setFill(); context.fill(CGRect(x: 0, y: 0, width: 300, height: 180))
+                ("Sunday" as NSString).draw(at: CGPoint(x: 24, y: 70), withAttributes: [.font: UIFont.systemFont(ofSize: 28), .foregroundColor: UIColor.white])
+            }
+        }
+        if entry.name == "Weekend.pdf" {
+            return UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 300, height: 420)).pdfData { context in
+                for page in 1...2 {
+                    context.beginPage()
+                    ("Revised page \(page)\n\nReview the new schedule." as NSString)
+                        .draw(in: CGRect(x: 24, y: 24, width: 252, height: 360),
+                              withAttributes: [.font: UIFont.systemFont(ofSize: 16)])
+                }
+            }
+        }
+        return Data("Revised workspace file: \(entry.name)\nKeep Sunday open.\n".utf8)
+    }
+    #endif
     private func previewWorkspaceGitStatus() -> WorkspaceGitStatusResponse {
         WorkspaceGitStatusResponse(available: true, detail: nil, repositoryPath: "/preview", changes: [
             WorkspaceGitChange(path: "README.md", originalPath: nil, state: "staged", indexStatus: "M", worktreeStatus: " "),
@@ -2516,7 +2827,10 @@ struct ManagedBotListMutationState {
                         await self.refreshConversation(chat)
                     }
                 }
-                if let parent = self.selectedChat, parent.botId != nil { await self.loadSubagents(parent) }
+                if let parent = self.selectedChat {
+                    if parent.botId != nil { await self.loadSubagents(parent) }
+                    else if self.isProject(parent) { await self.loadProjectSubagents(parent) }
+                }
                 await self.loadAttention()
                 if let chat = self.visibleChat, chat.botId != nil || self.isProject(chat) { try? await self.loadQueue(chat) }
                 // Events arriving during the request require another refresh,
@@ -2673,7 +2987,8 @@ struct ManagedBotListMutationState {
             if let persistConnection { try persistConnection(nil) }
             else { try identity.forgetConnection() }
             partition = nil; store = nil; writer = nil; projection = ProjectionState(); publish(.everything)
-            subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]
+            projectSubagentLoadTokens = [:]
+            subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]
             selectedChat = nil; managedBots = []; managedBotMutations = ManagedBotListMutationState(); macConnected = nil; hasConnectedThisLaunch = false; connection = nil; error = nil; accessEnded = false
             status = "Connect to your computer to get started."
         }
@@ -2723,3 +3038,66 @@ struct ConversationTimeline {
         attachmentIDs = rows.flatMap(\.attachmentIds)
     }
 }
+
+#if WONDER_DIAGNOSTICS
+/// A tiny generated black MP4 lets the real Files sheet exercise AVFoundation's
+/// authenticated range path without a paired Mac or a model request.
+private final class DiagnosticWorkspaceMediaProtocol: URLProtocol, @unchecked Sendable {
+    static let video = Data(base64Encoded: "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMxbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAB9AAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAlx0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAB9AAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAEAAAABAAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAfQAAAAAAABAAAAAAHUbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAgABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABf21pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAT9zdGJsAAAAv3N0c2QAAAAAAAAAAQAAAK9hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAEAAQABIAAAASAAAAAAAAAABFExhdmM2My4xLjEwMSBsaWJ4MjY0AAAAAAAAAAAAAAAAGP//AAAANWF2Y0MBZAAK/+EAGGdkAAqs2UQmwEQAAAMABAAAAwAIPEiWWAEABmjr48siwP34+AAAAAAQcGFzcAAAAAEAAAABAAAAFGJ0cnQAAAAAAAALmAAAAAAAAAAYc3R0cwAAAAAAAAABAAAAAgAAQAAAAAAUc3RzcwAAAAAAAAABAAAAAQAAABxzdHNjAAAAAAAAAAEAAAABAAAAAgAAAAEAAAAcc3RzegAAAAAAAAAAAAAAAgAAAtcAAAAPAAAAFHN0Y28AAAAAAAAAAQAAA2EAAABhdWR0YQAAAFltZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAACxpbHN0AAAAJKl0b28AAAAcZGF0YQAAAAEAAAAATGF2ZjYzLjEuMTAxAAAACGZyZWUAAALubWRhdAAAAq0GBf//qdxF6b3m2Ui3lizYINkj7u94MjY0IC0gY29yZSAxNjUgcjMyMjIgYjM1NjA1YSAtIEguMjY0L01QRUctNCBBVkMgY29kZWMgLSBDb3B5bGVmdCAyMDAzLTIwMjUgLSBodHRwOi8vd3d3LnZpZGVvbGFuLm9yZy94MjY0Lmh0bWwgLSBvcHRpb25zOiBjYWJhYz0xIHJlZj0zIGRlYmxvY2s9MTowOjAgYW5hbHlzZT0weDM6MHgxMTMgbWU9aGV4IHN1Ym1lPTcgcHN5PTEgcHN5X3JkPTEuMDA6MC4wMCBtaXhlZF9yZWY9MSBtZV9yYW5nZT0xNiBjaHJvbWFfbWU9MSB0cmVsbGlzPTEgOHg4ZGN0PTEgY3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNocm9tYV9xcF9vZmZzZXQ9LTIgdGhyZWFkcz0yIGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MyBiX3B5cmFtaWQ9MiBiX2FkYXB0PTEgYl9iaWFzPTAgZGlyZWN0PTEgd2VpZ2h0Yj0xIG9wZW5fZ29wPTAgd2VpZ2h0cD0yIGtleWludD0yNTAga2V5aW50X21pbj0xIHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByY19sb29rYWhlYWQ9NDAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4wMACAAAAAImWIhAAW//730z/MsuyaJLXjqPeinIvz0z8pUaJ8gb17Rs0AAAALQZohbEFf/talm0A=") ?? Data()
+    private static let revision = String(repeating: "a", count: 64)
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "workspace-media.invalid"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else { return }
+        if ProcessInfo.processInfo.arguments.contains("-workspace-media-offline-preview") {
+            reply(url: url, status: 503, bytes: Data(), headers: [:])
+            return
+        }
+        guard request.value(forHTTPHeaderField: "Origin") == "https://workspace-media.invalid",
+              request.value(forHTTPHeaderField: "Cookie")?.hasPrefix("__Host-wonder_session=") == true,
+              let range = request.value(forHTTPHeaderField: "Range"), range.hasPrefix("bytes=") else {
+            reply(url: url, status: 403, bytes: Data(), headers: [:])
+            return
+        }
+        let parts = range.dropFirst("bytes=".count).split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 2, let start = Int(parts[0]), let requestedEnd = Int(parts[1]),
+              start >= 0, requestedEnd >= start, start < Self.video.count else {
+            reply(url: url, status: 416, bytes: Data(), headers: [:])
+            return
+        }
+        if let revision = request.value(forHTTPHeaderField: "X-Wonder-Revision"),
+           revision != Self.revision {
+            reply(url: url, status: 409, bytes: Data(), headers: [:])
+            return
+        }
+        if request.value(forHTTPHeaderField: "X-Wonder-Revision") != nil,
+           ProcessInfo.processInfo.arguments.contains("-workspace-media-stale-preview") {
+            reply(url: url, status: 409, bytes: Data(), headers: [:])
+            return
+        }
+        let end = min(requestedEnd, Self.video.count - 1)
+        let bytes = Self.video.subdata(in: start..<(end + 1))
+        reply(url: url, status: 206, bytes: bytes, headers: [
+            "Content-Type": "video/mp4",
+            "Content-Length": String(bytes.count),
+            "Content-Range": "bytes \(start)-\(end)/\(Self.video.count)",
+            "X-Wonder-Revision": Self.revision
+        ])
+    }
+
+    override func stopLoading() {}
+
+    private func reply(url: URL, status: Int, bytes: Data, headers: [String: String]) {
+        guard let response = HTTPURLResponse(url: url, statusCode: status,
+                                             httpVersion: "HTTP/1.1", headerFields: headers) else { return }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if !bytes.isEmpty { client?.urlProtocol(self, didLoad: bytes) }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+#endif

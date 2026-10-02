@@ -20,6 +20,8 @@
     "conversationList": { "$ref": "#/$defs/conversationList" },
     "subagentSummary": { "$ref": "#/$defs/subagentSummary" },
     "subagentList": { "$ref": "#/$defs/subagentList" },
+    "projectSubagentList": { "$ref": "#/$defs/projectSubagentList" },
+    "projectSubagentTranscript": { "$ref": "#/$defs/projectSubagentTranscript" },
     "workspaceRoot": { "$ref": "#/$defs/workspaceRoot" },
     "workspaceRoots": { "$ref": "#/$defs/workspaceRoots" },
     "workspaceDirectory": { "$ref": "#/$defs/workspaceDirectory" },
@@ -38,6 +40,9 @@
     "saveBotSkillVersionResponse": { "$ref": "#/$defs/saveBotSkillVersionResponse" },
     "botSkillFixtureTestReceipt": { "$ref": "#/$defs/botSkillFixtureTestReceipt" },
     "conversationFile": { "$ref": "#/$defs/conversationFile" },
+    "artifactAnnotation": { "$ref": "#/$defs/artifactAnnotation" },
+    "automationSummary": { "$ref": "#/$defs/automationSummary" },
+    "automationRunSummary": { "$ref": "#/$defs/automationRunSummary" },
     "conversationFiles": { "type": "array", "items": { "$ref": "#/$defs/conversationFile" } },
     "createConversationFileRequest": { "$ref": "#/$defs/createConversationFileRequest" },
     "botSummary": { "$ref": "#/$defs/botSummary" },
@@ -83,6 +88,23 @@
     "/api/v1/push/registration": { "post": { "request": { "$ref": "#/$defs/pushRegistration" }, "response": { "type": "object", "required": ["registered"], "properties": { "registered": { "const": true } }, "additionalProperties": false } } },
     "/api/v1/push/revoke": { "post": { "request": { "$ref": "#/$defs/pushSignedAction" }, "response": { "type": "object", "required": ["revoked"], "properties": { "revoked": { "const": true } }, "additionalProperties": false } } },
     "/api/v1/push/routes/{route}": { "get": { "response": { "$ref": "#/$defs/pushRoute" } } },
+    "/api/v1/automations": {
+      "get": { "response": { "type": "array", "items": { "$ref": "#/$defs/automationSummary" } } },
+      "post": { "request": { "$ref": "#/$defs/createAutomationRequest" }, "response": { "$ref": "#/$defs/automationSummary" }, "successStatus": 201 }
+    },
+    "/api/v1/automations/preview": {
+      "post": { "request": { "$ref": "#/$defs/previewAutomationRequest" }, "response": { "$ref": "#/$defs/previewAutomationResponse" } }
+    },
+    "/api/v1/automations/{automationId}": {
+      "patch": { "request": { "$ref": "#/$defs/updateAutomationRequest" }, "response": { "$ref": "#/$defs/automationSummary" } },
+      "delete": { "successStatus": 204 }
+    },
+    "/api/v1/automations/{automationId}/run": {
+      "post": { "request": { "$ref": "#/$defs/runAutomationRequest" }, "response": { "$ref": "#/$defs/automationRunSummary" }, "successStatus": 202, "description": "The JSON body is optional; clientRequestId makes retries idempotent." }
+    },
+    "/api/v1/automations/{automationId}/runs": {
+      "get": { "response": { "type": "array", "items": { "$ref": "#/$defs/automationRunSummary" } } }
+    },
 
     "/api/v1/computer/sessions": {
       "post": { "request": { "$ref": "#/$defs/startComputerSessionRequest" }, "response": { "$ref": "#/$defs/computerSession" }, "successStatus": 201 }
@@ -187,6 +209,9 @@
     "/api/v1/conversations/{conversationId}/workspace/file": {
       "get": { "query": { "$ref": "#/$defs/workspaceQuery" }, "response": { "contentType": "application/octet-stream", "maxBytes": 8388608 } }
     },
+    "/api/v1/conversations/{conversationId}/workspace/media": {
+      "get": { "query": { "$ref": "#/$defs/workspaceQuery" }, "requestHeaders": { "Range": "bytes=start-end, one range up to 1048576 bytes", "X-Wonder-Revision": "Required after bytes=0-0 bootstrap" }, "response": { "status": 206, "contentType": "audio or video MIME", "maxBytes": 1048576, "headers": ["Content-Range", "Content-Length", "Accept-Ranges", "X-Wonder-Revision"] } }
+    },
     "/api/v1/conversations/{conversationId}/workspace/git/status": {
       "get": { "query": { "$ref": "#/$defs/workspaceQuery" }, "response": { "$ref": "#/$defs/workspaceGitStatus" } }
     },
@@ -270,9 +295,120 @@
         "response": { "$ref": "#/$defs/projectConversationDetail" }
       }
     },
+    "/api/v1/project-conversations/{conversationId}/subagents": {
+      "get": { "response": { "$ref": "#/$defs/projectSubagentList" } }
+    },
+    "/api/v1/project-conversations/{conversationId}/subagents/{threadId}/transcript": {
+      "get": { "query": { "$ref": "#/$defs/projectSubagentTranscriptQuery" }, "response": { "$ref": "#/$defs/projectSubagentTranscript" } }
+    },
     "/api/v1/conversations/{conversationId}/desktop-continuation": { "get": { "response": { "$ref": "#/$defs/desktopContinuation" } } }
   },
   "$defs": {
+    "automationSummary": {
+      "type": "object",
+      "required": ["id", "revision", "name", "kind", "conversationId", "prompt", "rrule", "timezone", "status", "notificationPolicy", "modelId", "reasoningEffort", "scopeType", "scopeId", "nextRunAt", "lastRunAt", "lastAttemptAt", "lastSuccessAt", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "kind": { "type": "string", "enum": ["continuation", "standalone"] },
+        "botId": { "type": "string", "minLength": 1 },
+        "conversationId": { "type": ["string", "null"] },
+        "prompt": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "rrule": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "status": { "type": "string", "enum": ["active", "paused"] },
+        "notificationPolicy": { "type": "string", "enum": ["all_runs", "failed_runs_only"] },
+        "modelId": { "type": ["string", "null"] },
+        "reasoningEffort": { "type": ["string", "null"] },
+        "scopeType": { "type": "string", "enum": ["bot", "group_chat", "project_thread"] },
+        "scopeId": { "type": "string", "minLength": 1 },
+        "nextRunAt": { "type": ["string", "null"] },
+        "lastRunAt": { "type": ["string", "null"] },
+        "lastAttemptAt": { "type": ["string", "null"] },
+        "lastSuccessAt": { "type": ["string", "null"] },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "automationRunSummary": {
+      "type": "object",
+      "required": ["id", "automationId", "scheduledFor", "status", "startedAt", "finishedAt", "error", "messageId", "conversationId"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "automationId": { "type": "string", "minLength": 1 },
+        "scheduledFor": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["running", "completed", "failed"] },
+        "startedAt": { "type": "string", "minLength": 1 },
+        "finishedAt": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] },
+        "messageId": { "type": ["string", "null"] },
+        "conversationId": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "createAutomationRequest": {
+      "type": "object",
+      "required": ["name", "kind", "prompt", "rrule", "timezone"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "kind": { "type": "string", "enum": ["continuation", "standalone"] },
+        "botId": { "type": ["string", "null"] },
+        "conversationId": { "type": ["string", "null"] },
+        "prompt": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "rrule": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "status": { "type": ["string", "null"], "enum": ["active", "paused", null] },
+        "notificationPolicy": { "type": ["string", "null"], "enum": ["all_runs", "failed_runs_only", null] },
+        "modelId": { "type": ["string", "null"] },
+        "reasoningEffort": { "type": ["string", "null"] },
+        "scopeType": { "type": ["string", "null"], "enum": ["bot", "group_chat", "project_thread", null] },
+        "scopeId": { "type": ["string", "null"], "minLength": 1 },
+        "clientRequestId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 }
+      },
+      "additionalProperties": false
+    },
+    "updateAutomationRequest": {
+      "type": "object",
+      "properties": {
+        "expectedRevision": { "type": ["integer", "null"], "minimum": 0 },
+        "name": { "type": ["string", "null"], "minLength": 1, "maxLength": 120 },
+        "kind": { "type": ["string", "null"], "enum": ["continuation", "standalone", null] },
+        "conversationId": { "type": ["string", "null"] },
+        "prompt": { "type": ["string", "null"], "minLength": 1, "maxLength": 8000 },
+        "rrule": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 },
+        "timezone": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
+        "status": { "type": ["string", "null"], "enum": ["active", "paused", null] },
+        "notificationPolicy": { "type": ["string", "null"], "enum": ["all_runs", "failed_runs_only", null] },
+        "modelId": { "type": ["string", "null"] },
+        "reasoningEffort": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "previewAutomationRequest": {
+      "type": "object",
+      "required": ["rrule", "timezone"],
+      "properties": {
+        "rrule": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 80 }
+      },
+      "additionalProperties": false
+    },
+    "previewAutomationResponse": {
+      "type": "object",
+      "required": ["nextRunAt", "timezone"],
+      "properties": {
+        "nextRunAt": { "type": ["string", "null"] },
+        "timezone": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "runAutomationRequest": {
+      "type": "object",
+      "properties": { "clientRequestId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 } },
+      "additionalProperties": false
+    },
     "groupModelSettings": {
       "type": "object",
       "required": [
@@ -581,10 +717,11 @@
     },
     "executionReadiness": {
       "type": "object",
-      "required": ["ready", "detail"],
+      "required": ["ready", "detail", "reason"],
       "properties": {
         "ready": { "type": "boolean" },
-        "detail": { "type": "string" }
+        "detail": { "type": "string" },
+        "reason": { "enum": ["ready", "runtime_unavailable", "storage_unavailable", "recovering", "backlog"] }
       },
       "additionalProperties": false
     },
@@ -1297,6 +1434,45 @@
       },
       "additionalProperties": false
     },
+    "projectSubagentSummary": {
+      "type": "object",
+      "required": ["parentConversationId", "threadId", "title", "agentNickname", "agentRole", "status", "isArchived", "canAcceptDirectInput"],
+      "properties": {
+        "parentConversationId": { "type": "string", "minLength": 1 },
+        "threadId": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "agentNickname": { "type": ["string", "null"] },
+        "agentRole": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "isArchived": { "type": "boolean" },
+        "canAcceptDirectInput": { "const": false }
+      },
+      "additionalProperties": false
+    },
+    "projectSubagentList": {
+      "type": "object",
+      "required": ["available", "detail", "subagents"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "detail": { "type": ["string", "null"] },
+        "subagents": { "type": "array", "items": { "$ref": "#/$defs/projectSubagentSummary" }, "maxItems": 100 }
+      },
+      "additionalProperties": false
+    },
+    "projectSubagentTranscriptQuery": {
+      "type": "object",
+      "properties": { "cursor": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+      "additionalProperties": false
+    },
+    "projectSubagentTranscript": {
+      "type": "object",
+      "required": ["subagent", "snapshot"],
+      "properties": {
+        "subagent": { "$ref": "#/$defs/projectSubagentSummary" },
+        "snapshot": { "$ref": "#/$defs/conversationSnapshot" }
+      },
+      "additionalProperties": false
+    },
     "conversationGoalResponse": {
       "type": "object",
       "required": ["goal"],
@@ -1856,6 +2032,26 @@
       },
       "additionalProperties": false
     },
+    "artifactAnnotation": {
+      "type": "object",
+      "description": "Upload as an immutable conversation attachment with MIME application/vnd.wonder.artifact-annotation+json, then select its file ID in attachmentIds. The source file is never modified.",
+      "required": ["version", "projectId", "conversationId", "rootId", "path", "sourceSha256", "anchor", "note"],
+      "properties": {
+        "version": { "const": 1 },
+        "projectId": { "type": "string", "minLength": 1 },
+        "conversationId": { "type": "string", "minLength": 1 },
+        "rootId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "sourceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "anchor": { "oneOf": [
+          { "type": "object", "required": ["kind", "startLine", "endLine"], "properties": { "kind": { "const": "textLines" }, "startLine": { "type": "integer", "minimum": 1 }, "endLine": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
+          { "type": "object", "required": ["kind", "x", "y", "width", "height"], "properties": { "kind": { "const": "imageRegion" }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 }, "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }, "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 } }, "additionalProperties": false },
+          { "type": "object", "required": ["kind", "page", "x", "y", "width", "height"], "properties": { "kind": { "const": "pdfRegion" }, "page": { "type": "integer", "minimum": 1 }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 }, "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }, "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 } }, "additionalProperties": false }
+        ] },
+        "note": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      },
+      "additionalProperties": false
+    },
     "conversationMessage": {
       "type": "object",
       "required": ["messageId", "clientMessageId", "body", "state", "createdAt", "bodySha256", "codexThreadId", "codexTurnId", "attachmentIds"],
@@ -2277,6 +2473,7 @@
         "family": { "$ref": "#/$defs/agentFamily" },
         "model": { "type": "string", "minLength": 1 },
         "effort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] },
         "accessMode": { "$ref": "#/$defs/projectAccessMode" },
         "claudeApproval": { "$ref": "#/$defs/claudeApproval" },
         "planMode": { "type": "boolean" },
@@ -2307,6 +2504,7 @@
         "family",
         "model",
         "effort",
+        "serviceTier",
         "accessMode",
         "claudeApproval",
         "planMode",
@@ -2326,6 +2524,7 @@
         "family": { "$ref": "#/$defs/agentFamily" },
         "model": { "type": ["string", "null"] },
         "effort": { "type": ["string", "null"] },
+        "serviceTier": { "type": ["string", "null"] },
         "accessMode": { "$ref": "#/$defs/projectAccessMode" },
         "claudeApproval": { "$ref": "#/$defs/claudeApproval" },
         "planMode": { "type": "boolean" },
@@ -2349,6 +2548,7 @@
         "hasUnread": { "type": "boolean" },
         "model": { "type": "string", "minLength": 1 },
         "effort": { "type": ["string", "null"], "minLength": 1 },
+        "serviceTier": { "type": ["string", "null"], "minLength": 1 },
         "accessMode": { "$ref": "#/$defs/projectAccessMode" },
         "claudeApproval": { "$ref": "#/$defs/claudeApproval" },
         "planMode": { "type": "boolean" }

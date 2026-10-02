@@ -28,21 +28,6 @@ pub(super) async fn list(
     if query.cursor.as_ref().is_some_and(|c| c.len() > 4096) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let thread = if let Some(conversation) = &query.conversation_id {
-        // Never silently substitute the host scope for an unavailable Bot scope.
-        match state.store.conversation_thread(conversation).await {
-            Ok(Some(thread)) => Some(thread),
-            _ => {
-                return (
-                    StatusCode::CONFLICT,
-                    "Send this Bot a message before checking its app access.",
-                )
-                    .into_response()
-            }
-        }
-    } else {
-        None
-    };
     let family = if let Some(conversation) = &query.conversation_id {
         match claude::conversation_family(&state, conversation).await {
             Ok(family)
@@ -63,33 +48,76 @@ pub(super) async fn list(
     } else {
         query.agent_family.unwrap_or_default()
     };
-    let client = match claude::client(&state, family) {
-        Ok(client) => client,
-        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    let project_conversation = if let Some(conversation) = &query.conversation_id {
+        match state.store.project_conversation(conversation).await {
+            Ok(project) => project,
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    } else {
+        None
     };
-    let rpc = client.lock().await.rpc();
+    let thread = if let Some(project) = &project_conversation {
+        match project_thread(&state, project).await {
+            Ok(thread) => Some(thread),
+            Err(response) => return response,
+        }
+    } else if let Some(conversation) = &query.conversation_id {
+        // Preserve Bot and Group scope rather than substituting host scope.
+        match state.store.conversation_thread(conversation).await {
+            Ok(Some(thread)) => Some(thread),
+            _ => {
+                return (
+                    StatusCode::CONFLICT,
+                    "Start this conversation before checking its app access.",
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        None
+    };
+    let rpc = match (
+        project_conversation.is_some(),
+        query.conversation_id.is_some(),
+        family,
+    ) {
+        (true, _, _) | (false, false, AgentFamily::Codex) => {
+            match projects::rpc_for(&state, family).await {
+                Ok(rpc) => rpc,
+                Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+            }
+        }
+        _ => match claude::client(&state, family) {
+            Ok(client) => client.lock().await.rpc(),
+            Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+        },
+    };
     let result = rpc
         .request(
             "app/installed",
             json!({"threadId":thread,"forceRefresh":query.refresh}),
         )
         .await;
+    if result
+        .as_ref()
+        .ok()
+        .and_then(|response| response.error.as_ref())
+        .is_some_and(|error| error.code == -32601)
+    {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "This provider does not offer Connected Apps in Wonder yet.",
+        )
+            .into_response();
+    }
     let installed = match result {
         Ok(response) if response.error.is_none() => response.result,
         _ => None,
     };
     let Some(mut runtime) = installed.and_then(|v| v["apps"].as_array().cloned()) else {
         return (
-            if query.conversation_id.is_some() {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::SERVICE_UNAVAILABLE
-            },
-            if query.conversation_id.is_some() {
-                "This Bot's app access is not loaded. Send it a message, then refresh."
-            } else {
-                "App access could not be verified. Check your agent’s sign-in on your Mac, then refresh."
-            },
+            StatusCode::SERVICE_UNAVAILABLE,
+            "App access could not be verified. Check your agent’s sign-in on your Mac, then refresh.",
         )
             .into_response();
     };
@@ -141,6 +169,55 @@ pub(super) async fn list(
         "apps":apps,"nextCursor":next_cursor,"checkedAtMs":now_ms(),
         "warning":if metadata.is_none(){Some("Some app details could not be loaded. Access status is current.")}else{None}
     }))).into_response()
+}
+
+async fn project_thread(
+    state: &AppState,
+    project: &wonder_store::StoredProjectConversation,
+) -> Result<String, Response> {
+    let expected_store = match project.family {
+        AgentFamily::Codex => &state.projects.codex_store,
+        AgentFamily::Claude => &state.projects.claude_store,
+    };
+    if project.provider_store != *expected_store {
+        return Err((
+            StatusCode::CONFLICT,
+            "This Project belongs to another provider history on your Mac.",
+        )
+            .into_response());
+    }
+    let Some(native_session) = project.native_session_id.as_deref() else {
+        return Err((
+            StatusCode::CONFLICT,
+            "Start this Project chat before checking its app access.",
+        )
+            .into_response());
+    };
+    // Claude's native session ID differs from its bridge thread ID. The
+    // durable binding is the exact transport identity for both families.
+    let binding = state.store.runtime_binding(&project.conversation_id).await;
+    let Ok(Some(binding)) = binding else {
+        return Err((
+            StatusCode::CONFLICT,
+            "This Project's app access changed. Reopen the chat and try again.",
+        )
+            .into_response());
+    };
+    let matches_native = match project.family {
+        AgentFamily::Codex => binding.thread_id == native_session,
+        AgentFamily::Claude => binding.session_id.as_deref() == Some(native_session),
+    };
+    if binding.family != project.family
+        || binding.execution_scope != wonder_store::EXECUTION_SCOPE_PROJECTS
+        || !matches_native
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "This Project's app access changed. Reopen the chat and try again.",
+        )
+            .into_response());
+    }
+    Ok(binding.thread_id)
 }
 
 fn page_offset(cursor: Option<&str>, fingerprint: &str, length: usize) -> Option<usize> {
@@ -210,6 +287,286 @@ fn safe_url(value: &Value, setup: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    use wonder_store::{ProjectConversationInsert, ProjectRootInput};
+
+    #[tokio::test]
+    async fn account_and_app_reads_use_owner_runtime_and_exact_project_thread() {
+        let (dir, mut state) = crate::ingestion::tests::fixture().await;
+        fs::write(
+            dir.path().join("usage-fixture.json"),
+            r#"{"rateLimits":{"primary":{"usedPercent":20,"windowDurationMins":300}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("apps-fixture.json"),
+            r#"{"apps":[{"id":"app-fixture","enabled":true,"callable":true}]}"#,
+        )
+        .unwrap();
+        let original = fs::read_to_string(dir.path().join("codex")).unwrap();
+        let owner_bin = dir.path().join("codex-owner");
+        fs::write(
+            &owner_bin,
+            original.replacen(
+                "#!/bin/sh\n",
+                "#!/bin/sh\nexport WONDER_FIXTURE_SCOPE=owner\n",
+                1,
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&owner_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        state.projects = crate::projects::ProjectRuntime::configured(
+            owner_bin,
+            "test".into(),
+            &dir.path().join("owner-home"),
+            &dir.path().join("claude-home"),
+            crate::ingestion::notification_sink(state.store.clone()),
+        );
+        let source = dir.path().join("project-source");
+        fs::create_dir(&source).unwrap();
+        let root = source.to_string_lossy().into_owned();
+        state
+            .store
+            .create_project(
+                "project",
+                "request",
+                "hash",
+                "Project",
+                &[ProjectRootInput {
+                    path: root.clone(),
+                    canonical_path: root.clone(),
+                }],
+                0,
+                "now",
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .create_project_conversation(ProjectConversationInsert {
+                conversation_id: "project-chat",
+                project_id: "project",
+                family: AgentFamily::Codex,
+                provider_store: &state.projects.codex_store,
+                native_session_id: Some("project-thread"),
+                cwd: &root,
+                roots_revision: 1,
+                title: "Project chat",
+                model: None,
+                effort: None,
+                service_tier: None,
+                access_mode: "workspace",
+                claude_approval: "ask",
+                plan_mode: false,
+                creation_request_id: None,
+                now: "now",
+            })
+            .await
+            .unwrap();
+        state
+            .store
+            .bind_project_runtime(
+                "project-chat",
+                AgentFamily::Codex,
+                &state.projects.codex_store,
+                "project-thread",
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+
+        let usage = crate::account_usage::read(
+            State(state.clone()),
+            Extension(OwnerAuthority),
+            Query(crate::account_usage::UsageQuery::default()),
+        )
+        .await;
+        assert_eq!(usage.status(), StatusCode::OK);
+        let body = to_bytes(usage.into_body(), 100_000).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["windows"][0]["remainingPercent"], 80.0);
+
+        for (conversation, expected) in [(None, None), (Some("project-chat"), Some("project-chat"))]
+        {
+            let response = list(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Query(AppQuery {
+                    cursor: None,
+                    agent_family: Some(AgentFamily::Codex),
+                    conversation_id: conversation.map(str::to_owned),
+                    refresh: false,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 100_000).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["conversationId"].as_str(), expected);
+            assert_eq!(value["apps"][0]["name"], "Fixture app");
+        }
+        let bot_conversation = state
+            .store
+            .ensure_bot_workspace("bot", "Bot", "now")
+            .await
+            .unwrap();
+        state
+            .store
+            .bind_runtime(
+                &bot_conversation,
+                AgentFamily::Codex,
+                "bot-thread",
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+        let response = list(
+            State(state.clone()),
+            Extension(OwnerAuthority),
+            Query(AppQuery {
+                cursor: None,
+                agent_family: Some(AgentFamily::Codex),
+                conversation_id: Some(bot_conversation),
+                refresh: false,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let log = fs::read_to_string(dir.path().join("routing-requests-jsonl")).unwrap();
+        let requests = log
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let installed = requests
+            .iter()
+            .filter(|r| r["method"] == "app/installed")
+            .collect::<Vec<_>>();
+        assert_eq!(installed.len(), 3);
+        assert_eq!(installed[0]["scope"], "owner");
+        assert!(installed[0]["params"]["threadId"].is_null());
+        assert_eq!(installed[1]["scope"], "owner");
+        assert_eq!(installed[1]["params"]["threadId"], "project-thread");
+        assert_eq!(installed[2]["scope"], "bot");
+        assert_eq!(installed[2]["params"]["threadId"], "bot-thread");
+        assert!(requests
+            .iter()
+            .any(|r| r["scope"] == "owner" && r["method"] == "account/rateLimits/read"));
+
+        // A provider read failure is retryable; 409 is reserved for a stale
+        // conversation binding or changed pagination snapshot.
+        fs::write(
+            dir.path().join("apps-fixture.json"),
+            r#"{"unexpected":true}"#,
+        )
+        .unwrap();
+        let response = list(
+            State(state.clone()),
+            Extension(OwnerAuthority),
+            Query(AppQuery {
+                cursor: None,
+                agent_family: Some(AgentFamily::Codex),
+                conversation_id: Some("project-chat".into()),
+                refresh: true,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        fs::write(dir.path().join("unsupported-usage"), "").unwrap();
+        state.projects.shutdown().await;
+        let response = crate::account_usage::read(
+            State(state),
+            Extension(OwnerAuthority),
+            Query(crate::account_usage::UsageQuery::default()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn claude_project_app_scope_uses_bound_thread_not_native_session() {
+        let (dir, mut state) = crate::ingestion::tests::fixture().await;
+        state.projects = crate::projects::ProjectRuntime::configured(
+            dir.path().join("codex"),
+            "test".into(),
+            &dir.path().join("codex-home"),
+            &dir.path().join("claude-home"),
+            crate::ingestion::notification_sink(state.store.clone()),
+        );
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let root = source.to_string_lossy().into_owned();
+        state
+            .store
+            .create_project(
+                "project",
+                "request",
+                "hash",
+                "Project",
+                &[ProjectRootInput {
+                    path: root.clone(),
+                    canonical_path: root.clone(),
+                }],
+                0,
+                "now",
+            )
+            .await
+            .unwrap();
+        state
+            .store
+            .create_project_conversation(ProjectConversationInsert {
+                conversation_id: "claude-chat",
+                project_id: "project",
+                family: AgentFamily::Claude,
+                provider_store: &state.projects.claude_store,
+                native_session_id: Some("session-claude"),
+                cwd: &root,
+                roots_revision: 1,
+                title: "Claude chat",
+                model: None,
+                effort: None,
+                service_tier: None,
+                access_mode: "workspace",
+                claude_approval: "ask",
+                plan_mode: false,
+                creation_request_id: None,
+                now: "now",
+            })
+            .await
+            .unwrap();
+        state
+            .store
+            .bind_project_runtime(
+                "claude-chat",
+                AgentFamily::Claude,
+                &state.projects.claude_store,
+                "claude-project-thread",
+                Some("session-claude"),
+                "now",
+            )
+            .await
+            .unwrap();
+        let project = state
+            .store
+            .project_conversation("claude-chat")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            project_thread(&state, &project).await.unwrap(),
+            "claude-project-thread"
+        );
+        let mut stale = project.clone();
+        stale.native_session_id = Some("another-session".into());
+        assert_eq!(
+            project_thread(&state, &stale).await.unwrap_err().status(),
+            StatusCode::CONFLICT
+        );
+    }
     #[test]
     fn pagination_rejects_a_changed_runtime_snapshot() {
         assert_eq!(page_offset(None, "current", 120), Some(0));

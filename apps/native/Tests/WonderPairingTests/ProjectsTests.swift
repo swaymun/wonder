@@ -1,6 +1,32 @@
 import XCTest
 @testable import WonderPairing
 
+private final class ProjectSubagentResponseProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "project-agents.invalid"
+    }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let roster = #"{"available":true,"detail":null,"subagents":[{"parentConversationId":"project parent","threadId":"child/thread","title":"Scout","agentNickname":"Scout","agentRole":"research","status":"active","isArchived":false,"canAcceptDirectInput":false}]}"#
+        let transcript = #"{"subagent":{"parentConversationId":"project parent","threadId":"child/thread","title":"Scout","agentNickname":"Scout","agentRole":"research","status":"completed","isArchived":false,"canAcceptDirectInput":false},"snapshot":{"conversationId":"project-agent:project parent:child/thread","hostEpoch":"epoch","lastSequence":0,"messages":[],"assistantMessages":[],"thread":{"threadId":"child/thread","turns":[{"id":"turn","status":"completed","startedAt":null,"completedAt":null,"items":[{"id":"answer","type":"agentMessage","state":"completed","text":"Found the issue","createdAt":"2026-10-02T00:00:00Z","payload":{}}]}],"nextCursor":null,"hydrated":false},"events":[]}}"#
+        let value: String?
+        switch request.url?.absoluteString {
+        case "https://project-agents.invalid/api/v1/project-conversations/project%20parent/subagents":
+            value = roster
+        case "https://project-agents.invalid/api/v1/project-conversations/project%20parent/subagents/child%2Fthread/transcript?cursor=older%2Bpage":
+            value = transcript
+        default:
+            value = nil
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: value == nil ? 404 : 200,
+            httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if let value { client?.urlProtocol(self, didLoad: Data(value.utf8)) }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 final class ProjectsTests: XCTestCase {
     private func project(_ id: String, pinned: Bool = false, included: Bool = true, family: AgentFamily? = nil) -> ProjectSummary {
         ProjectSummary(id: id, name: id.capitalized, isIncluded: included, isPinned: pinned,
@@ -20,14 +46,47 @@ final class ProjectsTests: XCTestCase {
         XCTAssertNil(projects.archiveVersion, "Older hosts do not offer Archive")
         let page = try JSONDecoder().decode(ProjectThreadsPage.self, from: Data(#"{"threads":[{"reference":"claude:a0b0","conversationId":"f861","title":"Wonder-p0","family":"claude","updatedAt":1790735086,"isPinned":false,"hasUnread":true,"isWorking":false}],"nextCursor":null,"partial":[]}"#.utf8))
         XCTAssertEqual(page.threads.first?.family, .claude)
-        let detail = try JSONDecoder().decode(ProjectConversationDetail.self, from: Data(#"{"conversationId":"c","projectId":"p","projectName":"Codex P0","title":"t","family":"codex","model":"gpt-5.6-luna","effort":"low","accessMode":"read_only","workingFolder":"/w","workingFolderName":"w","isPinned":false,"hasUnread":false,"hasNativeSession":true,"folderInProject":true,"notice":null}"#.utf8))
+        let detail = try JSONDecoder().decode(ProjectConversationDetail.self, from: Data(#"{"conversationId":"c","projectId":"p","projectName":"Codex P0","title":"t","family":"codex","model":"gpt-5.6-luna","effort":"low","serviceTier":"fast","accessMode":"read_only","workingFolder":"/w","workingFolderName":"w","isPinned":false,"hasUnread":false,"hasNativeSession":true,"folderInProject":true,"notice":null}"#.utf8))
         XCTAssertEqual(detail.accessMode, .readOnly)
+        XCTAssertEqual(detail.serviceTier, "fast")
         XCTAssertNil(detail.isArchived)
         let encoded = try JSONEncoder().encode(detail)
         var archived = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         archived["isArchived"] = true
         XCTAssertEqual(try JSONDecoder().decode(ProjectConversationDetail.self,
             from: JSONSerialization.data(withJSONObject: archived)).isArchived, true)
+    }
+
+    // Contract: a Project helper stays bound to its parent and exact provider
+    // thread; the read-only transcript route cannot be confused with Bot chat.
+    func testProjectSubagentWireAndRequestPaths() async throws {
+        let roster = try JSONDecoder().decode(ProjectSubagentList.self, from: Data(#"{"available":true,"detail":null,"subagents":[{"parentConversationId":"project parent","threadId":"child/thread","title":"Scout","agentNickname":"Scout","agentRole":"research","status":"active","isArchived":false,"canAcceptDirectInput":false}]}"#.utf8))
+        let child = try XCTUnwrap(roster.subagents.first)
+        XCTAssertEqual(child.statusLabel, "Running")
+        XCTAssertFalse(child.canAcceptDirectInput)
+        XCTAssertEqual(try ProjectSubagentPaths.roster(parentConversationId: child.parentConversationId),
+                       "/api/v1/project-conversations/project%20parent/subagents")
+        XCTAssertEqual(try ProjectSubagentPaths.transcript(parentConversationId: child.parentConversationId,
+            threadId: child.threadId, cursor: "older+page"),
+            "/api/v1/project-conversations/project%20parent/subagents/child%2Fthread/transcript?cursor=older%2Bpage")
+        XCTAssertThrowsError(try ProjectSubagentPaths.transcript(parentConversationId: "", threadId: child.threadId))
+
+        let read = try JSONDecoder().decode(ProjectSubagentTranscript.self, from: Data(#"{"subagent":{"parentConversationId":"project parent","threadId":"child/thread","title":"Scout","agentNickname":"Scout","agentRole":"research","status":"completed","isArchived":false,"canAcceptDirectInput":false},"snapshot":{"conversationId":"project-agent:project parent:child/thread","hostEpoch":"epoch","lastSequence":0,"messages":[],"assistantMessages":[],"thread":{"threadId":"child/thread","turns":[{"id":"turn","status":"completed","startedAt":null,"completedAt":null,"items":[{"id":"answer","type":"agentMessage","state":"completed","text":"Found the issue","createdAt":"2026-10-02T00:00:00Z","payload":{}}]}],"nextCursor":null,"hydrated":false},"events":[]}}"#.utf8))
+        XCTAssertEqual(read.subagent.parentConversationId, child.parentConversationId)
+        XCTAssertEqual(read.snapshot.rows(author: read.subagent.title).first?.text, "Found the issue")
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ProjectSubagentResponseProtocol.self]
+        let api = PairingAPI(configuration: configuration)
+        let fetchedRoster: ProjectSubagentList = try await api.request(
+            ProjectSubagentPaths.roster(parentConversationId: child.parentConversationId),
+            origin: "https://project-agents.invalid")
+        XCTAssertEqual(fetchedRoster.subagents.first?.threadId, child.threadId)
+        let fetchedRead: ProjectSubagentTranscript = try await api.request(
+            ProjectSubagentPaths.transcript(parentConversationId: child.parentConversationId,
+                                            threadId: child.threadId, cursor: "older+page"),
+            origin: "https://project-agents.invalid")
+        XCTAssertEqual(fetchedRead.snapshot.rows(author: child.title).first?.text, "Found the issue")
     }
 
     // Contract: changing Macs never keeps a destination, provider or settings
@@ -249,6 +308,29 @@ final class ProjectComposerContractTests: XCTestCase {
         switched.chooseFamily(.claude)
         switched.ensureModel(among: visible(.claude, all))
         XCTAssertEqual([switched.model, switched.effort], ["claude:sonnet", "high"])
+    }
+
+    // A saved draft keeps an advertised speed, clears it when the selected
+    // model loses that tier, and never rewrites a submitted creation.
+    func testProjectDraftSpeedFollowsRuntimeModelChoices() throws {
+        let options = try models(#"""
+        [{"id":"gpt-a","displayName":"A","hidden":false,"reasoningEfforts":[],"agentFamily":"codex",
+          "serviceTiers":[{"id":"default","label":"Standard"},{"id":"fast","label":"Fast"}]},
+         {"id":"gpt-b","displayName":"B","hidden":false,"reasoningEfforts":[],"agentFamily":"codex",
+          "serviceTiers":[{"id":"default","label":"Standard"}]}]
+        """#)
+        var draft = NewChatDraft(family: .codex, model: "gpt-a")
+        draft.serviceTier = "fast"
+        draft.ensureModel(among: options)
+        XCTAssertEqual(draft.serviceTier, "fast")
+        draft.chooseModel(options[1])
+        XCTAssertNil(draft.serviceTier)
+        draft.model = "gpt-a"; draft.serviceTier = "fast"
+        draft.ensureModel(among: [options[1]])
+        XCTAssertNil(draft.serviceTier)
+        draft.serviceTier = "default"; draft.freeze()
+        draft.ensureModel(among: options)
+        XCTAssertEqual(draft.serviceTier, "default")
     }
 
     // Contract: each provider offers its own access rows, older hosts keep the

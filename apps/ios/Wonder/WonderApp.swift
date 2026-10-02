@@ -18,14 +18,17 @@ import VisionKit
 private struct WonderRoot: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var preview: ConnectionModel
+    @AppStorage(ChatBubblePalette.storageKey) private var bubblePaletteRaw = ChatBubblePalette.standard.rawValue
 
     var body: some View {
         content.environmentObject(library)
+            .environment(\.chatBubblePalette, ChatBubblePalette(rawValue: bubblePaletteRaw) ?? .standard)
     }
 
     @ViewBuilder private var content: some View {
         #if WONDER_DIAGNOSTICS
         if ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps") { DiagnosticConnectedAppsFixtureView() }
+        else if ProcessInfo.processInfo.arguments.contains("-diagnostics-automations-fixture") { DiagnosticAutomationsFixtureView() }
         else if DiagnosticSubagentFixture.chatLayoutFixture { DiagnosticChatLayoutFixtureView() }
         else if ProcessInfo.processInfo.arguments.contains("-diagnostics-subagent-fixture") { DiagnosticSubagentFixtureView() }
         else if ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-session-fixture") { ComputerSessionDiagnosticFixtureView() }
@@ -66,7 +69,9 @@ struct ConnectionsView: View {
     @ObservedObject var library: ConnectionLibrary
     var isSheet = false
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(ProjectWidgetSnapshot.showNamesPreferenceKey) private var showNamesOnWidgets = false
     @State private var adding = false
+    @State private var widgetFailure: String?
     var body: some View {
         if isSheet {
             NavigationStack {
@@ -98,12 +103,67 @@ struct ConnectionsView: View {
                 }
                 Button("Add computer", systemImage: "plus") { adding = true }.disabled(!library.loaded).accessibilityIdentifier("settings-add-computer")
             }
+            Section("Appearance") {
+                NavigationLink("Chat bubbles") { ChatAppearanceView() }
+                    .accessibilityIdentifier("settings-chat-bubbles")
+            }
+            if ProjectWidgetIdentity(bundleIdentifier: Bundle.main.bundleIdentifier) != nil {
+                Section {
+                    Toggle("Show names on widgets", isOn: Binding(
+                        get: { showNamesOnWidgets },
+                        set: { value in
+                            let previous = showNamesOnWidgets
+                            showNamesOnWidgets = value
+                            if !library.publishWidgetSnapshotNow() {
+                                showNamesOnWidgets = previous
+                                widgetFailure = "Widget settings could not be saved. Try again."
+                            } else { widgetFailure = nil }
+                        }
+                    ))
+                    .accessibilityIdentifier("widget-show-names")
+                    if let widgetFailure { Text(widgetFailure).foregroundStyle(.red) }
+                } header: {
+                    Text("Widgets")
+                } footer: {
+                    Text("Names may appear on your Home Screen when enabled. Otherwise widgets use generic Project and chat labels.")
+                }
+            }
             #if WONDER_DIAGNOSTICS
             Section { NavigationLink("Diagnostics") { DiagnosticsView(library: library) }.accessibilityIdentifier("diagnostics-settings") }
             #endif
         }
         .navigationTitle("Settings")
         .sheet(isPresented: $adding) { PairComputerView(model: library.pairingModel()) }
+    }
+}
+
+private struct ChatAppearanceView: View {
+    @AppStorage(ChatBubblePalette.storageKey) private var paletteRaw = ChatBubblePalette.standard.rawValue
+    var body: some View {
+        Form {
+            Section {
+                Picker("Bubble palette", selection: $paletteRaw) {
+                    ForEach(ChatBubblePalette.allCases, id: \.rawValue) { palette in
+                        Text(palette.title).tag(palette.rawValue)
+                    }
+                }
+                .accessibilityIdentifier("chat-bubble-palette")
+            }
+            Section("Preview") {
+                VStack(spacing: 12) {
+                    Text("Agent response")
+                        .modifier(ChatBubbleSurface())
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Your message")
+                        .modifier(ChatBubbleSurface(isUser: true))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .padding(.vertical, 8)
+                .accessibilityElement(children: .contain)
+            }
+        }
+        .navigationTitle("Chat bubbles")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -114,8 +174,6 @@ struct ConnectionDetail: View {
     @Environment(\.dismiss) private var dismiss
     @State private var removing = false
     @State private var pairing = false
-    @State private var codexUsageLoading = false
-    @State private var codexUsageFailure: String?
     var body: some View {
         Form {
             Section {
@@ -163,40 +221,12 @@ struct ConnectionDetail: View {
             Section {
                 NavigationLink("Projects") { ManageProjectsView(model: model, library: model.projects, embedded: true) }
                     .accessibilityIdentifier("connection-projects")
+                NavigationLink("Automations") { AutomationsView(model: model) }
+                    .accessibilityIdentifier("connection-automations")
                 NavigationLink("Connected apps") { ConnectedAppsView(model: model) }
                 NavigationLink("Voice & Dictation") { VoiceSettingsView(model: model, controller: model.dictation) }
             }
-            Section {
-                let windows = model.codexUsageCache[model.assignmentScope]?.response.windows ?? []
-                if !windows.isEmpty {
-                    ForEach(windows) { window in
-                        HStack(spacing: 12) {
-                            Text(window.label)
-                            Spacer(minLength: 12)
-                            Text("\(window.roundedRemainingPercent)% left")
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityIdentifier("codex-usage-window:\(window.id)")
-                        .accessibilityLabel(window.label)
-                        .accessibilityValue("\(window.roundedRemainingPercent)% left")
-                    }
-                } else if codexUsageLoading {
-                    ProgressView("Loading usage…")
-                        .accessibilityIdentifier("codex-usage-loading")
-                } else if let codexUsageFailure {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(codexUsageFailure).foregroundStyle(.secondary)
-                        Button("Try again") { Task { await loadCodexUsage(force: true) } }
-                            .accessibilityIdentifier("codex-usage-retry")
-                    }
-                } else {
-                    Text("Usage is unavailable right now.").foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("Codex usage").accessibilityIdentifier("codex-usage-section")
-            }
+            CodexUsageSection(model: model)
             ClaudeUsageSection(model: model)
             Section {
                 Button("Remove connection", role: .destructive) { removing = true }.disabled(model.busy)
@@ -206,11 +236,6 @@ struct ConnectionDetail: View {
         .navigationTitle(model.macName).navigationBarTitleDisplayMode(.inline)
         .task {
             await model.check()
-            await loadCodexUsage()
-        }
-        .onChange(of: model.assignmentScope) { _, _ in codexUsageFailure = nil }
-        .onChange(of: model.accessEnded) { _, ended in
-            if ended { codexUsageFailure = "Usage is unavailable. Wonder on that Mac may need updating." }
         }
         .onChange(of: model.connection == nil) { _, removed in if removed { dismiss() } }
         .sheet(isPresented: $pairing, onDismiss: {
@@ -226,22 +251,88 @@ struct ConnectionDetail: View {
         }
     }
 
-    @MainActor private func loadCodexUsage(force: Bool = false) async {
+}
+
+struct ProviderUsageView: View {
+    @ObservedObject var model: ConnectionModel
+    let family: AgentFamily
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            Form {
+                if family == .codex { CodexUsageSection(model: model) }
+                else { ClaudeUsageSection(model: model) }
+            }
+            .navigationTitle("\(family.title) usage")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("Done") { dismiss() } }
+        }
+    }
+}
+
+private struct CodexUsageSection: View {
+    @ObservedObject var model: ConnectionModel
+    @State private var loading = false
+    @State private var failure: String?
+    var body: some View {
+        Section {
+            let windows = model.codexUsageCache[model.assignmentScope]?.response.windows ?? []
+            if let failure, !loading {
+                Text(failure).foregroundStyle(.secondary)
+                if !windows.isEmpty { Text("Previous usage values may be out of date.").foregroundStyle(.secondary) }
+            }
+            if !windows.isEmpty {
+                ForEach(windows) { window in
+                    HStack(spacing: 12) {
+                        Text(window.label)
+                        Spacer(minLength: 12)
+                        Text("\(window.roundedRemainingPercent)% left")
+                            .foregroundStyle(.secondary).monospacedDigit()
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityIdentifier("codex-usage-window:\(window.id)")
+                    .accessibilityLabel(window.label)
+                    .accessibilityValue("\(window.roundedRemainingPercent)% left")
+                }
+            }
+            if loading {
+                ProgressView("Loading usage…").accessibilityIdentifier("codex-usage-loading")
+            } else if failure == nil && windows.isEmpty && model.codexUsageCache[model.assignmentScope] != nil {
+                Text("Codex returned no usage windows. Try refreshing after checking sign-in on your Mac.").foregroundStyle(.secondary)
+            } else if failure == nil && windows.isEmpty {
+                Text("Usage is unavailable right now.").foregroundStyle(.secondary)
+            }
+            Button(failure == nil ? "Refresh Codex usage" : "Try again") {
+                Task { await load(force: true) }
+            }
+            .disabled(loading)
+            .accessibilityIdentifier(failure == nil ? "codex-usage-refresh" : "codex-usage-retry")
+        } header: {
+            Text("Codex usage").accessibilityIdentifier("codex-usage-section")
+        }
+        .task(id: model.assignmentScope) { await load(force: false) }
+        .onChange(of: model.accessEnded) { _, ended in
+            if ended { failure = "Access ended. Reconnect this Mac to check usage." }
+        }
+    }
+
+    @MainActor private func load(force: Bool = false) async {
         let scope = model.assignmentScope
-        codexUsageFailure = nil
-        codexUsageLoading = model.codexUsageCache[scope] == nil
-        defer { codexUsageLoading = false }
+        failure = nil
+        loading = true
+        defer { if scope == model.assignmentScope { loading = false } }
         do {
             try await model.loadCodexUsage(force: force)
         } catch {
-            guard scope == model.assignmentScope, !model.accessEnded,
-                  model.codexUsageCache[scope] == nil else { return }
+            guard scope == model.assignmentScope, !model.accessEnded else { return }
             if case PairingFailure.response(404) = error {
-                codexUsageFailure = "Usage is unavailable. Wonder on that Mac may need updating."
+                failure = "Update Wonder on this Mac to check Codex usage."
+            } else if case PairingFailure.response(501) = error {
+                failure = "This Codex version doesn't provide usage details in Wonder."
             } else if case PairingFailure.response(503) = error {
-                codexUsageFailure = "Usage is unavailable. Wonder on that Mac may need updating."
+                failure = "Codex usage couldn't be verified on this Mac. Check Codex sign-in, then try again."
             } else {
-                codexUsageFailure = "Usage couldn’t be loaded. Try again."
+                failure = "Usage couldn’t be loaded. Try again."
             }
         }
     }
@@ -432,7 +523,14 @@ struct ConnectedAppsView: View {
                     ForEach(AgentFamily.allCases) { family in Text(family.title).tag(family) }
                 }.pickerStyle(.segmented)
             }
-            if let failure { FailureDetails(message: failure) }
+            if let failure {
+                Section {
+                    Text(failure).foregroundStyle(.secondary)
+                    Button("Try again") { Task { await load(refresh: true) } }
+                        .disabled(loading)
+                        .accessibilityIdentifier("connected-apps-retry")
+                }
+            }
             if let warning { Text(warning).foregroundStyle(.secondary) }
             Section {
                 ForEach(apps) { app in
@@ -516,7 +614,11 @@ struct ConnectedAppsView: View {
         } catch {
             guard savedScope == scope, !model.accessEnded else { return }
             if conversationId != nil, case PairingFailure.response(409) = error {
-                failure = "Send this Bot a message, then check its app access again."
+                failure = "Start this conversation or reopen it, then check its app access again."
+            } else if case PairingFailure.response(501) = error {
+                failure = "This provider doesn't offer Connected Apps in Wonder yet."
+            } else if case PairingFailure.response(404) = error {
+                failure = "Update Wonder on this Mac to check Connected Apps."
             } else {
                 failure = "Apps could not be verified. Check Wonder on your computer, then refresh."
             }

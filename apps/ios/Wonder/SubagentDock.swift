@@ -88,6 +88,218 @@ struct SubagentDock: View {
     }
 }
 
+/// Project helpers are provider threads, not Wonder conversations. Keep their
+/// roster and history read-only under the parent Project thread.
+struct ProjectSubagentDock: View {
+    let agents: [ProjectSubagentSummary]
+    let detail: String?
+    @Binding var isPresented: Bool
+    let open: (ProjectSubagentSummary) -> Void
+
+    var body: some View {
+        if !agents.isEmpty {
+            Button { isPresented.toggle() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.2")
+                    Text(agents.count.formatted()).monospacedDigit()
+                }
+                .modifier(ComposerStatusPill())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("project-subagent-status-pill")
+            .accessibilityLabel("\(agents.count) Project \(agents.count == 1 ? "agent task" : "agent tasks")")
+            .accessibilityValue(isPresented ? "Expanded" : "Collapsed")
+            .accessibilityHint("Show agent tasks in this Project thread")
+            .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        Text("Agent tasks").font(.headline).accessibilityAddTraits(.isHeader)
+                        ForEach(agents) { agent in
+                            rosterButton(agent)
+                        }
+                        if let detail {
+                            Text(detail).font(.caption).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("project-subagent-roster-detail")
+                        }
+                    }
+                    .padding()
+                }
+                .frame(idealWidth: 320, maxWidth: 360, idealHeight: 280, maxHeight: 360)
+                .presentationCompactAdaptation(.popover)
+            }
+        }
+    }
+
+    private func rosterButton(_ agent: ProjectSubagentSummary) -> some View {
+        Button { open(agent) } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "person.crop.circle").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(agent.title).foregroundStyle(.primary)
+                    Text(agent.statusLabel).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(minHeight: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("project-subagent-roster:" + agent.threadId)
+        .accessibilityLabel(agent.title + ", " + agent.statusLabel)
+        .accessibilityHint("Open read-only agent task")
+    }
+}
+
+struct ProjectSubagentTranscriptView: View {
+    @ObservedObject var model: ConnectionModel
+    let parent: ChatSummary
+    let child: ProjectSubagentSummary
+    @Environment(\.dismiss) private var dismiss
+    @State private var snapshot: ConversationSnapshot?
+    @State private var entries: [ChatFeedEntry] = []
+    @State private var turns: [String: ReadTurn] = [:]
+    @State private var lastActivityEntries: Set<String> = []
+    @State private var expanded: Set<String> = []
+    @State private var error: String?
+    @State private var loading = true
+    @State private var loadingOlder = false
+    @State private var olderTask: Task<Void, Never>?
+    @State private var loadToken = UUID()
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    if let cursor = snapshot?.thread.nextCursor {
+                        Button {
+                            olderTask?.cancel()
+                            olderTask = Task { await loadOlder(cursor: cursor) }
+                        } label: {
+                            if loadingOlder { ProgressView() }
+                            else { Text("Load older activity") }
+                        }
+                        .disabled(loadingOlder)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .accessibilityIdentifier("project-subagent-load-older")
+                    }
+                    ForEach(entries) { entry in
+                        transcriptEntry(entry)
+                    }
+                    if !loading, entries.isEmpty, error == nil {
+                        ContentUnavailableView("No activity yet", systemImage: "text.bubble",
+                            description: Text("This agent task has no saved messages."))
+                    }
+                    if loading { ProgressView("Loading agent task…").frame(maxWidth: .infinity) }
+                    if let error {
+                        VStack(spacing: 8) {
+                            Text(error).font(.footnote).foregroundStyle(.secondary)
+                            Button("Try again") { Task { await loadInitial() } }
+                                .accessibilityIdentifier("project-subagent-retry")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .padding(16)
+            }
+            .accessibilityIdentifier("project-subagent-transcript")
+            .navigationTitle(child.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Text("Read only").font(.caption).foregroundStyle(.secondary)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .accessibilityIdentifier("project-subagent-sheet-done")
+                }
+            }
+        }
+        .task(id: child.threadId + ":" + model.assignmentScope) { await loadInitial() }
+        .onDisappear {
+            loadToken = UUID()
+            olderTask?.cancel()
+        }
+    }
+
+    @ViewBuilder private func transcriptEntry(_ entry: ChatFeedEntry) -> some View {
+        if entry.isActivity {
+            ActivityGroupView(rows: entry.rows,
+                turn: entry.rows.first?.turnId.flatMap { turns[$0] },
+                isLatestSegmentForTurn: lastActivityEntries.contains(entry.id),
+                isLatestActiveSegment: false,
+                expanded: expanded.contains(entry.id)) {
+                    if expanded.contains(entry.id) { expanded.remove(entry.id) }
+                    else { expanded.insert(entry.id) }
+                }
+            if expanded.contains(entry.id) {
+                ForEach(entry.rows, id: \.id) { row in
+                    ActivityItemView(row: row, expanded: true) {}
+                        .padding(.leading, 12)
+                }
+            }
+        } else if let row = entry.rows.first {
+            MessageRow(row: row)
+                .accessibilityIdentifier("project-subagent-row:" + row.id)
+        }
+    }
+
+    private func display(_ value: ConversationSnapshot) {
+        snapshot = value
+        let rows = value.rows(author: child.title)
+        entries = ChatFeedEntry.grouping(rows)
+        turns = Dictionary((value.thread.turns ?? []).map { ($0.id, $0) }, uniquingKeysWith: { _, newer in newer })
+        lastActivityEntries = ChatFeedEntry.latestActivityEntryIDs(entries)
+    }
+
+    private func loadInitial() async {
+        olderTask?.cancel()
+        olderTask = nil
+        let token = UUID()
+        loadToken = token
+        let requestedChild = child
+        let scope = model.assignmentScope
+        snapshot = nil
+        entries = []
+        turns = [:]
+        lastActivityEntries = []
+        expanded = []
+        loading = true
+        loadingOlder = false
+        error = nil
+        do {
+            let response = try await model.projectSubagentTranscript(parent: parent, child: requestedChild)
+            guard !Task.isCancelled, loadToken == token, child.threadId == requestedChild.threadId,
+                  model.assignmentScope == scope else { return }
+            display(response.snapshot)
+        } catch {
+            guard !Task.isCancelled, loadToken == token, child.threadId == requestedChild.threadId,
+                  model.assignmentScope == scope else { return }
+            self.error = "This agent task could not be opened. Refresh the Project thread and try again."
+        }
+        loading = false
+    }
+
+    private func loadOlder(cursor: String) async {
+        guard let snapshot else { return }
+        let token = loadToken
+        let requestedChild = child
+        let scope = model.assignmentScope
+        loadingOlder = true
+        error = nil
+        do {
+            let response = try await model.projectSubagentTranscript(parent: parent, child: requestedChild, cursor: cursor)
+            guard !Task.isCancelled, loadToken == token, child.threadId == requestedChild.threadId,
+                  model.assignmentScope == scope else { return }
+            display(try snapshot.mergingOlder(response.snapshot))
+        } catch {
+            guard !Task.isCancelled, loadToken == token, child.threadId == requestedChild.threadId,
+                  model.assignmentScope == scope else { return }
+            self.error = "Older activity could not be loaded. Try again."
+        }
+        loadingOlder = false
+    }
+}
+
 /// Opens the conversation's computer view from the composer's status row.
 struct ComputerDock: View {
     @Binding var isPresented: Bool
@@ -103,6 +315,22 @@ struct ComputerDock: View {
         .accessibilityIdentifier("computer-status-pill")
         .accessibilityLabel("View computer")
         .accessibilityHint("Show your Mac's screen")
+    }
+}
+
+struct FilesDock: View {
+    let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            Label("Files", systemImage: "folder")
+                .labelStyle(.iconOnly)
+                .modifier(ComposerStatusPill())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("conversation-files-pill")
+        .accessibilityLabel("Files")
+        .accessibilityHint("Browse this conversation's files and changes")
     }
 }
 

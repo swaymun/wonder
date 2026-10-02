@@ -14,8 +14,9 @@ can still read and change the same conversations on the paired Mac.
 The Xcode `WonderTesting` scheme runs and archives the optimized `Testing`
 configuration. Its tests use `TestingDiagnostics`, which includes the existing
 bounded Diagnostics tools. Regular Testing uploads use Release behavior, without
-the recorder. Each channel includes matching `.NotificationService` and `.Share`
-extensions; their Keychain access is confined to their own channel.
+the recorder. Each channel includes matching `.NotificationService`, `.Share`
+and `.Widget` extensions. Share Keychain access and Widget snapshots are confined
+to their own channel.
 
 ## Upload both channels
 
@@ -49,18 +50,27 @@ not another version of the existing Wonder record.
 
 Apple Developer needs the Testing app ID with Push Notifications enabled, plus
 `com.swaymun.wonder.testing.NotificationService` and
-`com.swaymun.wonder.testing.Share` with no additional capabilities. The production
-share extension separately requires `com.swaymun.wonder.Share`. There is no App
-Group to create: Share reads the containing app's existing Keychain access group
-and never renews or writes its saved connection.
+`com.swaymun.wonder.testing.Share`, plus the new
+`com.swaymun.wonder.testing.Widget` ID. Production has corresponding
+`com.swaymun.wonder.NotificationService`, `.Share` and `.Widget` IDs. Share reads
+the containing app's existing Keychain access group and never renews or writes
+its saved connection. The app and Widget extension must both have their
+channel's App Group capability: `group.com.swaymun.wonder.testing` for blue
+Testing and `group.com.swaymun.wonder` for orange production. The Widget reads a
+bounded saved Project-link snapshot there; names are generic until the user opts
+in through Settings. No pairing credential or message text goes in the group.
 
 Each ID needs an App Store provisioning profile saved in encrypted Match using
-the existing Apple Distribution certificate. Profile creation requires explicit
-owner approval. The normal upload lane remains read-only for signing assets.
+the existing Apple Distribution certificate. Existing app profiles must also
+include their new App Group capability. Creating the Widget IDs, App Groups or
+new profiles and renewing existing profiles requires explicit owner approval;
+the normal upload lane remains read-only for signing assets. The Widget target
+and separate group IDs compile in unsigned iPhone/iPad simulators; this does
+not verify signed App Group access, Home Screen presentation or TestFlight upload.
 
 For explicitly requested physical QA, use the approved Testing development profiles. Set
 `WONDER_APP_SIGNING_STYLE=Manual` and supply `WONDER_MAIN_PROFILE`,
-`WONDER_PUSH_PROFILE` and `WONDER_SHARE_PROFILE` to `xcodebuild` with the
+`WONDER_PUSH_PROFILE`, `WONDER_SHARE_PROFILE` and `WONDER_WIDGET_PROFILE` to `xcodebuild` with the
 `TestingDiagnostics` configuration. Test runners retain automatic signing and
 can reuse an installed Xcode-managed development profile; this does not require
 `-allowProvisioningUpdates` or new certificates.

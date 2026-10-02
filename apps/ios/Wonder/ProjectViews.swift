@@ -173,7 +173,11 @@ struct ProjectComposerSettings: View {
     }
     private var effort: String? { selected.flatMap { ModelDefaults.effort(detail?.effort, for: $0) } }
     private var title: String {
-        if let selected { return ModelDefaults.summary(model: selected, effort: effort) }
+        if let selected {
+            let summary = ModelDefaults.summary(model: selected, effort: effort)
+            let speed = selected.serviceTiers?.first { $0.id == detail?.serviceTier }
+            return speed.map { $0.id == "default" ? summary : summary + " · " + $0.label } ?? summary
+        }
         return detail?.model ?? "Model"
     }
     var body: some View {
@@ -210,6 +214,25 @@ struct ProjectComposerSettings: View {
                             }
                         }
                     }
+                    if let selected, let tiers = selected.serviceTiers, tiers.count > 1 {
+                        Section("Speed") {
+                            ForEach(tiers) { option in
+                                Button { Task { await chooseSpeed(option.id, model: selected) } } label: {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(option.label)
+                                            if let description = option.description {
+                                                Text(description).font(.footnote).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        Spacer()
+                                        if option.id == (detail?.serviceTier ?? "default") { Image(systemName: "checkmark") }
+                                    }
+                                }
+                                .accessibilityIdentifier("project-speed:\(option.id)")
+                            }
+                        }
+                    }
                     if let failure { FailureDetails("Settings not saved", message: failure) }
                 }
                 .disabled(saving || model.accessEnded)
@@ -231,8 +254,20 @@ struct ProjectComposerSettings: View {
         // Choosing the current model again keeps the effort already chosen.
         guard let family = detail?.family, effort != nil || option.id != selected?.id else { return }
         let chosen = effort ?? ModelDefaults.effort(for: option)
-        let fields: [String: Any] = ["model": option.id, "effort": chosen as Any? ?? NSNull()]
+        let retainedTier = detail?.serviceTier.flatMap { tier in
+            (option.serviceTiers ?? []).contains(where: { $0.id == tier }) || option.defaultServiceTier == tier ? tier : nil
+        }
+        let fields: [String: Any] = ["model": option.id, "effort": chosen as Any? ?? NSNull(),
+                                     "serviceTier": retainedTier as Any? ?? NSNull()]
         if await save(fields) { RememberedModels.save(family, model: option.id, effort: chosen) }
+    }
+    private func chooseSpeed(_ tier: String, model selected: BotOptions.Model) async {
+        var fields: [String: Any] = ["serviceTier": tier]
+        if detail?.model == nil {
+            fields["model"] = selected.id
+            fields["effort"] = effort as Any? ?? NSNull()
+        }
+        _ = await save(fields)
     }
     @discardableResult private func save(_ fields: [String: Any]) async -> Bool {
         guard !fields.isEmpty, !saving else { return false }
