@@ -136,8 +136,11 @@ forward rules for an older feature or workflow.
   Retain evidence under `.local/`; report each channel's build number and uploaded,
   processing, processed and tester-availability status separately. Check Apple
   before retrying an uncertain upload to avoid duplicates.
-- Upload authorization does not include beta-review submission, tester invitations,
-  notifications or group changes. Those require explicit authorization.
+- After a Wonder Testing build is processed, add it to the existing Owner Beta
+  group and verify tester availability. This is standing authorization for new
+  Testing builds; do not invite testers or change other groups. Beta-review
+  submission, tester invitations, notifications and other group changes still
+  require explicit authorization.
 
 ## Delivery and cleanup
 
