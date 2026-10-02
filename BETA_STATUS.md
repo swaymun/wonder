@@ -56,6 +56,17 @@ local upgrade and clean second-Mac first launch; both installed copies reached
 annotation now dispatches its frozen source copy even after an unrelated
 Project root change, verified by a fake-provider regression. No live Project
 model message or scheduled Automation run was started for these checks.
+
+A post-upload review found retry and stale-response cases in these binaries:
+some Project sends can remain uncertain after a definite pre-execution failure,
+and a late New Chat error after re-pairing the same Mac can disturb the current
+draft. Rapid PDF page turns can overlap preview work, and long Project history
+scans can delay update handoff. The Mac install helper
+checks process health after replacement; these two installed copies were also
+checked manually for `/readyz`. Source corrections and focused iPhone, iPad,
+daemon and installer checks are complete on an unshipped branch. They are not
+in Testing 20, production 82 or Mac 1.0.108; another release is required.
+
 Native progressive dictation had no supported SpeechTranscriber locale on the
 tested iOS 26.5 simulators, so the existing dictation path remains in place.
 EPUB and read-only USDZ/OBJ/PLY/STL viewers passed focused checks, while
