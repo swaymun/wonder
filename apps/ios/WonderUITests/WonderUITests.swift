@@ -854,7 +854,11 @@ import UIKit
         XCTAssertTrue(switcher.waitForExistence(timeout: 5))
         XCTAssertEqual(switcher.value as? String, "Closed")
         XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(computerContainer.waitForExistence(timeout: 5), "Rotation must keep View Computer open.")
         retainMenuScreenshot(app, name: "Computer controls in landscape", fullScreen: true)
+        assertComputerSideRail(app)
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertTrue(computerContainer.waitForExistence(timeout: 5), "Returning to portrait must keep the same viewer open.")
         assertComputerControlRow(app)
         app.buttons["computer-session-close"].tap()
         XCTAssertFalse(computerContainer.waitForExistence(timeout: 2))
@@ -877,6 +881,51 @@ import UIKit
         retainMenuScreenshot(app, name: "Single control row at largest accessibility text size", fullScreen: true)
         app.buttons["computer-session-done"].tap()
         XCTAssertTrue(takeControl.waitForExistence(timeout: 5))
+        app.buttons["computer-session-close"].tap()
+    }
+
+    func testComputerViewerFromNewChatSurvivesPhoneRotation() throws {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview", "-diagnostics-computer-shell-fixture",
+                               "-diagnostics-computer-session-available-fixture"]
+        app.launch()
+        let viewComputer = app.buttons["view-computer"]
+        XCTAssertTrue(viewComputer.waitForExistence(timeout: 10))
+        viewComputer.tap()
+        let viewer = app.descendants(matching: .any).matching(identifier: "computer-session-container").firstMatch
+        XCTAssertTrue(viewer.waitForExistence(timeout: 5))
+        let picker = app.buttons["computer-session-connection-picker"]
+        XCTAssertTrue(picker.exists)
+        XCTAssertEqual(picker.value as? String, "Live")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(viewer.waitForExistence(timeout: 5), "Rotating must keep the presented viewer, not return to New chat.")
+        XCTAssertTrue(picker.isHittable)
+        XCTAssertFalse(viewComputer.isHittable)
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertTrue(viewer.waitForExistence(timeout: 5))
+        app.buttons["computer-session-close"].tap()
+        XCTAssertTrue(viewComputer.waitForExistence(timeout: 5))
+    }
+
+    func testDiagnosticsComputerVideoQualityReconnectsAndReleasesControl() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-computer-session-fixture", "-diagnostics-computer-session-available-fixture"]
+        app.launch()
+        let takeControl = app.buttons["computer-session-take-control"]
+        XCTAssertTrue(takeControl.waitForExistence(timeout: 10))
+        takeControl.tap()
+        let active = app.descendants(matching: .any).matching(identifier: "computer-session-control-active").firstMatch
+        XCTAssertTrue(active.waitForExistence(timeout: 5))
+        app.buttons["computer-session-more"].tap()
+        let sharp = app.buttons["Sharp (1440p)"]
+        XCTAssertTrue(sharp.waitForExistence(timeout: 5))
+        sharp.tap()
+        XCTAssertTrue(takeControl.waitForExistence(timeout: 5), "Changing quality must reconnect and release control.")
+        XCTAssertFalse(active.exists)
         app.buttons["computer-session-close"].tap()
     }
 
@@ -1003,6 +1052,30 @@ import UIKit
         }
         if app.keyboards.firstMatch.exists {
             XCTAssertLessThanOrEqual(frames[0].maxY, app.keyboards.firstMatch.frame.minY + 2)
+        }
+    }
+
+    private func assertComputerSideRail(_ app: XCUIApplication) {
+        let preview = app.otherElements["computer-session-preview"]
+        let controls = app.descendants(matching: .any).matching(identifier: "computer-session-controls-row").firstMatch
+        let done = app.buttons["computer-session-done"]
+        XCTAssertTrue(preview.exists && controls.exists && done.isHittable)
+        XCTAssertLessThanOrEqual(preview.frame.maxX, controls.frame.minX + 2)
+        XCTAssertGreaterThanOrEqual(preview.frame.maxY, controls.frame.maxY - 24,
+                                    "The video viewport must reach the bottom safe area beside the rail.")
+        XCTAssertLessThan(done.frame.midY, app.buttons["computer-session-shortcut-all-windows"].frame.midY)
+        let left = app.buttons["computer-session-shortcut-all-windows"]
+        let right = app.buttons["computer-session-shortcut-app-windows"]
+        XCTAssertTrue(left.isHittable && right.isHittable)
+        XCTAssertEqual(left.frame.midY, right.frame.midY, accuracy: 1)
+        XCTAssertLessThan(left.frame.midX, right.frame.midX)
+        for identifier in ["computer-session-shortcut-next-window", "computer-session-shortcut-applications",
+                           "computer-session-shortcut-app-switcher", "computer-session-key-escape",
+                           "computer-session-key-tab", "computer-session-clipboard", "computer-session-keyboard"] {
+            let button = app.buttons[identifier]
+            XCTAssertTrue(button.isHittable, "Side control must be reachable: \(identifier)")
+            XCTAssertGreaterThanOrEqual(button.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(button.frame.height, 44)
         }
     }
 

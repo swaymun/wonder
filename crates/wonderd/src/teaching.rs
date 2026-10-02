@@ -2464,6 +2464,7 @@ mod tests {
             conversation_id: "conversation".into(),
             generation: 7,
             state: "live".into(),
+            video_quality: "standard".into(),
             source_id: Some("source-7".into()),
             source_name: Some("Mac display".into()),
             source_kind: Some("screen".into()),

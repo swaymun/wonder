@@ -110,7 +110,8 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
     public func prepare(
         sessionID: String,
         generation: UInt64,
-        viewerCount: Int
+        viewerCount: Int,
+        configuration: CaptureConfiguration? = nil
     ) -> CaptureOperationResult {
         stopStream()
         frameQueue.reset()
@@ -125,7 +126,8 @@ public final class ScreenCaptureSession: NSObject, @unchecked Sendable {
             sessionID: sessionID,
             generation: generation,
             viewerCount: viewerCount,
-            screenRecordingAuthorized: CGPreflightScreenCaptureAccess()
+            screenRecordingAuthorized: CGPreflightScreenCaptureAccess(),
+            configuration: configuration
         )
         lock.unlock()
         emit("capture.prepared", status: snapshot)

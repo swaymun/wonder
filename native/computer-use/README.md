@@ -27,7 +27,9 @@ ScreenCaptureKit. It supports `capture.prepare`, `capture.sources`,
 session ID and generation where it acts on an existing session. Duplicate stops
 are safe for the same identity; a stale identity is rejected.
 
-The initial stream is 1280x720 at 15 fps with audio disabled and a ScreenCaptureKit
+The viewer can request Save data (1280x720), Auto (up to 1920x1080), or Sharp
+(2560x1440). Older clients continue to request 1280x720. All modes cap at
+15 fps, disable audio, and use a ScreenCaptureKit
 queue depth of two. Frames are handled on a dedicated capture queue and handed to
 the pinned stasel/WebRTC M153 `RTCVideoSource(forScreenCast: true)` through a
 bounded latest-frame sink. Superseded frames are dropped so a slow encoder cannot

@@ -3,7 +3,7 @@ import Foundation
 public struct CaptureStateMachine: Sendable {
     public private(set) var status: CaptureStatusSnapshot
 
-    private let configuration: CaptureConfiguration
+    private var configuration: CaptureConfiguration
     private let pickerAvailable: Bool
     private let helperInstanceID: String
 
@@ -29,8 +29,8 @@ public struct CaptureStateMachine: Sendable {
             geometryRevision: 0,
             pickerAvailable: pickerAvailable,
             screenRecordingAuthorized: screenRecordingAuthorized,
-            audioEnabled: configuration.audioEnabled,
-            configuration: configuration,
+            audioEnabled: self.configuration.audioEnabled,
+            configuration: self.configuration,
             lastFrame: nil
         )
     }
@@ -40,8 +40,10 @@ public struct CaptureStateMachine: Sendable {
         sessionID: String,
         generation: UInt64,
         viewerCount: Int,
-        screenRecordingAuthorized: Bool
+        screenRecordingAuthorized: Bool,
+        configuration: CaptureConfiguration? = nil
     ) -> CaptureStatusSnapshot {
+        if let configuration { self.configuration = configuration }
         let nextGeneration = max(generation, status.generation &+ 1)
         status = CaptureStatusSnapshot(
             state: viewerCount > 0 && screenRecordingAuthorized ? .awaitingSource : (viewerCount > 0 ? .permissionDenied : .stopped),
@@ -56,8 +58,8 @@ public struct CaptureStateMachine: Sendable {
             geometryRevision: 0,
             pickerAvailable: pickerAvailable,
             screenRecordingAuthorized: screenRecordingAuthorized,
-            audioEnabled: configuration.audioEnabled,
-            configuration: configuration,
+            audioEnabled: self.configuration.audioEnabled,
+            configuration: self.configuration,
             lastFrame: nil,
             message: viewerCount > 0 && screenRecordingAuthorized ? nil : (viewerCount > 0 ? "Allow Screen Recording for Wonder on your Mac" : nil),
             reason: viewerCount > 0 ? (screenRecordingAuthorized ? nil : "screen_recording_permission_required") : "no_authorized_viewers"

@@ -57,7 +57,9 @@ final class ComputerSessionModel: ObservableObject {
             inputPreferences.set(inputMode.rawValue, forKey: "computer.inputMode")
         }
     }
+    @Published private(set) var videoQuality: ComputerVideoQuality
     private let inputPreferences: UserDefaults
+    private var requestedSource: ComputerSource?
     let pointerState = ComputerPointerState()
     private var pointer: CGPoint {
         get { pointerState.position }
@@ -83,11 +85,14 @@ final class ComputerSessionModel: ObservableObject {
     init(model: ConnectionModel, chat: ChatSummary, inputPreferences: UserDefaults = .standard) {
         self.inputPreferences = inputPreferences
         self.inputMode = inputPreferences.string(forKey: "computer.inputMode").flatMap(ComputerInputMode.init(rawValue:)) ?? .trackpad
+        self.videoQuality = inputPreferences.string(forKey: "computer.videoQuality").flatMap(ComputerVideoQuality.init(rawValue:)) ?? .auto
         self.connectionModel = model
         self.chat = chat
         #if WONDER_DIAGNOSTICS
-        if ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-session-fixture") {
+        if ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-session-fixture")
+            || ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-shell-fixture") {
             inputMode = .trackpad
+            videoQuality = .auto
         }
         #endif
         receiver.onStateChange = { [weak self] state, revision in
@@ -109,6 +114,7 @@ final class ComputerSessionModel: ObservableObject {
     var isFixture: Bool {
         #if WONDER_DIAGNOSTICS
         return ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-session-fixture")
+            || ProcessInfo.processInfo.arguments.contains("-diagnostics-computer-shell-fixture")
         #else
         return false
         #endif
@@ -135,7 +141,9 @@ final class ComputerSessionModel: ObservableObject {
             let body = try JSONEncoder().encode(StartComputerSessionRequest(
                 clientRequestId: requestID,
                 conversationId: chat.id,
-                hostInstallationId: connection.credential.hostInstallationId
+                hostInstallationId: connection.credential.hostInstallationId,
+                source: requestedSource,
+                videoQuality: videoQuality
             ))
             let created: ComputerSession = try await connectionModel.manage(
                 "/api/v1/computer/sessions",
@@ -208,8 +216,10 @@ final class ComputerSessionModel: ObservableObject {
         }
     }
 
-    func retry() async {
+    func retry(preservingSource: Bool = false) async {
         guard !ended else { return }
+        // The Mac resolves the source's current geometry after reconnecting.
+        requestedSource = preservingSource ? session?.source.id.map { ComputerSource(id: $0) } : nil
         lifetimeRevision &+= 1
         let revision = lifetimeRevision
         await releaseControl()
@@ -233,6 +243,13 @@ final class ComputerSessionModel: ObservableObject {
         ended = false
         clientRequestID = UUID().uuidString.lowercased()
         await start()
+    }
+
+    func setVideoQuality(_ quality: ComputerVideoQuality) {
+        guard quality != videoQuality, session?.videoQuality != nil, !isLoading else { return }
+        videoQuality = quality
+        if !isFixture { inputPreferences.set(quality.rawValue, forKey: "computer.videoQuality") }
+        Task { await retry(preservingSource: true) }
     }
 
     func close() async {
@@ -944,7 +961,8 @@ final class ComputerSessionModel: ObservableObject {
             lastStateAt: "2026-09-12T00:00:00Z",
             endedAt: nil,
             capability: available ? ComputerCapability(available: true, action: "none", reason: "Live computer viewing is available on this Mac.") : .oldHost,
-            control: control
+            control: control,
+            videoQuality: .auto
         )
     }
 
@@ -1046,26 +1064,27 @@ private struct ComputerConnectionSessionView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ComputerViewport(model: sessionModel)
-            .frame(maxWidth: .infinity)
-            .frame(maxHeight: .infinity)
-
-            if let failure = sessionModel.failure, !sessionModel.isClosed {
-                VStack(alignment: .leading, spacing: 8) {
-                    FailureDetails("Computer view unavailable", message: failure)
-                    Button("Try again") { Task { await sessionModel.retry() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(sessionModel.isLoading)
+        GeometryReader { geometry in
+            let sideControls = geometry.size.width > geometry.size.height && geometry.size.width >= 650
+            Group {
+                if sideControls {
+                    HStack(spacing: 0) {
+                        computerContent
+                        if !sessionModel.isClosed {
+                            ComputerSessionControls(model: sessionModel, sidePlacement: true)
+                                .frame(width: 120)
+                                .frame(maxHeight: .infinity, alignment: .top)
+                        }
+                    }
+                } else {
+                    VStack(spacing: 0) {
+                        computerContent
+                        if !sessionModel.isClosed {
+                            ComputerSessionControls(model: sessionModel)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
                 }
-                .frame(maxWidth: 980, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 10)
-            }
-
-            if !sessionModel.isClosed {
-                ComputerSessionControls(model: sessionModel)
-                    .frame(maxWidth: .infinity)
             }
         }
         .background(Color(uiColor: .systemBackground))
@@ -1110,6 +1129,23 @@ private struct ComputerConnectionSessionView: View {
                     Picker("Pointer mode", selection: $sessionModel.inputMode) {
                         ForEach(ComputerInputMode.allCases) { mode in
                             Text(mode.title).tag(mode)
+                        }
+                    }
+                    if let session = sessionModel.session {
+                        if session.videoQuality != nil {
+                            Picker("Video quality", selection: Binding(
+                                get: { sessionModel.videoQuality },
+                                set: { sessionModel.setVideoQuality($0) }
+                            )) {
+                                ForEach(ComputerVideoQuality.allCases) { quality in
+                                    Text(quality.title).tag(quality)
+                                }
+                            }
+                            .disabled(sessionModel.isLoading)
+                            .accessibilityIdentifier("computer-session-video-quality")
+                        } else {
+                            Button("Video quality requires an updated Mac") { }
+                                .disabled(true)
                         }
                     }
                     Button("Recenter pointer", systemImage: "scope") { sessionModel.recenterPointer() }
@@ -1162,6 +1198,24 @@ private struct ComputerConnectionSessionView: View {
         // viewport's accessibility element in XCTest.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("computer-session-container")
+    }
+
+    private var computerContent: some View {
+        VStack(spacing: 0) {
+            ComputerViewport(model: sessionModel)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let failure = sessionModel.failure, !sessionModel.isClosed {
+                VStack(alignment: .leading, spacing: 8) {
+                    FailureDetails("Computer view unavailable", message: failure)
+                    Button("Try again") { Task { await sessionModel.retry() } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(sessionModel.isLoading)
+                }
+                .frame(maxWidth: 980, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 10)
+            }
+        }
     }
 
     private func handleLifetimeEnd() async {
@@ -1378,6 +1432,7 @@ private struct ComputerPointerShape: Shape {
 
 struct ComputerSessionControls: View {
     @ObservedObject var model: ComputerSessionModel
+    var sidePlacement = false
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
@@ -1399,61 +1454,65 @@ struct ComputerSessionControls: View {
                     .accessibilityIdentifier("computer-session-clipboard-message")
             }
             if model.isControlActive {
-                HStack(spacing: 4) {
-                    shortcutButton("Windows", symbol: "rectangle.3.group", label: "All windows, Control Up Arrow",
-                                   identifier: "all-windows") { model.sendShortcut(key: "up", modifiers: 2) }
-                    shortcutButton("This app", symbol: "macwindow", label: "App windows, Control Down Arrow",
-                                   identifier: "app-windows") { model.sendShortcut(key: "down", modifiers: 2) }
-                    shortcutButton("Next", symbol: "rectangle.on.rectangle", label: "Next window, Command Grave",
-                                   identifier: "next-window") { model.sendShortcut(key: "`", modifiers: 8) }
-                    shortcutButton("Apps", symbol: "square.grid.3x3", label: "Show Applications, Command Space then Command 1",
-                                   identifier: "applications") { model.showApplications() }
-                    shortcutButton(model.isAppSwitcherPresented ? "Choose app" : "⌘ Tab", symbol: "command",
-                                   label: model.isAppSwitcherPresented ? "Choose highlighted app" : "Show app switcher, Command Tab",
-                                   identifier: "app-switcher") { model.toggleAppSwitcher() }
-                        .background(model.isAppSwitcherPresented ? Color.accentColor.opacity(0.15) : .clear, in: Capsule())
-                        .accessibilityValue(model.isAppSwitcherPresented ? "Open, Command held" : "Closed")
-                        .accessibilityHint("Opens and holds the Mac app switcher. Use Tab to move, tap again to choose, or Escape to cancel.")
-                }
-                .font(.caption)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("computer-session-shortcuts-row")
-                HStack(spacing: 4) {
-                    keyButton("Esc", key: "escape", label: "Escape", symbol: "escape")
-                    keyButton("Tab", key: "tab", label: "Tab", symbol: "arrow.right.to.line")
-                    Menu {
-                        Button("Paste from Phone", systemImage: "doc.on.clipboard") { model.pasteFromPhone() }
-                            .accessibilityIdentifier("computer-session-paste-from-phone")
-                        Button("Copy from Mac", systemImage: "doc.on.doc") { model.copyFromMac() }
-                            .accessibilityIdentifier("computer-session-copy-from-mac")
-                    } label: {
-                        Image(systemName: "doc.on.clipboard")
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .contentShape(Rectangle())
+                if sidePlacement {
+                    sideControls
+                } else {
+                    HStack(spacing: 4) {
+                        shortcutButton("Windows", symbol: "rectangle.3.group", label: "All windows, Control Up Arrow",
+                                       identifier: "all-windows") { model.sendShortcut(key: "up", modifiers: 2) }
+                        shortcutButton("This app", symbol: "macwindow", label: "App windows, Control Down Arrow",
+                                       identifier: "app-windows") { model.sendShortcut(key: "down", modifiers: 2) }
+                        shortcutButton("Next", symbol: "rectangle.on.rectangle", label: "Next window, Command Grave",
+                                       identifier: "next-window") { model.sendShortcut(key: "`", modifiers: 8) }
+                        shortcutButton("Apps", symbol: "square.grid.3x3", label: "Show Applications, Command Space then Command 1",
+                                       identifier: "applications") { model.showApplications() }
+                        shortcutButton(model.isAppSwitcherPresented ? "Choose app" : "⌘ Tab", symbol: "command",
+                                       label: model.isAppSwitcherPresented ? "Choose highlighted app" : "Show app switcher, Command Tab",
+                                       identifier: "app-switcher") { model.toggleAppSwitcher() }
+                            .background(model.isAppSwitcherPresented ? Color.accentColor.opacity(0.15) : .clear, in: Capsule())
+                            .accessibilityValue(model.isAppSwitcherPresented ? "Open, Command held" : "Closed")
+                            .accessibilityHint("Opens and holds the Mac app switcher. Use Tab to move, tap again to choose, or Escape to cancel.")
                     }
-                    .accessibilityLabel("Clipboard")
-                    .accessibilityIdentifier("computer-session-clipboard")
-                    Button { model.toggleKeyboard() } label: {
-                        Image(systemName: model.keyboardPresented ? "keyboard.chevron.compact.down" : "keyboard")
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .accessibilityLabel(model.keyboardPresented ? "Hide keyboard" : "Show keyboard")
-                    .accessibilityIdentifier("computer-session-keyboard")
-                    Button { Task { await model.done() } } label: {
-                        Group {
-                            if dynamicTypeSize.isAccessibilitySize { Image(systemName: "checkmark") }
-                            else { Text("Done") }
+                    .font(.caption)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("computer-session-shortcuts-row")
+                    HStack(spacing: 4) {
+                        keyButton("Esc", key: "escape", label: "Escape", symbol: "escape")
+                        keyButton("Tab", key: "tab", label: "Tab", symbol: "arrow.right.to.line")
+                        Menu {
+                            Button("Paste from Phone", systemImage: "doc.on.clipboard") { model.pasteFromPhone() }
+                                .accessibilityIdentifier("computer-session-paste-from-phone")
+                            Button("Copy from Mac", systemImage: "doc.on.doc") { model.copyFromMac() }
+                                .accessibilityIdentifier("computer-session-copy-from-mac")
+                        } label: {
+                            Image(systemName: "doc.on.clipboard")
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .contentShape(Rectangle())
                         }
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .contentShape(Rectangle())
+                        .accessibilityLabel("Clipboard")
+                        .accessibilityIdentifier("computer-session-clipboard")
+                        Button { model.toggleKeyboard() } label: {
+                            Image(systemName: model.keyboardPresented ? "keyboard.chevron.compact.down" : "keyboard")
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .accessibilityLabel(model.keyboardPresented ? "Hide keyboard" : "Show keyboard")
+                        .accessibilityIdentifier("computer-session-keyboard")
+                        Button { Task { await model.done() } } label: {
+                            Group {
+                                if dynamicTypeSize.isAccessibilitySize { Image(systemName: "checkmark") }
+                                else { Text("Done") }
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .accessibilityLabel("Done")
+                        .accessibilityIdentifier("computer-session-done")
                     }
-                    .accessibilityLabel("Done")
-                    .accessibilityIdentifier("computer-session-done")
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Computer control active")
+                    .accessibilityIdentifier("computer-session-control-active")
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("Computer control active")
-                .accessibilityIdentifier("computer-session-control-active")
             } else if model.isStarting {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -1500,11 +1559,84 @@ struct ComputerSessionControls: View {
         .accessibilityIdentifier("computer-session-controls-row")
     }
 
+    private var sideControls: some View {
+        VStack(spacing: 5) {
+            Button { Task { await model.done() } } label: {
+                Image(systemName: "checkmark")
+                    .frame(width: 48, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Done")
+            .accessibilityIdentifier("computer-session-done")
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            Grid(horizontalSpacing: 4, verticalSpacing: 4) {
+                GridRow {
+                    shortcutButton("Windows", symbol: "rectangle.3.group", label: "All windows, Control Up Arrow",
+                                   identifier: "all-windows", iconOnly: true) { model.sendShortcut(key: "up", modifiers: 2) }
+                    shortcutButton("This app", symbol: "macwindow", label: "App windows, Control Down Arrow",
+                                   identifier: "app-windows", iconOnly: true) { model.sendShortcut(key: "down", modifiers: 2) }
+                }
+                GridRow {
+                    shortcutButton("Next", symbol: "rectangle.on.rectangle", label: "Next window, Command Grave",
+                                   identifier: "next-window", iconOnly: true) { model.sendShortcut(key: "`", modifiers: 8) }
+                    shortcutButton("Apps", symbol: "square.grid.3x3", label: "Show Applications, Command Space then Command 1",
+                                   identifier: "applications", iconOnly: true) { model.showApplications() }
+                }
+                GridRow {
+                    shortcutButton(model.isAppSwitcherPresented ? "Choose app" : "⌘ Tab", symbol: "command",
+                                   label: model.isAppSwitcherPresented ? "Choose highlighted app" : "Show app switcher, Command Tab",
+                                   identifier: "app-switcher", iconOnly: true) { model.toggleAppSwitcher() }
+                        .background(model.isAppSwitcherPresented ? Color.accentColor.opacity(0.15) : .clear, in: Capsule())
+                        .accessibilityValue(model.isAppSwitcherPresented ? "Open, Command held" : "Closed")
+                    keyButton("Esc", key: "escape", label: "Escape", symbol: "escape", iconOnly: true)
+                }
+                GridRow {
+                    keyButton("Tab", key: "tab", label: "Tab", symbol: "arrow.right.to.line", iconOnly: true)
+                    clipboardButton
+                }
+                GridRow {
+                    keyboardButton
+                    Color.clear.frame(width: 48, height: 44).accessibilityHidden(true)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Computer control active")
+        .accessibilityIdentifier("computer-session-control-active")
+    }
+
+    private var clipboardButton: some View {
+        Menu {
+            Button("Paste from Phone", systemImage: "doc.on.clipboard") { model.pasteFromPhone() }
+                .accessibilityIdentifier("computer-session-paste-from-phone")
+            Button("Copy from Mac", systemImage: "doc.on.doc") { model.copyFromMac() }
+                .accessibilityIdentifier("computer-session-copy-from-mac")
+        } label: {
+            Image(systemName: "doc.on.clipboard")
+                .frame(width: 48, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Clipboard")
+        .accessibilityIdentifier("computer-session-clipboard")
+    }
+
+    private var keyboardButton: some View {
+        Button { model.toggleKeyboard() } label: {
+            Image(systemName: model.keyboardPresented ? "keyboard.chevron.compact.down" : "keyboard")
+                .frame(width: 48, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(model.keyboardPresented ? "Hide keyboard" : "Show keyboard")
+        .accessibilityIdentifier("computer-session-keyboard")
+    }
+
     private func shortcutButton(_ title: String, symbol: String, label: String,
-                                identifier: String, action: @escaping () -> Void) -> some View {
+                                identifier: String, iconOnly: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Group {
-                if dynamicTypeSize.isAccessibilitySize { Image(systemName: symbol) }
+                if iconOnly || dynamicTypeSize.isAccessibilitySize { Image(systemName: symbol) }
                 else {
                     VStack(spacing: 3) {
                         Image(systemName: symbol).font(.system(size: 14))
@@ -1512,20 +1644,20 @@ struct ComputerSessionControls: View {
                     }
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .frame(maxWidth: iconOnly ? 48 : .infinity, minHeight: 44)
             .contentShape(Rectangle())
         }
         .accessibilityLabel(label)
         .accessibilityIdentifier("computer-session-shortcut-" + identifier)
     }
 
-    private func keyButton(_ title: String, key: String, label: String, symbol: String) -> some View {
+    private func keyButton(_ title: String, key: String, label: String, symbol: String, iconOnly: Bool = false) -> some View {
         Button { model.sendKey(key) } label: {
             Group {
-                if dynamicTypeSize.isAccessibilitySize { Image(systemName: symbol) }
+                if iconOnly || dynamicTypeSize.isAccessibilitySize { Image(systemName: symbol) }
                 else { Text(title) }
             }
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .frame(maxWidth: iconOnly ? 48 : .infinity, minHeight: 44)
             .contentShape(Rectangle())
         }
         .accessibilityLabel(label)

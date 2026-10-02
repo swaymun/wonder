@@ -630,6 +630,10 @@
       "type": "string",
       "enum": ["preparing", "awaitingSource", "live", "paused", "stale", "ended", "failed", "unavailable"]
     },
+    "computerVideoQuality": {
+      "type": "string",
+      "enum": ["standard", "auto", "high"]
+    },
     "computerCapability": {
       "type": "object",
       "required": ["available", "action", "reason"],
@@ -676,6 +680,29 @@
       },
       "additionalProperties": false
     },
+    "computerSourceRequest": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "scale": { "type": "number", "minimum": 0.1, "maximum": 8 },
+        "crop": {
+          "type": "object",
+          "required": ["x", "y", "width", "height"],
+          "properties": {
+            "x": { "type": "number", "minimum": 0, "maximum": 16384 },
+            "y": { "type": "number", "minimum": 0, "maximum": 16384 },
+            "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 16384 },
+            "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 16384 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "startComputerSessionRequest": {
       "type": "object",
       "required": ["clientRequestId", "conversationId", "hostInstallationId"],
@@ -684,7 +711,8 @@
         "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
         "hostInstallationId": { "type": "string", "minLength": 1, "maxLength": 160 },
         "generation": { "type": "integer", "const": 1 },
-        "source": { "$ref": "#/$defs/computerSource" }
+        "source": { "$ref": "#/$defs/computerSourceRequest" },
+        "videoQuality": { "$ref": "#/$defs/computerVideoQuality" }
       },
       "additionalProperties": false
     },
@@ -704,6 +732,7 @@
         "conversationId": { "type": "string", "minLength": 1 },
         "generation": { "type": "integer", "minimum": 1 },
         "state": { "$ref": "#/$defs/computerSessionState" },
+        "videoQuality": { "$ref": "#/$defs/computerVideoQuality" },
         "source": { "$ref": "#/$defs/computerSource" },
         "geometryRevision": { "type": "integer", "minimum": 0 },
         "failureReason": { "type": ["string", "null"], "maxLength": 512 },

@@ -166,7 +166,20 @@ final class ProtocolTests: XCTestCase {
         let legacy = Data(#"{"id":"session","clientRequestId":"request","ownerDeviceId":"phone","hostInstallationId":"mac","conversationId":"chat","generation":1,"state":"unavailable","source":{"id":null,"name":null,"kind":null,"width":null,"height":null,"scale":null,"crop":null},"geometryRevision":0,"failureReason":"Unavailable","createdAt":"now","updatedAt":"now","lastStateAt":"now","endedAt":null,"capability":{"available":false,"action":"update-host","reason":"Unavailable"}}"#.utf8)
         let session = try JSONDecoder().decode(ComputerSession.self, from: legacy)
         XCTAssertNil(session.control)
+        XCTAssertNil(session.videoQuality)
         XCTAssertEqual(session.state, .unavailable)
+    }
+
+    func testComputerVideoQualityRequestAndResponseRoundTrip() throws {
+        let request = StartComputerSessionRequest(
+            clientRequestId: "request", conversationId: "chat", hostInstallationId: "mac",
+            source: ComputerSource(id: "display:1"), videoQuality: .high
+        )
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertEqual(body["videoQuality"] as? String, "high")
+        XCTAssertEqual((body["source"] as? [String: Any])?["id"] as? String, "display:1")
+        let response = Data(#"{"id":"session","clientRequestId":"request","ownerDeviceId":"phone","hostInstallationId":"mac","conversationId":"chat","generation":1,"state":"live","source":{"id":null,"name":null,"kind":null,"width":null,"height":null,"scale":null,"crop":null},"geometryRevision":0,"failureReason":null,"createdAt":"now","updatedAt":"now","lastStateAt":"now","endedAt":null,"capability":{"available":true,"action":"none","reason":"Available"},"videoQuality":"high"}"#.utf8)
+        XCTAssertEqual(try JSONDecoder().decode(ComputerSession.self, from: response).videoQuality, .high)
     }
 
     func testRejectsUntrustedLinks() throws {

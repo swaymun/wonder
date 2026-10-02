@@ -50,7 +50,6 @@ struct ChatShell: View {
     @ObservedObject private var push = PushNotifications.shared
     @StateObject private var shell = ShellState()
     @State private var sceneID = UUID()
-    @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.scenePhase) private var phase
     @State private var columns = NavigationSplitViewVisibility.all
     @State private var choosingProjectsHost: String?
@@ -59,7 +58,10 @@ struct ChatShell: View {
 
     var body: some View {
         Group {
-            if sizeClass == .regular {
+            // Keep the presentation owner stable when an iPhone rotates. A
+            // size-class switch used to replace this branch and dismiss the
+            // full-screen computer viewer with it.
+            if UIDevice.current.userInterfaceIdiom == .pad {
                 NavigationSplitView(columnVisibility: $columns) {
                     SidebarView(library: library, shell: shell)
                         .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)

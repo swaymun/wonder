@@ -114,18 +114,37 @@ public struct ComputerSession: Codable, Equatable, Identifiable, Sendable {
     public let endedAt: String?
     public let capability: ComputerCapability
     public let control: ComputerControlCapability?
+    public let videoQuality: ComputerVideoQuality?
 
     public init(id: String, clientRequestId: String, ownerDeviceId: String, hostInstallationId: String,
                 conversationId: String, generation: UInt64, state: ComputerSessionState,
                 source: ComputerSource, geometryRevision: UInt64, failureReason: String?,
                 createdAt: String, updatedAt: String, lastStateAt: String, endedAt: String?,
-                capability: ComputerCapability, control: ComputerControlCapability? = .unavailable) {
+                capability: ComputerCapability, control: ComputerControlCapability? = .unavailable,
+                videoQuality: ComputerVideoQuality? = nil) {
         self.id = id; self.clientRequestId = clientRequestId; self.ownerDeviceId = ownerDeviceId
         self.hostInstallationId = hostInstallationId; self.conversationId = conversationId
         self.generation = generation; self.state = state; self.source = source
         self.geometryRevision = geometryRevision; self.failureReason = failureReason
         self.createdAt = createdAt; self.updatedAt = updatedAt; self.lastStateAt = lastStateAt
         self.endedAt = endedAt; self.capability = capability; self.control = control
+        self.videoQuality = videoQuality
+    }
+}
+
+public enum ComputerVideoQuality: String, Codable, CaseIterable, Identifiable, Sendable {
+    case auto
+    case standard
+    case high
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .auto: "Auto (up to 1080p)"
+        case .standard: "Save data (720p)"
+        case .high: "Sharp (1440p)"
+        }
     }
 }
 
@@ -135,11 +154,14 @@ public struct StartComputerSessionRequest: Encodable, Sendable {
     public let hostInstallationId: String
     public let generation: UInt64
     public let source: ComputerSource?
+    public let videoQuality: ComputerVideoQuality
 
     public init(clientRequestId: String, conversationId: String, hostInstallationId: String,
-                generation: UInt64 = 1, source: ComputerSource? = nil) {
+                generation: UInt64 = 1, source: ComputerSource? = nil,
+                videoQuality: ComputerVideoQuality = .auto) {
         self.clientRequestId = clientRequestId; self.conversationId = conversationId
         self.hostInstallationId = hostInstallationId; self.generation = generation; self.source = source
+        self.videoQuality = videoQuality
     }
 }
 

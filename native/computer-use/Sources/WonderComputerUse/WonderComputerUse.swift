@@ -345,6 +345,11 @@ struct WonderComputerUse {
                 controlSurface.hide()
                 result = ["released": controlGate.releaseAll()]
             case "capture.prepare", "prepare":
+                let quality = try (params["videoQuality"] as? String).map { value -> CaptureVideoQuality in
+                    guard let quality = CaptureVideoQuality(rawValue: value) else { throw ComputerUseError.invalidInput }
+                    return quality
+                } ?? .standard
+                let configuration = quality.configuration
                 let sessionID: String
                 if let suppliedSessionID = params["sessionID"] as? String {
                     guard !suppliedSessionID.isEmpty, suppliedSessionID.count <= 128 else { throw ComputerUseError.invalidInput }
@@ -354,9 +359,12 @@ struct WonderComputerUse {
                 }
                 let generation = number(params["generation"]) ?? 0
                 let viewerCount = Int(min(number(params["viewerCount"]) ?? 1, UInt64(Int.max)))
-                let captureResult = captureSession.prepare(sessionID: sessionID, generation: generation, viewerCount: viewerCount)
+                let captureResult = captureSession.prepare(
+                    sessionID: sessionID, generation: generation, viewerCount: viewerCount,
+                    configuration: configuration
+                )
                 if captureResult.accepted {
-                    publisher.prepare(sessionID: sessionID, generation: generation)
+                    publisher.prepare(sessionID: sessionID, generation: generation, configuration: configuration)
                 }
                 result = jsonObject(captureResult) ?? [:]
             case "capture.sources", "capture.listSources", "listSources":

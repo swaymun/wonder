@@ -59,6 +59,7 @@ pub struct ComputerSessionCreate {
     pub conversation_id: String,
     pub generation: u64,
     pub state: ComputerSessionState,
+    pub video_quality: String,
     pub source_id: Option<String>,
     pub source_name: Option<String>,
     pub source_kind: Option<String>,
@@ -80,6 +81,7 @@ pub struct StoredComputerSession {
     pub conversation_id: String,
     pub generation: u64,
     pub state: String,
+    pub video_quality: String,
     pub source_id: Option<String>,
     pub source_name: Option<String>,
     pub source_kind: Option<String>,
@@ -146,6 +148,7 @@ fn stored(row: &sqlx::sqlite::SqliteRow) -> StoredComputerSession {
         conversation_id: row.get("conversation_id"),
         generation: row.get::<i64, _>("generation") as u64,
         state: row.get("state"),
+        video_quality: row.get("video_quality"),
         source_id: row.get("source_id"),
         source_name: row.get("source_name"),
         source_kind: row.get("source_kind"),
@@ -190,7 +193,7 @@ impl Store {
     where
         E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
     {
-        let row = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE id=?")
+        let row = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, video_quality, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE id=?")
             .bind(id)
             .fetch_optional(executor)
             .await?;
@@ -630,7 +633,7 @@ impl Store {
         owner_device_id: &str,
         client_request_id: &str,
     ) -> Result<Option<StoredComputerSession>, sqlx::Error> {
-        let row = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE owner_device_id=? AND client_request_id=?")
+        let row = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, video_quality, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE owner_device_id=? AND client_request_id=?")
         .bind(owner_device_id)
         .bind(client_request_id)
         .fetch_optional(&self.pool)
@@ -642,7 +645,7 @@ impl Store {
         &self,
         id: &str,
     ) -> Result<Option<StoredComputerSession>, sqlx::Error> {
-        let row = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE id=?")
+        let row = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, video_quality, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE id=?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
@@ -653,7 +656,7 @@ impl Store {
         &self,
         host_installation_id: &str,
     ) -> Result<Option<StoredComputerSession>, sqlx::Error> {
-        let row = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE host_installation_id=? AND state IN ('preparing', 'awaitingSource', 'live', 'paused', 'stale') ORDER BY updated_at DESC LIMIT 1")
+        let row = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, video_quality, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE host_installation_id=? AND state IN ('preparing', 'awaitingSource', 'live', 'paused', 'stale') ORDER BY updated_at DESC LIMIT 1")
             .bind(host_installation_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -664,7 +667,7 @@ impl Store {
         &self,
         host_installation_id: &str,
     ) -> Result<Vec<StoredComputerSession>, sqlx::Error> {
-        let rows = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE host_installation_id=? AND state IN ('preparing', 'awaitingSource', 'live', 'paused', 'stale') ORDER BY updated_at DESC")
+        let rows = sqlx::query("SELECT id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, video_quality, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at, ended_at FROM computer_sessions WHERE host_installation_id=? AND state IN ('preparing', 'awaitingSource', 'live', 'paused', 'stale') ORDER BY updated_at DESC")
             .bind(host_installation_id)
             .fetch_all(&self.pool)
             .await?;
@@ -675,7 +678,7 @@ impl Store {
         &self,
         request: &ComputerSessionCreate,
     ) -> Result<StoredComputerSession, sqlx::Error> {
-        sqlx::query("INSERT INTO computer_sessions (id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO computer_sessions (id, client_request_id, owner_device_id, host_installation_id, conversation_id, generation, state, video_quality, source_id, source_name, source_kind, source_width, source_height, source_scale, crop_json, geometry_revision, failure_reason, created_at, updated_at, last_state_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&request.id)
             .bind(&request.client_request_id)
             .bind(&request.owner_device_id)
@@ -683,6 +686,7 @@ impl Store {
             .bind(&request.conversation_id)
             .bind(request.generation as i64)
             .bind(request.state.as_str())
+            .bind(&request.video_quality)
             .bind(&request.source_id)
             .bind(&request.source_name)
             .bind(&request.source_kind)
@@ -864,6 +868,7 @@ mod tests {
                 conversation_id: format!("{session_id}-conversation"),
                 generation: 1,
                 state: ComputerSessionState::Live,
+                video_quality: "standard".into(),
                 source_id: Some("display-1".into()),
                 source_name: Some("Mac display".into()),
                 source_kind: Some("display".into()),
@@ -1112,6 +1117,7 @@ mod tests {
             conversation_id: "bot-chat".into(),
             generation: 1,
             state: ComputerSessionState::Unavailable,
+            video_quality: "high".into(),
             source_id: Some("display-1".into()),
             source_name: Some("Mac display".into()),
             source_kind: Some("display".into()),
@@ -1125,12 +1131,14 @@ mod tests {
         };
         let inserted = store.insert_computer_session(&request).await.unwrap();
         assert_eq!(inserted.state, "unavailable");
+        assert_eq!(inserted.video_quality, "high");
         let same = store
             .computer_session_by_request("phone-1", "request-1")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(same.id, "session-1");
+        assert_eq!(same.video_quality, "high");
         let ended = store
             .end_computer_session("session-1", "phone-1", Some(1), "later")
             .await
@@ -1157,6 +1165,7 @@ mod tests {
                 conversation_id: "bot-chat".into(),
                 generation: 1,
                 state: ComputerSessionState::Preparing,
+                video_quality: "standard".into(),
                 source_id: None,
                 source_name: None,
                 source_kind: None,
@@ -1281,6 +1290,7 @@ mod tests {
                 conversation_id: "bot-chat".into(),
                 generation: 1,
                 state: ComputerSessionState::Live,
+                video_quality: "standard".into(),
                 source_id: Some("display-1".into()),
                 source_name: Some("Mac display".into()),
                 source_kind: Some("display".into()),
@@ -1303,6 +1313,7 @@ mod tests {
                 conversation_id: "other-chat".into(),
                 generation: 1,
                 state: ComputerSessionState::Live,
+                video_quality: "standard".into(),
                 source_id: Some("display-1".into()),
                 source_name: Some("Mac display".into()),
                 source_kind: Some("display".into()),

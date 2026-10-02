@@ -51,6 +51,8 @@ pub(crate) struct StartRequest {
     generation: Option<u64>,
     #[serde(default)]
     source: Option<SourceRequest>,
+    #[serde(default)]
+    video_quality: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +279,7 @@ struct SessionResponse {
     conversation_id: String,
     generation: u64,
     state: String,
+    video_quality: String,
     source: Source,
     geometry_revision: u64,
     failure_reason: Option<String>,
@@ -454,6 +457,7 @@ fn response(state: &AppState, session: StoredComputerSession) -> SessionResponse
         conversation_id: session.conversation_id,
         generation: session.generation,
         state: session.state,
+        video_quality: session.video_quality,
         source: Source {
             id: session.source_id,
             name: session.source_name,
@@ -1236,6 +1240,10 @@ pub(crate) async fn create(
         Ok(source) => source,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
+    let video_quality = request.video_quality.as_deref().unwrap_or("standard");
+    if !matches!(video_quality, "standard" | "auto" | "high") {
+        return (StatusCode::BAD_REQUEST, "video quality is invalid").into_response();
+    }
     if !state
         .store
         .computer_conversation_allowed(&request.conversation_id)
@@ -1252,6 +1260,7 @@ pub(crate) async fn create(
         Ok(Some(existing)) => {
             if existing.conversation_id != request.conversation_id
                 || existing.host_installation_id != state.host_installation_id
+                || existing.video_quality != video_quality
             {
                 return (
                     StatusCode::CONFLICT,
@@ -1318,6 +1327,7 @@ pub(crate) async fn create(
         } else {
             ComputerSessionState::Unavailable
         },
+        video_quality: video_quality.to_owned(),
         source_id: source.0,
         source_name: source.1,
         source_kind: source.2,
@@ -1338,7 +1348,8 @@ pub(crate) async fn create(
         {
             Ok(Some(existing))
                 if existing.conversation_id == request.conversation_id
-                    && existing.host_installation_id == state.host_installation_id =>
+                    && existing.host_installation_id == state.host_installation_id
+                    && existing.video_quality == video_quality =>
             {
                 existing
             }
@@ -3439,6 +3450,10 @@ async fn supervise_helper(
         .cloned()
         .map(|mut params| {
             params.insert("viewerCount".into(), serde_json::json!(1));
+            params.insert(
+                "videoQuality".into(),
+                serde_json::json!(session.video_quality),
+            );
             serde_json::Value::Object(params)
         })
         .unwrap_or_default();
@@ -4416,6 +4431,7 @@ mod supervisor_tests {
             conversation_id: "fake-chat".into(),
             generation: 1,
             state: ComputerSessionState::Preparing,
+            video_quality: "standard".into(),
             source_id: None,
             source_name: None,
             source_kind: None,
@@ -4438,6 +4454,7 @@ mod supervisor_tests {
             conversation_id: "conversation".into(),
             generation: 3,
             state: ComputerSessionState::Preparing.as_str().into(),
+            video_quality: "standard".into(),
             source_id: None,
             source_name: None,
             source_kind: None,
@@ -4854,9 +4871,11 @@ mod supervisor_tests {
         state.computer_use_enabled = true;
         state.computer_use_bin = Some(helper.clone());
 
+        let mut requested = session();
+        requested.video_quality = "high".into();
         let stored = state
             .store
-            .insert_computer_session(&session())
+            .insert_computer_session(&requested)
             .await
             .unwrap();
         let supervisor = Arc::clone(&state.computer_supervisor);
@@ -4912,6 +4931,7 @@ mod supervisor_tests {
             .starts_with("control.")));
         assert_eq!(requests[1]["params"]["sessionID"], "fake-session");
         assert_eq!(requests[1]["params"]["generation"], 1);
+        assert_eq!(requests[1]["params"]["videoQuality"], "high");
         assert!(requests[1]["params"]["handshake"]
             .as_str()
             .is_some_and(|value| !value.is_empty()));

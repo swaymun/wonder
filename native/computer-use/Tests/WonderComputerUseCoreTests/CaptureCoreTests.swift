@@ -226,13 +226,20 @@ final class CaptureCoreTests: XCTestCase {
         XCTAssertEqual(metadata.generation, 3)
     }
 
-    func testDefaultConfigurationIs720p15WithoutAudioAndClampedQueue() {
+    func testCaptureConfigurationBoundsAndQualityChoices() {
         let configuration = CaptureConfiguration(width: 4_000, height: 3_000, framesPerSecond: 120, audioEnabled: true, queueDepth: 100)
-        XCTAssertEqual(configuration.width, 1_280)
-        XCTAssertEqual(configuration.height, 720)
+        XCTAssertEqual(configuration.width, 2_560)
+        XCTAssertEqual(configuration.height, 1_440)
         XCTAssertEqual(configuration.framesPerSecond, 15)
         XCTAssertFalse(configuration.audioEnabled)
         XCTAssertEqual(configuration.queueDepth, 2)
+        XCTAssertEqual(CaptureVideoQuality.standard.configuration, CaptureConfiguration(width: 1_280, height: 720))
+        XCTAssertEqual(CaptureVideoQuality.auto.configuration, CaptureConfiguration(width: 1_920, height: 1_080))
+        XCTAssertEqual(CaptureVideoQuality.high.configuration, CaptureConfiguration(width: 2_560, height: 1_440))
+        var machine = CaptureStateMachine(configuration: .init(), pickerAvailable: true)
+        let prepared = machine.prepare(sessionID: "session", generation: 1, viewerCount: 1,
+                                       screenRecordingAuthorized: true, configuration: CaptureVideoQuality.high.configuration)
+        XCTAssertEqual(prepared.configuration, CaptureVideoQuality.high.configuration)
     }
 
     func testCaptureConfigurationCentersSourceWithoutChangingEncodedDimensions() {

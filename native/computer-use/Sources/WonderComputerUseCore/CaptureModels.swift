@@ -84,8 +84,8 @@ public struct CaptureConfiguration: Codable, Equatable, Sendable {
         audioEnabled: Bool = false,
         queueDepth: Int = 2
     ) {
-        self.width = max(1, min(width, 1_280))
-        self.height = max(1, min(height, 720))
+        self.width = max(1, min(width, 2_560))
+        self.height = max(1, min(height, 1_440))
         self.framesPerSecond = max(1, min(framesPerSecond, 15))
         // Audio capture is intentionally outside the first sharing contract.
         self.audioEnabled = false
@@ -118,6 +118,20 @@ public struct CaptureConfiguration: Codable, Equatable, Sendable {
             width: fittedWidth,
             height: fittedHeight
         )
+    }
+}
+
+public enum CaptureVideoQuality: String, Codable, CaseIterable, Sendable {
+    case standard
+    case auto
+    case high
+
+    public var configuration: CaptureConfiguration {
+        switch self {
+        case .standard: CaptureConfiguration(width: 1_280, height: 720)
+        case .auto: CaptureConfiguration(width: 1_920, height: 1_080)
+        case .high: CaptureConfiguration(width: 2_560, height: 1_440)
+        }
     }
 }
 

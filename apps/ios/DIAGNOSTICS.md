@@ -150,6 +150,18 @@ navigation bar. Refresh and More are separate toolbar buttons. The picker switch
 only the computer viewer: it closes the previous receiver and releases its
 control lease before opening a host-level view on the selected saved connection.
 The presenting chat and its draft stay on their original connection.
+The phone keeps the same presentation owner across portrait and landscape
+rotation. In landscape, controls move to a narrow right rail with two icon
+columns and Done above the grid; the video occupies the remaining width and
+height. In portrait, the existing two-row control layout remains.
+
+The More menu offers Auto (up to 1080p), Save data (720p), and Sharp (1440p)
+when the Mac supports video quality requests. The choice persists on the phone.
+Changing it releases any control lease and reconnects to the same selected
+source; a removed source can require a new selection. The Mac bounds capture
+and WebRTC output to the selected ceiling at 15 fps. Auto gives WebRTC a 1080p
+ceiling for its normal network and encoder adaptation; it does not guarantee
+1080p delivery. Older Macs show the quality control as unavailable.
 
 While control is active, the upper row shows icons and sends the default macOS
 All windows, App windows and Next window shortcuts. Apps opens Spotlight and
@@ -165,12 +177,16 @@ protocol does not support its Fn modifier. These defaults can differ from
 customized Mac shortcuts.
 
 `testComputerAppSwitcherHoldsCommandUntilSelectionOrCancellation` owns the ordered
-held-key contract. The existing computer UI fixtures check both 44-point control
-rows, native keyboard use, unavailable status and zoom, while
+held-key contract. The existing computer UI fixtures check the 44-point control
+rows and landscape rail, rotation persistence, native keyboard use, unavailable status and zoom, while
 `testDiagnosticsComputerPickerSwitchesHostsAndReleasesControl` checks two saved
 hosts, held-switcher cleanup and same-host reselection. Run the focused fixtures
 on iPhone and iPad, including the largest accessibility text size. Fixtures do
 not prove that a real Mac's app switcher or customized shortcuts respond.
+`testComputerViewerFromNewChatSurvivesPhoneRotation` opens the viewer from the
+actual chat shell with preview connections and rotates both ways.
+`testDiagnosticsComputerVideoQualityReconnectsAndReleasesControl` exercises the
+quality menu's reconnect and lease release without starting a real Mac stream.
 
 ## Bot startup and appearance regression
 
