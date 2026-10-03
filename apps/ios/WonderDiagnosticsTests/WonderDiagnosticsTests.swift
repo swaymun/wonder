@@ -1799,6 +1799,66 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path).count, 1, "Drafts and attached Claude sessions need no native Codex repair")
     }
 
+    // A Project conversation without a provider session still has a durable
+    // conversation ID and must be reachable from the Widget's recent chats.
+    @MainActor func testWidgetIncludesUnstartedProjectConversation() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        model.projects.forgetCache()
+        defer { model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
+        await model.projects.refresh()
+        let page = Data(#"{"threads":[{"reference":"wonder:draft-chat","conversationId":"draft-chat","title":"Planning draft","family":"codex","updatedAt":2,"isPinned":false,"hasUnread":false,"isWorking":false},{"reference":"codex:fixture","conversationId":"started-chat","title":"Started","family":"codex","updatedAt":1,"isPinned":false,"hasUnread":false,"isWorking":false}],"nextCursor":null,"partial":[]}"#.utf8)
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects/project/threads", body: page)
+        MessageRecoveryURLProtocol.hold(path: "/api/v1/projects/project/threads", method: "GET")
+        defer { MessageRecoveryURLProtocol.releaseHeld() }
+        model.projects.loadThreads("project")
+        for _ in 0..<100 {
+            if !MessageRecoveryURLProtocol.bodies(path: "/api/v1/projects/project/threads", includingEmpty: true).isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: "/api/v1/projects/project/threads", includingEmpty: true).count, 1)
+        let response = Data(#"{"conversation":{"reference":"wonder:draft-chat","conversationId":"draft-chat","title":"Planning draft","family":"codex","updatedAt":2,"isPinned":false,"hasUnread":false,"isWorking":false},"receipt":null}"#.utf8)
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects/project/threads", method: "POST", body: response)
+        var widgetChanges = 0
+        model.projects.widgetSnapshotChanged = { widgetChanges += 1 }
+        let draft = NewChatDraft(destination: .project(id: "project"), text: "Plan the next step", family: .codex, model: "fixture-model")
+        let created = try await model.projects.createThread(projectID: "project", draft: draft,
+                                                            body: "Plan the next step", deviceID: Self.cameraSavedConnection().credential.deviceId)
+        XCTAssertEqual(created.conversation.conversationId, "draft-chat")
+        XCTAssertEqual(widgetChanges, 1, "A successful prepare-only POST must request a Widget refresh before any detail GET")
+        let secondResponse = Data(#"{"conversation":{"reference":"wonder:second-chat","conversationId":"second-chat","title":"Second draft","family":"codex","updatedAt":3,"isPinned":false,"hasUnread":false,"isWorking":false},"receipt":null}"#.utf8)
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects/project/threads", method: "POST", body: secondResponse)
+        let secondDraft = NewChatDraft(destination: .project(id: "project"), text: "Another plan", family: .codex, model: "fixture-model")
+        let second = try await model.projects.createThread(projectID: "project", draft: secondDraft,
+                                                           body: "Another plan", deviceID: Self.cameraSavedConnection().credential.deviceId)
+        XCTAssertEqual(second.conversation.conversationId, "second-chat")
+        var renamed = try XCTUnwrap(JSONSerialization.jsonObject(with: projectDetail(pinned: false)) as? [String: Any])
+        renamed["conversationId"] = "draft-chat"
+        renamed["title"] = "Revised draft"
+        renamed["family"] = "codex"
+        renamed["hasNativeSession"] = false
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/draft-chat", method: "PATCH",
+                                           body: try JSONSerialization.data(withJSONObject: renamed))
+        try await model.projects.updateConversation("draft-chat", fields: ["title": "Revised draft"])
+        let changesBeforeOldPage = widgetChanges
+        MessageRecoveryURLProtocol.releaseHeld()
+        for _ in 0..<100 {
+            if model.projects.threads["project"]?.isLoading == false { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.projects.threads["project"]?.isLoading, false)
+        XCTAssertEqual(widgetChanges, changesBeforeOldPage + 1, "The older thread page must request another Widget refresh")
+        XCTAssertEqual(model.projects.threads["project"]?.threads.compactMap(\.conversationId),
+                       ["second-chat", "draft-chat", "started-chat"], "Locally created rows must keep their sidebar order")
+        let library = ConnectionLibrary(diagnosticModel: model)
+        let project = try XCTUnwrap(ProjectWidgetSnapshotPublisher.projectRows(from: library).first)
+        XCTAssertEqual(project.id, "project")
+        XCTAssertEqual(project.recentChats.map(\.id), ["second-chat", "draft-chat", "started-chat"])
+        XCTAssertEqual(project.recentChats.dropFirst().first?.title, "Revised draft")
+    }
+
     @MainActor private func prepareProject(_ model: ConnectionModel) async throws {
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
         await model.projects.refresh()

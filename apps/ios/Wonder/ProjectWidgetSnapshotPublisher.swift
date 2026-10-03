@@ -28,7 +28,7 @@ import WonderPairing
         return true
     }
 
-    private static func projectRows(from library: ConnectionLibrary) -> [ProjectWidgetSnapshot.Project] {
+    static func projectRows(from library: ConnectionLibrary) -> [ProjectWidgetSnapshot.Project] {
         var result: [ProjectWidgetSnapshot.Project] = []
         for saved in library.saved.connections where !saved.requiresPairing {
             if result.count == 10 { break }
@@ -45,7 +45,7 @@ import WonderPairing
                     if left.updatedAt != right.updatedAt { return left.updatedAt > right.updatedAt }
                     return left.reference < right.reference
                 }.compactMap { row -> ProjectWidgetSnapshot.Chat? in
-                    guard let id = row.conversationId, !row.reference.hasPrefix("wonder:"),
+                    guard let id = row.conversationId,
                           seen.insert(id).inserted, !model.projects.unavailable.contains(id),
                           model.projects.details[id]?.isArchived != true,
                           model.projects.details[id].map({ $0.projectId == project.id }) ?? true else { return nil }

@@ -29,6 +29,8 @@ import WonderPairing
     var owner: ConnectionModel? { model }
     private var scope: String?
     private var threadTasks: [String: Task<Void, Never>] = [:]
+    /// A first-page read may have started before a prepare-only conversation was created.
+    private var createdDuringThreadRead: [String: Set<String>] = [:]
     private var refreshTask: Task<Void, Never>?
     private var refreshID: UUID?
     private var refreshPinRevision = 0
@@ -93,6 +95,7 @@ import WonderPairing
             threadTasks.values.forEach { $0.cancel() }
             refreshTask?.cancel(); refreshTask = nil; refreshID = nil
             threadTasks = [:]
+            createdDuringThreadRead = [:]
             projects = []; families = []; loadingProjects = false; failure = nil
             threads = [:]; details = [:]; supportsProjects = nil; options = nil
             supportsModes = false; supportsArchive = false; pinned = []; unavailable = []; manuallyUnread = []; recentlyOpened = RecentlyOpenedConversations()
@@ -184,14 +187,21 @@ import WonderPairing
         let pinRevisionAtStart = pinRevision
         let readsAtStart = readRevisions
         threadTasks[key] = Task { [weak self] in
-            defer { if self?.scope == scope { self?.threadTasks[key] = nil } }
+            defer {
+                if self?.scope == scope {
+                    self?.threadTasks[key] = nil
+                    self?.createdDuringThreadRead[projectID] = nil
+                }
+            }
             var path = "/api/v1/projects/\(ConnectionModel.escape(projectID))/threads?limit=\(more ? 10 : SidebarProjection.initialThreads)"
             if let cursor { path += "&cursor=" + ConnectionModel.escape(cursor) }
             do {
                 let page: ProjectThreadsPage = try await model.manage(path)
                 guard let self, self.isCurrent(scope), !Task.isCancelled else { return }
                 var next = self.threads[projectID] ?? ProjectThreadsState()
+                let before = next.threads
                 next.apply(self.reconcilingReads(self.reconcilingPins(page, startedAt: pinRevisionAtStart), startedAt: readsAtStart), replacing: !more)
+                if !more { self.preserveCreatedDuringRead(in: &next, previous: before, projectID: projectID) }
                 next.isLoading = false
                 self.threads[projectID] = next
                 if !more { self.saveCache() }
@@ -208,7 +218,9 @@ import WonderPairing
                     let page: ProjectThreadsPage = try await model.manage("/api/v1/projects/\(ConnectionModel.escape(projectID))/threads?limit=\(SidebarProjection.initialThreads)")
                     guard self.isCurrent(scope) else { return }
                     var next = self.threads[projectID] ?? ProjectThreadsState()
+                    let before = next.threads
                     next.apply(self.reconcilingReads(self.reconcilingPins(page, startedAt: revision), startedAt: reads), replacing: true); next.isLoading = false
+                    self.preserveCreatedDuringRead(in: &next, previous: before, projectID: projectID)
                     self.threads[projectID] = next
                     self.saveCache()
                 } catch {
@@ -222,6 +234,21 @@ import WonderPairing
                         ? "Connect to \(model.macName) to load threads."
                         : "Threads could not be loaded. Tap to retry."
             }
+        }
+    }
+
+    private func preserveCreatedDuringRead(in state: inout ProjectThreadsState, previous: [ProjectThreadSummary], projectID: String) {
+        guard let created = createdDuringThreadRead[projectID] else { return }
+        // The page may contain an earlier title, pin or archive state for a row
+        // created during this request. The current local row wins; if it was
+        // archived, its absence removes a stale server copy too.
+        state.threads.removeAll { row in
+            guard let id = row.conversationId else { return false }
+            return created.contains(id)
+        }
+        for row in previous.reversed() {
+            guard let id = row.conversationId, created.contains(id) else { continue }
+            state.threads.insert(row, at: 0)
         }
     }
 
@@ -549,11 +576,15 @@ import WonderPairing
             state.hasLoaded = true
         }
         threads[projectID] = state
+        if threadTasks[projectID] != nil, let id = response.conversation.conversationId {
+            createdDuringThreadRead[projectID, default: []].insert(id)
+        }
         if let index = projects.firstIndex(where: { $0.id == projectID }) {
             let old = projects[index]
             projects[index] = ProjectSummary(id: old.id, name: old.name, isIncluded: old.isIncluded, isPinned: old.isPinned,
                 rootsRevision: old.rootsRevision, folders: old.folders, lastFamily: family, lastUsedAt: old.lastUsedAt, createdAt: old.createdAt)
         }
+        saveCache()
         return response
     }
 

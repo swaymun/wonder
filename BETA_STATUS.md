@@ -181,6 +181,18 @@ links and TestFlight Widget installation remain open. The exact two temporary
 simulator pairings for this check were revoked; the Mac roster showed six
 revoked devices and neither overnight QA device in the paired list.
 
+An October 3 source correction lets recent-chat Widgets include Wonder-created
+Project conversations that have a durable conversation ID but no provider
+session yet. It publishes the new row after the prepare-only creation succeeds
+and keeps locally changed rows when an older thread page returns. A held-read
+regression covering two drafts and a rename passed 1/1 on each iPhone and iPad
+simulator; the exact-conversation deep-link UI check also passed 1/1 on each.
+The Wonder Testing Release simulator build passed with no focused Diagnostics
+markers. A configured medium Widget recent-chat tap, installed TestFlight
+behavior and the current source's paired-host path remain unverified. Testing
+20 and production 82 predate this correction; the requested one upload per
+channel has already been used.
+
 At the owner's request, draft Mac Settings removes its redundant Folders list.
 Project roots and Bot file grants are separate daemon-owned controls; a
 read-only review found no access boundary using that list. The retired list's
