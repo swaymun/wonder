@@ -140,6 +140,59 @@ final class WonderDiagnosticsTests: XCTestCase {
                                            onRevision: nil, failureMessage: "Read failed")
         await fulfillment(of: [firstSnapshotRead], timeout: 2)
         openedBeforeSnapshot.close()
+
+        let largeSource = Data(repeating: 65, count: 512 * 1024)
+        let largeRevision = WorkspaceRevisionState(data: largeSource, sha256: ConversationFile.digest(largeSource))
+        largeRevision.observedPoint = WorkspaceObservationPoint(hostEpoch: "large-file", sequence: 1)
+        let largeReads = Counter()
+        let largeRefresh: () async throws -> Data = { _ = await largeReads.next(); return largeSource }
+        await largeRevision.observe(point: WorkspaceObservationPoint(hostEpoch: "large-file", sequence: 2),
+                                    refresh: largeRefresh, onRevision: nil, failureMessage: "Read failed")
+        for _ in 0..<100 where largeRevision.observedPoint?.sequence != 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let firstLargeReadCount = await largeReads.count()
+        XCTAssertEqual(firstLargeReadCount, 1)
+        await largeRevision.observe(point: WorkspaceObservationPoint(hostEpoch: "large-file", sequence: 3),
+                                    refresh: largeRefresh, onRevision: nil, failureMessage: "Read failed")
+        try await Task.sleep(for: .milliseconds(1_250))
+        let automaticLargeReadCount = await largeReads.count()
+        XCTAssertEqual(automaticLargeReadCount, 1,
+                       "A large unchanged file must not download once per second during a stream")
+        let manualLargeRead = await largeRevision.checkManuallyForRevision(refresh: largeRefresh, onRevision: nil,
+                                                                         failureMessage: "Read failed")
+        XCTAssertTrue(manualLargeRead,
+                      "Manual refresh remains available between passive checks")
+        let finalLargeReadCount = await largeReads.count()
+        XCTAssertEqual(finalLargeReadCount, 2)
+        try await Task.sleep(for: .milliseconds(1_000))
+        let coalescedLargeReadCount = await largeReads.count()
+        XCTAssertEqual(coalescedLargeReadCount, 2,
+                       "Manual refresh should satisfy the queued automatic check")
+        largeRevision.close()
+
+        let failedManualRevision = WorkspaceRevisionState(data: largeSource, sha256: ConversationFile.digest(largeSource))
+        failedManualRevision.observedPoint = WorkspaceObservationPoint(hostEpoch: "failed-manual", sequence: 1)
+        await failedManualRevision.observe(point: WorkspaceObservationPoint(hostEpoch: "failed-manual", sequence: 2),
+                                           refresh: { largeSource }, onRevision: nil, failureMessage: "Read failed")
+        for _ in 0..<100 where failedManualRevision.observedPoint?.sequence != 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let automaticAfterFailure = expectation(description: "Automatic check retries after failed manual read")
+        await failedManualRevision.observe(point: WorkspaceObservationPoint(hostEpoch: "failed-manual", sequence: 3),
+                                           refresh: { automaticAfterFailure.fulfill(); return largeSource },
+                                           onRevision: nil, failureMessage: "Read failed")
+        let handledFailure = await failedManualRevision.checkManuallyForRevision(
+            refresh: { throw URLError(.timedOut) }, onRevision: nil, failureMessage: "Read failed")
+        XCTAssertTrue(handledFailure)
+        XCTAssertEqual(failedManualRevision.observedPoint?.sequence, 2,
+                       "A failed manual read must not consume the queued event")
+        await fulfillment(of: [automaticAfterFailure], timeout: 4)
+        for _ in 0..<100 where failedManualRevision.observedPoint?.sequence != 3 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(failedManualRevision.observedPoint?.sequence, 3)
+        failedManualRevision.close()
     }
 
     @MainActor func testPDFPreviewRetainsPageReadingPointAndZoomAcrossRevision() throws {

@@ -2010,7 +2010,8 @@ struct ManagedBotListMutationState {
             ((composers[chat.id]?.draftAttachmentIds ?? []).contains(id) &&
              files[chat.id]?.contains(where: { $0.id == id && $0.mimeType == ArtifactAnnotation.mimeType }) == true)
         } ?? false
-        guard projects.details[chat.id] != nil, !chat.isArchived, !accessEnded,
+        guard let detail = projects.details[chat.id], detail.isArchived != true,
+              !chat.isArchived, !accessEnded,
               macConnected == true, composers[chat.id]?.pending == nil,
               (attachmentCount(chat.id) < 4 || replacesAnnotation), !uploading.contains(chat.id),
               !preparingSends.contains(chat.id) else { return false }
@@ -2028,7 +2029,8 @@ struct ManagedBotListMutationState {
         guard canAnnotate(chat, replacing: oldID),
               expectedScope == assignmentScope,
               let detail = projects.details[chat.id], detail.projectId == annotation.projectId,
-              annotation.conversationId == chat.id, !chat.isArchived, !accessEnded,
+              detail.isArchived != true, annotation.conversationId == chat.id,
+              !chat.isArchived, !accessEnded,
               (connection != nil || previewMode),
               !uploading.contains(chat.id), !preparingSends.contains(chat.id) else { throw FileFailure.integrity }
         loadComposer(chat.id)

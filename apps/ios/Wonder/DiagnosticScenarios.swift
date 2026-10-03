@@ -276,8 +276,9 @@ enum DiagnosticSubagentFixture {
     static var projectArchiveFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-archive") }
     static var projectSpeedFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-speed") }
     static var projectSubagentFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents") }
+    static var projectFilesSendFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-send") }
     static var questionResolutionFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-question-resolution") }
-    static var projectReadFixture: Bool { projectArchiveFixture || projectSpeedFixture || projectSubagentFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
+    static var projectReadFixture: Bool { projectArchiveFixture || projectSpeedFixture || projectSubagentFixture || projectFilesSendFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
     static let hostID = "diagnostic-host"
     static let parentID = "fixture-parent-conversation"
     static let childID = "fixture-child-conversation"
@@ -500,7 +501,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             let conversation = DiagnosticSubagentFixture.parentID
             let archiveFixture = DiagnosticSubagentFixture.projectArchiveFixture
             let speedFixture = DiagnosticSubagentFixture.projectSpeedFixture
-            let family = archiveFixture || speedFixture || DiagnosticSubagentFixture.projectSubagentFixture ? "codex" : "claude"
+            let family = archiveFixture || speedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture ? "codex" : "claude"
             let archived = Self.state.lock.withLock { Self.state.projectArchived }
             switch path {
             case "/api/v1/pairing/session/refresh-challenge":
@@ -537,11 +538,11 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                 }
                 finish(status: 200, body: json([
                     "conversationId": conversation, "projectId": "read-project", "projectName": "Read status",
-                    "title": "Read status fixture", "family": family, "model": archiveFixture || speedFixture ? "gpt-fixture" : "claude:sonnet", "effort": "high",
+                    "title": "Read status fixture", "family": family, "model": archiveFixture || speedFixture || DiagnosticSubagentFixture.projectFilesSendFixture ? "gpt-fixture" : "claude:sonnet", "effort": "high",
                     "serviceTier": speedFixture ? Self.state.lock.withLock { Self.state.projectServiceTier } as Any : NSNull(),
                     "accessMode": "read_only", "workingFolder": "/fixture", "workingFolderName": "fixture",
                     "isPinned": true, "hasUnread": Self.state.lock.withLock { Self.state.projectUnread },
-                    "hasNativeSession": archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture, "folderInProject": true, "claudeApproval": "ask", "planMode": false,
+                    "hasNativeSession": archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture, "folderInProject": true, "claudeApproval": "ask", "planMode": false,
                     "isArchived": Self.state.lock.withLock { Self.state.projectArchived }
                 ])); return
             case "/api/v1/project-conversations/\(conversation)/subagents" where DiagnosticSubagentFixture.projectSubagentFixture:
@@ -705,6 +706,36 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             "detail": NSNull(),
             "subagents": ProcessInfo.processInfo.arguments.contains("-diagnostics-history-replay") ? [] : [childSummary(), unavailableChildSummary()]
         ]))
+        case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/workspace/roots" where DiagnosticSubagentFixture.projectFilesSendFixture && method == "GET":
+            finish(status: 200, body: json(["available": true, "detail": NSNull(), "roots": [[
+                "id": "fixture-root", "label": "Workspace", "path": "/fixture", "isDirectory": true,
+                "kind": "workingDirectory", "readOnly": true
+            ]], "attachments": []]))
+        case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/workspace/directory" where DiagnosticSubagentFixture.projectFilesSendFixture && method == "GET":
+            let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+            guard query.first(where: { $0.name == "root" })?.value == "fixture-root",
+                  query.first(where: { $0.name == "path" })?.value == "" else {
+                finish(status: 400, body: Data("{}".utf8)); return
+            }
+            finish(status: 200, body: json(["rootId": "fixture-root", "path": "", "parentPath": NSNull(),
+                "entries": [["name": "README.md", "path": "README.md", "isDirectory": false,
+                             "byteSize": Data("Live workspace note.\n".utf8).count, "mimeType": "text/plain"]],
+                "nextOffset": NSNull()]))
+        case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/workspace/file" where DiagnosticSubagentFixture.projectFilesSendFixture && method == "GET":
+            let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+            guard query.first(where: { $0.name == "root" })?.value == "fixture-root",
+                  query.first(where: { $0.name == "path" })?.value == "README.md" else {
+                finish(status: 400, body: Data("{}".utf8)); return
+            }
+            finish(status: 200, body: Data("Live workspace note.\n".utf8))
+        case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/messages" where DiagnosticSubagentFixture.projectFilesSendFixture && method == "POST":
+            guard let body, let request = try? JSONDecoder().decode(SendRequest.self, from: body),
+                  request.body == "Review this file while Files stays open.", request.attachmentIds.isEmpty else {
+                finish(status: 400, body: Data("{}".utf8)); return
+            }
+            finish(status: 200, body: json(["clientMessageId": request.clientMessageId,
+                "wonderMessageId": "fixture-sent-message", "conversationId": DiagnosticSubagentFixture.parentID,
+                "bodySha256": ConversationFile.digest(Data(request.body.utf8)), "deliveryState": "accepted"]))
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.childID)/subagents": finish(status: 200, body: json([
             "available": true,
             "detail": NSNull(),
@@ -728,7 +759,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
     }
     private func projectReadThread() -> [String: Any] {
-        let family = DiagnosticSubagentFixture.projectArchiveFixture || DiagnosticSubagentFixture.projectSpeedFixture || DiagnosticSubagentFixture.projectSubagentFixture ? "codex" : "claude"
+        let family = DiagnosticSubagentFixture.projectArchiveFixture || DiagnosticSubagentFixture.projectSpeedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture ? "codex" : "claude"
         return ["reference": "\(family):read-fixture", "conversationId": DiagnosticSubagentFixture.parentID,
          "title": "Read status fixture", "family": family, "updatedAt": 1, "isPinned": true,
          "hasUnread": Self.state.lock.withLock { Self.state.projectUnread }, "isWorking": false]

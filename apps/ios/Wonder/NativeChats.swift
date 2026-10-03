@@ -2929,6 +2929,11 @@ struct WorkspaceObservationPoint: Hashable {
     private var observationTask: Task<Void, Never>?
     private var observationGeneration = UUID()
     private var lastAutomaticCheckAt: TimeInterval?
+    private var automaticCheckInterval: TimeInterval {
+        // A full-file refresh reads and hashes every byte. Keep passive reads
+        // near 256 KB/s for large previews; manual Check for changes is immediate.
+        min(30, max(1, Double(max(currentData.count, offeredData?.count ?? 0)) / (256 * 1024)))
+    }
     private var preparedSha256: String?
     private var closed = false
 
@@ -2987,6 +2992,21 @@ struct WorkspaceObservationPoint: Hashable {
         }
     }
 
+    @discardableResult func checkManuallyForRevision(refresh: (() async throws -> Data)?,
+                          onRevision: ((String) async -> Void)?, failureMessage: String) async -> Bool {
+        let checkedPoint = requestedPoint
+        let generation = observationGeneration
+        let checked = await checkForRevision(refresh: refresh, onRevision: onRevision,
+                                             failureMessage: failureMessage)
+        guard checked, refreshFailure == nil, !closed,
+              generation == observationGeneration else { return checked }
+        // A manual read satisfies the event already queued when it began.
+        // A newer event still gets its own automatic check after the cadence.
+        if let checkedPoint { observedPoint = checkedPoint }
+        lastAutomaticCheckAt = ProcessInfo.processInfo.systemUptime
+        return true
+    }
+
     func observe(point: WorkspaceObservationPoint, refresh: (() async throws -> Data)?,
                  onRevision: ((String) async -> Void)?, failureMessage: String) async {
         guard !Task.isCancelled, !closed, refresh != nil else { return }
@@ -3019,19 +3039,23 @@ struct WorkspaceObservationPoint: Hashable {
             // Chat streaming can advance the sequence many times per second.
             // Keep automatic full-file reads bounded while still checking the
             // newest event during an ongoing turn.
-            if let lastAutomaticCheckAt {
-                let remaining = max(0, 1 - (ProcessInfo.processInfo.systemUptime - lastAutomaticCheckAt))
-                if remaining > 0 {
-                    do { try await Task.sleep(for: .milliseconds(Int64((remaining * 1000).rounded(.up)))) }
-                    catch { return }
+            while true {
+                while refreshing {
+                    do { try await Task.sleep(for: .milliseconds(30)) } catch { return }
+                    guard !closed, generation == observationGeneration else { return }
                 }
-            }
-            while refreshing {
-                do { try await Task.sleep(for: .milliseconds(30)) } catch { return }
-                guard !closed, generation == observationGeneration else { return }
+                guard !Task.isCancelled, !closed, generation == observationGeneration else { return }
+                if observedPoint == requestedPoint { return }
+                let remaining = lastAutomaticCheckAt.map {
+                    max(0, automaticCheckInterval - (ProcessInfo.processInfo.systemUptime - $0))
+                } ?? 0
+                guard remaining > 0 else { break }
+                do { try await Task.sleep(for: .milliseconds(Int64((remaining * 1000).rounded(.up)))) }
+                catch { return }
             }
             guard !Task.isCancelled, !closed, generation == observationGeneration else { return }
             let checkedPoint = requestedPoint ?? requested
+            if observedPoint == checkedPoint { return }
             lastAutomaticCheckAt = ProcessInfo.processInfo.systemUptime
             let checked = await checkForRevision(refresh: refresh, onRevision: onRevision,
                                                  failureMessage: failureMessage)
@@ -3408,6 +3432,10 @@ struct WorkspaceBrowser: View {
                 .labelStyle(.iconOnly)
                 .frame(minWidth: 44, minHeight: 44)
                 .accessibilityIdentifier("workspace-preview-expand")
+                #if WONDER_DIAGNOSTICS
+                .accessibilityValue(DiagnosticSubagentFixture.projectFilesSendFixture &&
+                    model.composers[chat.id]?.pending?.receipt != nil ? "Host received test message" : "")
+                #endif
             }
             .padding(.horizontal, 12)
             .background(Color(uiColor: .secondarySystemBackground))
@@ -3421,7 +3449,9 @@ struct WorkspaceBrowser: View {
         if let item = selection {
             if let context = annotationContext(for: item), let previewRevision {
                 let replacement = reanchorDraft(for: item)
+                let annotationReason = annotationUnavailableReason(for: item)
                 WorkspaceImagePreview(model: model, chat: chat, item: item, context: context,
+                                      annotationUnavailableReason: annotationReason,
                                       revision: previewRevision,
                                       refresh: revisionRefresh(for: item),
                                       onRevision: revisionNotice(for: item),
@@ -3453,11 +3483,14 @@ struct WorkspaceBrowser: View {
             } else if let previewRevision {
                 let context = annotationContext(for: item)
                 let replacement = reanchorDraft(for: item)
+                let annotationReason = context == nil ? nil : annotationUnavailableReason(for: item)
                 WorkspaceDocumentPreview(name: item.name, mimeType: item.mimeType,
                                          revision: previewRevision, draft: textAnnotationDraft,
                                          pdfSession: pdfSession,
                                          htmlSession: htmlSession,
-                                         annotationContext: context, onAnnotation: { annotation in
+                                         annotationContext: context,
+                                         annotationUnavailableReason: annotationReason,
+                                         onAnnotation: { annotation in
                     guard let context else { throw FileFailure.integrity }
                     try stagePreviewAnnotation(annotation, context: context, replacing: replacement?.id)
                 }, refresh: revisionRefresh(for: item), onRevision: revisionNotice(for: item),
@@ -3860,10 +3893,29 @@ struct WorkspaceBrowser: View {
     private func annotationContext(for item: WorkspacePreviewSelection) -> ArtifactPreviewContext? {
         guard let rootID = item.rootID, let path = item.path, !path.isEmpty,
               let scope = item.scope, scope == model.assignmentScope,
-              let projectID = model.projects.details[chat.id]?.projectId,
-              model.canAnnotate(chat, replacing: reanchorDraft(for: item)?.id) else { return nil }
+              let projectID = model.projects.details[chat.id]?.projectId else { return nil }
         return ArtifactPreviewContext(projectID: projectID, conversationID: chat.id,
                                       rootID: rootID, path: path, scope: scope)
+    }
+    private func annotationUnavailableReason(for item: WorkspacePreviewSelection) -> String? {
+        guard !model.canAnnotate(chat, replacing: reanchorDraft(for: item)?.id) else { return nil }
+        if chat.isArchived || model.projects.details[chat.id]?.isArchived == true {
+            return "Unarchive this chat to add a note."
+        }
+        if model.accessEnded || model.macConnected != true {
+            return "Reconnect to your Mac to add a note."
+        }
+        if model.preparingSends.contains(chat.id) || model.sending.contains(chat.id) ||
+            model.composers[chat.id]?.pending != nil {
+            return "Wait for the current message to complete before saving this note."
+        }
+        if model.uploading.contains(chat.id) {
+            return "Wait for the current attachment to finish uploading."
+        }
+        if (model.composers[chat.id]?.attachmentCount ?? 0) >= 4 {
+            return "Remove an attachment to add a note."
+        }
+        return "Preview notes are unavailable right now."
     }
     private func reanchorDraft(for item: WorkspacePreviewSelection) -> (id: String, note: String)? {
         guard let reanchor, let replacingAnnotationID,
@@ -4020,6 +4072,7 @@ private struct WorkspaceImagePreview: View {
     let chat: ChatSummary
     let item: WorkspacePreviewSelection
     let context: ArtifactPreviewContext
+    let annotationUnavailableReason: String?
     let refresh: (() async throws -> Data)?
     let onRevision: ((String) async -> Void)?
     let refreshPoint: WorkspaceObservationPoint?
@@ -4030,12 +4083,14 @@ private struct WorkspaceImagePreview: View {
     @State private var showingRegion = false
 
     init(model: ConnectionModel, chat: ChatSummary, item: WorkspacePreviewSelection,
-         context: ArtifactPreviewContext, revision: WorkspaceRevisionState,
+         context: ArtifactPreviewContext, annotationUnavailableReason: String?,
+         revision: WorkspaceRevisionState,
          refresh: (() async throws -> Data)?,
          onRevision: ((String) async -> Void)?, refreshPoint: WorkspaceObservationPoint?,
          initialNote: String, onClose: @escaping () -> Void,
          onAnnotation: @escaping (ArtifactAnnotation) throws -> Void) {
         self.model = model; self.chat = chat; self.item = item; self.context = context
+        self.annotationUnavailableReason = annotationUnavailableReason
         self.revision = revision
         self.refresh = refresh; self.onRevision = onRevision; self.refreshPoint = refreshPoint
         self.initialNote = initialNote
@@ -4085,14 +4140,27 @@ private struct WorkspaceImagePreview: View {
                 }
             }
             .overlay(alignment: .bottom) {
-                Button("Annotate region", systemImage: "square.dashed") { showingRegion = true }
-                    .buttonStyle(.borderedProminent)
-                    .padding(.bottom, 18)
-                    .accessibilityIdentifier("annotation-image-open")
+                VStack(spacing: 4) {
+                    Button("Annotate region", systemImage: "square.dashed") { showingRegion = true }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(annotationUnavailableReason != nil)
+                        .accessibilityHint(annotationUnavailableReason ?? "")
+                        .accessibilityIdentifier("annotation-image-open")
+                    if let annotationUnavailableReason {
+                        Text(annotationUnavailableReason)
+                            .font(.footnote).foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 10).padding(.vertical, 4)
+                            .background(.black.opacity(0.7), in: Capsule())
+                            .accessibilityIdentifier("annotation-image-unavailable")
+                    }
+                }
+                .padding(.bottom, 18)
             }
             .fullScreenCover(isPresented: $showingRegion) {
                 WorkspaceRegionEditor(name: item.name, source: revision.currentData, context: context,
-                                      format: .image, onAnnotation: onAnnotation, initialNote: initialNote)
+                                      format: .image, onAnnotation: onAnnotation, initialNote: initialNote,
+                                      annotationUnavailableReason: annotationUnavailableReason)
             }
             .task(id: refreshPoint) {
                 guard let refreshPoint else { return }
@@ -4102,7 +4170,7 @@ private struct WorkspaceImagePreview: View {
     }
 
     private func checkForRevision() async {
-        await revision.checkForRevision(refresh: refresh, onRevision: onRevision,
+        await revision.checkManuallyForRevision(refresh: refresh, onRevision: onRevision,
             failureMessage: "Could not check this image. Check your Mac or workspace access and try again.")
     }
 }
@@ -4116,6 +4184,7 @@ private struct WorkspaceRegionEditor: View {
     let format: WorkspaceRegionFormat
     let onAnnotation: (ArtifactAnnotation) throws -> Void
     var initialNote: String = ""
+    var annotationUnavailableReason: String? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var page = 1
     @State private var pageCount = 0
@@ -4206,9 +4275,14 @@ private struct WorkspaceRegionEditor: View {
                     .frame(maxHeight: 260)
                     if note.utf8.count > 4096 { Text("Keep the note under 4,096 bytes.").font(.footnote).foregroundStyle(.red) }
                     if let failure { Text(failure).font(.footnote).foregroundStyle(.red).accessibilityIdentifier("annotation-region-error") }
+                    if let annotationUnavailableReason {
+                        Text(annotationUnavailableReason)
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("annotation-region-wait")
+                    }
                     Button("Add to message") { addAnnotation() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(loading || region == nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
+                        .disabled(annotationUnavailableReason != nil || loading || region == nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
                         .accessibilityIdentifier("annotation-region-add")
                 }
                 .padding(12)
@@ -4244,7 +4318,7 @@ private struct WorkspaceRegionEditor: View {
     }
 
     private func addAnnotation() {
-        guard !loading, let region else { return }
+        guard annotationUnavailableReason == nil, !loading, let region else { return }
         do {
             let x = Double(region.minX), y = Double(region.minY)
             let width = Double(region.width), height = Double(region.height)
@@ -4476,7 +4550,7 @@ private struct WorkspaceVersionedBinaryPreview: View {
                     Button("Check for changes", systemImage: "arrow.clockwise") {
                         revision.manualRefreshTask?.cancel()
                         revision.manualRefreshTask = Task {
-                            await revision.checkForRevision(refresh: refresh, onRevision: onRevision,
+                            await revision.checkManuallyForRevision(refresh: refresh, onRevision: onRevision,
                                 failureMessage: "Could not check this file. Check your Mac or workspace access and try again.")
                         }
                     }
@@ -4531,6 +4605,7 @@ private struct WorkspaceDocumentPreview: View {
     let pdfSession: PDFPreviewSession?
     let htmlSession: WorkspaceHTMLPreviewSession?
     let annotationContext: ArtifactPreviewContext?
+    let annotationUnavailableReason: String?
     let onAnnotation: ((ArtifactAnnotation) throws -> Void)?
     let refresh: (() async throws -> Data)?
     let onRevision: ((String) async -> Void)?
@@ -4543,6 +4618,7 @@ private struct WorkspaceDocumentPreview: View {
          pdfSession: PDFPreviewSession? = nil,
          htmlSession: WorkspaceHTMLPreviewSession? = nil,
          annotationContext: ArtifactPreviewContext? = nil,
+         annotationUnavailableReason: String? = nil,
          onAnnotation: ((ArtifactAnnotation) throws -> Void)? = nil,
          refresh: (() async throws -> Data)? = nil,
          onRevision: ((String) async -> Void)? = nil,
@@ -4552,7 +4628,8 @@ private struct WorkspaceDocumentPreview: View {
         self.htmlSession = htmlSession
         self.revision = revision
         self.draft = draft
-        self.annotationContext = annotationContext; self.onAnnotation = onAnnotation
+        self.annotationContext = annotationContext; self.annotationUnavailableReason = annotationUnavailableReason
+        self.onAnnotation = onAnnotation
         self.refresh = refresh; self.onRevision = onRevision; self.refreshPoint = refreshPoint
         self.onClose = onClose
     }
@@ -4596,6 +4673,8 @@ private struct WorkspaceDocumentPreview: View {
                     ToolbarItem(placement: .topBarLeading) {
                         if mimeType == "application/pdf", annotationContext != nil, onAnnotation != nil {
                             Button("Annotate region") { showingPDFRegion = true }
+                                .disabled(!canStageAnnotation)
+                                .accessibilityHint(annotationUnavailableReason ?? "")
                                 .accessibilityIdentifier("annotation-pdf-open")
                         }
                     }
@@ -4617,10 +4696,20 @@ private struct WorkspaceDocumentPreview: View {
                         .background(Color(uiColor: .secondarySystemBackground))
                         .accessibilityIdentifier("workspace-document-truncated")
                 }
+                if mimeType == "application/pdf", annotationContext != nil,
+                   let annotationUnavailableReason {
+                    Text(annotationUnavailableReason)
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .accessibilityIdentifier("annotation-document-unavailable")
+                }
                 if onClose != nil && (refresh != nil || mimeType == "application/pdf" && annotationContext != nil && onAnnotation != nil) {
                     HStack {
                         if mimeType == "application/pdf", annotationContext != nil, onAnnotation != nil {
                             Button("Annotate region") { showingPDFRegion = true }
+                                .disabled(!canStageAnnotation)
+                                .accessibilityHint(annotationUnavailableReason ?? "")
                                 .accessibilityIdentifier("annotation-pdf-open")
                         }
                         Spacer()
@@ -4663,7 +4752,7 @@ private struct WorkspaceDocumentPreview: View {
                                 Button("Save comment", systemImage: "checkmark") { addAnnotation() }
                                     .labelStyle(.iconOnly)
                                     .frame(minWidth: 44, minHeight: 44)
-                                    .disabled(draft.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.note.utf8.count > 4096)
+                                    .disabled(!canStageAnnotation || draft.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.note.utf8.count > 4096)
                                     .accessibilityIdentifier("annotation-add")
                             } else {
                                 Button("Comment", systemImage: "text.bubble") { draft.editingSelection = true }
@@ -4681,6 +4770,11 @@ private struct WorkspaceDocumentPreview: View {
                                         .allowsHitTesting(false)
                                 }
                             }
+                            if let annotationUnavailableReason {
+                                Text(annotationUnavailableReason)
+                                    .font(.footnote).foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("annotation-comment-wait")
+                            }
                         }
                         if draft.note.utf8.count > 4096 { Text("Keep the comment under 4,096 bytes.").font(.footnote).foregroundStyle(.red) }
                         if let error = draft.error { Text(error).font(.footnote).foregroundStyle(.red) }
@@ -4695,7 +4789,8 @@ private struct WorkspaceDocumentPreview: View {
             .fullScreenCover(isPresented: $showingPDFRegion) {
                 if let annotationContext, let onAnnotation {
                     WorkspaceRegionEditor(name: name, source: revision.currentData, context: annotationContext,
-                                          format: .pdf, onAnnotation: onAnnotation, initialNote: draft.note)
+                                          format: .pdf, onAnnotation: onAnnotation, initialNote: draft.note,
+                                          annotationUnavailableReason: annotationUnavailableReason)
                 }
             }
             .task(id: refreshPoint) {
@@ -4708,9 +4803,13 @@ private struct WorkspaceDocumentPreview: View {
     }
 
     private var canAnnotate: Bool {
-        !revision.preparingText && annotationContext != nil && onAnnotation != nil && mimeType != "text/html" &&
+        !revision.preparingText && annotationContext != nil && onAnnotation != nil &&
+        (canStageAnnotation || draft.selectedRange != nil) && mimeType != "text/html" &&
         (mimeType.hasPrefix("text/") || ["application/json", "application/yaml", "application/xml", "application/sql"].contains(mimeType)) &&
         revision.preparedText != nil
+    }
+    private var canStageAnnotation: Bool {
+        annotationContext != nil && annotationUnavailableReason == nil
     }
     private var refreshButton: some View {
         Button("Check for changes", systemImage: "arrow.clockwise") {
@@ -4728,7 +4827,7 @@ private struct WorkspaceDocumentPreview: View {
         return String(selected.prefix(120)).replacingOccurrences(of: "\n", with: " ")
     }
     private func addAnnotation() {
-        guard let annotationContext, let onAnnotation, let selectedTextRange = draft.selectedRange,
+        guard canStageAnnotation, let annotationContext, let onAnnotation, let selectedTextRange = draft.selectedRange,
               let text = revision.preparedText, let range = Range(selectedTextRange, in: text) else { return }
         do {
             let start = text[..<range.lowerBound].utf8.count
@@ -4743,7 +4842,7 @@ private struct WorkspaceDocumentPreview: View {
     }
 
     private func checkForRevision() async {
-        await revision.checkForRevision(refresh: refresh, onRevision: onRevision,
+        await revision.checkManuallyForRevision(refresh: refresh, onRevision: onRevision,
             failureMessage: "Could not check this file. Check your Mac or workspace access and try again.")
     }
 

@@ -2615,6 +2615,56 @@ import UIKit
         XCTAssertTrue(files.waitForExistence(timeout: 5))
     }
 
+    func testProjectFilesKeepsSelectedPreviewDuringOfflineMessageSend() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved",
+                               "-diagnostics-project-files-send", "-diagnostics-usage-fixture"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let thread = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 15))
+        thread.tap()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let file = app.buttons["workspace-file-entry:README.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        file.tap()
+        let preview = app.textViews["annotation-selectable-text"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue((preview.value as? String)?.contains("Live workspace note.") == true)
+        selectTextForPreviewComment(app)
+        let note = app.descendants(matching: .any)["annotation-note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        note.tap(); note.typeText("Keep this unfinished comment")
+        let draft = app.textViews["message-draft"]
+        XCTAssertTrue(draft.isHittable)
+        draft.tap(); draft.typeText("Review this file while Files stays open.")
+        app.buttons["send-message"].tap()
+        let expand = app.buttons["workspace-preview-expand"]
+        let received = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Host received test message"), object: expand)
+        XCTAssertEqual(XCTWaiter.wait(for: [received], timeout: 15), .completed,
+                       "The host must acknowledge the message while Files remains open")
+        XCTAssertTrue(expand.exists,
+                      "Sending must leave the selected file in the chat workspace")
+        let plainPreview = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Live workspace note.")).firstMatch
+        XCTAssertTrue(plainPreview.waitForExistence(timeout: 10) || preview.waitForExistence(timeout: 2),
+                      "The same file content should remain visible while the send is pending")
+        XCTAssertEqual(note.value as? String, "Keep this unfinished comment",
+                       "A pending message must not hide or discard a separate comment draft")
+        XCTAssertTrue(app.staticTexts["annotation-comment-wait"].exists)
+        XCTAssertFalse(app.buttons["annotation-add"].isEnabled)
+        XCTAssertFalse(anyElement(app, identifier: "conversation-scroll").exists,
+                       "Files should still replace the timeline after the send")
+        retainMenuScreenshot(app, name: "Project file stays open after offline send")
+        app.buttons["workspace-preview-back"].tap()
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(app.images["Received by your Mac"].waitForExistence(timeout: 10),
+                      "The synthetic host must acknowledge the exact message")
+    }
+
     func testProjectLargeTextPreviewKeepsFilesAndComposerResponsive() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
