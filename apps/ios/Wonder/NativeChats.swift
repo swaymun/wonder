@@ -4030,27 +4030,36 @@ private struct WorkspaceRegionEditor: View {
     @State private var failure: String?
     @State private var loading = true
     @State private var showingAreaControls = false
+    @FocusState private var noteFocused: Bool
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 if format == .pdf, pageCount > 0 {
                     HStack {
-                        Button("Previous page", systemImage: "chevron.left") {
+                        Button {
                             guard !loading else { return }
                             loading = true
                             page -= 1
+                        } label: {
+                            Image(systemName: "chevron.left").frame(minWidth: 44, minHeight: 44)
                         }
-                            .disabled(loading || page <= 1).accessibilityIdentifier("annotation-previous-page")
+                        .accessibilityLabel("Previous page")
+                        .disabled(loading || page <= 1).accessibilityIdentifier("annotation-previous-page")
                         Spacer()
-                        Text("Page \(page) of \(pageCount)").accessibilityIdentifier("annotation-page-position")
+                        Text("\(page) / \(pageCount)")
+                            .accessibilityLabel("Page \(page) of \(pageCount)")
+                            .accessibilityIdentifier("annotation-page-position")
                         Spacer()
-                        Button("Next page", systemImage: "chevron.right") {
+                        Button {
                             guard !loading else { return }
                             loading = true
                             page += 1
+                        } label: {
+                            Image(systemName: "chevron.right").frame(minWidth: 44, minHeight: 44)
                         }
-                            .disabled(loading || page >= pageCount).accessibilityIdentifier("annotation-next-page")
+                        .accessibilityLabel("Next page")
+                        .disabled(loading || page >= pageCount).accessibilityIdentifier("annotation-next-page")
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
                 }
@@ -4072,25 +4081,34 @@ private struct WorkspaceRegionEditor: View {
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Button(format == .pdf ? "Select whole page" : "Select whole image") {
-                        region = CGRect(x: 0, y: 0, width: 1, height: 1)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Button(format == .pdf ? "Select whole page" : "Select whole image") {
+                                region = CGRect(x: 0, y: 0, width: 1, height: 1)
+                            }
+                            .disabled(loading || preview == nil)
+                            .accessibilityIdentifier("annotation-region-all")
+                            DisclosureGroup("Adjust selected area", isExpanded: $showingAreaControls) {
+                                Slider(value: regionValue(\.minX), in: 0...0.99, step: 0.01) { Text("Left") }
+                                Slider(value: regionValue(\.minY), in: 0...0.99, step: 0.01) { Text("Top") }
+                                Slider(value: regionValue(\.width), in: 0.01...1, step: 0.01) { Text("Width") }
+                                Slider(value: regionValue(\.height), in: 0.01...1, step: 0.01) { Text("Height") }
+                            }
+                            .disabled(loading || preview == nil)
+                            .onChange(of: showingAreaControls) { _, expanded in
+                                if expanded && region == nil { region = CGRect(x: 0, y: 0, width: 1, height: 1) }
+                            }
+                            .accessibilityIdentifier("annotation-region-adjust")
+                            TextField("What should the agent notice?", text: $note, axis: .vertical)
+                                .lineLimit(2...4)
+                                .focused($noteFocused)
+                                .onChange(of: noteFocused) { _, focused in
+                                    if focused { showingAreaControls = false }
+                                }
+                                .accessibilityIdentifier("annotation-region-note")
+                        }
                     }
-                    .disabled(loading || preview == nil)
-                    .accessibilityIdentifier("annotation-region-all")
-                    DisclosureGroup("Adjust selected area", isExpanded: $showingAreaControls) {
-                        Slider(value: regionValue(\.minX), in: 0...0.99, step: 0.01) { Text("Left") }
-                        Slider(value: regionValue(\.minY), in: 0...0.99, step: 0.01) { Text("Top") }
-                        Slider(value: regionValue(\.width), in: 0.01...1, step: 0.01) { Text("Width") }
-                        Slider(value: regionValue(\.height), in: 0.01...1, step: 0.01) { Text("Height") }
-                    }
-                    .disabled(loading || preview == nil)
-                    .onChange(of: showingAreaControls) { _, expanded in
-                        if expanded && region == nil { region = CGRect(x: 0, y: 0, width: 1, height: 1) }
-                    }
-                    .accessibilityIdentifier("annotation-region-adjust")
-                    TextField("What should the agent notice?", text: $note, axis: .vertical)
-                        .lineLimit(2...4)
-                        .accessibilityIdentifier("annotation-region-note")
+                    .frame(maxHeight: 260)
                     if note.utf8.count > 4096 { Text("Keep the note under 4,096 bytes.").font(.footnote).foregroundStyle(.red) }
                     if let failure { Text(failure).font(.footnote).foregroundStyle(.red).accessibilityIdentifier("annotation-region-error") }
                     Button("Add to message") { addAnnotation() }

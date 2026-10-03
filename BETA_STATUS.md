@@ -340,6 +340,19 @@ UI tests: 1/1 each on iPhone and iPad. Inline and accepted-revision screenshots
 were inspected. Narrow iPad windows, a real paired-host revision, repeated
 WebKit memory and installed Release behavior remain open.
 
+The PDF/image region editor now keeps its Add action and validation feedback
+visible while the controls scroll, and collapses expanded area sliders when
+the note takes keyboard focus. PDF page arrows use compact icons with full
+accessible labels. The page-selection and accessibility XXXL keyboard flows
+passed 2/2 each on iPhone 17 and iPad Pro 13-inch TestingDiagnostics
+simulators; the resulting screens were inspected. On iPad, the selected page
+remained large enough to inspect with the keyboard open. The iPhone's smaller
+screen shows the comment controls above the keyboard at that text size; the
+page itself must be inspected before typing or after dismissing the keyboard.
+The change remains source-only under the requested one-upload-per-channel
+limit. A real paired-host annotation send, narrow iPad window and installed
+TestFlight behavior remain open.
+
 ## Earlier qualification
 
 Testing build 7 and production build 71 passed six focused iPhone Simulator

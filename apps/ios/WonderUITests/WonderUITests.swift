@@ -2952,6 +2952,53 @@ import UIKit
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
+    func testProjectPDFRegionControlsStayReachableWithLargeTextAndKeyboard() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
+                               "-project-files-conversation-preview", "-artifact-annotation-preview",
+                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
+        app.buttons["conversation-files-pill"].tap()
+        let fileList = app.collectionViews["workspace-file-list"]
+        XCTAssertTrue(fileList.waitForExistence(timeout: 10))
+        let pdf = app.buttons["workspace-file-entry:Weekend.pdf"]
+        for _ in 0..<15 where !pdf.isHittable {
+            // The composer overlays the lower part of this lazy list on iPhone.
+            let start = fileList.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.45))
+            let end = fileList.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.12))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        XCTAssertTrue(pdf.isHittable, "The PDF row should remain reachable at large text sizes")
+        pdf.tap()
+        let annotate = app.buttons["annotation-pdf-open"]
+        XCTAssertTrue(annotate.waitForExistence(timeout: 10))
+        annotate.tap()
+        let wholePage = app.buttons["annotation-region-all"]
+        XCTAssertTrue(wholePage.waitForExistence(timeout: 10))
+        wholePage.tap()
+        let adjust = app.buttons["annotation-region-adjust"]
+        XCTAssertTrue(adjust.waitForExistence(timeout: 5))
+        adjust.tap()
+        let note = app.descendants(matching: .any)["annotation-region-note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        note.tap(); note.typeText("Review this page")
+        let add = app.buttons["annotation-region-add"]
+        XCTAssertTrue(add.exists)
+        XCTAssertTrue(add.isHittable, "Add must remain reachable above the keyboard at large text sizes")
+        XCTAssertLessThanOrEqual(add.frame.maxY, app.frame.maxY - 8)
+        XCTAssertTrue(adjust.isHittable, "Area controls must be reachable after focusing the note")
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let previewPage = app.images["annotation-preview-image"]
+            XCTAssertGreaterThan(previewPage.frame.height, 250,
+                                 "The page should remain large enough to inspect with the keyboard open")
+        }
+        retainMenuScreenshot(app, name: "Large text PDF comment controls with keyboard")
+        add.tap()
+        XCTAssertTrue(app.buttons["composer-annotation-edit"].waitForExistence(timeout: 5))
+    }
+
     func testProjectImageAndPDFRevisionPreviewsStayInConversation() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
