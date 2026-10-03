@@ -306,6 +306,17 @@ TestFlight installation and repeated memory/performance sampling remain open.
 These changes are absent from Testing 20 and production 82 under the requested
 one-upload-per-channel cap; no model turn was sent.
 
+A later October 3 review found that typing after opening a text comment in
+full screen could prepend to the saved draft. The original UI test checked
+only that both phrases existed, and its screenshot showed the wrong order.
+The comment field now retains a bounded native cursor range across preview
+remounts, shows a visible prompt on entry and rejects events from an editor
+that has been replaced or canceled. The test asserts the exact combined note.
+The final caret and add/edit/remove checks passed 2/2 on each iPhone and iPad
+TestingDiagnostics simulator; the final stale-revision check passed 1/1 on both.
+Screenshots show the correct order and persistent source highlight. This fix
+is source-only and has not been installed through TestFlight.
+
 ## Earlier qualification
 
 Testing build 7 and production build 71 passed six focused iPhone Simulator

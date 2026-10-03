@@ -2997,12 +2997,16 @@ private struct WorkspacePreviewSelection: Identifiable {
     @Published var selectionResetID = UUID()
     @Published var editingSelection = false
     @Published var note = ""
+    @Published var noteSelection: NSRange?
+    var activeNoteFieldID: UUID?
     @Published var error: String?
 
     func clearSelection(discardNote: Bool) {
         selectedRange = nil
         selectionResetID = UUID()
         editingSelection = false
+        activeNoteFieldID = nil
+        noteSelection = nil
         error = nil
         if discardNote { note = "" }
     }
@@ -3010,6 +3014,7 @@ private struct WorkspacePreviewSelection: Identifiable {
     func reset(note: String = "") {
         clearSelection(discardNote: true)
         self.note = note
+        noteSelection = nil
     }
 }
 
@@ -4468,9 +4473,15 @@ private struct WorkspaceDocumentPreview: View {
                             }
                         }
                         if draft.editingSelection {
-                            TextField("Add a comment", text: $draft.note, axis: .vertical)
-                                .lineLimit(2...4)
-                                .accessibilityIdentifier("annotation-note")
+                            ZStack(alignment: .topLeading) {
+                                WorkspaceAnnotationNoteField(draft: draft)
+                                if draft.note.isEmpty {
+                                    Text("Add a comment")
+                                        .foregroundStyle(.secondary)
+                                        .padding(.top, 8)
+                                        .allowsHitTesting(false)
+                                }
+                            }
                         }
                         if draft.note.utf8.count > 4096 { Text("Keep the comment under 4,096 bytes.").font(.footnote).foregroundStyle(.red) }
                         if let error = draft.error { Text(error).font(.footnote).foregroundStyle(.red) }
@@ -4890,6 +4901,93 @@ struct PDFPreview: UIViewRepresentable {
         }
         context.coordinator.revision = nextRevision
         session?.update(document: document, revision: nextRevision, view: view)
+    }
+}
+
+private struct WorkspaceAnnotationNoteField: UIViewRepresentable {
+    @ObservedObject var draft: WorkspaceTextAnnotationDraft
+
+    func makeCoordinator() -> Coordinator { Coordinator(draft: draft) }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        context.coordinator.isUpdating = true
+        draft.activeNoteFieldID = context.coordinator.id
+        view.delegate = context.coordinator
+        view.font = .preferredFont(forTextStyle: .body)
+        view.adjustsFontForContentSizeCategory = true
+        view.textColor = .label
+        view.tintColor = .tintColor
+        view.backgroundColor = .clear
+        view.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+        view.textContainer.lineFragmentPadding = 0
+        view.isScrollEnabled = true
+        view.text = draft.note
+        view.selectedRange = Self.clamp(draft.noteSelection, length: (view.text as NSString).length)
+        view.accessibilityLabel = "Add a comment"
+        view.accessibilityIdentifier = "annotation-note"
+        context.coordinator.isUpdating = false
+        let editorID = context.coordinator.id
+        Task { @MainActor [weak view] in
+            await Task.yield()
+            guard let view, view.window != nil, draft.activeNoteFieldID == editorID else { return }
+            view.becomeFirstResponder()
+        }
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        context.coordinator.draft = draft
+        guard draft.activeNoteFieldID == context.coordinator.id,
+              view.markedTextRange == nil,
+              view.text != draft.note else { return }
+        context.coordinator.isUpdating = true
+        view.text = draft.note
+        view.selectedRange = Self.clamp(draft.noteSelection, length: (view.text as NSString).length)
+        context.coordinator.isUpdating = false
+    }
+
+    static func dismantleUIView(_ view: UITextView, coordinator: Coordinator) {
+        if coordinator.draft.activeNoteFieldID == coordinator.id {
+            coordinator.draft.activeNoteFieldID = nil
+        }
+        view.delegate = nil
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        guard let width = proposal.width, width > 0 else { return nil }
+        let line = uiView.font?.lineHeight ?? 20
+        let content = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        return CGSize(width: width, height: min(max(content, max(44, 2 * line)), 4 * line + 16))
+    }
+
+    private static func clamp(_ range: NSRange?, length: Int) -> NSRange {
+        guard let range, range.location >= 0 else { return NSRange(location: length, length: 0) }
+        let start = min(range.location, length)
+        return NSRange(location: start, length: min(range.length, length - start))
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        let id = UUID()
+        var draft: WorkspaceTextAnnotationDraft
+        var isUpdating = false
+
+        init(draft: WorkspaceTextAnnotationDraft) { self.draft = draft }
+
+        func textViewDidChange(_ view: UITextView) { publish(view) }
+        func textViewDidChangeSelection(_ view: UITextView) { publish(view) }
+        func textViewDidEndEditing(_ view: UITextView) { publish(view) }
+
+        private func publish(_ view: UITextView) {
+            guard !isUpdating, view.markedTextRange == nil,
+                  draft.activeNoteFieldID == id else { return }
+            let text = view.text ?? ""
+            let range = view.selectedRange
+            // User input is outside SwiftUI layout. Publish it before a tap on
+            // Save, Cancel, or Full screen can replace this editor.
+            if draft.note != text { draft.note = text }
+            if draft.noteSelection != range { draft.noteSelection = range }
+        }
     }
 }
 struct ConstrainedHTML: UIViewRepresentable {

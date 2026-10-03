@@ -2733,8 +2733,10 @@ import UIKit
         XCTAssertTrue(file.waitForExistence(timeout: 10))
         file.tap()
         selectTextForPreviewComment(app)
-        let note = app.textFields["annotation-note"]
+        let note = app.descendants(matching: .any)["annotation-note"]
         XCTAssertTrue(note.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Add a comment"].exists,
+                      "A new comment should show a visible input prompt")
         note.tap()
         note.typeText("Check the preview wording")
         retainMenuScreenshot(app, name: "Highlighted text comment editor")
@@ -2774,31 +2776,30 @@ import UIKit
         XCTAssertTrue(file.waitForExistence(timeout: 10))
         file.tap()
         selectTextForPreviewComment(app)
-        let inlineNote = app.textFields["annotation-note"]
+        let inlineNote = app.descendants(matching: .any)["annotation-note"]
         XCTAssertTrue(inlineNote.waitForExistence(timeout: 5))
         inlineNote.tap(); inlineNote.typeText("Keep this draft")
 
         app.buttons["workspace-preview-expand"].tap()
         XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
-        let expandedNote = try XCTUnwrap(app.textFields.matching(identifier: "annotation-note")
+        let expandedNote = try XCTUnwrap(app.descendants(matching: .any).matching(identifier: "annotation-note")
             .allElementsBoundByIndex.first(where: { $0.isHittable }))
         XCTAssertTrue((expandedNote.value as? String)?.contains("Keep this draft") == true)
-        expandedNote.tap(); expandedNote.typeText(" in full screen")
+        expandedNote.typeText(" in full screen")
         app.buttons["workspace-preview-collapse"].tap()
         XCTAssertTrue(app.buttons["workspace-preview-expand"].waitForExistence(timeout: 5),
                       "Collapsing must keep the inline file preview")
         let resumedNote = inlineNote.value as? String
-        XCTAssertTrue(resumedNote?.contains("Keep this draft") == true &&
-                      resumedNote?.contains("in full screen") == true,
-                      "An unsaved comment must survive both presentation changes: \(String(describing: resumedNote))")
+        XCTAssertEqual(resumedNote, "Keep this draft in full screen",
+                       "An unsaved comment must retain its caret and text through both presentation changes")
         retainMenuScreenshot(app, name: "Comment draft after full-screen collapse")
 
         app.buttons["annotation-cancel"].tap()
         XCTAssertFalse(app.staticTexts["annotation-selected-text"].exists)
         XCTAssertFalse(app.buttons["annotation-comment"].exists)
         selectTextForPreviewComment(app)
-        XCTAssertTrue(app.textFields["annotation-note"].waitForExistence(timeout: 5))
-        XCTAssertFalse((app.textFields["annotation-note"].value as? String)?
+        XCTAssertTrue(app.descendants(matching: .any)["annotation-note"].waitForExistence(timeout: 5))
+        XCTAssertFalse((app.descendants(matching: .any)["annotation-note"].value as? String)?
             .contains("Keep this draft") == true, "Cancel must discard the unsaved comment")
     }
 
@@ -2851,7 +2852,7 @@ import UIKit
         XCTAssertTrue(file.waitForExistence(timeout: 10))
         file.tap()
         selectTextForPreviewComment(app)
-        let note = app.textFields["annotation-note"]
+        let note = app.descendants(matching: .any)["annotation-note"]
         XCTAssertTrue(note.waitForExistence(timeout: 5))
         note.tap(); note.typeText("Review this introduction")
         app.buttons["annotation-add"].tap()
@@ -2894,7 +2895,7 @@ import UIKit
         XCTAssertTrue(app.staticTexts["annotation-edit-stale"].waitForExistence(timeout: 5))
         app.buttons["annotation-edit-reanchor"].tap()
         selectTextForPreviewComment(app)
-        let carriedNote = app.textFields["annotation-note"]
+        let carriedNote = app.descendants(matching: .any)["annotation-note"]
         XCTAssertTrue(carriedNote.waitForExistence(timeout: 5))
         XCTAssertTrue((carriedNote.value as? String)?.contains("keep this note") == true)
         app.buttons["annotation-add"].tap()
@@ -4301,7 +4302,7 @@ import UIKit
         XCTAssertTrue(readme.isHittable, "The paired Project root should expose README.md")
         readme.tap()
         selectTextForPreviewComment(app)
-        let note = app.textFields["annotation-note"]
+        let note = app.descendants(matching: .any)["annotation-note"]
         XCTAssertTrue(note.waitForExistence(timeout: 5))
         note.tap(); note.typeText("Check this preview line")
         app.buttons["annotation-add"].tap()
