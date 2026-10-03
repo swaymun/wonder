@@ -186,10 +186,83 @@ fn verified_child(
         title,
         agent_nickname: verified.agent_nickname,
         agent_role: verified.agent_role,
-        status: verified.status,
+        status: project_child_status(thread, &verified.status),
         is_archived: archived,
         can_accept_direct_input: false,
     })
+}
+
+fn project_child_status(thread: &Value, verified_status: &str) -> String {
+    if verified_status == "active" {
+        let flags = thread
+            .pointer("/status/activeFlags")
+            .and_then(Value::as_array);
+        for waiting in ["waitingOnApproval", "waitingOnUserInput"] {
+            if flags.is_some_and(|flags| flags.iter().any(|flag| flag.as_str() == Some(waiting))) {
+                return waiting.into();
+            }
+        }
+    }
+    if verified_status == "systemError" {
+        return "failed".into();
+    }
+    verified_status.into()
+}
+
+// `thread/read` has no archive field. Check the provider's exact parent list
+// when opening one child, without adding requests for every roster row.
+async fn child_in_list(
+    parent: &ProjectParent,
+    thread_id: &str,
+    archived: bool,
+) -> Result<(bool, bool), Response> {
+    let result = request(
+        &parent.rpc,
+        "thread/list",
+        json!({
+            "sourceKinds": ["subAgentThreadSpawn"],
+            "parentThreadId": parent.thread_id,
+            "archived": archived,
+            "limit": MAX_CHILDREN,
+        }),
+    )
+    .await
+    .map_err(|_| unavailable("The agent task's archive state could not be checked."))?;
+    let threads = result
+        .get("data")
+        .and_then(Value::as_array)
+        .filter(|threads| threads.len() <= MAX_CHILDREN)
+        .ok_or_else(|| unavailable("Codex returned an invalid agent task list."))?;
+    if let Some(thread) = threads
+        .iter()
+        .find(|thread| thread.get("id").and_then(Value::as_str) == Some(thread_id))
+    {
+        return verified_child(parent, thread, archived)
+            .map(|_| (true, false))
+            .ok_or_else(|| unavailable("The agent task's archive state could not be verified."));
+    }
+    let more = result
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .is_some_and(|cursor| !cursor.is_empty());
+    Ok((false, more))
+}
+
+async fn child_archived(parent: &ProjectParent, thread_id: &str) -> Result<bool, Response> {
+    let (current, more_current) = child_in_list(parent, thread_id, false).await?;
+    if current {
+        return Ok(false);
+    }
+    let (archived, more_archived) = child_in_list(parent, thread_id, true).await?;
+    if archived {
+        return Ok(true);
+    }
+    if more_current || more_archived {
+        return Err(unavailable(
+            "The agent task's archive state could not be checked.",
+        ));
+    }
+    Err(StatusCode::NOT_FOUND.into_response())
 }
 
 pub(crate) async fn list(
@@ -295,8 +368,12 @@ pub(crate) async fn transcript(
     if thread.get("id").and_then(Value::as_str) != Some(thread_id.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(child) = verified_child(&parent, thread, false) else {
+    let Some(mut child) = verified_child(&parent, thread, false) else {
         return StatusCode::NOT_FOUND.into_response();
+    };
+    child.is_archived = match child_archived(&parent, &thread_id).await {
+        Ok(archived) => archived,
+        Err(response) => return response,
     };
     let result = match request(
         &parent.rpc,
@@ -371,6 +448,39 @@ pub(crate) async fn transcript(
 mod tests {
     use super::*;
 
+    #[test]
+    fn project_child_status_preserves_waiting_and_provider_failures() {
+        for (thread, verified, expected) in [
+            (
+                json!({"status":{"type":"active","activeFlags":["waitingOnApproval"]}}),
+                "active",
+                "waitingOnApproval",
+            ),
+            (
+                json!({"status":{"type":"active","activeFlags":["waitingOnUserInput"]}}),
+                "active",
+                "waitingOnUserInput",
+            ),
+            (
+                json!({"status":{"type":"active","activeFlags":[]}}),
+                "active",
+                "active",
+            ),
+            (
+                json!({"status":{"type":"systemError"}}),
+                "systemError",
+                "failed",
+            ),
+            (
+                json!({"status":{"type":"notLoaded"}}),
+                "notLoaded",
+                "notLoaded",
+            ),
+        ] {
+            assert_eq!(project_child_status(&thread, verified), expected);
+        }
+    }
+
     async fn body(response: Response) -> (StatusCode, Value) {
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -393,7 +503,7 @@ mod tests {
         let child = json!({
             "id":"child-thread", "parentThreadId":"thread", "cwd":cwd,
             "source":{"subAgent":{"thread_spawn":{"parent_thread_id":"thread","depth":1,"agent_nickname":"Scout"}}},
-            "status":{"type":"idle"}
+            "status":{"type":"notLoaded"}, "isArchived":true
         });
         let forged = json!({
             "id":"forged-thread", "parentThreadId":"thread", "cwd":cwd,
@@ -430,6 +540,8 @@ mod tests {
         crate::tests::validate_http_contract("projectSubagentList", &roster);
         assert_eq!(roster["subagents"].as_array().unwrap().len(), 1, "{roster}");
         assert_eq!(roster["subagents"][0]["threadId"], "child-thread");
+        assert_eq!(roster["subagents"][0]["status"], "notLoaded");
+        assert_eq!(roster["subagents"][0]["isArchived"], true);
         assert_eq!(roster["subagents"][0]["canAcceptDirectInput"], false);
         assert!(roster["detail"].as_str().unwrap().contains("Older tasks"));
 
@@ -445,11 +557,29 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{read}");
         crate::tests::validate_http_contract("projectSubagentTranscript", &read);
+        assert_eq!(read["subagent"]["isArchived"], true);
         assert_eq!(read["snapshot"]["thread"]["threadId"], "child-thread");
         assert_eq!(
             read["snapshot"]["thread"]["turns"][0]["items"][1]["text"],
             "Found the issue"
         );
+        let fixture_path = dir.path().join("project-subagents-fixture.json");
+        let mut fixture: Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture_path).unwrap()).unwrap();
+        fixture["threads"]["child-thread"]["isArchived"] = Value::Bool(false);
+        std::fs::write(&fixture_path, fixture.to_string()).unwrap();
+        let (status, unarchived) = body(
+            transcript(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path(("project-chat".into(), "child-thread".into())),
+                Query(TranscriptQuery::default()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unarchived["subagent"]["isArchived"], false);
         for id in ["forged-thread", "outside-thread"] {
             let (status, _) = body(
                 transcript(

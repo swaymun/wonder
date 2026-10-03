@@ -550,11 +550,20 @@ private struct NewChatContent: View {
     private var optionsLoadKey: String { model.assignmentScope + (model.macConnected == true ? ":ready" : ":waiting") }
 
     var body: some View {
-        VStack(spacing: 0) { Spacer(minLength: 0) }
-        .frame(maxWidth: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
-        .safeAreaInset(edge: .bottom) { composer }
+        VStack(spacing: 0) {
+            Group {
+                if showingFiles, let projectFilesChat {
+                    WorkspaceBrowser(model: model, chat: projectFilesChat, attachmentIDs: nil)
+                } else {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            composer
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Rerun once the connection is ready: a launch-time read can fail
         // before the session renews, and the model list must not stay empty.
         .task(id: optionsLoadKey) {
@@ -607,9 +616,7 @@ private struct NewChatContent: View {
         .fullScreenCover(isPresented: $showingComputer) {
             NavigationStack { ComputerSessionView(model: model, chat: hostViewChat) }
         }
-        .sheet(isPresented: $showingFiles) {
-            if let projectFilesChat { WorkspaceBrowser(model: model, chat: projectFilesChat, attachmentIDs: nil) }
-        }
+        .onChange(of: projectFilesChat?.id) { _, _ in showingFiles = false }
         .onChange(of: showingComputer) { _, showing in
             if showing { model.dictation.captureControlsHidden(conversationID: draftChat.id) }
         }
@@ -801,9 +808,10 @@ private struct NewChatContent: View {
     }
 
     private var filesButton: some View {
-        Button { showingFiles = true } label: { PickerRow(systemImage: "folder", title: "Files", showsChevron: false) }
+        Button { showingFiles.toggle() } label: { PickerRow(systemImage: "folder", title: "Files", showsChevron: false) }
             .buttonStyle(.plain).disabled(model.accessEnded)
-            .accessibilityHint("Browse the selected project folder and changes")
+            .accessibilityValue(showingFiles ? "Open" : "Closed")
+            .accessibilityHint(showingFiles ? "Return to the new chat" : "Browse the selected project folder and changes")
             .accessibilityIdentifier("new-chat-files")
     }
 

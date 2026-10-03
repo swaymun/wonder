@@ -210,12 +210,13 @@ struct ManagedBotListMutationState {
     @Published var busy = false
     @Published var verification: String?
     @Published var error: String?
-    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; projectSubagentLoadTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
+    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; projectSubagents = [:]; projectSubagentAvailability = [:]; projectSubagentErrors = [:]; projectSubagentLoadTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
     @Published var chats: [ChatSummary] = [] { didSet { noteListChange() } }
     @Published var subagents: [String: [SubagentSummary]] = [:] { didSet { noteListChange() } }
     @Published var subagentAvailability: [String: Bool] = [:]
     @Published var subagentErrors: [String: String] = [:]
     @Published var projectSubagents: [String: [ProjectSubagentSummary]] = [:]
+    @Published var projectSubagentAvailability: [String: Bool] = [:]
     @Published var projectSubagentErrors: [String: String] = [:]
     private var projectSubagentLoadTokens: [String: UUID] = [:]
     @Published var goals: [String: ConversationGoal] = [:]
@@ -349,6 +350,7 @@ struct ManagedBotListMutationState {
     #if WONDER_DIAGNOSTICS
     private var diagnosticReplayEnabled = true
     private var previewProjectFilesRootReads = 0
+    private var previewWorkspaceRootReads = 0
     private var previewWorkspaceFileReads: [String: Int] = [:]
     #endif
     var previewMode: Bool {
@@ -953,6 +955,7 @@ struct ManagedBotListMutationState {
         stopReading()
         partition = key
         projectSubagentLoadTokens = [:]
+        projectSubagentAvailability = [:]
         subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]; loadingConversationIDs = []; loadingTokens = [:]; conversationLoadFailures = [:]
         let store = Self.readStore(for: saved)
         self.store = store
@@ -1254,15 +1257,18 @@ struct ManagedBotListMutationState {
                 origin: saved.origin, credential: saved.credential)
             guard key == partition, projectSubagentLoadTokens[parent.id] == token, !Task.isCancelled else { return }
             projectSubagents[parent.id] = response.subagents.filter { $0.parentConversationId == parent.id }
+            projectSubagentAvailability[parent.id] = response.available
             projectSubagentErrors[parent.id] = response.detail
         } catch PairingFailure.response(let status) where [403, 404, 409].contains(status) {
             guard key == partition, projectSubagentLoadTokens[parent.id] == token, !Task.isCancelled else { return }
             projectSubagents[parent.id] = []
+            projectSubagentAvailability[parent.id] = false
             projectSubagentErrors[parent.id] = status == 404
                 ? "Agent tasks need a newer Wonder on your computer. Update it, then refresh this Project thread."
                 : "Agent tasks are no longer available in this Project thread. Refresh the Project to try again."
         } catch {
             guard key == partition, projectSubagentLoadTokens[parent.id] == token, !Task.isCancelled else { return }
+            projectSubagentAvailability[parent.id] = false
             projectSubagentErrors[parent.id] = "Agent tasks could not be loaded. Refresh this Project thread to try again."
         }
     }
@@ -2170,6 +2176,10 @@ struct ManagedBotListMutationState {
     func loadWorkspaceRoots(_ chat: ChatSummary) async throws -> WorkspaceRootsResponse {
         if previewMode {
             #if WONDER_DIAGNOSTICS
+            if ProcessInfo.processInfo.arguments.contains("-workspace-delayed-background-roots") {
+                previewWorkspaceRootReads += 1
+                if previewWorkspaceRootReads > 1 { try await Task.sleep(for: .seconds(5)) }
+            }
             if chat.id.hasPrefix("project-files:") {
                 if ProcessInfo.processInfo.arguments.contains("-project-files-root-revoked") { throw PairingFailure.response(403) }
                 if ProcessInfo.processInfo.arguments.contains("-project-files-project-removed") { throw PairingFailure.response(404) }
@@ -2360,7 +2370,15 @@ struct ManagedBotListMutationState {
             #endif
             values = rootEntries
         }
-        return WorkspaceDirectoryPage(rootId: root.id, path: path, parentPath: path.isEmpty ? nil : "", entries: Array(values.dropFirst(offset).prefix(200)), nextOffset: nil)
+        #if WONDER_DIAGNOSTICS
+        let pageSize = ProcessInfo.processInfo.arguments.contains("-workspace-paged-preview") ? 2 : 200
+        #else
+        let pageSize = 200
+        #endif
+        let entries = Array(values.dropFirst(offset).prefix(pageSize))
+        let nextOffset = offset + entries.count < values.count ? offset + entries.count : nil
+        return WorkspaceDirectoryPage(rootId: root.id, path: path, parentPath: path.isEmpty ? nil : "",
+                                      entries: entries, nextOffset: nextOffset)
     }
     private func previewWorkspaceData(entry: WorkspaceEntry) -> Data {
         #if WONDER_DIAGNOSTICS
@@ -3078,6 +3096,7 @@ struct ManagedBotListMutationState {
             else { try identity.forgetConnection() }
             partition = nil; store = nil; writer = nil; projection = ProjectionState(); publish(.everything)
             projectSubagentLoadTokens = [:]
+            projectSubagentAvailability = [:]
             subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]
             selectedChat = nil; managedBots = []; managedBotMutations = ManagedBotListMutationState(); macConnected = nil; hasConnectedThisLaunch = false; connection = nil; error = nil; accessEnded = false
             status = "Connect to your computer to get started."

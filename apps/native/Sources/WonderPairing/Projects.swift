@@ -21,18 +21,23 @@ public struct ProjectSubagentSummary: Codable, Hashable, Identifiable, Sendable 
     public var id: String { threadId }
 
     public var statusLabel: String {
-        if isArchived { return "Completed" }
-        switch status {
-        case "active", "running", "inProgress": return "Running"
-        case "idle": return "Idle"
-        case "pendingInit", "pending", "waiting": return "Waiting"
-        case "waitingOnApproval": return "Waiting for approval"
-        case "waitingOnUserInput": return "Waiting for input"
-        case "completed": return "Completed"
-        case "interrupted", "shutdown": return "Stopped"
-        case "failed", "errored": return "Failed"
-        default: return "Unavailable"
+        let state: String = switch status {
+        case "active", "running", "inProgress": "Running"
+        case "idle": "Idle"
+        case "pendingInit", "pending", "waiting": "Waiting"
+        case "waitingOnApproval": "Waiting for approval"
+        case "waitingOnUserInput": "Waiting for input"
+        case "completed": "Completed"
+        case "interrupted", "shutdown": "Stopped"
+        case "failed", "errored": "Failed"
+        case "notLoaded": "Status unknown"
+        default: "Status unknown"
         }
+        return isArchived ? "Archived · \(state)" : state
+    }
+
+    public func statusLabel(available: Bool) -> String {
+        available ? statusLabel : "Last known: " + statusLabel
     }
 }
 

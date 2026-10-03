@@ -122,9 +122,9 @@ import XCTest
             capture(app, name: "Model \(name)")
             app.buttons["workspace-preview-back"].tap()
             XCTAssertTrue(app.buttons["workspace-file-entry:\(name)"].waitForExistence(timeout: 5))
-            app.buttons["workspace-close"].tap()
+            app.buttons["conversation-files-pill"].tap()
             let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
-                                                    object: app.buttons["workspace-close"])
+                                                    object: app.collectionViews["workspace-file-list"])
             XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 5), .completed)
             XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 5))
         }
@@ -134,7 +134,7 @@ import XCTest
                 .waitForExistence(timeout: 10), "\(name) should explain its unsupported input")
             capture(app, name: "Unsupported model \(name)")
             app.buttons["workspace-preview-back"].tap()
-            app.buttons["workspace-close"].tap()
+            app.buttons["conversation-files-pill"].tap()
         }
     }
 

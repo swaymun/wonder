@@ -92,6 +92,7 @@ struct SubagentDock: View {
 /// roster and history read-only under the parent Project thread.
 struct ProjectSubagentDock: View {
     let agents: [ProjectSubagentSummary]
+    let available: Bool
     let detail: String?
     @Binding var isPresented: Bool
     let open: (ProjectSubagentSummary) -> Void
@@ -107,7 +108,8 @@ struct ProjectSubagentDock: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("project-subagent-status-pill")
-            .accessibilityLabel("\(agents.count) Project \(agents.count == 1 ? "agent task" : "agent tasks")")
+            .accessibilityLabel((available ? "" : "Last known: ")
+                                + "\(agents.count) Project \(agents.count == 1 ? "agent task" : "agent tasks")")
             .accessibilityValue(isPresented ? "Expanded" : "Collapsed")
             .accessibilityHint("Show agent tasks in this Project thread")
             .popover(isPresented: $isPresented, arrowEdge: .bottom) {
@@ -136,7 +138,7 @@ struct ProjectSubagentDock: View {
                 Image(systemName: "person.crop.circle").foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(agent.title).foregroundStyle(.primary)
-                    Text(agent.statusLabel).font(.caption).foregroundStyle(.secondary)
+                    Text(agent.statusLabel(available: available)).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
@@ -145,7 +147,7 @@ struct ProjectSubagentDock: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("project-subagent-roster:" + agent.threadId)
-        .accessibilityLabel(agent.title + ", " + agent.statusLabel)
+        .accessibilityLabel(agent.title + ", " + agent.statusLabel(available: available))
         .accessibilityHint("Open read-only agent task")
     }
 }

@@ -396,6 +396,7 @@ enum DiagnosticSubagentFixture {
             state.delayNextChildSend = false
             state.childRevision = 2
             state.childStatus = "completed"
+            state.projectSubagentRosterFails = false
             state.projectServiceTier = "default"
             state.goalPresent = goalFixture
             state.goalObjective = "Prepare a reliable beta launch with the Scout helper."
@@ -434,6 +435,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var delayNextChildSend = false
         var childRevision = 2
         var childStatus = "completed"
+        var projectSubagentRosterFails = false
         var projectUnread = true
         var projectArchived = false
         var projectServiceTier = "default"
@@ -556,20 +558,27 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     "isArchived": Self.state.lock.withLock { Self.state.projectArchived }
                 ])); return
             case "/api/v1/project-conversations/\(conversation)/subagents" where DiagnosticSubagentFixture.projectSubagentFixture:
+                if Self.state.lock.withLock({ Self.state.projectSubagentRosterFails }) {
+                    finish(status: 503, body: Data("Agent tasks could not be loaded".utf8)); return
+                }
+                let staleProbe = ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents-stale")
                 finish(status: 200, body: json(["available": true, "detail": NSNull(), "subagents": [[
                     "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.childThreadID,
                     "title": "Scout", "agentNickname": "Scout", "agentRole": "research",
-                    "status": "idle", "isArchived": false, "canAcceptDirectInput": false
+                    "status": staleProbe ? "active" : "notLoaded", "isArchived": false, "canAcceptDirectInput": false
                 ], [
                     "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.secondChildThreadID,
                     "title": "Builder", "agentNickname": "Builder", "agentRole": "implementation",
                     "status": "completed", "isArchived": false, "canAcceptDirectInput": false
                 ]]])); return
             case "/api/v1/project-conversations/\(conversation)/subagents/\(DiagnosticSubagentFixture.childThreadID)/transcript" where DiagnosticSubagentFixture.projectSubagentFixture:
+                if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents-stale") {
+                    Self.state.lock.withLock { Self.state.projectSubagentRosterFails = true }
+                }
                 finish(status: 200, body: json(["subagent": [
                     "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.childThreadID,
                     "title": "Scout", "agentNickname": "Scout", "agentRole": "research",
-                    "status": "idle", "isArchived": false, "canAcceptDirectInput": false
+                    "status": "notLoaded", "isArchived": false, "canAcceptDirectInput": false
                 ], "snapshot": [
                     "conversationId": "project-agent:\(conversation):\(DiagnosticSubagentFixture.childThreadID)",
                     "hostEpoch": "fixture", "lastSequence": 0, "messages": [], "assistantMessages": [],

@@ -135,6 +135,7 @@ struct ChatShell: View {
                             NavigationStack {
                                 ShellMain(library: library, shell: shell,
                                           compactIPadWindow: compact,
+                                          showSidebarButton: true,
                                           sidebarButtonLabel: compact || !showWideSidebar ? "Show Chats" : "Hide Chats") {
                                     if compact { shell.sidebarOpen = true }
                                     else { showWideSidebar.toggle() }
@@ -270,13 +271,14 @@ struct ChatShell: View {
 
 private struct HostSheet: Identifiable { let id: String }
 
-/// The iPhone layout: the conversation with a sidebar drawer that follows the finger.
-/// Drag state lives here, so only the drawer's offset and the dimming change per frame;
-/// the conversation and the sidebar list are not re-evaluated while dragging.
+/// The iPhone layout: a compact drawer or a regular-width sidebar beside the
+/// conversation. The navigation stack remains mounted as the size class changes.
+/// Drag state lives here, so only the drawer's offset and dimming change per frame.
 private struct PhoneDrawerLayout: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// The finger's horizontal travel while a drag opens or closes the drawer.
     @State private var drag: CGFloat = 0
     @State private var dragEngaged = false
@@ -293,22 +295,30 @@ private struct PhoneDrawerLayout: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let width = min(geometry.size.width * 0.85, 420)
-            let offset = min(0, max(-width, (shell.sidebarOpen ? 0 : -width) + drag))
-            let progress = width > 0 ? 1 + offset / width : 0
+            let wide = horizontalSizeClass == .regular
+            let width = wide ? min(380, max(240, geometry.size.width * 0.31))
+                : min(geometry.size.width * 0.85, 420)
+            let drawerOpen = !wide && shell.sidebarOpen
+            let offset = wide ? 0 : min(0, max(-width, (drawerOpen ? 0 : -width) + drag))
+            let progress = !wide && width > 0 ? 1 + offset / width : 0
             ZStack(alignment: .leading) {
-                NavigationStack {
-                    ShellMain(library: library, shell: shell, compactIPadWindow: false,
-                              sidebarButtonLabel: "Open sidebar") {
-                        shell.sidebarOpen = true
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: wide ? width + 1 : 0)
+                        .accessibilityHidden(true)
+                    NavigationStack {
+                        ShellMain(library: library, shell: shell, compactIPadWindow: false,
+                                  showSidebarButton: !wide, sidebarButtonLabel: "Open sidebar") {
+                            shell.sidebarOpen = true
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                    .accessibilityHidden(shell.sidebarOpen)
-                    .allowsHitTesting(!shell.sidebarOpen)
+                    .accessibilityHidden(drawerOpen)
+                    .allowsHitTesting(!drawerOpen)
                     .overlay(alignment: .leading) {
                         // Only the leading edge below the navigation bar opens the drawer, so
                         // horizontal scrolling in the conversation and the header buttons keep working.
-                        if !shell.sidebarOpen && !shell.settingsOpen {
+                        if !wide && !drawerOpen && !shell.settingsOpen {
                             Color.clear.frame(width: Self.edgeWidth).contentShape(Rectangle())
                                 .padding(.top, Self.navigationBarHeight)
                                 .gesture(openGesture(width: width))
@@ -319,8 +329,8 @@ private struct PhoneDrawerLayout: View {
                 Color.black.opacity(0.4 * progress).ignoresSafeArea()
                     .onTapGesture { close() }
                     .simultaneousGesture(closeGesture(width: width))
-                    .allowsHitTesting(shell.sidebarOpen)
-                    .accessibilityHidden(!shell.sidebarOpen)
+                    .allowsHitTesting(drawerOpen)
+                    .accessibilityHidden(!drawerOpen)
                     .accessibilityLabel("Close sidebar")
                     .accessibilityAddTraits(.isButton)
                     .accessibilityIdentifier("sidebar-scrim")
@@ -332,12 +342,17 @@ private struct PhoneDrawerLayout: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityAction(.escape) { close() }
                     .offset(x: offset)
-                    .allowsHitTesting(shell.sidebarOpen)
-                    .accessibilityHidden(!shell.sidebarOpen)
-                    .simultaneousGesture(closeGesture(width: width))
+                    .allowsHitTesting(wide || drawerOpen)
+                    .accessibilityHidden(!wide && !drawerOpen)
+                    .simultaneousGesture(closeGesture(width: width, enabled: !wide))
                     .zIndex(1)
             }
             .animation(animation, value: shell.sidebarOpen)
+            .onChange(of: wide) { _, isWide in
+                drag = 0
+                dragEngaged = false
+                if isWide { shell.sidebarOpen = false }
+            }
         }
         .onChange(of: shell.sidebarOpen) { _, open in
             if open {
@@ -368,11 +383,11 @@ private struct PhoneDrawerLayout: View {
             .onEnded { value in settle(width: width, translation: value.translation.width, velocity: value.velocity.width) }
     }
 
-    private func closeGesture(width: CGFloat) -> some Gesture {
+    private func closeGesture(width: CGFloat, enabled: Bool = true) -> some Gesture {
         DragGesture(minimumDistance: 10)
             .updating($touching) { _, state, _ in state = true }
             .onChanged { value in
-                guard shell.sidebarOpen else { return }
+                guard enabled, shell.sidebarOpen else { return }
                 let travel = value.translation
                 if dragEngaged || (travel.width < 0 && abs(travel.width) > abs(travel.height) * 1.5) {
                     dragEngaged = true; dragWidth = width
@@ -447,6 +462,7 @@ private struct ShellMain: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
     let compactIPadWindow: Bool
+    let showSidebarButton: Bool
     let sidebarButtonLabel: String
     let sidebarAction: () -> Void
     @AccessibilityFocusState private var sidebarButtonFocused: Bool
@@ -491,7 +507,7 @@ private struct ShellMain: View {
             }
         }
         .toolbar {
-            if !compactIPadWindow {
+            if !compactIPadWindow && showSidebarButton {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: sidebarAction) { Image(systemName: "line.3.horizontal") }
                         .accessibilityLabel(sidebarButtonLabel)
@@ -518,7 +534,7 @@ private struct ShellMain: View {
         .onChange(of: shell.sidebarOpen) { _, open in
             guard !open, !shell.settingsOpen else { return }
             if compactIPadWindow { compactChatsFocused = true }
-            else { sidebarButtonFocused = true }
+            else if showSidebarButton { sidebarButtonFocused = true }
         }
     }
     private func plus() {

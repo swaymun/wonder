@@ -647,6 +647,7 @@ struct ConversationView: View {
                 subagent: subagent(for: row),
                 openSubagent: { selectedSubagent = $0 },
                 projectSubagents: projectSubagents(for: row),
+                projectSubagentsAvailable: model.macConnected == true && model.projectSubagentAvailability[chat.id] != false,
                 openProjectSubagent: { selectedProjectSubagent = $0 },
                 openFile: { path in workspaceRequest = WorkspaceBrowserRequest(initialFilePath: path) },
                 toggle: { toggleDetail(row.id) }
@@ -750,8 +751,7 @@ struct ConversationView: View {
             if let request = workspaceRequest {
                 WorkspaceBrowser(model: model, chat: chat, attachmentIDs: request.attachmentIDs,
                                  initialFilePath: request.initialFilePath, preferredRootID: request.preferredRootID,
-                                 reanchor: request.reanchor, replacingAnnotationID: request.replacingAnnotationID,
-                                 onClose: { workspaceRequest = nil })
+                                 reanchor: request.reanchor, replacingAnnotationID: request.replacingAnnotationID)
                     .id(request.id)
             } else if model.snapshots[chat.id] != nil || model.groups[chat.id] != nil {
                 ConversationScroller(model: model, projects: model.projects, chat: chat, entries: entries, nodeIDs: nodes.map(\.id),
@@ -1173,6 +1173,7 @@ struct ConversationView: View {
                             }
                             if model.isProject(chat), !(model.projectSubagents[chat.id] ?? []).isEmpty {
                                 ProjectSubagentDock(agents: model.projectSubagents[chat.id] ?? [],
+                                    available: model.macConnected == true && model.projectSubagentAvailability[chat.id] != false,
                                     detail: model.projectSubagentErrors[chat.id], isPresented: $showingProjectSubagents) { child in
                                     showingProjectSubagents = false
                                     Task { @MainActor in
@@ -3244,6 +3245,7 @@ struct WorkspaceBrowserRequest: Identifiable {
 
 struct WorkspaceBrowser: View {
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
     let attachmentIDs: [String]?
@@ -3251,9 +3253,7 @@ struct WorkspaceBrowser: View {
     var preferredRootID: String? = nil
     var reanchor: ArtifactAnnotation? = nil
     var replacingAnnotationID: String? = nil
-    var onClose: (() -> Void)? = nil
     @State private var openedInitialFile = false
-    @Environment(\.dismiss) private var dismiss
     @State private var response: WorkspaceRootsResponse?
     @State private var selectedRootID: String?
     @State private var directoryPath = ""
@@ -3272,7 +3272,6 @@ struct WorkspaceBrowser: View {
     @State private var listingRefreshTask: Task<Void, Never>?
     @State private var listingRefreshID: UUID?
     @State private var listedPoint: WorkspaceObservationPoint?
-    @State private var listingRefreshError: String?
     @State private var listingRetryCount = 0
     @State private var lastListingAttemptAt: TimeInterval?
     @State private var diffRequestID = UUID()
@@ -3316,6 +3315,7 @@ struct WorkspaceBrowser: View {
         attachmentPhoto != nil || (attachmentSelection != nil && attachmentData != nil && attachmentDigest != nil) ||
         (selectedDiff != nil && diffText != nil)
     }
+    private var shouldPollListing: Bool { scenePhase == .active && !hasPreview }
     private var previewName: String {
         selection?.name ?? documentSelection?.name ?? mediaSelection?.name ?? attachmentPhoto?.name ??
         attachmentSelection?.name ?? selectedDiff?.path ?? "Preview"
@@ -3328,100 +3328,74 @@ struct WorkspaceBrowser: View {
         return model.composers[chat.id]?.attachmentIDs.contains(addedAnnotationID) == true
     }
 
+    private var workspaceControls: some View {
+        HStack(spacing: 12) {
+            Text(viewMode == "all"
+                 ? (directoryPath.isEmpty ? "Workspace" : "Workspace / " + directoryPath)
+                 : "Modified")
+                .font(.headline)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            if viewMode == "all", selectedRoot?.isDirectory == true, directoryPath.isEmpty {
+                Button(action: toggleHiddenFiles) {
+                    Image(systemName: showHidden ? "eye" : "eye.slash")
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel(showHidden ? "Hide hidden files" : "Show hidden files")
+                .accessibilityValue(showHidden ? "On" : "Off")
+                .accessibilityIdentifier("workspace-hidden-toggle")
+            }
+            Button(viewMode == "all" ? "Modified" : "Workspace") {
+                viewMode = viewMode == "all" ? "modified" : "all"
+            }
+            .font(.subheadline)
+            .frame(minHeight: 44)
+            .accessibilityIdentifier("workspace-view-toggle")
+        }
+        .padding(.horizontal, 16)
+    }
+
     var body: some View {
         Group {
             if hasPreview {
                 inlinePreview
             } else {
-                NavigationStack {
-                    VStack(spacing: 0) {
-                        if onClose != nil {
+                VStack(spacing: 0) {
+                    workspaceControls
+                    if let response, response.roots.count > 1 {
+                        Menu {
+                            ForEach(response.roots) { root in
+                                WorkspaceRootMenuButton(root: root) { selectRoot($0) }
+                            }
+                        } label: {
                             HStack {
-                                Text("Files").font(.headline)
+                                Label(selectedRoot?.label ?? "Choose location", systemImage: "folder")
                                 Spacer()
-                                Button("Refresh files", systemImage: "arrow.clockwise") {
-                                    scheduleListingRefresh(immediate: true)
-                                }
-                                .labelStyle(.iconOnly)
-                                .frame(minWidth: 44, minHeight: 44)
-                                .accessibilityIdentifier("workspace-refresh")
-                                Button("Chat", systemImage: "xmark") { onClose?() }
-                                    .frame(minWidth: 44, minHeight: 44)
-                                    .accessibilityIdentifier("workspace-close")
+                                Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(.secondary)
                             }
-                            .padding(.horizontal, 12)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
                         }
-                Picker("Files view", selection: $viewMode) {
-                    Text("All files").tag("all")
-                    Text("Modified").tag("modified")
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.top, 8)
-                .accessibilityIdentifier("workspace-view-picker")
-                if let listingRefreshError {
-                    HStack(spacing: 8) {
-                        Text(listingRefreshError)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                        Button("Try again") {
-                            scheduleListingRefresh(immediate: true)
-                        }
-                        .font(.caption.weight(.semibold))
-                        .accessibilityIdentifier("workspace-refresh-retry")
+                        .buttonStyle(.plain)
+                        .padding(.horizontal)
+                        .accessibilityIdentifier("workspace-root-picker")
                     }
-                    .padding(.horizontal)
-                }
-                if let response, response.roots.count > 1 {
-                    Menu {
-                        ForEach(response.roots) { root in
-                            WorkspaceRootMenuButton(root: root) { selectRoot($0) }
+                    if let failure {
+                        VStack(spacing: 12) {
+                            ContentUnavailableView("Files unavailable", systemImage: "externaldrive.badge.xmark", description: Text(failure))
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityLabel("Files unavailable. \(failure)")
+                                .accessibilityIdentifier("workspace-unavailable")
+                            Button("Try again") { Task { await retryWorkspace() } }
+                                .buttonStyle(.bordered)
+                                .accessibilityIdentifier("workspace-retry")
                         }
-                    } label: {
-                        HStack {
-                            Label(selectedRoot?.label ?? "Choose location", systemImage: "folder")
-                            Spacer()
-                            Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(.secondary)
-                        }
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal)
-                    .accessibilityIdentifier("workspace-root-picker")
-                }
-                if let failure {
-                    VStack(spacing: 12) {
-                        ContentUnavailableView("Files unavailable", systemImage: "externaldrive.badge.xmark", description: Text(failure))
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("Files unavailable. \(failure)")
-                            .accessibilityIdentifier("workspace-unavailable")
-                        Button("Try again") { Task { await retryWorkspace() } }
-                            .buttonStyle(.bordered)
-                            .accessibilityIdentifier("workspace-retry")
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if viewMode == "modified" {
-                    modifiedView
-                } else {
-                    allFilesView
-                }
-                    }
-                    .navigationTitle("Files")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        if onClose == nil {
-                            ToolbarItem(placement: .cancellationAction) {
-                                WorkspaceBrowserDoneButton { dismiss() }
-                            }
-                            ToolbarItem(placement: .primaryAction) {
-                                Button("Refresh files", systemImage: "arrow.clockwise") {
-                                    scheduleListingRefresh(immediate: true)
-                                }
-                                .accessibilityIdentifier("workspace-refresh")
-                            }
-                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if viewMode == "modified" {
+                        modifiedView
+                    } else {
+                        allFilesView
                     }
                 }
             }
@@ -3460,7 +3434,27 @@ struct WorkspaceBrowser: View {
             .onChange(of: hasPreview) { _, preview in
                 if !preview { scheduleListingRefresh() }
             }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { scheduleListingRefresh(force: true) }
+                else {
+                    listingRefreshTask?.cancel()
+                    listingRefreshTask = nil
+                    listingRefreshID = nil
+                }
+            }
             .onAppear { scheduleListingRefresh() }
+            .task(id: shouldPollListing) {
+                guard shouldPollListing else { return }
+                while !Task.isCancelled {
+                    // Re-reading every loaded page every 12 seconds can flood
+                    // large folders. Keep the first pages responsive and slow
+                    // the poll as the visible listing grows.
+                    let pageCount = max(1, ((directory?.entries.count ?? 0) + 199) / 200)
+                    let interval = max(12, pageCount * 6)
+                    do { try await Task.sleep(for: .seconds(interval)) } catch { return }
+                    scheduleListingRefresh(force: true)
+                }
+            }
             .onDisappear {
                 listingRefreshTask?.cancel()
                 listingRefreshTask = nil
@@ -3713,32 +3707,10 @@ struct WorkspaceBrowser: View {
         if loading && directory == nil && visibleAttachments.isEmpty { ProgressView("Loading files…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         else {
             List {
-                if loading {
-                    ProgressView("Loading files…")
-                        .accessibilityIdentifier("workspace-refreshing")
-                }
                 if let root = selectedRoot {
                     if !directoryPath.isEmpty {
                         Button { navigate(to: directory?.parentPath ?? "") } label: { Label("Back", systemImage: "chevron.left") }
                             .accessibilityIdentifier("workspace-back")
-                    }
-                    if root.isDirectory && directoryPath.isEmpty {
-                        Button(action: toggleHiddenFiles) {
-                            HStack(spacing: 12) {
-                                Label("Show hidden files", systemImage: "eye")
-                                Spacer(minLength: 12)
-                                if showHidden {
-                                    Image(systemName: "checkmark")
-                                        .foregroundStyle(.tint)
-                                        .accessibilityHidden(true)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        }
-                        .accessibilityIdentifier("workspace-hidden-toggle")
-                        .accessibilityValue(showHidden ? "On" : "Off")
-                        .accessibilityHint("Reloads this folder with hidden files visible")
-                        .accessibilityAddTraits(showHidden ? .isSelected : [])
                     }
                     Section {
                         if root.isDirectory {
@@ -3749,17 +3721,19 @@ struct WorkspaceBrowser: View {
                                 .accessibilityIdentifier("workspace-\(entry.isDirectory ? "directory" : "file")-entry:\(entry.path)")
                             }
                             if let next = directory?.nextOffset {
-                                Button("Load more", systemImage: "ellipsis") { Task { await loadDirectory(reset: false, offset: next) } }
-                                    .accessibilityIdentifier("workspace-next-page")
+                                Button("Load more", systemImage: "ellipsis") {
+                                    // User pagination takes priority over a
+                                    // refresh already waiting on the host.
+                                    listingRefreshTask?.cancel()
+                                    listingRefreshTask = nil
+                                    listingRefreshID = nil
+                                    Task { await loadDirectory(reset: false, offset: next) }
+                                }
+                                .accessibilityIdentifier("workspace-next-page")
                             }
                         } else {
                             Button { openRootFile(root) } label: { Label(URL(fileURLWithPath: root.path).lastPathComponent, systemImage: "doc.text") }
                                 .accessibilityIdentifier("workspace-file-entry:\(root.id)")
-                        }
-                    } header: {
-                        HStack {
-                            Text(directoryPath.isEmpty ? root.label : directoryPath)
-                            Spacer()
                         }
                     }
                 }
@@ -3784,16 +3758,9 @@ struct WorkspaceBrowser: View {
             ContentUnavailableView("Modified unavailable", systemImage: "arrow.triangle.branch", description: Text(git.detail ?? "Git status is unavailable on this host."))
                 .accessibilityIdentifier("workspace-git-unavailable")
         } else if let git, git.changes.isEmpty {
-            VStack(spacing: 12) {
-                if loading { ProgressView("Refreshing changes…").accessibilityIdentifier("workspace-refreshing") }
-                ContentUnavailableView("No modified files", systemImage: "checkmark.circle", description: Text("This workspace has no staged, unstaged, or untracked changes."))
-            }
+            ContentUnavailableView("No modified files", systemImage: "checkmark.circle", description: Text("This workspace has no staged, unstaged, or untracked changes."))
         } else if let git {
             List {
-                if loading {
-                    ProgressView("Refreshing changes…")
-                        .accessibilityIdentifier("workspace-refreshing")
-                }
                 if selectedDiff != nil && diffText == nil {
                     ProgressView("Loading diff…")
                         .accessibilityIdentifier("workspace-diff-loading")
@@ -3849,32 +3816,26 @@ struct WorkspaceBrowser: View {
         directoryPath = ""
         directory = nil
         git = nil
-        listingRefreshError = nil
         failure = workspaceBrowserError(error)
     }
-    private func scheduleListingRefresh(immediate: Bool = false) {
-        guard response != nil, !hasPreview,
-              immediate || (observationPoint != nil && observationPoint != listedPoint) else { return }
-        if immediate {
-            listingRefreshTask?.cancel()
-            listingRefreshTask = nil
-            listingRefreshID = nil
-            listingRetryCount = 0
-        } else if listingRefreshTask != nil { return }
+    private func scheduleListingRefresh(force: Bool = false) {
+        guard scenePhase == .active, response != nil, !hasPreview,
+              !loading, (force || (observationPoint != nil && observationPoint != listedPoint)),
+              listingRefreshTask == nil else { return }
         let requestID = UUID()
         listingRefreshID = requestID
         let minimumInterval = min(30.0, 2.0 * pow(2.0, Double(listingRetryCount)))
         let elapsed = lastListingAttemptAt.map { ProcessInfo.processInfo.systemUptime - $0 } ?? minimumInterval
-        let delay = immediate ? 0 : max(0, minimumInterval - elapsed)
+        let delay = max(0, minimumInterval - elapsed)
         listingRefreshTask = Task {
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard listingRefreshID == requestID else { return }
-            if Task.isCancelled || hasPreview {
+            if Task.isCancelled || hasPreview || loading {
                 listingRefreshTask = nil
                 listingRefreshID = nil
                 return
             }
-            if !immediate && observationPoint == listedPoint {
+            if !force && observationPoint == listedPoint {
                 listingRefreshTask = nil
                 listingRefreshID = nil
                 return
@@ -3912,7 +3873,6 @@ struct WorkspaceBrowser: View {
                 git = nil
             }
             response = next
-            listingRefreshError = nil
             guard selectedRoot != nil else {
                 failure = next.detail ?? "No verified workspace locations are available."
                 return false
@@ -3939,7 +3899,6 @@ struct WorkspaceBrowser: View {
                 clearUnavailableWorkspace(error)
                 return false
             }
-            listingRefreshError = "Couldn’t refresh Files. Check your Mac connection and try again."
             return false
         }
     }
@@ -4070,15 +4029,25 @@ struct WorkspaceBrowser: View {
         let captured = location
         let requestID = UUID()
         directoryRequestID = requestID
+        let loadedCount = backgroundRefresh ? (directory?.entries.count ?? 0) : 0
         if reset && !preserveUntilLoaded { directory = nil }
         let loadingID = beginLoading()
         defer { loadingRequests.remove(loadingID) }
         do {
-            let page = try await model.loadWorkspaceDirectory(chat, root: root, path: captured.path,
+            var page = try await model.loadWorkspaceDirectory(chat, root: root, path: captured.path,
                                                               showHidden: captured.hidden, offset: offset)
+            var seenOffsets: Set<Int> = []
+            while backgroundRefresh, page.entries.count < loadedCount,
+                  let next = page.nextOffset, seenOffsets.insert(next).inserted {
+                guard isCurrent(captured), requestID == directoryRequestID else { return false }
+                let more = try await model.loadWorkspaceDirectory(chat, root: root, path: captured.path,
+                                                                  showHidden: captured.hidden, offset: next)
+                guard more.rootId == page.rootId, more.path == page.path else { throw FileFailure.integrity }
+                page = WorkspaceDirectoryPage(rootId: page.rootId, path: page.path, parentPath: page.parentPath,
+                                              entries: page.entries + more.entries, nextOffset: more.nextOffset)
+            }
             guard isCurrent(captured), requestID == directoryRequestID else { return false }
             failure = nil
-            listingRefreshError = nil
             missingDirectory = false
             if reset || directory == nil { directory = page }
             else if let current = directory { directory = WorkspaceDirectoryPage(rootId: page.rootId, path: page.path, parentPath: page.parentPath, entries: current.entries + page.entries, nextOffset: page.nextOffset) }
@@ -4091,9 +4060,7 @@ struct WorkspaceBrowser: View {
                 failure = "This folder moved or was deleted. Try again to return to the workspace root."
             } else if isUnavailableWorkspace(error) {
                 clearUnavailableWorkspace(error)
-            } else if backgroundRefresh {
-                listingRefreshError = "Couldn’t refresh this folder. Try again."
-            } else { failure = workspaceBrowserError(error) }
+            } else if !backgroundRefresh { failure = workspaceBrowserError(error) }
             return false
         }
     }
@@ -4107,13 +4074,12 @@ struct WorkspaceBrowser: View {
         do {
             let next = try await model.loadWorkspaceGitStatus(chat, root: root)
             guard isCurrent(captured), requestID == gitRequestID else { return false }
-            git = next; failure = nil; listingRefreshError = nil
+            git = next; failure = nil
             return true
         } catch {
             guard isCurrent(captured), requestID == gitRequestID else { return false }
             if isUnavailableWorkspace(error) { clearUnavailableWorkspace(error) }
-            else if backgroundRefresh { listingRefreshError = "Couldn’t refresh changes. Try again." }
-            else { failure = workspaceBrowserError(error) }
+            else if !backgroundRefresh { failure = workspaceBrowserError(error) }
             return false
         }
     }
@@ -4344,15 +4310,6 @@ private struct WorkspaceRootMenuButton: View {
     var body: some View {
         Button(root.label) { action(root) }
             .accessibilityIdentifier("workspace-root:\(root.id)")
-    }
-}
-
-private struct WorkspaceBrowserDoneButton: View {
-    let action: () -> Void
-
-    var body: some View {
-        Button("Done", action: action)
-            .accessibilityIdentifier("workspace-close")
     }
 }
 
@@ -6399,6 +6356,7 @@ struct ActivityItemView: View {
     let subagent: SubagentSummary?
     let openSubagent: ((SubagentSummary) -> Void)?
     let projectSubagents: [ProjectSubagentSummary]
+    let projectSubagentsAvailable: Bool
     let openProjectSubagent: ((ProjectSubagentSummary) -> Void)?
     let openFile: ((String) -> Void)?
     let toggle: () -> Void
@@ -6410,6 +6368,7 @@ struct ActivityItemView: View {
         subagent: SubagentSummary? = nil,
         openSubagent: ((SubagentSummary) -> Void)? = nil,
         projectSubagents: [ProjectSubagentSummary] = [],
+        projectSubagentsAvailable: Bool = true,
         openProjectSubagent: ((ProjectSubagentSummary) -> Void)? = nil,
         openFile: ((String) -> Void)? = nil,
         toggle: @escaping () -> Void
@@ -6419,6 +6378,7 @@ struct ActivityItemView: View {
         self.subagent = subagent
         self.openSubagent = openSubagent
         self.projectSubagents = projectSubagents
+        self.projectSubagentsAvailable = projectSubagentsAvailable
         self.openProjectSubagent = openProjectSubagent
         self.openFile = openFile
         self.toggle = toggle
@@ -6442,11 +6402,13 @@ struct ActivityItemView: View {
                     Button {
                         openProjectSubagent(projectSubagent)
                     } label: {
-                        SubagentActivityLabel(title: projectSubagent.title, statusLabel: projectSubagent.statusLabel)
+                        SubagentActivityLabel(title: projectSubagent.title,
+                                              statusLabel: projectSubagent.statusLabel(available: projectSubagentsAvailable))
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("project-subagent-row:" + projectSubagent.threadId)
-                    .accessibilityLabel(projectSubagent.title + ", " + projectSubagent.statusLabel)
+                    .accessibilityLabel(projectSubagent.title + ", "
+                                        + projectSubagent.statusLabel(available: projectSubagentsAvailable))
                     .accessibilityHint("Open read-only agent task.")
                 }
             }

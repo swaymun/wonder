@@ -26,6 +26,22 @@ source-only when checked. The shipped iOS checkpoint source is now in
 Testing 21, but its installed TestFlight behavior has not yet been observed.
 Mac source changes after 1.0.108 remain uninstalled.
 
+An October 3 source-only follow-up addresses the owner's Files and helper
+screenshots. Project helper rows now distinguish unknown, waiting, failed and
+last-known states; focused host/native tests and a stale-roster UI check passed
+on both simulators. Files uses the conversation area and bottom toggle in both
+Project conversations and New Chat, with a compact Workspace/hidden-file
+control and quiet background refresh. Focused in-chat Files, preview/diff and
+paginated refresh checks passed on iPhone and iPad, including an overlap where
+the user taps Load more during a delayed refresh. iPhone 17 Pro Max also kept
+the Project draft and Chats sidebar through portrait-landscape-portrait. The
+Wonder Testing Release simulator build and testing-lane validation passed. The
+current Testing 21 installation still has older UI and historical “Stopped”
+labels; the scoped response wording and these changes have not been uploaded.
+A truthful live status for a Codex desktop-owned turn needs a supported shared
+status source. New Chat preview notes, genuine iPad two-app Split View and
+iPhone Duo pose testing remain open.
+
 The October 3 post-checkpoint composer hardening is verified in source and
 signed TestingDiagnostics simulator builds, but is not in Testing 21 or
 production 82. With a large staged attachment, draft edits now persist a

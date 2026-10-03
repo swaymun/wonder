@@ -497,6 +497,8 @@ import UIKit
         pill.tap()
         let scout = app.buttons["project-subagent-roster:fixture-child-thread"]
         XCTAssertTrue(scout.waitForExistence(timeout: 5))
+        XCTAssertEqual(scout.label, "Scout, Status unknown",
+                       "A desktop-owned child that is not loaded by this server must not look unavailable or falsely live")
         scout.tap()
         let reply = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Scout found the parser issue.")).firstMatch
         XCTAssertTrue(reply.waitForExistence(timeout: 15), app.debugDescription)
@@ -528,6 +530,36 @@ import UIKit
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Builder completed the file review.")).firstMatch.waitForExistence(timeout: 15))
         app.buttons["project-subagent-sheet-done"].tap()
         XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 5))
+    }
+
+    func testProjectAgentRosterMarksCachedRunningStatusLastKnownAfterRefreshFailure() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+                               "-diagnostics-chat-layout-unsaved", "-diagnostics-project-subagents",
+                               "-diagnostics-project-subagents-stale"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let parent = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(parent.waitForExistence(timeout: 15))
+        parent.tap()
+        let pill = app.buttons["project-subagent-status-pill"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 10))
+        pill.tap()
+        let scout = app.buttons["project-subagent-roster:fixture-child-thread"]
+        XCTAssertTrue(scout.waitForExistence(timeout: 5))
+        XCTAssertEqual(scout.label, "Scout, Running")
+        scout.tap()
+        XCTAssertTrue(app.staticTexts["Read only"].waitForExistence(timeout: 10))
+        app.buttons["project-subagent-sheet-done"].tap()
+        app.buttons["new-chat"].tap()
+        openSidebarIfNeeded(app)
+        parent.tap()
+        XCTAssertTrue(pill.waitForExistence(timeout: 10))
+        pill.tap()
+        XCTAssertTrue(scout.waitForExistence(timeout: 5))
+        XCTAssertEqual(scout.label, "Scout, Last known: Running")
+        XCTAssertTrue(app.staticTexts["project-subagent-roster-detail"].exists)
     }
 
     func testActivityDisclosureKeepsVisibleReadingAnchorAtLargeText() throws {
@@ -1156,7 +1188,7 @@ import UIKit
         XCTAssertTrue(viewer.waitForExistence(timeout: 5))
         let picker = app.buttons["computer-session-connection-picker"]
         XCTAssertTrue(picker.exists)
-        XCTAssertEqual(picker.value as? String, "Live")
+        XCTAssertEqual(picker.value as? String, "Connected, screen live")
         XCUIDevice.shared.orientation = .landscapeLeft
         XCTAssertTrue(viewer.waitForExistence(timeout: 5), "Rotating must keep the presented viewer, not return to New chat.")
         XCTAssertTrue(picker.isHittable)
@@ -1219,7 +1251,7 @@ import UIKit
         studio.tap()
         XCTAssertTrue(app.buttons["computer-session-take-control"].waitForExistence(timeout: 5))
         XCTAssertEqual(picker.label, "Computer, Studio")
-        XCTAssertEqual(picker.value as? String, "Live")
+        XCTAssertEqual(picker.value as? String, "Connected, screen live")
         app.buttons["computer-session-take-control"].tap()
         let switcher = app.buttons["computer-session-shortcut-app-switcher"]
         XCTAssertTrue(switcher.waitForExistence(timeout: 5))
@@ -1231,7 +1263,7 @@ import UIKit
         laptop.tap()
         XCTAssertTrue(app.buttons["computer-session-take-control"].waitForExistence(timeout: 5))
         XCTAssertEqual(picker.label, "Computer, Laptop")
-        XCTAssertEqual(picker.value as? String, "Live")
+        XCTAssertEqual(picker.value as? String, "Connected, screen live")
         XCTAssertFalse(switcher.exists)
         XCTAssertFalse(app.keyboards.firstMatch.exists)
         app.buttons["computer-session-take-control"].tap()
@@ -2440,7 +2472,7 @@ import UIKit
         XCTAssertTrue(app.buttons["Files"].waitForExistence(timeout: 5))
         app.buttons["Files"].tap()
 
-        let picker = app.descendants(matching: .any).matching(identifier: "workspace-view-picker").firstMatch
+        let picker = app.buttons["workspace-view-toggle"]
         XCTAssertTrue(picker.waitForExistence(timeout: 15), "The updated paired host must expose workspace browsing.")
         let hidden = app.buttons["workspace-hidden-toggle"]
         XCTAssertTrue(hidden.waitForExistence(timeout: 15))
@@ -2520,7 +2552,7 @@ import UIKit
         let imageFile = app.buttons["Saturday.png"]
         let documentFile = app.buttons["notes.txt"]
         let malformedFile = app.buttons["broken.png"]
-        XCTAssertTrue(app.buttons["workspace-close"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.collectionViews["workspace-file-list"].waitForExistence(timeout: 10))
         let filesList = app.collectionViews.allElementsBoundByIndex.max {
             $0.frame.minY < $1.frame.minY
         } ?? app.collectionViews.firstMatch
@@ -2579,7 +2611,7 @@ import UIKit
         XCTAssertTrue(files.waitForExistence(timeout: 10))
         XCTAssertTrue(files.isHittable)
         files.tap()
-        let picker = app.descendants(matching: .any).matching(identifier: "workspace-view-picker").firstMatch
+        let picker = app.buttons["workspace-view-toggle"]
         XCTAssertTrue(picker.waitForExistence(timeout: 10), "Workspace browser preview is unavailable in this build.")
         guard picker.exists else { return }
         XCTAssertTrue(app.buttons["workspace-directory-entry:Projects"].waitForExistence(timeout: 5))
@@ -2625,7 +2657,8 @@ import UIKit
         // The app process keeps running while XCTest waits; give the delayed
         // fixture request a turn before changing the browser location.
         Thread.sleep(forTimeInterval: 0.25)
-        XCTAssertTrue(app.descendants(matching: .any)["workspace-refreshing"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["workspace-refreshing"].exists,
+                       "Background refresh must not interrupt browsing with a spinner")
         projectFolder.tap()
         let plan = app.buttons["workspace-file-entry:Projects/Plan.md"]
         XCTAssertTrue(plan.waitForExistence(timeout: 5))
@@ -2636,6 +2669,41 @@ import UIKit
         XCTAssertFalse(app.descendants(matching: .any)["workspace-unavailable"].exists)
     }
 
+    func testWorkspaceQuietRefreshKeepsLoadedPages() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-workspace-paged-preview"]
+        app.launch()
+        app.buttons["conversation-files-pill"].tap()
+        let more = app.buttons["workspace-next-page"]
+        XCTAssertTrue(more.waitForExistence(timeout: 10))
+        more.tap()
+        let lastFile = app.buttons["workspace-file-entry:diagram.png"]
+        XCTAssertTrue(lastFile.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["workspace-refresh"].exists)
+        Thread.sleep(forTimeInterval: 14)
+        XCTAssertTrue(lastFile.exists, "A quiet refresh must keep the pages already loaded")
+        XCTAssertFalse(app.descendants(matching: .any)["workspace-refreshing"].exists)
+    }
+
+    func testWorkspaceLoadMoreWinsOverBackgroundRefresh() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
+                               "-workspace-paged-preview", "-workspace-delayed-background-roots"]
+        app.launch()
+        app.buttons["conversation-files-pill"].tap()
+        let more = app.buttons["workspace-next-page"]
+        XCTAssertTrue(more.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 13)
+        more.tap()
+        let lastFile = app.buttons["workspace-file-entry:diagram.png"]
+        XCTAssertTrue(lastFile.waitForExistence(timeout: 8),
+                      "Explicit pagination must win while background roots are being refreshed")
+        Thread.sleep(forTimeInterval: 5.5)
+        XCTAssertTrue(lastFile.exists, "A late background response must retain the loaded page")
+    }
+
     func testWorkspaceModifiedLoadsAfterDelayedRoots() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -2644,7 +2712,7 @@ import UIKit
         let files = app.buttons["conversation-files-pill"]
         XCTAssertTrue(files.waitForExistence(timeout: 10))
         files.tap()
-        let picker = app.descendants(matching: .any).matching(identifier: "workspace-view-picker").firstMatch
+        let picker = app.buttons["workspace-view-toggle"]
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Loading files…"].exists)
         app.buttons["Modified"].tap()
@@ -2706,6 +2774,9 @@ import UIKit
         files.tap()
         let workspace = app.collectionViews["workspace-file-list"]
         XCTAssertTrue(workspace.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["workspace-close"].exists)
+        XCTAssertFalse(app.buttons["workspace-refresh"].exists)
+        XCTAssertTrue(app.buttons["workspace-hidden-toggle"].exists)
         retainMenuScreenshot(app, name: "Project Files inside chat")
         let draft = app.textViews["message-draft"]
         XCTAssertTrue(draft.isHittable, "The composer stays available beside Files")
@@ -2739,7 +2810,7 @@ import UIKit
         draft.typeText("Review these files")
         XCTAssertTrue(changed.waitForExistence(timeout: 5),
                       "Editing the composer must keep the Files workspace open")
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(files.waitForExistence(timeout: 5))
     }
 
@@ -2865,7 +2936,7 @@ import UIKit
                        "Files should still replace the timeline after the send")
         retainMenuScreenshot(app, name: "Project file stays open after offline send")
         app.buttons["workspace-preview-back"].tap()
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         let bottom = app.buttons["scroll-to-bottom"]
         if bottom.exists && bottom.isHittable { bottom.tap() }
         XCTAssertTrue(app.images["Received by your Mac"].waitForExistence(timeout: 10),
@@ -2901,7 +2972,9 @@ import UIKit
         XCTAssertTrue(app.buttons["workspace-modified-entry:Project update.md"].waitForExistence(timeout: 10))
         XCTAssertTrue(draft.isHittable)
         retainMenuScreenshot(app, name: "Project Files refreshes after host receipt")
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
+        let bottom = app.buttons["scroll-to-bottom"]
+        if bottom.exists && bottom.isHittable { bottom.tap() }
         XCTAssertTrue(app.images["Received by your Mac"].waitForExistence(timeout: 10),
                       "The host must accept the exact synthetic Project message")
     }
@@ -2924,12 +2997,12 @@ import UIKit
         let draft = app.textViews["message-draft"]
         draft.tap(); draft.typeText("Review this file while Files stays open.")
         app.buttons["send-message"].tap()
-        XCTAssertTrue(app.buttons["workspace-refresh-retry"].waitForExistence(timeout: 10),
-                      "A failed background read must leave the prior listing and show recovery")
+        XCTAssertFalse(app.buttons["workspace-refresh-retry"].exists,
+                       "A failed background read must keep the prior listing without a refresh banner")
         XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].exists)
         XCTAssertTrue(app.buttons["workspace-file-entry:Project update.md"].waitForExistence(timeout: 15),
                       "Files must retry after reconnection without another Project event or manual tap")
-        XCTAssertFalse(app.buttons["workspace-refresh-retry"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["workspace-refreshing"].exists)
         XCTAssertTrue(draft.isHittable)
     }
 
@@ -2974,10 +3047,10 @@ import UIKit
                       "A denied workspace refresh must hide the previously authorized listing")
         XCTAssertFalse(oldFile.exists)
         XCTAssertFalse(app.staticTexts["No modified files"].exists)
-        app.buttons[modified ? "All files" : "Modified"].tap()
+        app.buttons[modified ? "Workspace" : "Modified"].tap()
         XCTAssertTrue(unavailable.exists, "Switching views must not resurrect revoked rows")
         XCTAssertFalse(oldFile.exists)
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(app.images["Received by your Mac"].waitForExistence(timeout: 10),
                       "The fixture must revoke only after accepting the exact message")
     }
@@ -3104,7 +3177,7 @@ import UIKit
             workspacePreviewClose(app, legacyID: "workspace-media-close").tap()
             XCTAssertTrue(video.waitForExistence(timeout: 5))
         }
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
@@ -3326,7 +3399,7 @@ import UIKit
         XCTAssertTrue((app.textViews["annotation-selectable-text"].value as? String)?
             .contains("Revised workspace file") == true)
         workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         XCTAssertTrue(chip.label.contains("Source changed"), chip.label)
         chip.tap()
@@ -3504,7 +3577,7 @@ import UIKit
         XCTAssertTrue(app.buttons["annotation-pdf-open"].exists)
         retainMenuScreenshot(app, name: "Updated PDF in open viewer")
         workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
@@ -3571,7 +3644,7 @@ import UIKit
                       "A malformed update must not silently leave the old page visible")
         retainMenuScreenshot(app, name: "Invalid PDF revision in viewer")
         workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
@@ -3650,6 +3723,13 @@ import UIKit
             XCTAssertLessThanOrEqual(files.frame.maxY, composer.frame.minY)
             retainMenuScreenshot(app, name: "New Project chat destinations at \(size)")
             files.tap()
+            let list = app.collectionViews["workspace-file-list"]
+            XCTAssertTrue(list.waitForExistence(timeout: 10))
+            XCTAssertTrue(composer.isHittable, "New Chat Files must replace the chat area and keep its composer")
+            XCTAssertLessThanOrEqual(list.frame.maxY, composer.frame.minY + 2)
+            XCTAssertFalse(app.buttons["workspace-close"].exists)
+            XCTAssertFalse(app.buttons["workspace-refresh"].exists)
+            XCTAssertTrue(app.buttons["workspace-hidden-toggle"].exists)
             XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].waitForExistence(timeout: 10))
             app.buttons["Modified"].tap()
             let changed = app.buttons["workspace-modified-entry:README.md"]
@@ -3657,7 +3737,7 @@ import UIKit
             changed.tap()
             XCTAssertTrue(workspacePreviewClose(app, legacyID: "workspace-diff-close").waitForExistence(timeout: 5))
             workspacePreviewClose(app, legacyID: "workspace-diff-close").tap()
-            app.buttons["workspace-close"].tap()
+            closeWorkspace(app)
             XCTAssertTrue(files.waitForExistence(timeout: 5))
             XCTAssertFalse(app.buttons["new-chat-send"].isEnabled)
             app.terminate()
@@ -3680,7 +3760,7 @@ import UIKit
             XCTAssertTrue(unavailable.waitForExistence(timeout: 10))
             XCTAssertTrue(unavailable.label.contains(expected))
             XCTAssertTrue(app.buttons["workspace-retry"].exists)
-            app.buttons["workspace-close"].tap()
+            closeWorkspace(app)
             XCTAssertTrue(files.waitForExistence(timeout: 5))
             app.terminate()
         }
@@ -3699,7 +3779,7 @@ import UIKit
         app.buttons["workspace-retry"].tap()
         XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].waitForExistence(timeout: 10))
         XCTAssertFalse(unavailable.exists)
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(files.waitForExistence(timeout: 5))
     }
 
@@ -3720,7 +3800,7 @@ import UIKit
         app.buttons["workspace-retry"].tap()
         XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].waitForExistence(timeout: 10))
         XCTAssertFalse(unavailable.exists)
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(files.waitForExistence(timeout: 5))
     }
 
@@ -3835,8 +3915,8 @@ import UIKit
             XCTAssertTrue(app.staticTexts["Fixture workspace file: Authentication.swift\n"].exists)
             retainMenuScreenshot(app, name: large ? "Linked file at maximum text" : "Filename opens file preview")
             workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
-            XCTAssertTrue(app.navigationBars["Files"].waitForExistence(timeout: 5))
-            app.buttons["workspace-close"].tap()
+            XCTAssertTrue(app.buttons["workspace-view-toggle"].waitForExistence(timeout: 5))
+            closeWorkspace(app)
             XCTAssertTrue(detail.waitForExistence(timeout: 5))
             XCTAssertEqual(detail.value as? String, "Collapsed")
             let toggle = app.buttons["file-change-toggle:fixture/row"]
@@ -4416,10 +4496,9 @@ import UIKit
                 let workspaceAttachment = app.buttons["workspace-attachment:notes.txt"]
                 XCTAssertTrue(workspaceAttachment.waitForExistence(timeout: 5),
                               "Closing the document preview returns to the Files attachment row.")
-                let workspaceClose = app.buttons["workspace-close"]
-                XCTAssertTrue(workspaceClose.waitForExistence(timeout: 5),
-                              "The Files sheet remains explicitly dismissible after closing a document preview.")
-                workspaceClose.tap()
+                XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 5),
+                              "The Files pill remains available after closing a document preview.")
+                closeWorkspace(app)
                 XCTAssertTrue(queuedWithAttachments.waitForExistence(timeout: 5),
                               "Dismissing Files returns to the queued conversation row.")
 
@@ -4545,6 +4624,54 @@ import UIKit
         XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed,
                        "The Chats control must restore the sidebar at large text sizes")
         retainMenuScreenshot(app, name: "Chats sidebar restored at accessibility size")
+    }
+
+    func testRegularWidthPhoneKeepsChatsBesideProjectConversation() throws {
+        continueAfterFailure = false
+        guard UIDevice.current.userInterfaceIdiom == .phone else { throw XCTSkip("iPhone regular-width layout") }
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+                               "-diagnostics-chat-layout-unsaved", "-diagnostics-project-speed"]
+        app.launch()
+
+        let draft = app.textViews["message-draft"]
+        XCTAssertTrue(app.buttons["open-sidebar"].waitForExistence(timeout: 10))
+        openSidebarIfNeeded(app)
+        let parent = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(parent.waitForExistence(timeout: 10))
+        parent.tap()
+        XCTAssertTrue(draft.waitForExistence(timeout: 5))
+        draft.tap(); draft.typeText("Keep this draft")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        guard app.windows.firstMatch.frame.width >= 900 else {
+            throw XCTSkip("This iPhone landscape window stays compact")
+        }
+        let search = app.textFields["sidebar-search"]
+        let timeline = app.descendants(matching: .any)["conversation-scroll"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10))
+        XCTAssertTrue(timeline.waitForExistence(timeout: 10))
+        XCTAssertTrue(search.isHittable, "Chats must stay usable beside the conversation")
+        XCTAssertTrue(app.buttons["conversation-title-menu"].isHittable)
+        XCTAssertGreaterThanOrEqual(timeline.frame.minX, search.frame.maxX - 10,
+                                    "The regular-width sidebar must not cover the conversation")
+        XCTAssertFalse(app.buttons["open-sidebar"].exists,
+                       "A visible sidebar should not have a redundant drawer control")
+        retainMenuScreenshot(app, name: "Chats beside a Project conversation at regular phone width", fullScreen: true)
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertTrue(app.buttons["open-sidebar"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["conversation-title-menu"].isHittable)
+        XCTAssertTrue((draft.value as? String)?.contains("Keep this draft") == true,
+                      "Changing the size class must keep the same Project draft")
+    }
+
+    private func closeWorkspace(_ app: XCUIApplication) {
+        let conversationToggle = app.buttons["conversation-files-pill"]
+        let toggle = conversationToggle.exists ? conversationToggle : app.buttons["new-chat-files"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5) && toggle.isHittable,
+                      "The bottom Files control must close the workspace")
+        toggle.tap()
     }
 
     private func openSidebarIfNeeded(_ app: XCUIApplication) {
@@ -4918,7 +5045,7 @@ import UIKit
         XCTAssertTrue(workspacePreviewClose(app, legacyID: "workspace-diff-close").waitForExistence(timeout: 10))
         retainMenuScreenshot(app, name: "Live Project diff")
         workspacePreviewClose(app, legacyID: "workspace-diff-close").tap()
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
@@ -4950,7 +5077,7 @@ import UIKit
         XCTAssertTrue(app.buttons["annotation-image-open"].isHittable)
         retainMenuScreenshot(app, name: "Live Project image preview")
         workspacePreviewClose(app, legacyID: "photo-viewer-close").tap()
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
@@ -4984,7 +5111,7 @@ import UIKit
         XCTAssertFalse(app.staticTexts["Preview unavailable"].exists)
         retainMenuScreenshot(app, name: "Live Project iPad PDF preview")
         workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
@@ -5074,7 +5201,7 @@ import UIKit
         retainMenuScreenshot(app, name: "Live authenticated Project audio controls")
         workspacePreviewClose(app, legacyID: "workspace-media-close").tap()
         XCTAssertTrue(audio.waitForExistence(timeout: 5))
-        app.buttons["workspace-close"].tap()
+        closeWorkspace(app)
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 

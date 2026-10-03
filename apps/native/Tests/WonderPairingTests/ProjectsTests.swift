@@ -63,7 +63,26 @@ final class ProjectsTests: XCTestCase {
         let roster = try JSONDecoder().decode(ProjectSubagentList.self, from: Data(#"{"available":true,"detail":null,"subagents":[{"parentConversationId":"project parent","threadId":"child/thread","title":"Scout","agentNickname":"Scout","agentRole":"research","status":"active","isArchived":false,"canAcceptDirectInput":false}]}"#.utf8))
         let child = try XCTUnwrap(roster.subagents.first)
         XCTAssertEqual(child.statusLabel, "Running")
+        XCTAssertEqual(child.statusLabel(available: false), "Last known: Running")
         XCTAssertFalse(child.canAcceptDirectInput)
+        // The host cannot infer live desktop-owned work from a separate App
+        // Server's notLoaded status; archiving also cannot imply completion.
+        for (status, archived, expected) in [
+            ("notLoaded", false, "Status unknown"),
+            ("unknown", false, "Status unknown"),
+            ("interrupted", true, "Archived · Stopped"),
+            ("failed", true, "Archived · Failed"),
+            ("completed", true, "Archived · Completed"),
+            ("notLoaded", true, "Archived · Status unknown"),
+        ] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "parentConversationId": "project parent", "threadId": "child/thread",
+                "title": "Scout", "agentNickname": "Scout", "agentRole": "research",
+                "status": status, "isArchived": archived, "canAcceptDirectInput": false,
+            ])
+            XCTAssertEqual(try JSONDecoder().decode(ProjectSubagentSummary.self, from: data).statusLabel,
+                           expected, "\(status), archived=\(archived)")
+        }
         XCTAssertEqual(try ProjectSubagentPaths.roster(parentConversationId: child.parentConversationId),
                        "/api/v1/project-conversations/project%20parent/subagents")
         XCTAssertEqual(try ProjectSubagentPaths.transcript(parentConversationId: child.parentConversationId,
