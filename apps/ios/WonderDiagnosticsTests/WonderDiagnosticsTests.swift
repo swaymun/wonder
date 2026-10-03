@@ -182,17 +182,58 @@ final class WonderDiagnosticsTests: XCTestCase {
         await failedManualRevision.observe(point: WorkspaceObservationPoint(hostEpoch: "failed-manual", sequence: 3),
                                            refresh: { automaticAfterFailure.fulfill(); return largeSource },
                                            onRevision: nil, failureMessage: "Read failed")
+        try await Task.sleep(for: .milliseconds(900))
         let handledFailure = await failedManualRevision.checkManuallyForRevision(
             refresh: { throw URLError(.timedOut) }, onRevision: nil, failureMessage: "Read failed")
         XCTAssertTrue(handledFailure)
         XCTAssertEqual(failedManualRevision.observedPoint?.sequence, 2,
                        "A failed manual read must not consume the queued event")
+        try await Task.sleep(for: .milliseconds(1_200))
+        XCTAssertEqual(failedManualRevision.observedPoint?.sequence, 2,
+                       "A manual failure must delay the queued automatic retry")
         await fulfillment(of: [automaticAfterFailure], timeout: 4)
         for _ in 0..<100 where failedManualRevision.observedPoint?.sequence != 3 {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(failedManualRevision.observedPoint?.sequence, 3)
         failedManualRevision.close()
+
+        let failedAutomaticRevision = WorkspaceRevisionState(data: original, sha256: ConversationFile.digest(original))
+        failedAutomaticRevision.observedPoint = WorkspaceObservationPoint(hostEpoch: "failed-automatic", sequence: 1)
+        let automaticReads = Counter()
+        let slowFailure = expectation(description: "Slow automatic read times out")
+        let automaticRetry = expectation(description: "Failed automatic check retries without a new chat event")
+        await failedAutomaticRevision.observe(
+            point: WorkspaceObservationPoint(hostEpoch: "failed-automatic", sequence: 2),
+            refresh: {
+                if await automaticReads.next() == 1 {
+                    try await Task.sleep(for: .milliseconds(2_100))
+                    slowFailure.fulfill()
+                    throw URLError(.timedOut)
+                }
+                automaticRetry.fulfill()
+                return updated
+            }, onRevision: nil, failureMessage: "Read failed")
+        await fulfillment(of: [slowFailure], timeout: 4)
+        for _ in 0..<100 where failedAutomaticRevision.refreshFailure == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(failedAutomaticRevision.observedPoint?.sequence, 1,
+                       "A failed automatic read must not consume the pending update")
+        let failedAutomaticReads = await automaticReads.count()
+        XCTAssertEqual(failedAutomaticReads, 1)
+        try await Task.sleep(for: .milliseconds(250))
+        let readsBeforeRetry = await automaticReads.count()
+        XCTAssertEqual(readsBeforeRetry, 1,
+                       "Backoff must start after a slow timeout, not when the read began")
+        await fulfillment(of: [automaticRetry], timeout: 4)
+        for _ in 0..<100 where failedAutomaticRevision.observedPoint?.sequence != 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(failedAutomaticRevision.observedPoint?.sequence, 2)
+        XCTAssertEqual(failedAutomaticRevision.offeredData, updated)
+        XCTAssertNil(failedAutomaticRevision.refreshFailure)
+        failedAutomaticRevision.close()
     }
 
     @MainActor func testPDFPreviewRetainsPageReadingPointAndZoomAcrossRevision() throws {

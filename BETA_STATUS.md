@@ -353,6 +353,28 @@ The change remains source-only under the requested one-upload-per-channel
 limit. A real paired-host annotation send, narrow iPad window and installed
 TestFlight behavior remain open.
 
+The latest source-only Files review fixed a failed automatic revision check
+being treated as a completed check. A selected file now retries a pending
+update with bounded delay after a Mac read failure, including a slow timeout;
+manual and automatic checks cannot overwrite each other's outcome or move the
+observed sequence backward. The existing Diagnostics owner and visible
+text-revision/unsent-note UI check each passed 1/1 on both iPhone 17 and iPad
+Pro 13-inch iOS 26.5 simulators. Paired-host edit timing and installed Release
+behavior remain unverified, so Files acceptance stays open. The desktop task
+status comparison also confirmed that Wonder's separate App Server can report
+`notLoaded` while Codex desktop owns an active turn. Codex hooks do not by
+themselves prove ongoing activity; a supported fresh desktop-owned status
+source is still required before showing a live Running state in Wonder.
+
+Broader GLB support remains research gated. An isolated, nonshipping
+GLTFKit2 probe rendered a textured GLB in 100 SceneView open/close cycles
+on each iPhone and iPad simulator, and a Python hostile-input prototype
+passed 19/19 expected cases. Closed process footprint rose about 1.2 MiB
+on each device without a demonstrated plateau; simulator GPU allocation
+could not be measured. Native input validation, complex/near-limit assets,
+GPU tracing and package/license review are still required before adding GLB
+to Wonder. The probe was removed from both simulators.
+
 ## Earlier qualification
 
 Testing build 7 and production build 71 passed six focused iPhone Simulator

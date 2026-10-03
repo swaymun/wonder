@@ -2929,6 +2929,7 @@ struct WorkspaceObservationPoint: Hashable {
     private var observationTask: Task<Void, Never>?
     private var observationGeneration = UUID()
     private var lastAutomaticCheckAt: TimeInterval?
+    private var automaticFailureCount = 0
     private var automaticCheckInterval: TimeInterval {
         // A full-file refresh reads and hashes every byte. Keep passive reads
         // near 256 KB/s for large previews; manual Check for changes is immediate.
@@ -2966,29 +2967,51 @@ struct WorkspaceObservationPoint: Hashable {
         preparingText = false
     }
 
-    @discardableResult func checkForRevision(refresh: (() async throws -> Data)?,
-                          onRevision: ((String) async -> Void)?, failureMessage: String) async -> Bool {
-        guard let refresh, !closed, !refreshing else { return false }
+    private enum CheckOutcome { case skipped, succeeded, failed }
+
+    private func markObserved(_ point: WorkspaceObservationPoint) {
+        if let observedPoint, observedPoint.hostEpoch == point.hostEpoch,
+           observedPoint.sequence >= point.sequence { return }
+        observedPoint = point
+    }
+
+    private func checkForRevision(refresh: (() async throws -> Data)?,
+                                  onRevision: ((String) async -> Void)?,
+                                  failureMessage: String,
+                                  generation: UUID) async -> CheckOutcome {
+        guard let refresh, !closed, !refreshing,
+              generation == observationGeneration else { return .skipped }
         refreshing = true; refreshFailure = nil
         defer { refreshing = false }
         do {
             let data = try await refresh()
-            guard !Task.isCancelled, !closed else { return false }
+            guard !Task.isCancelled, !closed,
+                  generation == observationGeneration else { return .skipped }
             let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
-            guard !Task.isCancelled, !closed else { return false }
+            guard !Task.isCancelled, !closed,
+                  generation == observationGeneration else { return .skipped }
             if sha256 != currentSha256 {
                 if sha256 != offeredSha256 { offeredData = data; offeredSha256 = sha256 }
             } else if sha256 == currentSha256 { offeredData = nil; offeredSha256 = nil }
             // Draft notes may have changed since the last check, or the file
             // may have reverted to the version the preview is displaying.
             await onRevision?(sha256)
-            return true
+            guard !Task.isCancelled, !closed,
+                  generation == observationGeneration else { return .skipped }
+            lastAutomaticCheckAt = ProcessInfo.processInfo.systemUptime
+            automaticFailureCount = 0
+            return .succeeded
         } catch is CancellationError {
-            return false
+            return .skipped
         } catch {
-            guard !Task.isCancelled, !closed else { return false }
+            guard !Task.isCancelled, !closed,
+                  generation == observationGeneration else { return .skipped }
             refreshFailure = failureMessage
-            return true
+            // Timestamp the completed failure so a slow timeout does not
+            // consume its own retry delay.
+            lastAutomaticCheckAt = ProcessInfo.processInfo.systemUptime
+            automaticFailureCount = min(automaticFailureCount + 1, 5)
+            return .failed
         }
     }
 
@@ -2996,14 +3019,15 @@ struct WorkspaceObservationPoint: Hashable {
                           onRevision: ((String) async -> Void)?, failureMessage: String) async -> Bool {
         let checkedPoint = requestedPoint
         let generation = observationGeneration
-        let checked = await checkForRevision(refresh: refresh, onRevision: onRevision,
-                                             failureMessage: failureMessage)
-        guard checked, refreshFailure == nil, !closed,
-              generation == observationGeneration else { return checked }
+        let outcome = await checkForRevision(refresh: refresh, onRevision: onRevision,
+                                             failureMessage: failureMessage, generation: generation)
+        guard outcome != .skipped, !closed, generation == observationGeneration else {
+            return outcome != .skipped
+        }
+        if outcome == .failed { return true }
         // A manual read satisfies the event already queued when it began.
         // A newer event still gets its own automatic check after the cadence.
-        if let checkedPoint { observedPoint = checkedPoint }
-        lastAutomaticCheckAt = ProcessInfo.processInfo.systemUptime
+        if let checkedPoint { markObserved(checkedPoint) }
         return true
     }
 
@@ -3018,6 +3042,8 @@ struct WorkspaceObservationPoint: Hashable {
             observationGeneration = UUID()
             observationTask?.cancel()
             observationTask = nil
+            lastAutomaticCheckAt = nil
+            automaticFailureCount = 0
         }
         requestedPoint = point
         guard observationTask == nil, let refresh else { return }
@@ -3047,7 +3073,9 @@ struct WorkspaceObservationPoint: Hashable {
                 guard !Task.isCancelled, !closed, generation == observationGeneration else { return }
                 if observedPoint == requestedPoint { return }
                 let remaining = lastAutomaticCheckAt.map {
-                    max(0, automaticCheckInterval - (ProcessInfo.processInfo.systemUptime - $0))
+                    let retryInterval = min(30, Double(1 << min(automaticFailureCount, 5)))
+                    return max(0, max(automaticCheckInterval, retryInterval) -
+                               (ProcessInfo.processInfo.systemUptime - $0))
                 } ?? 0
                 guard remaining > 0 else { break }
                 do { try await Task.sleep(for: .milliseconds(Int64((remaining * 1000).rounded(.up)))) }
@@ -3057,10 +3085,17 @@ struct WorkspaceObservationPoint: Hashable {
             let checkedPoint = requestedPoint ?? requested
             if observedPoint == checkedPoint { return }
             lastAutomaticCheckAt = ProcessInfo.processInfo.systemUptime
-            let checked = await checkForRevision(refresh: refresh, onRevision: onRevision,
-                                                 failureMessage: failureMessage)
-            guard checked, !Task.isCancelled, !closed, generation == observationGeneration else { return }
-            observedPoint = checkedPoint
+            let outcome = await checkForRevision(refresh: refresh, onRevision: onRevision,
+                                                 failureMessage: failureMessage,
+                                                 generation: generation)
+            guard outcome != .skipped, !Task.isCancelled, !closed,
+                  generation == observationGeneration else { return }
+            if outcome == .failed {
+                // A failed read did not observe this file revision. Keep the
+                // event pending and retry without polling an offline Mac hot.
+                continue
+            }
+            markObserved(checkedPoint)
         }
     }
 
