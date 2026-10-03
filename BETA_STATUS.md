@@ -42,6 +42,13 @@ A truthful live status for a Codex desktop-owned turn needs a supported shared
 status source. New Chat preview notes, genuine iPad two-app Split View and
 iPhone Duo pose testing remain open.
 
+An additional host-only helper fix follows up to ten provider list pages when
+checking a verified Project task's archive state. A focused test passed for a
+child on page two and for a repeated cursor returning unavailable. The visible
+roster still stops at 100 tasks. This source is not installed in Mac 1.0.108;
+Testing 21 and production 82 remain unchanged. Another Device Hub attempt did
+not establish two visible iPad app panes, so Split View remains unverified.
+
 The October 3 post-checkpoint composer hardening is verified in source and
 signed TestingDiagnostics simulator builds, but is not in Testing 21 or
 production 82. With a large staged attachment, draft edits now persist a

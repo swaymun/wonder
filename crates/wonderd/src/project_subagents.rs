@@ -16,6 +16,7 @@ use wonder_store::{AgentFamily, StoredProject, StoredProjectConversation};
 
 const MAX_CHILDREN: usize = 100;
 const PAGE_SIZE: usize = 100;
+const MAX_ARCHIVE_LOOKUP_PAGES: usize = 10;
 
 struct ProjectParent {
     conversation: StoredProjectConversation,
@@ -209,46 +210,68 @@ fn project_child_status(thread: &Value, verified_status: &str) -> String {
     verified_status.into()
 }
 
-// `thread/read` has no archive field. Check the provider's exact parent list
-// when opening one child, without adding requests for every roster row.
+// `thread/read` has no archive field. Scan bounded parent-list pages only when
+// opening one child, without adding requests for every roster row.
 async fn child_in_list(
     parent: &ProjectParent,
     thread_id: &str,
     archived: bool,
-) -> Result<(bool, bool), Response> {
-    let result = request(
-        &parent.rpc,
-        "thread/list",
-        json!({
-            "sourceKinds": ["subAgentThreadSpawn"],
-            "parentThreadId": parent.thread_id,
-            "archived": archived,
-            "limit": MAX_CHILDREN,
-        }),
-    )
-    .await
-    .map_err(|_| unavailable("The agent task's archive state could not be checked."))?;
-    let threads = result
-        .get("data")
-        .and_then(Value::as_array)
-        .filter(|threads| threads.len() <= MAX_CHILDREN)
-        .ok_or_else(|| unavailable("Codex returned an invalid agent task list."))?;
-    if let Some(thread) = threads
-        .iter()
-        .find(|thread| thread.get("id").and_then(Value::as_str) == Some(thread_id))
-    {
-        return verified_child(parent, thread, archived)
-            .map(|_| (true, false))
-            .ok_or_else(|| unavailable("The agent task's archive state could not be verified."));
+) -> Result<(bool, bool), Box<Response>> {
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    for _ in 0..MAX_ARCHIVE_LOOKUP_PAGES {
+        let result = request(
+            &parent.rpc,
+            "thread/list",
+            json!({
+                "sourceKinds": ["subAgentThreadSpawn"],
+                "parentThreadId": parent.thread_id,
+                "archived": archived,
+                "limit": MAX_CHILDREN,
+                "cursor": cursor,
+            }),
+        )
+        .await
+        .map_err(|_| {
+            Box::new(unavailable(
+                "The agent task's archive state could not be checked.",
+            ))
+        })?;
+        let threads = result
+            .get("data")
+            .and_then(Value::as_array)
+            .filter(|threads| threads.len() <= MAX_CHILDREN)
+            .ok_or_else(|| Box::new(unavailable("Codex returned an invalid agent task list.")))?;
+        if let Some(thread) = threads
+            .iter()
+            .find(|thread| thread.get("id").and_then(Value::as_str) == Some(thread_id))
+        {
+            return verified_child(parent, thread, archived)
+                .map(|_| (true, false))
+                .ok_or_else(|| {
+                    Box::new(unavailable(
+                        "The agent task's archive state could not be verified.",
+                    ))
+                });
+        }
+        cursor = match result.get("nextCursor") {
+            None | Some(Value::Null) => return Ok((false, false)),
+            Some(Value::String(next))
+                if !next.is_empty() && next.len() <= 2048 && seen_cursors.insert(next.clone()) =>
+            {
+                Some(next.clone())
+            }
+            _ => {
+                return Err(Box::new(unavailable(
+                    "Codex returned an invalid agent task cursor.",
+                )))
+            }
+        };
     }
-    let more = result
-        .get("nextCursor")
-        .and_then(Value::as_str)
-        .is_some_and(|cursor| !cursor.is_empty());
-    Ok((false, more))
+    Ok((false, true))
 }
 
-async fn child_archived(parent: &ProjectParent, thread_id: &str) -> Result<bool, Response> {
+async fn child_archived(parent: &ProjectParent, thread_id: &str) -> Result<bool, Box<Response>> {
     let (current, more_current) = child_in_list(parent, thread_id, false).await?;
     if current {
         return Ok(false);
@@ -258,11 +281,11 @@ async fn child_archived(parent: &ProjectParent, thread_id: &str) -> Result<bool,
         return Ok(true);
     }
     if more_current || more_archived {
-        return Err(unavailable(
+        return Err(Box::new(unavailable(
             "The agent task's archive state could not be checked.",
-        ));
+        )));
     }
-    Err(StatusCode::NOT_FOUND.into_response())
+    Err(Box::new(StatusCode::NOT_FOUND.into_response()))
 }
 
 pub(crate) async fn list(
@@ -373,7 +396,7 @@ pub(crate) async fn transcript(
     };
     child.is_archived = match child_archived(&parent, &thread_id).await {
         Ok(archived) => archived,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let result = match request(
         &parent.rpc,
@@ -566,6 +589,47 @@ mod tests {
         let fixture_path = dir.path().join("project-subagents-fixture.json");
         let mut fixture: Value =
             serde_json::from_str(&std::fs::read_to_string(&fixture_path).unwrap()).unwrap();
+        fixture["listPageSize"] = json!(1);
+        fixture["threads"]["aaa-archived"] = json!({
+            "id":"aaa-archived", "parentThreadId":"thread", "cwd":"/outside",
+            "source":{"subAgent":{"thread_spawn":{"parent_thread_id":"thread","depth":1}}},
+            "status":{"type":"idle"}, "isArchived":true
+        });
+        std::fs::write(&fixture_path, fixture.to_string()).unwrap();
+        let (status, paged) = body(
+            transcript(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path(("project-chat".into(), "child-thread".into())),
+                Query(TranscriptQuery::default()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an archived child on page two must open: {paged}"
+        );
+        assert_eq!(paged["subagent"]["isArchived"], true);
+        fixture["repeatListCursor"] = json!(true);
+        std::fs::write(&fixture_path, fixture.to_string()).unwrap();
+        let (status, _) = body(
+            transcript(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path(("project-chat".into(), "child-thread".into())),
+                Query(TranscriptQuery::default()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a cyclic cursor cannot establish archive state"
+        );
+        fixture.as_object_mut().unwrap().remove("repeatListCursor");
         fixture["threads"]["child-thread"]["isArchived"] = Value::Bool(false);
         std::fs::write(&fixture_path, fixture.to_string()).unwrap();
         let (status, unarchived) = body(

@@ -1214,7 +1214,16 @@ for line in sys.stdin:
                 continue
             result = {'thread':thread}
         elif method == 'thread/list':
-            result = {'data':[thread for thread in fixture['threads'].values() if thread.get('parentThreadId') == params.get('parentThreadId') and thread.get('isArchived',False) == params.get('archived',False)],'nextCursor':fixture.get('listNextCursor') if not params.get('archived',False) else None}
+            threads = [thread for thread in fixture['threads'].values() if thread.get('parentThreadId') == params.get('parentThreadId') and thread.get('isArchived',False) == params.get('archived',False)]
+            page_size = fixture.get('listPageSize')
+            if page_size:
+                start = 0 if params.get('cursor') == 'repeat' else int(params.get('cursor') or 0)
+                end = start + page_size
+                result = {'data':threads[start:end],'nextCursor':str(end) if end < len(threads) else None}
+                if fixture.get('repeatListCursor') and result['nextCursor']:
+                    result['nextCursor'] = 'repeat'
+            else:
+                result = {'data':[],'nextCursor':None} if params.get('cursor') else {'data':threads,'nextCursor':fixture.get('listNextCursor') if not params.get('archived',False) else None}
         else:
             result = {'data':fixture.get('items',{}).get(params.get('threadId'),[]),'nextCursor':None}
         print(json.dumps({'id':r['id'],'result':result}),flush=True)
