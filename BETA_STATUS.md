@@ -317,6 +317,20 @@ TestingDiagnostics simulator; the final stale-revision check passed 1/1 on both.
 Screenshots show the correct order and persistent source highlight. This fix
 is source-only and has not been installed through TestFlight.
 
+Workspace EPUB and 3D file previews now offer a verified newer version after
+an explicit check or a later conversation sequence, then reopen the reader or
+scene only when “Show new version” is chosen. Focused diagnostic iPhone and
+iPad UI tests passed 2/2 each: a revised EPUB showed changed Chapter 2 text,
+and an OBJ changed from an unsupported sidecar to a rendered standalone scene.
+The accepted EPUB and iPad model screenshots were inspected. Existing EPUB,
+repeated-model and 3D-control checks passed 3/3 in a finalized iPad bundle.
+On iPhone the repeated-model rerun finalized 1/1; the other two passed their
+assertions, but Xcode stalled finalizing their combined result bundle, so that
+log is supporting evidence only. This verifies manual adoption using synthetic
+files, not timing of changes from a paired Mac. Valid-scene-to-valid-scene
+replacement, camera gesture pose, VoiceOver, rotation, narrow iPad windows,
+memory/performance sampling and installed Release behavior remain open.
+
 ## Earlier qualification
 
 Testing build 7 and production build 71 passed six focused iPhone Simulator

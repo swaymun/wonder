@@ -2325,6 +2325,13 @@ struct ManagedBotListMutationState {
     }
     #if WONDER_DIAGNOSTICS
     private func previewWorkspaceRevisionData(entry: WorkspaceEntry) -> Data {
+        if entry.name == "workspace-reader.epub",
+           let revised = DiagnosticWorkspaceFileFixtures.data(name: "workspace-reader-revised.epub") {
+            return revised
+        }
+        if entry.name == "sidecar.obj" {
+            return Data("o revised-triangle\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".utf8)
+        }
         if entry.mimeType?.hasPrefix("image/") == true {
             return UIGraphicsImageRenderer(size: CGSize(width: 300, height: 180)).pngData { context in
                 UIColor.systemIndigo.setFill(); context.fill(CGRect(x: 0, y: 0, width: 300, height: 180))

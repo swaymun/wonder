@@ -3369,14 +3369,17 @@ struct WorkspaceBrowser: View {
                         galleryFiles: ConversationAttachmentGallery.imageFiles(visibleAttachments),
                         initialFileID: file.id, onClose: closePreview, showsHeader: false)
         } else if let item = documentSelection {
-            if WorkspaceModelPreview.supports(item.name) {
-                WorkspaceModelPreview(name: item.name, data: item.data, revision: item.sha256,
-                                      session: modelSession,
-                                      onClose: closePreview)
-            } else if WorkspacePublicationPreview.supports(item.name) {
-                WorkspacePublicationPreview(name: item.name, data: item.data,
-                                            origin: "workspace:\(model.assignmentScope):\(chat.id):\(item.id)",
-                                            onClose: closePreview)
+            if WorkspaceModelPreview.supports(item.name) || WorkspacePublicationPreview.supports(item.name),
+               let previewRevision {
+                WorkspaceVersionedBinaryPreview(name: item.name,
+                                                format: WorkspaceModelPreview.supports(item.name) ? .model : .epub,
+                                                revision: previewRevision,
+                                                refresh: revisionRefresh(for: item),
+                                                onRevision: revisionNotice(for: item),
+                                                refreshSequence: model.snapshots[chat.id]?.lastSequence,
+                                                modelSession: modelSession,
+                                                origin: "workspace:\(model.assignmentScope):\(chat.id):\(item.id)",
+                                                onClose: closePreview)
             } else if let previewRevision {
                 let context = annotationContext(for: item)
                 let replacement = reanchorDraft(for: item)
@@ -4327,6 +4330,78 @@ private struct SelectablePreviewText: UIViewRepresentable {
                     self.selectedRange.wrappedValue = selected
                 }
             }
+        }
+    }
+}
+
+/// Binary readers keep showing the verified selected bytes until the owner
+/// accepts a newer workspace revision. Attachment previews are immutable.
+private struct WorkspaceVersionedBinaryPreview: View {
+    enum Format { case model, epub }
+
+    let name: String
+    let format: Format
+    @ObservedObject var revision: WorkspaceRevisionState
+    let refresh: (() async throws -> Data)?
+    let onRevision: ((String) async -> Void)?
+    let refreshSequence: UInt64?
+    let modelSession: WorkspaceModelPreviewSession?
+    let origin: String
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if refresh != nil {
+                HStack {
+                    Spacer()
+                    Button("Check for changes", systemImage: "arrow.clockwise") {
+                        revision.manualRefreshTask?.cancel()
+                        revision.manualRefreshTask = Task {
+                            await revision.checkForRevision(refresh: refresh, onRevision: onRevision,
+                                failureMessage: "Could not check this file. Check your Mac or workspace access and try again.")
+                        }
+                    }
+                    .labelStyle(.iconOnly)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .disabled(revision.refreshing)
+                    .accessibilityIdentifier("workspace-binary-refresh")
+                }
+                .padding(.horizontal, 12)
+            }
+            if revision.offeredData != nil {
+                HStack(spacing: 12) {
+                    Text("New file version available")
+                        .font(.footnote)
+                        .accessibilityIdentifier("workspace-binary-revision-warning")
+                    Spacer(minLength: 0)
+                    Button("Show new version") { revision.showOfferedRevision() }
+                        .accessibilityIdentifier("workspace-binary-show-revision")
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color.orange.opacity(0.16))
+            } else if let failure = revision.refreshFailure {
+                Text(failure).font(.footnote).foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                    .accessibilityIdentifier("workspace-binary-refresh-error")
+            }
+            Group {
+                switch format {
+                case .model:
+                    WorkspaceModelPreview(name: name, data: revision.currentData,
+                                          revision: revision.currentSha256,
+                                          session: modelSession, onClose: onClose)
+                case .epub:
+                    WorkspacePublicationPreview(name: name, data: revision.currentData,
+                                                origin: origin, onClose: onClose)
+                        .id(revision.currentSha256)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .task(id: refreshSequence) {
+            guard let refreshSequence else { return }
+            await revision.observe(sequence: refreshSequence, refresh: refresh, onRevision: onRevision,
+                failureMessage: "Could not check this file. Check your Mac or workspace access and try again.")
         }
     }
 }

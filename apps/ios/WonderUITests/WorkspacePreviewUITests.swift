@@ -9,10 +9,11 @@ import XCTest
         #endif
     }
 
-    private func launchProjectFiles() -> XCUIApplication {
+    private func launchProjectFiles(revision: Bool = false) -> XCUIApplication {
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
                                "-project-files-conversation-preview", "-workspace-document-preview"]
+        if revision { app.launchArguments.append("-artifact-revision-preview") }
         app.launch()
         XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
         return app
@@ -158,5 +159,48 @@ import XCTest
         app.buttons["workspace-preview-collapse"].tap()
         XCTAssertTrue(scene.waitForExistence(timeout: 12))
         XCTAssertTrue(app.buttons["workspace-model-zoom-in"].isHittable)
+    }
+
+    func testEPUBRevisionOpensAcceptedBook() {
+        continueAfterFailure = false
+        let app = launchProjectFiles(revision: true)
+        open("workspace-reader.epub", in: app)
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-epub-content"]
+            .waitForExistence(timeout: 15))
+        app.buttons["workspace-binary-refresh"].tap()
+        let show = app.buttons["workspace-binary-show-revision"]
+        XCTAssertTrue(show.waitForExistence(timeout: 10))
+        app.buttons["workspace-preview-expand"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
+        XCTAssertTrue(show.exists, "The offered EPUB should survive full screen")
+        app.buttons["workspace-preview-collapse"].tap()
+        XCTAssertTrue(show.waitForExistence(timeout: 5))
+        show.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-epub-content"]
+            .waitForExistence(timeout: 15), "Accepted EPUB bytes should reopen")
+        app.buttons["workspace-epub-chapters"].tap()
+        let chapter = app.buttons["Chapter 2"]
+        XCTAssertTrue(chapter.waitForExistence(timeout: 5))
+        chapter.tap()
+        XCTAssertTrue(app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "Revised chapter is here"))
+            .firstMatch.waitForExistence(timeout: 10), "The reader must show the accepted bytes")
+        capture(app, name: "Accepted EPUB revision")
+    }
+
+    func testModelRevisionReopensFromUnsupportedSource() {
+        continueAfterFailure = false
+        let app = launchProjectFiles(revision: true)
+        open("sidecar.obj", in: app)
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-model-error"]
+            .waitForExistence(timeout: 10))
+        app.buttons["workspace-binary-refresh"].tap()
+        let show = app.buttons["workspace-binary-show-revision"]
+        XCTAssertTrue(show.waitForExistence(timeout: 10))
+        show.tap()
+        let scene = app.descendants(matching: .any)["workspace-model-scene"]
+        XCTAssertTrue(scene.waitForExistence(timeout: 12), "Accepted OBJ should replace the unsupported source")
+        XCTAssertTrue(scene.isHittable)
+        capture(app, name: "Accepted OBJ revision")
     }
 }
