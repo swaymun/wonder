@@ -9646,23 +9646,15 @@ async fn dispatch_guide(
             drop(_dispatch_guard);
             match restart_and_reconcile(&state, &steered_message).await {
                 Some(ReconcileResult::Accepted { thread_id, turn_id }) => {
-                    let _ = state
-                        .store
-                        .update_message_delivery(
-                            &steered_message.id,
-                            "accepted_by_codex",
-                            Some(&thread_id),
-                            Some(&turn_id),
+                    if !accept_reconciled_guide(&state, &steered_message, &thread_id, &turn_id)
+                        .await
+                    {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "App Server steer remains uncertain",
                         )
-                        .await;
-                    publish_message_state(
-                        &state,
-                        &steered_message,
-                        DeliveryState::AcceptedByCodex,
-                        Some(&thread_id),
-                        Some(&turn_id),
-                    )
-                    .await;
+                            .into_response();
+                    }
                     return (
                         StatusCode::ACCEPTED,
                         [(header::CACHE_CONTROL, "no-store")],
@@ -10827,6 +10819,48 @@ enum ReconcileResult {
     Accepted { thread_id: String, turn_id: String },
 }
 
+async fn accept_reconciled_guide(
+    state: &AppState,
+    message: &wonder_store::StoredMessage,
+    thread: &str,
+    turn: &str,
+) -> bool {
+    let Some(_admission) = state.update_admission.claim_guard().await else {
+        return false;
+    };
+    let _dispatch = state.dispatch_lock.lock().await;
+    let Ok(Some(current)) = state.store.message_by_id(&message.id).await else {
+        return false;
+    };
+    if current.state != "uncertain"
+        || current.conversation_id != message.conversation_id
+        || current.client_message_id != message.client_message_id
+        || current.body_sha256 != message.body_sha256
+        || current.codex_thread_id.as_deref() != Some(thread)
+        || current.codex_turn_id.is_some()
+    {
+        return false;
+    }
+    if state
+        .store
+        .update_message_delivery(&message.id, "accepted_by_codex", Some(thread), Some(turn))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    state.ingestion.request_reconciliation();
+    publish_message_state(
+        state,
+        &current,
+        DeliveryState::AcceptedByCodex,
+        Some(thread),
+        Some(turn),
+    )
+    .await;
+    true
+}
+
 async fn restart_and_reconcile(
     state: &AppState,
     message: &wonder_store::StoredMessage,
@@ -10880,6 +10914,7 @@ async fn restart_and_reconcile(
         .ok()?;
         resolved
     };
+    let _admission = state.update_admission.claim_guard().await?;
     let mut app_server = state.app_server.lock().await;
     if app_server
         .restart(state.launch_config.lock().await.clone())
@@ -10922,6 +10957,7 @@ async fn restart_and_reconcile(
         .and_then(|status| status.get("type"))
         .and_then(serde_json::Value::as_str)
         == Some("idle");
+    drop(_admission);
 
     let mut turns_cursor = None;
     let mut seen_turns = std::collections::HashSet::new();
@@ -16182,6 +16218,67 @@ for line in sys.stdin:
             steer_response_turn_id(&accepted),
             Some("turn-from-app-server".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn late_guide_receipt_waits_for_update_lease_and_rechecks_exact_message() {
+        let (_dir, state) = crate::ingestion::tests::fixture().await;
+        let wonder_store::MessageInsert::Inserted(message) = state
+            .store
+            .insert_guide_message(
+                "owner",
+                "late-guide",
+                "continue",
+                "hash",
+                "bot",
+                &[],
+                "now",
+                "parent-turn",
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("new guide")
+        };
+        assert!(state
+            .store
+            .claim_guide(&message.id, "thread")
+            .await
+            .unwrap());
+        assert_eq!(
+            state
+                .update_admission
+                .prepare_update("guide-update", &state)
+                .await,
+            Ok(())
+        );
+        assert!(!super::accept_reconciled_guide(&state, &message, "thread", "accepted-turn").await);
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "uncertain"
+        );
+        assert!(state.update_admission.cancel_lease("guide-update").await);
+        assert!(
+            !super::accept_reconciled_guide(&state, &message, "forged-thread", "accepted-turn")
+                .await
+        );
+        assert!(super::accept_reconciled_guide(&state, &message, "thread", "accepted-turn").await);
+        assert!(!super::accept_reconciled_guide(&state, &message, "thread", "other-turn").await);
+        let saved = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, "accepted_by_codex");
+        assert_eq!(saved.codex_turn_id.as_deref(), Some("accepted-turn"));
+        state.app_server.lock().await.shutdown().await.unwrap();
     }
 
     #[test]

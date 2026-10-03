@@ -9,6 +9,7 @@ struct WorkspaceModelPreview: View {
     let name: String
     let data: Data
     let revision: String
+    var onClose: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -60,10 +61,13 @@ struct WorkspaceModelPreview: View {
             }
             .navigationTitle(name)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(onClose == nil ? .visible : .hidden, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                        .accessibilityIdentifier("workspace-model-close")
+                if onClose == nil {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { dismiss() }
+                            .accessibilityIdentifier("workspace-model-close")
+                    }
                 }
             }
         }

@@ -105,12 +105,22 @@ public struct ChatFeedEntry: Identifiable, Sendable {
         return result
     }
 
-    public static func lifecycleLabel(rows: [ReadRow], turn: ReadTurn?, isLatestSegmentForTurn: Bool, isLatestActiveSegment: Bool) -> String {
+    public static func lifecycleLabel(rows: [ReadRow], turn: ReadTurn?, isLatestSegmentForTurn: Bool, isLatestActiveSegment: Bool,
+                                      isProjectConversation: Bool = false) -> String {
         if turn?.isInProgress == true {
             if isLatestActiveSegment {
                 return rows.last?.activitySummary?.title == "Thinking" ? "Thinking…" : "Working…"
             }
             return actionSummary(rows: rows) ?? "Work status unavailable"
+        }
+        if isLatestSegmentForTurn, isProjectConversation {
+            // A separate Codex desktop process may be running a newer turn
+            // while Wonder can read only this saved turn's terminal outcome.
+            switch turn?.status {
+            case "interrupted": return "This response stopped"
+            case "failed": return "This response couldn’t finish"
+            default: break
+            }
         }
         if isLatestSegmentForTurn, let terminal = turn?.terminalLabel {
             return terminal

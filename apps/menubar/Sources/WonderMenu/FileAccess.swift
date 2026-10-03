@@ -12,7 +12,6 @@ struct FileAccessPolicy: Codable {
 struct FileAccessSnapshot: Decodable {
     let botId: String
     let botName: String
-    let workspacePath: String
     let access: FileAccessPolicy
 }
 private final class FileAccessTransport: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
@@ -85,16 +84,6 @@ private final class FileAccessTransport: NSObject, URLSessionTaskDelegate, @unch
             requests = nextRequests; selected = nextSelected; snapshot = nextSnapshot
         } catch { message = error.localizedDescription }
     }
-    func existingFolderPaths() async throws -> [String] {
-        try await checkHost()
-        let bots = try JSONDecoder().decode([FileAccessBot].self, from: await request("bots"))
-        var paths = Set<String>()
-        for bot in bots {
-            let snapshot = try JSONDecoder().decode(FileAccessSnapshot.self, from: await request("bots/\(bot.id)/file-access"))
-            paths.formUnion(snapshot.access.readRoots + snapshot.access.writeRoots + [snapshot.workspacePath])
-        }
-        return paths.sorted()
-    }
     func decide(_ item: PendingFileAccess, accepted: Bool) async {
         guard !busy, !selected.isEmpty else { return }
         busy = true; message = nil
@@ -143,99 +132,6 @@ private final class FileAccessTransport: NSObject, URLSessionTaskDelegate, @unch
             message = error.localizedDescription
             // A saved policy can outlive a failed activation; retain its current revision.
             if let data = try? await request("bots/\(selected)/file-access"), let current = try? JSONDecoder().decode(FileAccessSnapshot.self, from: data) { snapshot = current }
-        }
-    }
-}
-
-/// User-selected macOS folders, separate from per-Bot sandbox permissions.
-@MainActor final class ComputerFolders {
-    struct Selection: Codable { let path: String; let bookmark: Data; var imported: Bool? }
-    private let defaults: UserDefaults
-    private let key = "computer.selectedFolders.v1"
-    private let excludedRoots: [String]
-    private var selections: [Selection] = []
-    private var scopes: [String: URL] = [:]
-    private var unavailable = Set<String>()
-    var message: String?
-    var rows: [[String: Any]] {
-        selections.map { ["path": $0.path, "name": URL(fileURLWithPath: $0.path).lastPathComponent,
-                          "available": !unavailable.contains($0.path), "imported": $0.imported == true] }
-    }
-    static let internalRoots = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".wonder").path, "/tmp", "/private/tmp"]
-    static func isVisible(_ path: String, excluding roots: [String] = internalRoots) -> Bool {
-        let lexicalPath = path
-        let resolvedPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-        return !roots.contains { root in
-            let lexicalRoot = root
-            let resolvedRoot = URL(fileURLWithPath: root).resolvingSymlinksInPath().path
-            return lexicalPath == lexicalRoot || lexicalPath.hasPrefix(lexicalRoot + "/")
-                || resolvedPath == resolvedRoot || resolvedPath.hasPrefix(resolvedRoot + "/")
-        }
-    }
-    init(defaults: UserDefaults = .standard, excludedRoots: [String] = ComputerFolders.internalRoots) {
-        self.defaults = defaults
-        self.excludedRoots = excludedRoots
-        guard let data = defaults.data(forKey: key) else { return }
-        do {
-            selections = try JSONDecoder().decode([Selection].self, from: data).filter { Self.isVisible($0.path, excluding: excludedRoots) }
-            defaults.set(try JSONEncoder().encode(selections), forKey: key)
-            for item in selections {
-                var stale = false
-                if let url = try? URL(resolvingBookmarkData: item.bookmark, options: [.withSecurityScope, .withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale) {
-                    if url.startAccessingSecurityScopedResource() { scopes[item.path] = url }
-                    if stale || url.path != item.path || !FileManager.default.fileExists(atPath: url.path) { unavailable.insert(item.path) }
-                } else { unavailable.insert(item.path) }
-            }
-        } catch { message = "Saved folders could not be loaded. Add them again." }
-    }
-    func remember(_ url: URL, imported: Bool = false) throws {
-        guard Self.isVisible(url.path, excluding: excludedRoots) else {
-            throw NSError(domain: "WonderFolders", code: 1, userInfo: [NSLocalizedDescriptionKey: "Temporary folders and Wonder’s internal folders are not included in this list."])
-        }
-        let bookmark = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
-        var next = selections.filter { $0.path != url.path }
-        next.append(Selection(path: url.path, bookmark: bookmark, imported: imported))
-        next.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-        let data = try JSONEncoder().encode(next)
-        defaults.set(data, forKey: key)
-        selections = next
-        scopes.removeValue(forKey: url.path)?.stopAccessingSecurityScopedResource()
-        if url.startAccessingSecurityScopedResource() { scopes[url.path] = url }
-        unavailable.remove(url.path)
-        guard !imported else { return }
-        // Exercise the selected directory now, while the owner is at setup.
-        do { _ = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) }
-        catch { unavailable.insert(url.path); message = "macOS could not read \(url.lastPathComponent). Review Files and Folders in System Settings." }
-    }
-    func importExisting(_ paths: [String]) {
-        let seenKey = "computer.importedFolders.v1"
-        var seen = Set(defaults.stringArray(forKey: seenKey) ?? [])
-        for path in Set(paths).sorted() where !seen.contains(path) && Self.isVisible(path, excluding: excludedRoots) {
-            if selections.contains(where: { $0.path == path }) { seen.insert(path); continue }
-            var directory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: path, isDirectory: &directory), directory.boolValue else { continue }
-            do {
-                try remember(URL(fileURLWithPath: path, isDirectory: true), imported: true)
-                seen.insert(path)
-            } catch { message = "Some existing folders could not be restored. Add them with +." }
-        }
-        defaults.set(seen.sorted(), forKey: seenKey)
-    }
-    func remove(_ path: String) {
-        do {
-            let next = selections.filter { $0.path != path }
-            defaults.set(try JSONEncoder().encode(next), forKey: key)
-            selections = next
-            scopes.removeValue(forKey: path)?.stopAccessingSecurityScopedResource()
-            unavailable.remove(path)
-            message = nil
-        } catch { message = "The folder could not be removed. Try again." }
-    }
-    func openPrivacy(fullDisk: Bool, setup: Bool = false) {
-        let anchor = fullDisk ? "Privacy_AllFiles" : "Privacy_FilesAndFolders"
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)"), PrivacySettings.open(url, revealApplication: fullDisk && setup) else {
-            message = "Open System Settings → Privacy & Security to manage Wonder’s access."
-            return
         }
     }
 }

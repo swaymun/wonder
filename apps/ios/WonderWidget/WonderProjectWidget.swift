@@ -117,6 +117,19 @@ struct WonderProjectWidgetView: View {
     }
 
     private func small(_ project: ProjectWidgetSnapshot.Project, identity: ProjectWidgetIdentity) -> some View {
+        Group {
+            if let url = ProjectWidgetLink.newChat(hostID: project.hostID, projectID: project.id,
+                                                   identity: identity) {
+                Link(destination: url) { smallContent(project) }
+                    .buttonStyle(.plain)
+            } else {
+                smallContent(project)
+            }
+        }
+        .accessibilityLabel("\(project.name), new chat. \(savedAccessibility)")
+    }
+
+    private func smallContent(_ project: ProjectWidgetSnapshot.Project) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Image(systemName: "square.stack.3d.up")
                 .foregroundStyle(.tint)
@@ -127,8 +140,6 @@ struct WonderProjectWidgetView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding()
-        .widgetURL(ProjectWidgetLink.newChat(hostID: project.hostID, projectID: project.id, identity: identity))
-        .accessibilityLabel("\(project.name), new chat. \(savedAccessibility)")
     }
 
     private func expanded(_ project: ProjectWidgetSnapshot.Project, identity: ProjectWidgetIdentity,
@@ -179,11 +190,22 @@ struct WonderProjectWidgetView: View {
     }
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: "square.stack.3d.up").foregroundStyle(.tint)
-            Text("Wonder Projects").font(.headline)
-            Text(emptyMessage)
-                .font(.subheadline).foregroundStyle(.secondary)
+        Group {
+            if family == .systemSmall {
+                VStack(alignment: .leading, spacing: 6) {
+                    Image(systemName: "square.stack.3d.up").foregroundStyle(.tint)
+                    Spacer(minLength: 0)
+                    Text("Choose a Project").font(.headline).lineLimit(2)
+                    Text("Edit widget to start").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Image(systemName: "square.stack.3d.up").foregroundStyle(.tint)
+                    Text("Wonder Projects").font(.headline)
+                    Text(emptyMessage)
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding()

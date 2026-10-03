@@ -122,14 +122,18 @@ struct ProjectAccessMenu: View {
 /// Compact title with the provider icon and project name.
 struct ProjectConversationHeader: View {
     let detail: ProjectConversationDetail
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var body: some View {
         VStack(spacing: 1) {
             Text(detail.title).font(.headline).lineLimit(1)
-            HStack(spacing: 4) {
-                ProviderIcon(family: detail.family, size: 12)
-                Text(detail.projectName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            if !dynamicTypeSize.isAccessibilitySize {
+                HStack(spacing: 4) {
+                    ProviderIcon(family: detail.family, size: 12)
+                    Text(detail.projectName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
         }
+        .frame(maxWidth: 240)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(detail.title), \(detail.projectName) project, \(detail.family.title)")
         .accessibilityIdentifier("project-conversation-header")

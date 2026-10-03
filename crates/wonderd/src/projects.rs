@@ -35,8 +35,48 @@ const MAX_PINNED_THREADS: i64 = 50;
 const CODEX_SOURCE_KINDS: [&str; 4] = ["cli", "vscode", "exec", "appServer"];
 const CURSOR_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_CURSORS: usize = 128;
+const RECEIPT_PAGES_PER_CYCLE: usize = 20;
+const RECEIPT_RESCAN_DELAY: Duration = Duration::from_secs(60);
+const IDLE_FINAL_ROSTER_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCESS_MODES: [&str; 3] = ["read_only", "workspace", "full_access"];
 const CLAUDE_APPROVALS: [&str; 3] = ["ask", "accept_edits", "auto"];
+
+struct ReceiptScan {
+    thread_id: String,
+    client_message_id: String,
+    cursor: Option<String>,
+    seen: HashSet<String>,
+    pages_scanned: usize,
+    resume_after: Instant,
+    notice: Option<&'static str>,
+}
+
+impl ReceiptScan {
+    fn new(message: &wonder_store::StoredMessage) -> Self {
+        Self {
+            thread_id: message.codex_thread_id.clone().unwrap_or_default(),
+            client_message_id: message.client_message_id.clone(),
+            cursor: None,
+            seen: HashSet::new(),
+            pages_scanned: 0,
+            resume_after: Instant::now(),
+            notice: None,
+        }
+    }
+
+    fn reset_after(&mut self, delay: Duration) {
+        self.cursor = None;
+        self.seen.clear();
+        self.pages_scanned = 0;
+        self.resume_after = Instant::now() + delay;
+    }
+}
+
+enum ReceiptScanStep {
+    Pending,
+    Accepted(String),
+    Notice(&'static str),
+}
 
 /// The normal-home Codex client serves project threads and shared discovery.
 pub struct ProjectRuntime {
@@ -46,6 +86,9 @@ pub struct ProjectRuntime {
     pub codex_store: String,
     pub claude_store: String,
     cursors: std::sync::Mutex<HashMap<String, (Instant, CatalogCursor)>>,
+    /// Progress for uncertain Project sends. An interrupted host starts at the
+    /// newest page again; it never retries the send from this cache.
+    receipt_scans: std::sync::Mutex<HashMap<String, ReceiptScan>>,
     /// Latest dispatch problem per conversation, in owner-facing language.
     notices: std::sync::Mutex<HashMap<String, String>>,
     /// Runtime generation that accepted each running turn. A changed or dead
@@ -77,6 +120,7 @@ impl ProjectRuntime {
             codex_store: store_key("codex", codex_home),
             claude_store: store_key("claude", claude_home),
             cursors: std::sync::Mutex::new(HashMap::new()),
+            receipt_scans: std::sync::Mutex::new(HashMap::new()),
             notices: std::sync::Mutex::new(HashMap::new()),
             generations: std::sync::Mutex::new(HashMap::new()),
         })
@@ -137,6 +181,14 @@ pub(crate) async fn rpc_for(state: &AppState, family: AgentFamily) -> Result<Rpc
     }
 }
 
+// Recovery can restart a dead Codex runtime while obtaining its RPC client.
+// Admit that setup before an update begins; native history reads stay outside
+// the barrier so a long scan cannot delay the update handoff.
+async fn recovery_rpc_for(state: &AppState, family: AgentFamily) -> Option<RpcClient> {
+    let _admission = state.update_admission.claim_guard().await?;
+    rpc_for(state, family).await.ok()
+}
+
 fn provider_store(state: &AppState, family: AgentFamily) -> &str {
     match family {
         AgentFamily::Codex => &state.projects.codex_store,
@@ -152,6 +204,10 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, message.into()).into_response()
 }
 
+fn codex_active_writer_conflict(message: &str) -> bool {
+    message.starts_with("thread ") && message.ends_with(" already has an active writer")
+}
+
 async fn result(rpc: &RpcClient, method: &str, params: Value) -> Result<Value, String> {
     let response = rpc
         .request(method, params)
@@ -163,6 +219,20 @@ async fn result(rpc: &RpcClient, method: &str, params: Value) -> Result<Value, S
     response
         .result
         .ok_or_else(|| format!("{method} returned no result"))
+}
+
+// A JSON-RPC rejection with invalid-request/params semantics, or an explicit
+// busy-thread rejection, proves that turn/start did not accept a turn. Other
+// provider errors and transport failures remain uncertain after submission.
+fn turn_start_rejected_before_execution(code: i64, message: &str) -> bool {
+    if matches!(code, -32602..=-32600) {
+        return true;
+    }
+    let message = message.to_ascii_lowercase();
+    code == -32000
+        && (message.contains("already has an active turn")
+            || message.contains("turn already in progress")
+            || message.contains("thread is busy"))
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +459,13 @@ async fn set_archived(
             "Send the first message before archiving this thread.",
         ));
     };
-    // Serialize against Wonder dispatch and refuse unsettled user intent.
+    // Keep archive outside an update handoff, then serialize against Wonder
+    // dispatch and refuse unsettled user intent.
+    let Some(_admission) = state.update_admission.claim_guard().await else {
+        return Err(conflict(
+            "Wonder is preparing to update. Try again shortly.",
+        ));
+    };
     let _guard = state.dispatch_lock.lock().await;
     if state
         .store
@@ -442,21 +518,38 @@ async fn set_archived(
             ));
         }
     }
-    result(
-        &rpc,
-        if archived {
-            "thread/archive"
-        } else {
-            "thread/unarchive"
-        },
-        json!({"threadId": native}),
-    )
-    .await
-    .map_err(|_| {
-        unavailable(
-            "The archive change could not be confirmed. Refresh before trying again.".into(),
-        )
-    })?;
+    let method = if archived {
+        "thread/archive"
+    } else {
+        "thread/unarchive"
+    };
+    let response = rpc.request(method, json!({"threadId": native})).await;
+    let failure = match response {
+        Ok(response) => response
+            .error
+            .map(|error| (Some(error.code), error.message))
+            .or_else(|| {
+                response
+                    .result
+                    .is_none()
+                    .then(|| (None, format!("{method} returned no result")))
+            }),
+        Err(error) => Some((None, error.to_string())),
+    };
+    if let Some((code, message)) = failure {
+        // A transport response can be lost after Codex has already committed
+        // the change. Confirm provider state before reporting a failure.
+        if codex_is_archived(state, conversation).await.ok() != Some(archived) {
+            if archived && code == Some(-32600) && codex_active_writer_conflict(&message) {
+                return Err(conflict(
+                    "This thread is still open in Codex on your Mac. Close it there and try again, or archive it in Codex.",
+                ));
+            }
+            return Err(unavailable(
+                "The archive change could not be confirmed. Refresh before trying again.".into(),
+            ));
+        }
+    }
     // Existing catalog pages were read before the mutation and can contain it.
     state
         .projects
@@ -2785,7 +2878,15 @@ async fn dispatch_inner(
                 "sandbox": sandbox, "approvalPolicy": approval, "runtimeWorkspaceRoots": roots,
             }))
             .await
-            .map_err(|_| "This Codex thread could not be reopened. Its history on your Mac is unchanged.".to_owned())?;
+            .map_err(|message| {
+                if codex_active_writer_conflict(&message) {
+                    "This thread is open in Codex on your Mac. Close it there, then retry this same message in Wonder."
+                        .to_owned()
+                } else {
+                    "This Codex thread could not be reopened. Its history on your Mac is unchanged."
+                        .to_owned()
+                }
+            })?;
             if resumed.pointer("/thread/id").and_then(Value::as_str)
                 != Some(binding.thread_id.as_str())
             {
@@ -2889,12 +2990,6 @@ async fn dispatch_inner(
         "inputSha256": hex::encode(Sha256::digest(serde_json::to_vec(&input).unwrap_or_default())),
     })
     .to_string();
-    state
-        .store
-        .begin_dispatch_submission_with_context(&message.id, &thread_id, Some(&context))
-        .await
-        .map_err(|e| e.to_string())?;
-    *submitting = true;
     let params = match conversation.family {
         AgentFamily::Codex => codex_turn_params(
             &thread_id,
@@ -2928,7 +3023,23 @@ async fn dispatch_inner(
             "wonderProject":claude_project(&project, &conversation.cwd)}),
     };
     crate::update_handoff::remember_settings(state, &thread_id, &resume, &params).await?;
-    let started = result(&rpc, "turn/start", params).await?;
+    state
+        .store
+        .begin_dispatch_submission_with_context(&message.id, &thread_id, Some(&context))
+        .await
+        .map_err(|e| e.to_string())?;
+    *submitting = true;
+    let response = rpc
+        .request("turn/start", params)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(error) = response.error {
+        if turn_start_rejected_before_execution(error.code, &error.message) {
+            *submitting = false;
+        }
+        return Err(error.message);
+    }
+    let started = response.result.ok_or("turn/start returned no result")?;
     let turn = started
         .pointer("/turn/id")
         .or_else(|| started.get("turnId"))
@@ -2942,11 +3053,17 @@ async fn dispatch_inner(
 /// An uncertain receipt is completed only with proof for its exact native turn;
 /// incomplete history never authorizes resubmission.
 pub(crate) async fn recover(state: &AppState) {
-    let _dispatch = state.dispatch_lock.lock().await;
+    if state.update_admission.work_paused() {
+        return;
+    }
+    recover_uncertain_receipts(state).await;
     let Ok(messages) = state.store.active_runtime_messages().await else {
         return;
     };
     for message in messages {
+        if state.update_admission.work_paused() {
+            return;
+        }
         let Ok(Some(conversation)) = state
             .store
             .project_conversation(&message.conversation_id)
@@ -2958,6 +3075,37 @@ pub(crate) async fn recover(state: &AppState) {
             message.codex_thread_id.clone(),
             message.codex_turn_id.clone(),
         ) else {
+            continue;
+        };
+        let Some(rpc) = recovery_rpc_for(state, conversation.family).await else {
+            continue;
+        };
+        let Ok(status) = native_turn_status(&rpc, &thread, &turn).await else {
+            continue;
+        };
+        let items = if matches!(
+            status.as_deref(),
+            Some("completed" | "failed" | "interrupted")
+        ) {
+            crate::hydrate_app_server_turn_items(state, &thread, &turn).await
+        } else {
+            None
+        };
+        // An update may have paused/resumed this turn while native history was
+        // loading. Re-enter the admission barrier and verify the exact receipt
+        // before any persisted state or client event changes.
+        let Some(_admission) = state.update_admission.claim_guard().await else {
+            return;
+        };
+        let _dispatch = state.dispatch_lock.lock().await;
+        let Ok(active) = state.store.active_runtime_messages().await else {
+            continue;
+        };
+        let Some(current_message) = active.iter().find(|current| {
+            current.id == message.id
+                && current.codex_thread_id.as_deref() == Some(&thread)
+                && current.codex_turn_id.as_deref() == Some(&turn)
+        }) else {
             continue;
         };
         let accepted = state
@@ -2978,17 +3126,9 @@ pub(crate) async fn recover(state: &AppState) {
             && current
                 .as_ref()
                 .is_some_and(|h| h.is_alive() && Some(h.id()) == accepted.as_deref());
-        let Ok(rpc) = rpc_for(state, conversation.family).await else {
-            continue;
-        };
-        let Ok(status) = native_turn_status(&rpc, &thread, &turn).await else {
-            continue;
-        };
         match status.as_deref() {
             Some("completed" | "failed" | "interrupted") => {
-                if let Some(items) =
-                    crate::hydrate_app_server_turn_items(state, &thread, &turn).await
-                {
+                if let Some(items) = items {
                     for entry in items {
                         if entry.item.get("type").and_then(Value::as_str) == Some("agentMessage") {
                             crate::process_app_server_notification(state, json!({"method": "item/completed",
@@ -3001,7 +3141,7 @@ pub(crate) async fn recover(state: &AppState) {
                     continue;
                 }
             }
-            _ if same_live_runtime || message.state == "uncertain" => continue,
+            _ if same_live_runtime || current_message.state == "uncertain" => continue,
             _ => {
                 if state
                     .store
@@ -3011,7 +3151,7 @@ pub(crate) async fn recover(state: &AppState) {
                 {
                     let _ = crate::publish_message_state_checked(
                         state,
-                        &message,
+                        current_message,
                         DeliveryState::Uncertain,
                         Some(&thread),
                         Some(&turn),
@@ -3028,6 +3168,219 @@ pub(crate) async fn recover(state: &AppState) {
             .remove(&message.id);
     }
     release_idle_codex_runtime(state).await;
+}
+
+async fn recover_uncertain_receipts(state: &AppState) {
+    recover_uncertain_receipts_with_budget(
+        state,
+        RECEIPT_HISTORY_PAGE_LIMIT,
+        RECEIPT_PAGES_PER_CYCLE,
+        RECEIPT_RESCAN_DELAY,
+    )
+    .await;
+}
+
+#[cfg(test)]
+async fn recover_uncertain_receipts_with_limit(state: &AppState, page_limit: usize) {
+    recover_uncertain_receipts_with_budget(state, page_limit, page_limit, Duration::ZERO).await;
+}
+
+async fn recover_uncertain_receipts_with_budget(
+    state: &AppState,
+    page_limit: usize,
+    pages_per_cycle: usize,
+    rescan_delay: Duration,
+) {
+    let Ok(messages) = state.store.ambiguous_dispatch_messages().await else {
+        return;
+    };
+    let ids = messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<HashSet<_>>();
+    state
+        .projects
+        .receipt_scans
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|id, _| ids.contains(id.as_str()));
+    for message in messages {
+        if state.update_admission.work_paused() {
+            return;
+        }
+        if !is_project(state, &message.conversation_id).await || !ready(state).await {
+            continue;
+        }
+        let scan =
+            scan_ambiguous_receipt(state, &message, page_limit, pages_per_cycle, rescan_delay)
+                .await;
+        if matches!(scan, ReceiptScanStep::Pending) {
+            continue;
+        }
+        let Some(_admission) = state.update_admission.claim_guard().await else {
+            return;
+        };
+        let _dispatch = state.dispatch_lock.lock().await;
+        let Ok(current) = state.store.ambiguous_dispatch_messages().await else {
+            continue;
+        };
+        if !current.iter().any(|current| {
+            current.id == message.id
+                && current.conversation_id == message.conversation_id
+                && current.client_message_id == message.client_message_id
+                && current.codex_thread_id == message.codex_thread_id
+        }) {
+            continue;
+        }
+        let turn = match scan {
+            ReceiptScanStep::Accepted(turn) => turn,
+            ReceiptScanStep::Notice(error) => {
+                state
+                    .projects
+                    .notices
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(message.conversation_id.clone(), error.to_owned());
+                continue;
+            }
+            ReceiptScanStep::Pending => continue,
+        };
+        if state
+            .store
+            .update_message_delivery(
+                &message.id,
+                "accepted_by_codex",
+                message.codex_thread_id.as_deref(),
+                Some(&turn),
+            )
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        state.ingestion.request_reconciliation();
+        crate::publish_message_state(
+            state,
+            &message,
+            DeliveryState::AcceptedByCodex,
+            message.codex_thread_id.as_deref(),
+            Some(&turn),
+        )
+        .await;
+        let mut notices = state
+            .projects
+            .notices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if notices.get(&message.conversation_id).is_some_and(|notice| {
+            notice == RECEIPT_HISTORY_LIMIT_NOTICE || notice == RECEIPT_HISTORY_INVALID_NOTICE
+        }) {
+            notices.remove(&message.conversation_id);
+        }
+    }
+}
+
+async fn scan_ambiguous_receipt(
+    state: &AppState,
+    message: &wonder_store::StoredMessage,
+    page_limit: usize,
+    pages_per_cycle: usize,
+    rescan_delay: Duration,
+) -> ReceiptScanStep {
+    let Some(thread) = message.codex_thread_id.as_deref() else {
+        return ReceiptScanStep::Pending;
+    };
+    let mut scan = {
+        let mut scans = state
+            .projects
+            .receipt_scans
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        scans
+            .remove(&message.id)
+            .filter(|scan| {
+                scan.thread_id == thread && scan.client_message_id == message.client_message_id
+            })
+            .unwrap_or_else(|| ReceiptScan::new(message))
+    };
+    if Instant::now() < scan.resume_after {
+        let notice = scan.notice;
+        state
+            .projects
+            .receipt_scans
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(message.id.clone(), scan);
+        return notice.map_or(ReceiptScanStep::Pending, ReceiptScanStep::Notice);
+    }
+    let conversation = state
+        .store
+        .project_conversation(&message.conversation_id)
+        .await;
+    let rpc = match conversation {
+        Ok(Some(conversation)) => recovery_rpc_for(state, conversation.family).await,
+        _ => None,
+    };
+    let mut outcome = ReceiptScanStep::Pending;
+    if let Some(rpc) = rpc {
+        for _ in 0..pages_per_cycle.min(page_limit.saturating_sub(scan.pages_scanned)) {
+            if state.update_admission.work_paused() {
+                break;
+            }
+            let page = result(
+                &rpc,
+                "thread/items/list",
+                json!({"threadId": thread, "limit": 100, "sortDirection": "desc", "cursor": scan.cursor}),
+            )
+            .await;
+            let Ok(page) = page else {
+                // Opaque cursors may expire after native history changes. A
+                // fresh sweep is safe because this path never resends intent.
+                scan.reset_after(rescan_delay);
+                break;
+            };
+            if page.get("data").and_then(Value::as_array).is_none() {
+                scan.reset_after(rescan_delay);
+                scan.notice = Some(RECEIPT_HISTORY_INVALID_NOTICE);
+                outcome = ReceiptScanStep::Notice(RECEIPT_HISTORY_INVALID_NOTICE);
+                break;
+            }
+            if let Some(turn) = crate::find_client_message(&page, &message.client_message_id) {
+                return ReceiptScanStep::Accepted(turn);
+            }
+            scan.pages_scanned += 1;
+            let next = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            match next {
+                None => {
+                    scan.reset_after(rescan_delay);
+                    scan.notice = None;
+                    break;
+                }
+                Some(cursor) if !scan.seen.insert(cursor.clone()) => {
+                    scan.reset_after(rescan_delay);
+                    scan.notice = Some(RECEIPT_HISTORY_INVALID_NOTICE);
+                    outcome = ReceiptScanStep::Notice(RECEIPT_HISTORY_INVALID_NOTICE);
+                    break;
+                }
+                Some(cursor) => scan.cursor = Some(cursor),
+            }
+        }
+    }
+    if scan.pages_scanned >= page_limit {
+        scan.reset_after(rescan_delay);
+        scan.notice = Some(RECEIPT_HISTORY_LIMIT_NOTICE);
+        outcome = ReceiptScanStep::Notice(RECEIPT_HISTORY_LIMIT_NOTICE);
+    }
+    state
+        .projects
+        .receipt_scans
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(message.id.clone(), scan);
+    outcome
 }
 
 async fn native_turn_status(
@@ -3069,16 +3422,28 @@ async fn native_turn_status(
 /// handles retain the process; the private Bot runtime is never stopped here.
 async fn release_idle_codex_runtime(state: &AppState) {
     let runtime = &state.projects;
-    let _start = runtime.start.lock().await;
-    let mut client = runtime.codex.lock().await;
-    if !client.health().is_alive() || client.health().storage_blocked() || client.has_rpc_handles()
-    {
+    let (rpc, generation) = {
+        let _start = runtime.start.lock().await;
+        let client = runtime.codex.lock().await;
+        if !client.health().is_alive()
+            || client.health().storage_blocked()
+            || client.has_rpc_handles()
+        {
+            return;
+        }
+        (client.rpc(), client.health().id().to_owned())
+    };
+    // Native idle checks may take several RPCs per loaded thread. An update
+    // can proceed while they run; the final shutdown has its own admission.
+    if state.update_admission.work_paused() {
         return;
     }
-    let rpc = client.rpc();
     let Ok(loaded) = result(&rpc, "thread/loaded/list", json!({})).await else {
         return;
     };
+    if state.update_admission.work_paused() {
+        return;
+    }
     let Some(threads) = loaded["data"].as_array() else {
         return;
     };
@@ -3101,12 +3466,18 @@ async fn release_idle_codex_runtime(state: &AppState) {
         return;
     }
     for thread in threads {
+        if state.update_admission.work_paused() {
+            return;
+        }
         let Some(thread) = thread.as_str() else {
             return;
         };
         let Ok(read) = result(&rpc, "thread/read", json!({"threadId": thread})).await else {
             return;
         };
+        if state.update_admission.work_paused() {
+            return;
+        }
         if read["thread"]["id"].as_str() != Some(thread)
             || read["thread"]["status"]["type"].as_str() != Some("idle")
         {
@@ -3115,6 +3486,9 @@ async fn release_idle_codex_runtime(state: &AppState) {
         let Ok(goal) = result(&rpc, "thread/goal/get", json!({"threadId": thread})).await else {
             return;
         };
+        if state.update_admission.work_paused() {
+            return;
+        }
         if !goal.get("goal").is_some_and(|g| {
             g.is_null()
                 || matches!(
@@ -3140,9 +3514,75 @@ async fn release_idle_codex_runtime(state: &AppState) {
         }
     }
     drop(rpc);
-    if !client.has_rpc_handles() {
-        let _ = client.shutdown().await;
+    let Some(_admission) = state.update_admission.claim_guard().await else {
+        return;
+    };
+    let _dispatch = state.dispatch_lock.lock().await;
+    let _start = runtime.start.lock().await;
+    let mut client = runtime.codex.lock().await;
+    if !client.health().is_alive()
+        || client.health().storage_blocked()
+        || client.health().id() != generation
+        || client.has_rpc_handles()
+    {
+        return;
     }
+    let Ok(current) = state.store.active_runtime_messages().await else {
+        return;
+    };
+    for message in current
+        .iter()
+        .filter(|message| message.state != "uncertain")
+    {
+        if threads
+            .iter()
+            .any(|thread| thread.as_str() == message.codex_thread_id.as_deref())
+        {
+            return;
+        }
+        // A new Project turn may have started after the idle snapshot on a
+        // thread that was not in that snapshot. Fail closed on store errors.
+        match state
+            .store
+            .project_conversation(&message.conversation_id)
+            .await
+        {
+            Ok(Some(conversation)) if conversation.family == AgentFamily::Codex => return,
+            Err(_) => return,
+            _ => {}
+        }
+    }
+    // A native child may have appeared after the unlocked probe without a
+    // Wonder message. Recheck the roster once while shutdown is fenced.
+    let final_rpc = client.rpc();
+    let final_loaded = tokio::time::timeout(
+        IDLE_FINAL_ROSTER_TIMEOUT,
+        result(&final_rpc, "thread/loaded/list", json!({})),
+    )
+    .await;
+    drop(final_rpc);
+    let Ok(Ok(final_loaded)) = final_loaded else {
+        return;
+    };
+    let Some(final_threads) = final_loaded["data"].as_array() else {
+        return;
+    };
+    let probed = threads
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    let current = final_threads
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    if !final_loaded["nextCursor"].is_null()
+        || probed.len() != threads.len()
+        || current.len() != final_threads.len()
+        || current != probed
+    {
+        return;
+    }
+    let _ = client.shutdown().await;
 }
 
 /// Reuse a native Codex project with the same folders, otherwise create one
@@ -3331,10 +3771,22 @@ async fn associate_codex_project(
     Ok(())
 }
 
+const RECEIPT_HISTORY_PAGE_LIMIT: usize = 10_000;
+const RECEIPT_HISTORY_LIMIT_NOTICE: &str = "This Project's history is too long to verify the message automatically. Check this thread on your Mac before sending it again; Wonder will retry verification.";
+const RECEIPT_HISTORY_INVALID_NOTICE: &str = "This Project's history could not be verified automatically. Check this thread on your Mac before sending it again; Wonder will retry verification.";
+
 /// Resolve an uncertain project send by its client message identity.
 pub(crate) async fn find_accepted_turn(
     state: &AppState,
     message: &wonder_store::StoredMessage,
+) -> Result<Option<String>, String> {
+    find_accepted_turn_with_limit(state, message, RECEIPT_HISTORY_PAGE_LIMIT).await
+}
+
+async fn find_accepted_turn_with_limit(
+    state: &AppState,
+    message: &wonder_store::StoredMessage,
+    page_limit: usize,
 ) -> Result<Option<String>, String> {
     let Some(thread) = message.codex_thread_id.as_deref() else {
         return Ok(None);
@@ -3347,15 +3799,24 @@ pub(crate) async fn find_accepted_turn(
     else {
         return Ok(None);
     };
-    let rpc = rpc_for(state, conversation.family).await?;
+    let rpc = {
+        let Some(_admission) = state.update_admission.claim_guard().await else {
+            return Ok(None);
+        };
+        rpc_for(state, conversation.family).await?
+    };
     let mut cursor: Option<String> = None;
-    for _ in 0..200 {
+    let mut seen = HashSet::new();
+    for _ in 0..page_limit {
         let page = result(
             &rpc,
             "thread/items/list",
-            json!({"threadId": thread, "limit": 100, "cursor": cursor}),
+            json!({"threadId": thread, "limit": 100, "sortDirection": "desc", "cursor": cursor}),
         )
         .await?;
+        if page.get("data").and_then(Value::as_array).is_none() {
+            return Err("Project history returned no items page".into());
+        }
         if let Some(turn) = crate::find_client_message(&page, &message.client_message_id) {
             return Ok(Some(turn));
         }
@@ -3366,8 +3827,11 @@ pub(crate) async fn find_accepted_turn(
         if cursor.is_none() {
             return Ok(None);
         }
+        if !seen.insert(cursor.as_ref().unwrap().clone()) {
+            return Err("Project history repeated a continuation cursor".into());
+        }
     }
-    Ok(None)
+    Err(RECEIPT_HISTORY_LIMIT_NOTICE.into())
 }
 
 /// Wonder-owned storage for media a project tool returned. It is never the
@@ -3634,6 +4098,806 @@ pub(crate) mod tests {
         (dir, state, message)
     }
 
+    async fn dispatch_failure_fixture() -> (tempfile::TempDir, AppState, wonder_store::StoredMessage)
+    {
+        let (dir, mut state) = crate::permission_modes::tests::fixture().await;
+        state
+            .runtime_catalog
+            .write()
+            .await
+            .models
+            .iter_mut()
+            .find(|model| model.id == "fake")
+            .unwrap()
+            .default_service_tier = Some("default".into());
+        let source = dir.path().join("project-source");
+        std::fs::create_dir(&source).unwrap();
+        let roots = validate_folders(&[source.to_string_lossy().into_owned()], &[]).unwrap();
+        state
+            .store
+            .create_project("project", "request", "hash", "Test", &roots, 0, "now")
+            .await
+            .unwrap();
+        state.projects = ProjectRuntime::configured(
+            dir.path().join("codex"),
+            "test".into(),
+            &dir.path().join("home"),
+            &dir.path().join("claude"),
+            crate::ingestion::notification_sink(state.store.clone()),
+        );
+        let conversation = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .create_project_conversation(ProjectConversationInsert {
+                conversation_id: &conversation,
+                project_id: "project",
+                family: AgentFamily::Codex,
+                provider_store: &state.projects.codex_store,
+                native_session_id: None,
+                cwd: source.to_str().unwrap(),
+                roots_revision: 1,
+                title: "Recovery",
+                model: Some("fake"),
+                effort: None,
+                service_tier: None,
+                access_mode: "read_only",
+                claude_approval: "ask",
+                plan_mode: false,
+                creation_request_id: None,
+                now: "now",
+            })
+            .await
+            .unwrap();
+        let MessageInsert::Inserted(message) = state
+            .store
+            .insert_dispatch_message(
+                "owner",
+                &uuid::Uuid::new_v4().to_string(),
+                "Do the task",
+                "hash",
+                &conversation,
+                &[],
+                "now",
+                true,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("new receipt")
+        };
+        (dir, state, message)
+    }
+
+    #[tokio::test]
+    async fn project_settings_write_failure_is_safe_before_turn_submission() {
+        let (dir, state, message) = dispatch_failure_fixture().await;
+        let pool = sqlx::SqlitePool::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("state.db").display()
+        ))
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER reject_update_settings BEFORE INSERT ON update_turn_settings BEGIN SELECT RAISE(FAIL, 'settings unavailable'); END")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        dispatch(state.clone(), message.clone()).await;
+        let saved = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, "safe_to_retry");
+        assert!(state
+            .projects
+            .notices
+            .lock()
+            .unwrap()
+            .get(&message.conversation_id)
+            .is_some_and(|notice| notice.contains("settings unavailable")));
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        assert!(requests.lines().any(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"] == "thread/start"
+        }));
+        assert!(requests.lines().all(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"] != "turn/start"
+        }));
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_explicit_busy_rejection_is_safe_but_unknown_rejection_is_uncertain() {
+        for (message_text, expected) in [
+            ("Thread already has an active turn", "safe_to_retry"),
+            ("Provider failed after starting", "uncertain"),
+        ] {
+            let (dir, state, message) = dispatch_failure_fixture().await;
+            let script_path = dir.path().join("runtime.py");
+            let script = std::fs::read_to_string(&script_path).unwrap();
+            let original =
+                "elif method == 'turn/start':\n        with open(root + '/accepted-client'";
+            assert!(script.contains(original));
+            let replacement = format!(
+                "elif method == 'turn/start':\n        print(json.dumps({{'id':r['id'],'error':{{'code':-32000,'message':{}}}}}),flush=True)\n        continue\n        with open(root + '/accepted-client'",
+                serde_json::to_string(message_text).unwrap()
+            );
+            std::fs::write(&script_path, script.replacen(original, &replacement, 1)).unwrap();
+
+            dispatch(state.clone(), message.clone()).await;
+            let saved = state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let notice = state
+                .projects
+                .notices
+                .lock()
+                .unwrap()
+                .get(&message.conversation_id)
+                .cloned();
+            assert_eq!(saved.state, expected, "{message_text}: {notice:?}");
+            assert!(!dir.path().join("accepted-client").exists());
+            let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+            assert_eq!(
+                requests
+                    .lines()
+                    .filter(
+                        |line| serde_json::from_str::<Value>(line).unwrap()["method"]
+                            == "turn/start"
+                    )
+                    .count(),
+                1,
+                "{message_text}: {notice:?}; {requests}"
+            );
+            state.projects.shutdown().await;
+            state.app_server.lock().await.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn project_receipt_recovery_rejects_repeated_history_cursor() {
+        let (dir, state, message) = handoff_fixture().await;
+        state.projects.shutdown().await;
+        let script_path = dir.path().join("runtime.py");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let original = "elif method == 'thread/items/list':\n        if os.path.exists(root + '/long-history'):";
+        assert!(script.contains(original));
+        let replacement = "elif method == 'thread/items/list':\n        print(json.dumps({'id':r['id'],'result':{'data':[],'nextCursor':'same'}}),flush=True)\n        continue\n        if os.path.exists(root + '/long-history'):";
+        std::fs::write(&script_path, script.replacen(original, replacement, 1)).unwrap();
+
+        let message = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let error = find_accepted_turn(&state, &message).await.unwrap_err();
+        assert!(error.contains("repeated a continuation cursor"), "{error}");
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        assert_eq!(
+            requests
+                .lines()
+                .filter(
+                    |line| serde_json::from_str::<Value>(line).unwrap()["method"]
+                        == "thread/items/list"
+                )
+                .count(),
+            2
+        );
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lost_steer_receipt_does_not_start_project_runtime_during_update() {
+        let (dir, state, message) = dispatch_failure_fixture().await;
+        state
+            .store
+            .update_message_delivery(&message.id, "uncertain", Some("thread"), None)
+            .await
+            .unwrap();
+        let message = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::write(
+            dir.path().join("accepted-client"),
+            &message.client_message_id,
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .update_admission
+                .prepare_update("lost-steer", &state)
+                .await,
+            Ok(())
+        );
+        assert_eq!(find_accepted_turn(&state, &message).await.unwrap(), None);
+        assert!(!state.projects.codex.lock().await.health().is_alive());
+        assert!(state.update_admission.cancel_lease("lost-steer").await);
+        assert_eq!(
+            find_accepted_turn(&state, &message).await.unwrap(),
+            Some("turn".into())
+        );
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_receipt_recovery_scans_newest_first_and_past_twenty_thousand_items() {
+        for target_page in [0, 200] {
+            let (dir, state, message) = dispatch_failure_fixture().await;
+            state
+                .store
+                .update_message_delivery(&message.id, "uncertain", Some("thread"), None)
+                .await
+                .unwrap();
+            let message = state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let script_path = dir.path().join("runtime.py");
+            let script = std::fs::read_to_string(&script_path).unwrap();
+            let original = "elif method == 'thread/items/list':\n        if os.path.exists(root + '/long-history'):";
+            assert!(script.contains(original));
+            let replacement = format!(
+                "elif method == 'thread/items/list':\n        if r['params'].get('sortDirection') != 'desc':\n            print(json.dumps({{'id':r['id'],'error':{{'code':-32602,'message':'Expected newest-first history'}}}}),flush=True)\n            continue\n        page = int(r['params'].get('cursor') or '0')\n        data = [{{'turnId':'other','item':{{'id':str(page)+'-'+str(i),'type':'agentMessage'}}}} for i in range(100)]\n        if page == {}: data[-1] = {{'turnId':'accepted-turn','item':{{'type':'userMessage','clientId':{}}}}}\n        result = {{'data':data,'nextCursor':str(page+1) if page < 200 else None}}\n        print(json.dumps({{'id':r['id'],'result':result}}),flush=True)\n        continue\n        if os.path.exists(root + '/long-history'):",
+                target_page,
+                serde_json::to_string(&message.client_message_id).unwrap()
+            );
+            std::fs::write(&script_path, script.replacen(original, &replacement, 1)).unwrap();
+
+            assert_eq!(
+                find_accepted_turn(&state, &message).await.unwrap(),
+                Some("accepted-turn".into())
+            );
+            let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+            let pages = requests
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|request| request["method"] == "thread/items/list")
+                .collect::<Vec<_>>();
+            assert_eq!(pages.len(), target_page + 1);
+            assert!(pages
+                .iter()
+                .all(|request| request["params"]["sortDirection"] == "desc"));
+            assert_eq!(
+                pages.last().unwrap()["params"]["cursor"],
+                if target_page == 0 {
+                    Value::Null
+                } else {
+                    json!("200")
+                }
+            );
+            state.projects.shutdown().await;
+            state.app_server.lock().await.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn project_receipt_recovery_advances_in_slices_and_backs_off_after_absent_proof() {
+        let (dir, state, message) = dispatch_failure_fixture().await;
+        state
+            .store
+            .update_message_delivery(&message.id, "uncertain", Some("thread"), None)
+            .await
+            .unwrap();
+        let script_path = dir.path().join("runtime.py");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let original = "elif method == 'thread/items/list':\n        if os.path.exists(root + '/long-history'):";
+        assert!(script.contains(original));
+        let replacement = format!(
+            "elif method == 'thread/items/list':\n        if r['params'].get('sortDirection') != 'desc':\n            print(json.dumps({{'id':r['id'],'error':{{'code':-32602,'message':'Expected newest-first history'}}}}),flush=True)\n            continue\n        page = int(r['params'].get('cursor') or '0')\n        data = [{{'turnId':'other','item':{{'id':str(page)+'-'+str(i),'type':'agentMessage'}}}} for i in range(100)]\n        if page == 200 and os.path.exists(root + '/accepted-client'): data[-1] = {{'turnId':'accepted-turn','item':{{'type':'userMessage','clientId':{}}}}}\n        result = {{'data':data,'nextCursor':str(page+1) if page < 200 else None}}\n        print(json.dumps({{'id':r['id'],'result':result}}),flush=True)\n        continue\n        if os.path.exists(root + '/long-history'):",
+            serde_json::to_string(&message.client_message_id).unwrap()
+        );
+        std::fs::write(&script_path, script.replacen(original, &replacement, 1)).unwrap();
+        let _service = crate::ingestion::spawn(state.clone()).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !ready(&state).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let request_count = || {
+            std::fs::read_to_string(dir.path().join("requests-jsonl"))
+                .unwrap()
+                .lines()
+                .filter(|line| {
+                    serde_json::from_str::<Value>(line).unwrap()["method"] == "thread/items/list"
+                })
+                .count()
+        };
+
+        // 201 pages represent 20,100 newer items. Each recovery pass must
+        // release the provider after at most 20 pages, retaining its cursor.
+        for cycle in 0..11 {
+            recover_uncertain_receipts_with_budget(
+                &state,
+                RECEIPT_HISTORY_PAGE_LIMIT,
+                RECEIPT_PAGES_PER_CYCLE,
+                RECEIPT_RESCAN_DELAY,
+            )
+            .await;
+            assert_eq!(request_count(), ((cycle + 1) * 20).min(201));
+        }
+        for _ in 0..3 {
+            recover_uncertain_receipts(&state).await;
+        }
+        assert_eq!(
+            request_count(),
+            201,
+            "absent proof must not rescan every tick"
+        );
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "uncertain"
+        );
+
+        // Once the quiet period expires, an old accepted item remains
+        // reachable without starting a second provider turn.
+        std::fs::write(
+            dir.path().join("accepted-client"),
+            &message.client_message_id,
+        )
+        .unwrap();
+        state
+            .projects
+            .receipt_scans
+            .lock()
+            .unwrap()
+            .get_mut(&message.id)
+            .unwrap()
+            .resume_after = Instant::now();
+        for cycle in 0..11 {
+            recover_uncertain_receipts(&state).await;
+            assert_eq!(request_count(), 201 + ((cycle + 1) * 20).min(201));
+        }
+        let saved = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, "accepted_by_codex");
+        assert_eq!(saved.codex_turn_id.as_deref(), Some("accepted-turn"));
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        assert!(requests.lines().all(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"] != "turn/start"
+        }));
+        assert!(state
+            .projects
+            .receipt_scans
+            .lock()
+            .unwrap()
+            .get(&message.id)
+            .is_none());
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_receipt_cursor_cycle_across_passes_resets_on_restart() {
+        let (dir, state, message) = dispatch_failure_fixture().await;
+        state
+            .store
+            .update_message_delivery(&message.id, "uncertain", Some("thread"), None)
+            .await
+            .unwrap();
+        let script_path = dir.path().join("runtime.py");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let original = "elif method == 'thread/items/list':\n        if os.path.exists(root + '/long-history'):";
+        assert!(script.contains(original));
+        let replacement = "elif method == 'thread/items/list':\n        print(json.dumps({'id':r['id'],'result':{'data':[],'nextCursor':'same'}}),flush=True)\n        continue\n        if os.path.exists(root + '/long-history'):";
+        std::fs::write(&script_path, script.replacen(original, replacement, 1)).unwrap();
+        let _service = crate::ingestion::spawn(state.clone()).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !ready(&state).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let count = || {
+            std::fs::read_to_string(dir.path().join("requests-jsonl"))
+                .unwrap()
+                .lines()
+                .filter(|line| {
+                    serde_json::from_str::<Value>(line).unwrap()["method"] == "thread/items/list"
+                })
+                .count()
+        };
+        for expected in [1, 2] {
+            recover_uncertain_receipts_with_budget(&state, 10, 1, RECEIPT_RESCAN_DELAY).await;
+            assert_eq!(count(), expected);
+        }
+        assert_eq!(
+            state
+                .projects
+                .notices
+                .lock()
+                .unwrap()
+                .get(&message.conversation_id)
+                .map(String::as_str),
+            Some(RECEIPT_HISTORY_INVALID_NOTICE)
+        );
+        recover_uncertain_receipts_with_budget(&state, 10, 1, RECEIPT_RESCAN_DELAY).await;
+        assert_eq!(count(), 2, "cycle must back off");
+        // Process restart discards cursor progress; a new process rechecks the
+        // newest page without resending the message.
+        state.projects.receipt_scans.lock().unwrap().clear();
+        recover_uncertain_receipts_with_budget(&state, 10, 1, RECEIPT_RESCAN_DELAY).await;
+        assert_eq!(count(), 3);
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        let cursors = requests
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|request| request["method"] == "thread/items/list")
+            .map(|request| request["params"]["cursor"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(cursors, vec![Value::Null, json!("same"), Value::Null]);
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_receipt_history_limit_keeps_uncertain_and_shows_recovery_notice() {
+        let (dir, state, message) = dispatch_failure_fixture().await;
+        state
+            .store
+            .update_message_delivery(&message.id, "uncertain", Some("thread"), None)
+            .await
+            .unwrap();
+        let script_path = dir.path().join("runtime.py");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let original = "elif method == 'thread/items/list':\n        if os.path.exists(root + '/long-history'):";
+        assert!(script.contains(original));
+        let replacement = "elif method == 'thread/items/list':\n        page = int(r['params'].get('cursor') or '0')\n        print(json.dumps({'id':r['id'],'result':{'data':[],'nextCursor':str(page+1)}}),flush=True)\n        continue\n        if os.path.exists(root + '/long-history'):";
+        std::fs::write(&script_path, script.replacen(original, replacement, 1)).unwrap();
+        let _service = crate::ingestion::spawn(state.clone()).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !ready(&state).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        recover_uncertain_receipts_with_limit(&state, 2).await;
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "uncertain"
+        );
+        assert_eq!(
+            state
+                .projects
+                .notices
+                .lock()
+                .unwrap()
+                .get(&message.conversation_id)
+                .map(String::as_str),
+            Some(RECEIPT_HISTORY_LIMIT_NOTICE)
+        );
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        assert_eq!(
+            requests
+                .lines()
+                .filter(
+                    |line| serde_json::from_str::<Value>(line).unwrap()["method"]
+                        == "thread/items/list"
+                )
+                .count(),
+            2
+        );
+        state.projects.shutdown().await;
+        std::fs::write(&script_path, script).unwrap();
+        std::fs::write(
+            dir.path().join("accepted-client"),
+            &message.client_message_id,
+        )
+        .unwrap();
+        recover_uncertain_receipts_with_limit(&state, 2).await;
+        let saved = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, "accepted_by_codex");
+        assert_eq!(saved.codex_turn_id.as_deref(), Some("turn"));
+        assert!(!state
+            .projects
+            .notices
+            .lock()
+            .unwrap()
+            .contains_key(&message.conversation_id));
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    async fn history_scan_allows_update(with_turn: bool) {
+        let (dir, state, message) = dispatch_failure_fixture().await;
+        state
+            .store
+            .update_message_delivery(
+                &message.id,
+                "uncertain",
+                Some("thread"),
+                with_turn.then_some("turn"),
+            )
+            .await
+            .unwrap();
+        let script_path = dir.path().join("runtime.py");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let original = if with_turn {
+            "elif method == 'thread/turns/list':\n        if os.path.exists(root + '/turn-pages.json'):"
+        } else {
+            "elif method == 'thread/items/list':\n        if os.path.exists(root + '/long-history'):"
+        };
+        assert!(script.contains(original));
+        let entry = if with_turn {
+            "{'id':'turn','status':'completed'}".to_owned()
+        } else {
+            format!(
+                "{{'turnId':'turn','item':{{'type':'userMessage','clientId':{}}}}}",
+                serde_json::to_string(&message.client_message_id).unwrap()
+            )
+        };
+        let replacement = format!(
+            "elif method == '{}':\n        page = int(r.get('params',{{}}).get('cursor') or '0')\n        open(root + '/history-waiting','w').close()\n        while os.path.exists(root + '/delay-history'): time.sleep(0.01)\n        result = {{'data':[{}] if page == 20 else [], 'nextCursor':str(page+1) if page < 20 else None}}\n        if page == 20: open(root + '/history-finished','w').close()\n        print(json.dumps({{'id':r['id'],'result':result}}),flush=True)\n        continue\n        if os.path.exists(root + '/{}'):",
+            if with_turn { "thread/turns/list" } else { "thread/items/list" },
+            entry,
+            if with_turn { "turn-pages.json" } else { "long-history" }
+        );
+        std::fs::write(&script_path, script.replacen(original, &replacement, 1)).unwrap();
+        std::fs::write(dir.path().join("delay-history"), "").unwrap();
+
+        let _service = crate::ingestion::spawn(state.clone()).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !ready(&state).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let scheduler = crate::dispatch::spawn(state.clone()).await.unwrap();
+        let waiting = dir.path().join("history-waiting");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !waiting.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let prepare_state = state.clone();
+        let preparing = tokio::spawn(async move {
+            prepare_state
+                .update_admission
+                .prepare_update("history-update", &prepare_state)
+                .await
+        });
+        let admitted = tokio::time::timeout(Duration::from_secs(1), async {
+            while !state.update_admission.work_paused() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        std::fs::remove_file(dir.path().join("delay-history")).unwrap();
+        if admitted.is_err() {
+            preparing.abort();
+            scheduler.abort();
+            panic!("Project history blocked update admission (turn={with_turn})");
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), preparing)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(())
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while if with_turn {
+                !dir.path().join("history-finished").exists()
+            } else {
+                !state
+                    .projects
+                    .receipt_scans
+                    .lock()
+                    .unwrap()
+                    .contains_key(&message.id)
+            } {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        let history_method = if with_turn {
+            "thread/turns/list"
+        } else {
+            "thread/items/list"
+        };
+        let history_requests = requests
+            .lines()
+            .filter(|line| serde_json::from_str::<Value>(line).unwrap()["method"] == history_method)
+            .count();
+        if with_turn {
+            assert!(history_requests >= 21);
+        } else {
+            assert_eq!(
+                history_requests, 1,
+                "Project scan should pause after update admission"
+            );
+        }
+        let saved = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, "uncertain");
+        assert_eq!(saved.codex_turn_id.as_deref(), with_turn.then_some("turn"));
+        assert!(state.update_admission.cancel_lease("history-update").await);
+        scheduler.abort();
+        let _ = scheduler.await;
+        if !with_turn {
+            recover_uncertain_receipts(&state).await;
+            let saved = state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.state, "accepted_by_codex");
+            assert_eq!(saved.codex_turn_id.as_deref(), Some("turn"));
+        }
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        assert!(requests.lines().all(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"] != "turn/start"
+        }));
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_history_scans_do_not_hold_update_admission_or_publish_during_update() {
+        history_scan_allows_update(false).await;
+        history_scan_allows_update(true).await;
+    }
+
+    #[tokio::test]
+    async fn receipt_recovery_waits_for_runtime_setup_before_admitting_update() {
+        let (_dir, state, message) = dispatch_failure_fixture().await;
+        state
+            .store
+            .update_message_delivery(&message.id, "uncertain", Some("thread"), None)
+            .await
+            .unwrap();
+        let message = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let start = state.projects.start.lock().await;
+        let scan_state = state.clone();
+        let scanning = tokio::spawn(async move {
+            scan_ambiguous_receipt(
+                &scan_state,
+                &message,
+                RECEIPT_HISTORY_PAGE_LIMIT,
+                RECEIPT_PAGES_PER_CYCLE,
+                RECEIPT_RESCAN_DELAY,
+            )
+            .await
+        });
+        // The scan is waiting to start the dead normal-home runtime. An update
+        // must queue behind that admitted setup, even though history reads are
+        // free to overlap the update once setup has finished.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let update_state = state.clone();
+        let preparing = tokio::spawn(async move {
+            update_state
+                .update_admission
+                .prepare_update("recovery-setup", &update_state)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), async {
+                while !state.update_admission.work_paused() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_err(),
+            "Update admission overtook recovery runtime setup"
+        );
+        drop(start);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), preparing)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(())
+        );
+        tokio::time::timeout(Duration::from_secs(3), scanning)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(state.projects.codex.lock().await.health().is_alive());
+        assert!(state.update_admission.cancel_lease("recovery-setup").await);
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_turn_recovery_waits_for_runtime_setup_before_admitting_update() {
+        let (_dir, state, _) = handoff_fixture().await;
+        state.projects.shutdown().await;
+        let start = state.projects.start.lock().await;
+        let recovery_state = state.clone();
+        let recovering = tokio::spawn(async move { recover(&recovery_state).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let update_state = state.clone();
+        let preparing = tokio::spawn(async move {
+            update_state
+                .update_admission
+                .prepare_update("active-recovery-setup", &update_state)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), async {
+                while !state.update_admission.work_paused() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_err(),
+            "Update admission overtook active-turn runtime setup"
+        );
+        drop(start);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), preparing)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(())
+        );
+        tokio::time::timeout(Duration::from_secs(3), recovering)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            state
+                .update_admission
+                .cancel_lease("active-recovery-setup")
+                .await
+        );
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
     fn writer_available(dir: &FsPath) -> bool {
         std::fs::File::open(dir.join("writer.lock"))
             .unwrap()
@@ -3688,6 +4952,54 @@ pub(crate) mod tests {
             .await
             .unwrap();
         std::fs::write(dir.path().join("completed"), "").unwrap();
+
+        let archive_attempts = || {
+            std::fs::read_to_string(dir.path().join("requests"))
+                .unwrap()
+                .lines()
+                .filter(|method| *method == "thread/archive")
+                .count()
+        };
+        let before_update = archive_attempts();
+        state
+            .update_admission
+            .prepare_update("archive-update", &state)
+            .await
+            .unwrap();
+        let during_update = update_conversation(
+            State(state.clone()),
+            Extension(OwnerAuthority),
+            Path("project-chat".into()),
+            Json(serde_json::from_value(json!({"isArchived": true})).unwrap()),
+        )
+        .await;
+        assert_eq!(during_update.status(), StatusCode::CONFLICT);
+        assert_eq!(archive_attempts(), before_update);
+        assert!(state.update_admission.cancel_lease("archive-update").await);
+
+        std::fs::write(dir.path().join("archive-active-writer"), "").unwrap();
+        let writer_conflict = update_conversation(
+            State(state.clone()),
+            Extension(OwnerAuthority),
+            Path("project-chat".into()),
+            Json(serde_json::from_value(json!({"isArchived": true})).unwrap()),
+        )
+        .await;
+        assert_eq!(writer_conflict.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(writer_conflict.into_body(), 100_000)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("Codex"));
+        assert!(!body.contains("active writer"));
+        assert_eq!(archive_attempts(), before_update + 1);
+        assert!(
+            !conversation_detail(&state, &conversation)
+                .await
+                .unwrap()
+                .is_archived
+        );
+        std::fs::remove_file(dir.path().join("archive-active-writer")).unwrap();
 
         std::fs::write(dir.path().join("archive-fail"), "").unwrap();
         assert_eq!(
@@ -3797,6 +5109,16 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_archived
         );
+        std::fs::write(dir.path().join("archive-lost-response"), "").unwrap();
+        set_archived(&state, &conversation, true).await.unwrap();
+        assert!(
+            conversation_detail(&state, &conversation)
+                .await
+                .unwrap()
+                .is_archived
+        );
+        std::fs::remove_file(dir.path().join("archive-lost-response")).unwrap();
+        set_archived(&state, &conversation, false).await.unwrap();
         let mut claude = conversation.clone();
         claude.family = AgentFamily::Claude;
         assert_eq!(
@@ -3804,6 +5126,79 @@ pub(crate) mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
         state.projects.shutdown().await;
+    }
+
+    // A desktop-owned thread can be notLoaded in Wonder's separate App Server
+    // while its last persisted turn is interrupted. The provider writer lock
+    // must reject resume before Wonder starts another turn, with useful retry copy.
+    #[tokio::test]
+    async fn project_send_reports_desktop_writer_conflict_without_starting_turn() {
+        let (dir, state, message) = dispatch_failure_fixture().await;
+        let rpc = codex_rpc(&state).await.unwrap();
+        drop(rpc);
+        state.runtime_catalog.write().await.models = vec![crate::ModelOption {
+            agent_family: AgentFamily::Codex,
+            capabilities: crate::ModelCapabilities::for_family(AgentFamily::Codex),
+            id: "fake".into(),
+            display_name: "Fake model".into(),
+            description: None,
+            model_specialty: None,
+            hidden: false,
+            reasoning_efforts: vec![],
+            default_reasoning_effort: None,
+            service_tiers: vec![crate::ChoiceOption {
+                id: "default".into(),
+                label: "Standard".into(),
+                description: None,
+            }],
+            default_service_tier: Some("default".into()),
+        }];
+        state
+            .store
+            .set_project_native_session(&message.conversation_id, "thread", "now")
+            .await
+            .unwrap();
+        state
+            .store
+            .bind_project_runtime(
+                &message.conversation_id,
+                AgentFamily::Codex,
+                &state.projects.codex_store,
+                "thread",
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+        std::fs::write(
+            dir.path().join("idle-fixture.json"),
+            json!({"thread":{"id":"thread","cwd":dir.path().join("project-source"),
+                "projectId":"native-project","status":{"type":"notLoaded"}}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("turn-pages.json"),
+            json!([[{"id":"old-turn","status":"interrupted"}]]).to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("resume-active-writer"), "").unwrap();
+
+        let mut submitting = false;
+        let failure = dispatch_inner(&state, &message, &mut submitting)
+            .await
+            .unwrap_err();
+        assert!(failure.contains("open in Codex on your Mac"), "{failure}");
+        assert!(!submitting);
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        assert!(requests.lines().any(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"] == "thread/resume"
+        }));
+        assert!(!requests.lines().any(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"] == "turn/start"
+        }));
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
     }
 
     // Contract: a lost terminal notification cannot leave a live-generation
@@ -3999,6 +5394,183 @@ pub(crate) mod tests {
         }
         idle["thread"]["goal"] = json!({"status":"complete"});
         std::fs::write(dir.path().join("idle-fixture.json"), idle.to_string()).unwrap();
+        release_idle_codex_runtime(&state).await;
+        assert!(writer_available(dir.path()));
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_runtime_probe_allows_update_and_does_not_shutdown_during_lease() {
+        let (dir, state, message) = handoff_fixture().await;
+        state
+            .store
+            .update_message_delivery(&message.id, "completed", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        state.projects.shutdown().await;
+        let script_path = dir.path().join("runtime.py");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let original =
+            "elif method == 'thread/loaded/list': result = {'data':list(idle), 'nextCursor':None}";
+        assert!(script.contains(original));
+        let replacement = "elif method == 'thread/loaded/list':\n        if os.path.exists(root + '/delay-loaded') and not os.path.exists(root + '/loaded-waiting'):\n            open(root + '/loaded-waiting','w').close()\n            def delayed_loaded(request_id):\n                while os.path.exists(root + '/delay-loaded'): time.sleep(0.01)\n                print(json.dumps({'id':request_id,'result':{'data':list(idle),'nextCursor':None}}),flush=True)\n            threading.Thread(target=delayed_loaded,args=(r['id'],),daemon=True).start()\n            continue\n        result = {'data':list(idle), 'nextCursor':None}";
+        std::fs::write(&script_path, script.replacen(original, replacement, 1)).unwrap();
+        let rpc = codex_rpc(&state).await.unwrap();
+        drop(rpc);
+        std::fs::write(dir.path().join("delay-loaded"), "").unwrap();
+        let recovery_state = state.clone();
+        let recovering = tokio::spawn(async move { recover(&recovery_state).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !dir.path().join("loaded-waiting").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let update_state = state.clone();
+        let preparing = tokio::spawn(async move {
+            update_state
+                .update_admission
+                .prepare_update("idle-probe-update", &update_state)
+                .await
+        });
+        let admitted = tokio::time::timeout(Duration::from_secs(1), async {
+            while !state.update_admission.work_paused() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        std::fs::remove_file(dir.path().join("delay-loaded")).unwrap();
+        if admitted.is_err() {
+            preparing.abort();
+            recovering.abort();
+            panic!("Idle Project lifecycle read blocked update admission");
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), preparing)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(())
+        );
+        tokio::time::timeout(Duration::from_secs(3), recovering)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(state.projects.codex.lock().await.health().is_alive());
+        assert!(!writer_available(dir.path()));
+        assert!(
+            state
+                .update_admission
+                .cancel_lease("idle-probe-update")
+                .await
+        );
+        release_idle_codex_runtime(&state).await;
+        assert!(writer_available(dir.path()));
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_runtime_probe_does_not_close_a_newly_loaded_thread() {
+        let (dir, state, message) = handoff_fixture().await;
+        state
+            .store
+            .update_message_delivery(&message.id, "completed", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        state.projects.shutdown().await;
+        let script_path = dir.path().join("runtime.py");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let original = "elif method == 'thread/backgroundTerminals/list': result = {'data':idle.get(r['params']['threadId'],{}).get('background',[]), 'nextCursor':None}";
+        assert!(script.contains(original));
+        let replacement = "elif method == 'thread/backgroundTerminals/list':\n        if os.path.exists(root + '/delay-background') and not os.path.exists(root + '/background-waiting'):\n            open(root + '/background-waiting','w').close()\n            def delayed_background(request_id):\n                while os.path.exists(root + '/delay-background'): time.sleep(0.01)\n                print(json.dumps({'id':request_id,'result':{'data':[],'nextCursor':None}}),flush=True)\n            threading.Thread(target=delayed_background,args=(r['id'],),daemon=True).start()\n            continue\n        result = {'data':idle.get(r['params']['threadId'],{}).get('background',[]), 'nextCursor':None}";
+        std::fs::write(&script_path, script.replacen(original, replacement, 1)).unwrap();
+        let rpc = codex_rpc(&state).await.unwrap();
+        drop(rpc);
+        std::fs::write(dir.path().join("delay-background"), "").unwrap();
+        let probe_state = state.clone();
+        let probing = tokio::spawn(async move { release_idle_codex_runtime(&probe_state).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !dir.path().join("background-waiting").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::write(
+            dir.path().join("idle-fixture.json"),
+            json!({"thread":{"id":"thread","status":{"type":"idle"}},
+                "new-thread":{"id":"new-thread","status":{"type":"idle"}}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::remove_file(dir.path().join("delay-background")).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), probing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(state.projects.codex.lock().await.health().is_alive());
+        assert!(!writer_available(dir.path()));
+        release_idle_codex_runtime(&state).await;
+        assert!(writer_available(dir.path()));
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_final_idle_roster_releases_update_admission() {
+        let (dir, state, message) = handoff_fixture().await;
+        state
+            .store
+            .update_message_delivery(&message.id, "completed", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        state.projects.shutdown().await;
+        let script_path = dir.path().join("runtime.py");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let original =
+            "elif method == 'thread/loaded/list': result = {'data':list(idle), 'nextCursor':None}";
+        assert!(script.contains(original));
+        let replacement = "elif method == 'thread/loaded/list':\n        count_path = root + '/loaded-count'\n        count = int(open(count_path).read()) if os.path.exists(count_path) else 0\n        count += 1\n        with open(count_path,'w') as saved: saved.write(str(count))\n        if count == 2 and os.path.exists(root + '/delay-final-loaded'):\n            open(root + '/final-loaded-waiting','w').close()\n            def delayed_final(request_id):\n                while os.path.exists(root + '/delay-final-loaded'): time.sleep(0.01)\n                print(json.dumps({'id':request_id,'result':{'data':list(idle),'nextCursor':None}}),flush=True)\n            threading.Thread(target=delayed_final,args=(r['id'],),daemon=True).start()\n            continue\n        result = {'data':list(idle), 'nextCursor':None}";
+        std::fs::write(&script_path, script.replacen(original, replacement, 1)).unwrap();
+        let rpc = codex_rpc(&state).await.unwrap();
+        drop(rpc);
+        std::fs::write(dir.path().join("delay-final-loaded"), "").unwrap();
+        let probe_state = state.clone();
+        let probing = tokio::spawn(async move { release_idle_codex_runtime(&probe_state).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !dir.path().join("final-loaded-waiting").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let update_state = state.clone();
+        let preparing = tokio::spawn(async move {
+            update_state
+                .update_admission
+                .prepare_update("stalled-final-roster", &update_state)
+                .await
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(4), preparing)
+                .await
+                .expect("final roster kept update admission beyond its short timeout")
+                .unwrap(),
+            Ok(())
+        );
+        std::fs::remove_file(dir.path().join("delay-final-loaded")).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), probing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(state.projects.codex.lock().await.health().is_alive());
+        assert!(!writer_available(dir.path()));
+        assert!(
+            state
+                .update_admission
+                .cancel_lease("stalled-final-roster")
+                .await
+        );
         release_idle_codex_runtime(&state).await;
         assert!(writer_available(dir.path()));
         state.app_server.lock().await.shutdown().await.unwrap();

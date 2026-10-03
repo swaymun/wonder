@@ -10,6 +10,38 @@ import WonderPairing
 @testable import Wonder
 
 final class WonderDiagnosticsTests: XCTestCase {
+    @MainActor func testWorkspaceRevisionChecksLatestSequenceAfterPriorCheckIsCancelled() async throws {
+        let original = Data("old".utf8)
+        let updated = Data("new".utf8)
+        let revision = WorkspaceRevisionState(data: original, sha256: ConversationFile.digest(original))
+        revision.observedSequence = 1
+        let firstStarted = expectation(description: "First revision read started")
+        let secondStarted = expectation(description: "Newest revision read started")
+        let first = Task { @MainActor in
+            await revision.observe(sequence: 2, refresh: {
+                firstStarted.fulfill()
+                try await Task.sleep(for: .seconds(5))
+                return original
+            }, onRevision: nil, failureMessage: "Read failed")
+        }
+        await fulfillment(of: [firstStarted], timeout: 2)
+        XCTAssertTrue(revision.refreshing)
+        let second = Task { @MainActor in
+            await revision.observe(sequence: 3, refresh: {
+                secondStarted.fulfill()
+                return updated
+            }, onRevision: nil, failureMessage: "Read failed")
+        }
+        await Task.yield()
+        first.cancel()
+        await first.value
+        await second.value
+        await fulfillment(of: [secondStarted], timeout: 2)
+        XCTAssertEqual(revision.observedSequence, 3)
+        XCTAssertEqual(revision.offeredData, updated)
+        XCTAssertEqual(revision.offeredSha256, ConversationFile.digest(updated))
+    }
+
     @MainActor func testPDFPreviewRetainsPageReadingPointAndZoomAcrossRevision() throws {
         func document(_ label: String) -> Data {
             UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 400, height: 3000)).pdfData { context in
@@ -2771,7 +2803,43 @@ extension WonderDiagnosticsTests {
         XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/pairing/session/refresh-challenge", includingEmpty: true).isEmpty)
     }
 
-    @MainActor private func renewalModel(persist: @escaping (SavedConnection?) throws -> Void) -> ConnectionModel {
+    // A saved Project can open before the foreground connection check starts.
+    // Its history refresh must join renewal instead of leaving Send blocked by a stale failure.
+    @MainActor func testColdProjectHistoryWaitsForRenewalBeforeRefreshing() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { MessageRecoveryURLProtocol.releaseHeld(); try? FileManager.default.removeItem(at: root) }
+        let model = renewalModel(root: root) { _ in }
+        model.projects.forgetCache()
+        defer { model.projects.forgetCache() }
+        let detail = try JSONDecoder().decode(ProjectConversationDetail.self, from: projectDetail(pinned: false))
+        model.registerProjectConversation(detail)
+        let chat = model.projectChat(detail)
+        model.macConnected = nil
+        try enqueueRenewal()
+        let challengePath = "/api/v1/pairing/session/refresh-challenge"
+        let historyPath = "/api/v1/conversations/\(chat.id)/history/refresh"
+        MessageRecoveryURLProtocol.hold(path: challengePath)
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/\(chat.id)", body: projectDetail(pinned: false))
+        MessageRecoveryURLProtocol.enqueue(path: historyPath, method: "POST", status: 202,
+                                           body: Data(#"{"state":"refreshing"}"#.utf8))
+        MessageRecoveryURLProtocol.enqueue(path: historyPath, method: "GET", body: Data(#"{"state":"completed"}"#.utf8))
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/conversations/\(chat.id)",
+                                           body: Data(#"{"conversationId":"project-chat","hostEpoch":"epoch","lastSequence":1,"messages":[],"assistantMessages":[],"thread":{"hydrated":true}}"#.utf8))
+        let refresh = Task { await model.reloadNativeHistory(chat) }
+        try await waitForRecoveryRequests(path: challengePath)
+        XCTAssertTrue(model.nativeHistoryRefreshing.contains(chat.id))
+        XCTAssertFalse(model.nativeHistoryFailures.contains(chat.id))
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: historyPath).isEmpty)
+        MessageRecoveryURLProtocol.releaseHeld()
+        await refresh.value
+        XCTAssertEqual(model.macConnected, true)
+        XCTAssertFalse(model.nativeHistoryFailures.contains(chat.id))
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: historyPath).count, 1)
+        XCTAssertEqual(model.snapshots[chat.id]?.conversationId, chat.id)
+    }
+
+    @MainActor private func renewalModel(root: URL? = nil, persist: @escaping (SavedConnection?) throws -> Void) -> ConnectionModel {
         let key = P256.Signing.PrivateKey()
         let signing = SigningIdentity(read: { key.rawRepresentation }, save: { _ in XCTFail("Renewal must not replace the identity") },
             restore: { _ in EnrollmentSigningIdentity(publicKey: key.publicKey, representation: key.rawRepresentation,
@@ -2779,6 +2847,10 @@ extension WonderDiagnosticsTests {
             create: { throw SigningIdentityFailure.missing })
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MessageRecoveryURLProtocol.self]
+        if let root {
+            return ConnectionModel(cameraFixtureStoreRoot: root, saved: Self.cameraSavedConnection(),
+                                   api: PairingAPI(configuration: configuration), replayEnabled: false, signingIdentity: signing)
+        }
         return ConnectionModel(saved: Self.cameraSavedConnection(), persistConnection: persist,
                                api: PairingAPI(configuration: configuration), signingIdentity: signing)
     }
@@ -2853,6 +2925,202 @@ extension WonderDiagnosticsTests {
         XCTAssertEqual(try store.loadComposer(conversation: chat.id).draft, fresh.draft)
         XCTAssertTrue(model.accessEnded)
     }
+
+    // A same-host replacement leaves the old model's host and assignment scope
+    // intact. A late folder/model rejection must not reset that draft's retry ID.
+    @MainActor func testReplacedPairingIgnoresLateNewChatRejections() async throws {
+        let saved = SavedConnection(origin: "https://pairing-recovery-unit.invalid", credential: Self.cameraSavedConnection().credential)
+        let host = saved.credential.hostInstallationId
+        defer { NewChatDraftStore.remove(host: host); PairingDelayedResponse.delivery.complete(Data(), status: 500) }
+        for status in [412, 422] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [PairingDelayedResponse.self]
+            let model = ConnectionModel(cameraFixtureStoreRoot: root, saved: saved,
+                                        api: PairingAPI(configuration: configuration), replayEnabled: false)
+            var draft = NewChatDraft(destination: .project(id: "project"), text: "Keep this request", family: .codex, model: "model")
+            draft.submittedDeviceID = saved.credential.deviceId
+            draft.freeze()
+            XCTAssertTrue(NewChatDraftStore.save(draft, host: host))
+            let attempt = NewChatSendAttempt(scope: model.assignmentScope, hostID: host, requestID: draft.requestID)
+            XCTAssertTrue(attempt.applies(to: model, hostID: host, draft: draft))
+            let response = Task {
+                try await model.projects.createThread(projectID: "project", draft: draft,
+                                                      body: "Keep this request", deviceID: saved.credential.deviceId)
+            }
+            for _ in 0..<200 {
+                if PairingDelayedResponse.delivery.isWaiting { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            guard PairingDelayedResponse.delivery.isWaiting else {
+                response.cancel()
+                XCTFail("The new-chat request did not reach the delayed response")
+                continue
+            }
+            model.retireAfterPairingReplacement()
+            XCTAssertEqual(model.assignmentScope, attempt.scope)
+            XCTAssertTrue(model.accessEnded)
+            PairingDelayedResponse.delivery.complete(Data(), status: status)
+            do {
+                _ = try await response.value
+                XCTFail("Expected HTTP \(status)")
+            } catch PairingFailure.response(let code) {
+                XCTAssertEqual(code, status)
+            } catch {
+                XCTFail("Expected HTTP \(status), got \(error)")
+            }
+            // This is the same response fence the New Chat catch paths use.
+            if attempt.applies(to: model, hostID: host, draft: draft) {
+                _ = NewChatDraftStore.reject(draft, host: host)
+            }
+            XCTAssertEqual(NewChatDraftStore.load(host: host)?.requestID, draft.requestID)
+            XCTAssertEqual(NewChatDraftStore.savedMessages(host: host).first?.requestID, draft.requestID)
+            NewChatDraftStore.remove(host: host)
+        }
+    }
+
+    // The first request is still waiting at the Mac when the same host is
+    // paired again. Its control must unlock before that HTTP request returns.
+    @MainActor func testNewChatSendTaskReleasesControlOnPairingReplacement() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root); PairingDelayedResponse.delivery.complete(Data(), status: 500) }
+        let saved = SavedConnection(origin: "https://pairing-recovery-unit.invalid", credential: Self.cameraSavedConnection().credential)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PairingDelayedResponse.self]
+        let model = ConnectionModel(cameraFixtureStoreRoot: root, saved: saved,
+                                    api: PairingAPI(configuration: configuration), replayEnabled: false)
+        let draft = NewChatDraft(destination: .project(id: "project"), text: "Keep this request", family: .codex, model: "model")
+        var send = NewChatSendTask()
+        let oldGeneration = send.generation
+        let oldRequest = Task {
+            _ = try? await model.projects.createThread(projectID: "project", draft: draft,
+                                                       body: draft.text, deviceID: saved.credential.deviceId)
+        }
+        send.start(oldRequest)
+        for _ in 0..<200 {
+            if PairingDelayedResponse.delivery.isWaiting { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard PairingDelayedResponse.delivery.isWaiting else {
+            send.cancel()
+            XCTFail("The new-chat request did not reach the delayed response")
+            return
+        }
+        model.retireAfterPairingReplacement()
+        send.cancel()
+        XCTAssertFalse(send.isActive, "The new pairing must release Send without waiting for the old Mac")
+        XCTAssertNotEqual(send.generation, oldGeneration)
+        let newGeneration = send.generation
+        let newRequest = Task { }
+        send.start(newRequest)
+        XCTAssertTrue(send.isActive)
+        PairingDelayedResponse.delivery.complete(Data(), status: 422)
+        await oldRequest.value
+        XCTAssertFalse(send.finish(oldGeneration), "The old completion must not release the new send")
+        XCTAssertTrue(send.isActive)
+        await newRequest.value
+        XCTAssertTrue(send.finish(newGeneration))
+        XCTAssertFalse(send.isActive)
+    }
+
+    // Leaving New Chat while creation waits on the Mac must keep the retry
+    // identity and make the late response inapplicable to its departed draft.
+    @MainActor func testLeavingNewChatCancelsHeldCreationAndKeepsRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let saved = SavedConnection(origin: "https://pairing-recovery-unit.invalid", credential: Self.cameraSavedConnection().credential)
+        let host = saved.credential.hostInstallationId
+        defer {
+            PairingDelayedResponse.delivery.complete(Data(), status: 500)
+            NewChatDraftStore.remove(host: host)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PairingDelayedResponse.self]
+        let model = ConnectionModel(cameraFixtureStoreRoot: root, saved: saved,
+                                    api: PairingAPI(configuration: configuration), replayEnabled: false)
+        var draft = NewChatDraft(destination: .project(id: "project"), text: "Keep this request", family: .codex, model: "model")
+        draft.submittedDeviceID = saved.credential.deviceId
+        draft.freeze()
+        XCTAssertTrue(NewChatDraftStore.save(draft, host: host))
+        let attempt = NewChatSendAttempt(scope: model.assignmentScope, hostID: host, requestID: draft.requestID)
+        var send = NewChatSendTask()
+        let request = Task {
+            _ = try? await model.projects.createThread(projectID: "project", draft: draft,
+                                                       body: draft.text, deviceID: saved.credential.deviceId)
+            XCTAssertFalse(attempt.applies(to: model, hostID: host, draft: draft),
+                           "A response after navigation must not mutate the departed draft")
+        }
+        send.start(request)
+        for _ in 0..<200 {
+            if PairingDelayedResponse.delivery.isWaiting { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard PairingDelayedResponse.delivery.isWaiting else {
+            send.cancel()
+            XCTFail("The creation request did not reach the delayed response")
+            return
+        }
+        XCTAssertTrue(send.cancelAfterSaving(draft, hostID: host))
+        XCTAssertFalse(send.isActive)
+        PairingDelayedResponse.delivery.complete(Data(), status: 500)
+        await request.value
+        XCTAssertEqual(NewChatDraftStore.savedMessages(host: host).first?.requestID, draft.requestID)
+    }
+
+    // An exact Project link on the same Mac replaces the visible draft while
+    // the original creation request is held. Save its retry identity first,
+    // then cancel its task so the linked Project can send immediately.
+    @MainActor func testExactProjectLinkSavesHeldSendBeforeSwitchingDraft() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let saved = SavedConnection(origin: "https://pairing-recovery-unit.invalid", credential: Self.cameraSavedConnection().credential)
+        let host = saved.credential.hostInstallationId
+        defer {
+            PairingDelayedResponse.delivery.complete(Data(), status: 500)
+            NewChatDraftStore.remove(host: host)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PairingDelayedResponse.self]
+        let model = ConnectionModel(cameraFixtureStoreRoot: root, saved: saved,
+                                    api: PairingAPI(configuration: configuration), replayEnabled: false)
+        let linked = NewChatDraft(destination: .project(id: "linked-project"), text: "Linked draft words", family: .codex, model: "model")
+        XCTAssertTrue(NewChatDraftStore.save(linked, host: host))
+        var pending = NewChatDraft(destination: .project(id: "old-project"), text: "Pending original words", family: .codex, model: "model")
+        pending.submittedDeviceID = saved.credential.deviceId
+        pending.freeze()
+        XCTAssertTrue(NewChatDraftStore.save(pending, host: host))
+        var send = NewChatSendTask()
+        let oldGeneration = send.generation
+        let oldRequest = Task {
+            _ = try? await model.projects.createThread(projectID: "old-project", draft: pending,
+                                                       body: pending.text, deviceID: saved.credential.deviceId)
+        }
+        send.start(oldRequest)
+        for _ in 0..<200 {
+            if PairingDelayedResponse.delivery.isWaiting { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard PairingDelayedResponse.delivery.isWaiting else {
+            send.cancel()
+            XCTFail("The old Project request did not reach the delayed response")
+            return
+        }
+        XCTAssertTrue(send.cancelAfterSaving(pending, hostID: host))
+        XCTAssertFalse(send.isActive)
+        XCTAssertNotEqual(send.generation, oldGeneration)
+        XCTAssertEqual(NewChatDraftStore.savedMessages(host: host).first?.requestID, pending.requestID)
+        XCTAssertEqual(NewChatDraftStore.load(host: host, destination: .project(id: "linked-project")), linked)
+        let newGeneration = send.generation
+        let newRequest = Task { }
+        send.start(newRequest)
+        PairingDelayedResponse.delivery.complete(Data(), status: 422)
+        await oldRequest.value
+        XCTAssertFalse(send.finish(oldGeneration))
+        XCTAssertTrue(send.isActive)
+        await newRequest.value
+        XCTAssertTrue(send.finish(newGeneration))
+    }
 }
 
 private final class PairingDelayedDelivery: @unchecked Sendable {
@@ -2860,9 +3128,9 @@ private final class PairingDelayedDelivery: @unchecked Sendable {
     private var response: PairingDelayedResponse?
     var isWaiting: Bool { lock.withLock { response != nil } }
     func hold(_ value: PairingDelayedResponse) { lock.withLock { response = value } }
-    func complete(_ data: Data) {
+    func complete(_ data: Data, status: Int = 200) {
         let value = lock.withLock { let value = response; response = nil; return value }
-        value?.complete(data)
+        value?.complete(data, status: status)
     }
 }
 
@@ -2872,8 +3140,8 @@ private final class PairingDelayedResponse: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() { Self.delivery.hold(self) }
     override func stopLoading() { }
-    func complete(_ data: Data) {
-        guard let url = request.url, let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"]) else { return }
+    func complete(_ data: Data, status: Int = 200) {
+        guard let url = request.url, let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"]) else { return }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)

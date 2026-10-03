@@ -31,6 +31,8 @@ class HandoffTests(unittest.TestCase):
         self.control.parent.mkdir()
         self.requests = []
         self.ready = True
+        self.runtime_ready = True
+        self.runtime_reason = 'runtime_unavailable'
         self.redirect = False
         test = self
         class Host(BaseHTTPRequestHandler):
@@ -41,6 +43,10 @@ class HandoffTests(unittest.TestCase):
                 if self.path == '/healthz':
                     self.send_response(200); self.end_headers()
                     self.wfile.write(b'{"status":"ok"}')
+                elif self.path == '/readyz':
+                    self.send_response(200 if test.runtime_ready else 503); self.end_headers()
+                    self.wfile.write(json.dumps({'ready':test.runtime_ready,
+                        'reason':'ready' if test.runtime_ready else test.runtime_reason}).encode())
             def do_POST(self):
                 request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 test.assertEqual(self.headers['x-wonder-loopback-capability'],'private-capability')
@@ -84,6 +90,18 @@ class HandoffTests(unittest.TestCase):
             stop.assert_not_called(); launch.assert_not_called()
         self.assertEqual((self.app/'version').read_text(),'old')
 
+    def test_failed_stop_never_launches_another_old_host(self):
+        with patch.object(installer,'verify'), patch.object(installer,'verify_update'), \
+             patch.object(installer,'running_pids',return_value=[123]), \
+             patch.object(installer,'stop',side_effect=RuntimeError('Wonder has not stopped')) as stop, \
+             patch.object(installer,'launch') as launch:
+            with self.assertRaisesRegex(RuntimeError,'has not stopped'):
+                installer.install(self.source,self.app.parent)
+        stop.assert_called_once_with(self.app,[123])
+        launch.assert_not_called()
+        self.assertEqual((self.app/'version').read_text(),'old')
+        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in self.requests],['prepare','cancel'])
+
     def test_failed_replacement_rolls_back_cancels_and_relaunches(self):
         def verify(app):
             if app == self.app and (app/'version').read_text() == 'new':
@@ -107,7 +125,7 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(len(self.requests),1)
 
     def test_failed_replacement_health_restores_signed_previous_bundle(self):
-        def check_health(_origin):
+        def check_health(_origin, _baseline_reason):
             self.assertEqual((self.app/'version').read_text(),'new')
             raise RuntimeError('new host failed health check')
         with patch.object(installer,'verify'), patch.object(installer,'verify_update'), \
@@ -152,9 +170,49 @@ class HandoffTests(unittest.TestCase):
 
     def test_health_probe_rejects_unhealthy_and_redirected_host(self):
         installer.wait_for_health(f'http://127.0.0.1:{self.host.server_port}', timeout=1)
-        self.redirect = True
-        with self.assertRaisesRegex(RuntimeError,'did not become healthy'):
+        self.runtime_ready = False
+        with self.assertRaisesRegex(RuntimeError,'did not become ready'):
             installer.wait_for_health(f'http://127.0.0.1:{self.host.server_port}', timeout=.1)
+        self.runtime_ready = True
+        self.redirect = True
+        with self.assertRaisesRegex(RuntimeError,'did not become ready'):
+            installer.wait_for_health(f'http://127.0.0.1:{self.host.server_port}', timeout=.1)
+
+    def test_replacement_without_readiness_rolls_back(self):
+        check = installer.wait_for_health
+        def launch(_app):
+            self.runtime_ready = False
+        with patch.object(installer,'verify'), patch.object(installer,'verify_update'), \
+             patch.object(installer,'running_pids',return_value=[123]), \
+             patch.object(installer,'stop'), patch.object(installer,'launch',side_effect=launch), \
+             patch.object(installer,'wait_for_health',side_effect=lambda origin, baseline: check(origin, baseline, timeout=.1)):
+            with self.assertRaisesRegex(RuntimeError,'did not become ready'):
+                installer.install(self.source,self.app.parent)
+        self.assertEqual((self.app/'version').read_text(),'old')
+        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in self.requests],['prepare','cancel'])
+
+    def test_preexisting_provider_outage_does_not_reject_healthy_replacement(self):
+        self.runtime_ready = False
+        with patch.object(installer,'verify'), patch.object(installer,'verify_update'), \
+             patch.object(installer,'running_pids',return_value=[123]), \
+             patch.object(installer,'stop'), patch.object(installer,'launch'):
+            installer.install(self.source,self.app.parent)
+        self.assertEqual((self.app/'version').read_text(),'new')
+        self.assertEqual(len(self.requests),1)
+
+    def test_changed_degradation_rolls_back(self):
+        self.runtime_ready = False
+        check = installer.wait_for_health
+        def launch(_app):
+            self.runtime_reason = 'storage_unavailable'
+        with patch.object(installer,'verify'), patch.object(installer,'verify_update'), \
+             patch.object(installer,'running_pids',return_value=[123]), \
+             patch.object(installer,'stop'), patch.object(installer,'launch',side_effect=launch), \
+             patch.object(installer,'wait_for_health',side_effect=lambda origin, baseline: check(origin, baseline, timeout=.1)):
+            with self.assertRaisesRegex(RuntimeError,'did not become ready'):
+                installer.install(self.source,self.app.parent)
+        self.assertEqual((self.app/'version').read_text(),'old')
+        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in self.requests],['prepare','cancel'])
 
 
 if __name__ == '__main__': unittest.main()

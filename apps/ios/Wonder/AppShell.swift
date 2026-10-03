@@ -123,7 +123,12 @@ struct ChatShell: View {
                         .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
                         .toolbar(.hidden, for: .navigationBar)
                 } detail: {
-                    NavigationStack { ShellMain(library: library, shell: shell, showsSidebarButton: false) }
+                    NavigationStack {
+                        ShellMain(library: library, shell: shell,
+                                  sidebarButtonLabel: columns == .detailOnly ? "Show Chats" : "Hide Chats") {
+                            columns = columns == .detailOnly ? .all : .detailOnly
+                        }
+                    }
                 }
             } else {
                 PhoneDrawerLayout(library: library, shell: shell)
@@ -250,7 +255,11 @@ private struct PhoneDrawerLayout: View {
             let offset = min(0, max(-width, (shell.sidebarOpen ? 0 : -width) + drag))
             let progress = width > 0 ? 1 + offset / width : 0
             ZStack(alignment: .leading) {
-                NavigationStack { ShellMain(library: library, shell: shell, showsSidebarButton: true) }
+                NavigationStack {
+                    ShellMain(library: library, shell: shell, sidebarButtonLabel: "Open sidebar") {
+                        shell.sidebarOpen = true
+                    }
+                }
                     .accessibilityHidden(shell.sidebarOpen)
                     .allowsHitTesting(!shell.sidebarOpen)
                     .overlay(alignment: .leading) {
@@ -394,7 +403,8 @@ private struct ProjectOnboardingObserver: View {
 private struct ShellMain: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
-    let showsSidebarButton: Bool
+    let sidebarButtonLabel: String
+    let sidebarAction: () -> Void
     @AccessibilityFocusState private var sidebarButtonFocused: Bool
     @State private var creatingProjectHost: String?
     private var onNewChat: Bool { shell.route == .newChat }
@@ -423,13 +433,11 @@ private struct ShellMain: View {
             }
         }
         .toolbar {
-            if showsSidebarButton {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { shell.sidebarOpen = true } label: { Image(systemName: "line.3.horizontal") }
-                        .accessibilityLabel("Open sidebar")
-                        .accessibilityIdentifier("open-sidebar")
-                        .accessibilityFocused($sidebarButtonFocused)
-                }
+            ToolbarItem(placement: .topBarLeading) {
+                Button(action: sidebarAction) { Image(systemName: "line.3.horizontal") }
+                    .accessibilityLabel(sidebarButtonLabel)
+                    .accessibilityIdentifier("open-sidebar")
+                    .accessibilityFocused($sidebarButtonFocused)
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { plus() } label: { Image(systemName: onNewChat ? "folder.badge.plus" : "plus") }

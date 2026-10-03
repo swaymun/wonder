@@ -227,6 +227,7 @@ struct ProjectSubagentTranscriptView: View {
                 turn: entry.rows.first?.turnId.flatMap { turns[$0] },
                 isLatestSegmentForTurn: lastActivityEntries.contains(entry.id),
                 isLatestActiveSegment: false,
+                isProjectConversation: true,
                 expanded: expanded.contains(entry.id)) {
                     if expanded.contains(entry.id) { expanded.remove(entry.id) }
                     else { expanded.insert(entry.id) }
@@ -319,6 +320,7 @@ struct ComputerDock: View {
 }
 
 struct FilesDock: View {
+    let isPresented: Bool
     let open: () -> Void
 
     var body: some View {
@@ -330,7 +332,9 @@ struct FilesDock: View {
         .buttonStyle(.plain)
         .accessibilityIdentifier("conversation-files-pill")
         .accessibilityLabel("Files")
-        .accessibilityHint("Browse this conversation's files and changes")
+        .accessibilityValue(isPresented ? "Open" : "Closed")
+        .accessibilityAddTraits(isPresented ? .isSelected : [])
+        .accessibilityHint(isPresented ? "Return to the conversation" : "Browse this conversation's files and changes")
     }
 }
 

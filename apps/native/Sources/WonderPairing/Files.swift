@@ -9,16 +9,21 @@ public struct ArtifactAnnotation: Codable, Sendable, Equatable {
     public static let mimeType = "application/vnd.wonder.artifact-annotation+json"
     public enum Anchor: Codable, Sendable, Equatable {
         case textLines(startLine: Int, endLine: Int)
+        /// UTF-8 byte offsets into the pinned source, with an exclusive end.
+        case textRange(startByte: Int, endByte: Int)
         case imageRegion(x: Double, y: Double, width: Double, height: Double)
         case pdfRegion(page: Int, x: Double, y: Double, width: Double, height: Double)
 
-        private enum CodingKeys: String, CodingKey { case kind, startLine, endLine, page, x, y, width, height }
+        private enum CodingKeys: String, CodingKey { case kind, startLine, endLine, startByte, endByte, page, x, y, width, height }
         public init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
             switch try values.decode(String.self, forKey: .kind) {
             case "textLines":
                 self = .textLines(startLine: try values.decode(Int.self, forKey: .startLine),
                                   endLine: try values.decode(Int.self, forKey: .endLine))
+            case "textRange":
+                self = .textRange(startByte: try values.decode(Int.self, forKey: .startByte),
+                                  endByte: try values.decode(Int.self, forKey: .endByte))
             case "imageRegion":
                 self = .imageRegion(x: try values.decode(Double.self, forKey: .x),
                                     y: try values.decode(Double.self, forKey: .y),
@@ -41,6 +46,10 @@ public struct ArtifactAnnotation: Codable, Sendable, Equatable {
                 try values.encode("textLines", forKey: .kind)
                 try values.encode(start, forKey: .startLine)
                 try values.encode(end, forKey: .endLine)
+            case .textRange(let start, let end):
+                try values.encode("textRange", forKey: .kind)
+                try values.encode(start, forKey: .startByte)
+                try values.encode(end, forKey: .endByte)
             case .imageRegion(let x, let y, let width, let height):
                 try values.encode("imageRegion", forKey: .kind)
                 try values.encode(x, forKey: .x); try values.encode(y, forKey: .y)
@@ -73,6 +82,26 @@ public struct ArtifactAnnotation: Codable, Sendable, Equatable {
         guard let text = String(data: source, encoding: .utf8) else { throw FileFailure.integrity }
         let lines = max(1, text.split(separator: "\n", omittingEmptySubsequences: false).count - (text.hasSuffix("\n") ? 1 : 0))
         try validate(sourceLineCount: lines)
+    }
+
+    public init(projectId: String, conversationId: String, rootId: String, path: String,
+                source: Data, mimeType: String, startByte: Int, endByte: Int, note: String) throws {
+        guard Self.isTextFormat(mimeType), startByte >= 0, endByte > startByte,
+              endByte <= source.count, String(data: source, encoding: .utf8) != nil,
+              String(data: source.subdata(in: startByte..<endByte), encoding: .utf8) != nil
+        else { throw FileFailure.integrity }
+        version = 1
+        self.projectId = projectId; self.conversationId = conversationId
+        self.rootId = rootId; self.path = path
+        sourceSha256 = ConversationFile.digest(source)
+        anchor = .textRange(startByte: startByte, endByte: endByte)
+        self.note = note
+        try validate()
+    }
+
+    private static func isTextFormat(_ mimeType: String) -> Bool {
+        (mimeType.hasPrefix("text/") && mimeType != "text/html") ||
+        ["application/json", "application/yaml", "application/xml", "application/sql"].contains(mimeType)
     }
 
     public init(projectId: String, conversationId: String, rootId: String, path: String,
@@ -119,6 +148,8 @@ public struct ArtifactAnnotation: Codable, Sendable, Equatable {
         switch anchor {
         case .textLines(let start, let end):
             guard start > 0, end >= start, sourceLineCount.map({ end <= $0 }) ?? true else { throw FileFailure.integrity }
+        case .textRange(let start, let end):
+            guard start >= 0, end > start else { throw FileFailure.integrity }
         case .imageRegion(let x, let y, let width, let height):
             guard Self.validRegion(x, y, width, height) else { throw FileFailure.integrity }
         case .pdfRegion(let page, let x, let y, let width, let height):

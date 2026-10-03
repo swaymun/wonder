@@ -153,7 +153,6 @@ apps/menubar/Sources/WonderMenu/Permissions.swift
 apps/menubar/Sources/WonderMenu/PrivacySettings.swift
 apps/menubar/Sources/WonderMenu/ServiceControls.swift
 apps/menubar/Sources/WonderMenu/Setup.swift
-apps/menubar/Tests/WonderMenuTests/ComputerFoldersTests.swift
 apps/menubar/Tests/WonderMenuTests/MenuReadinessStateTests.swift
 apps/menubar/Tests/WonderMenuTests/NativeBridgeTests.swift
 apps/menubar/Tests/WonderMenuTests/PairingMenuTests.swift

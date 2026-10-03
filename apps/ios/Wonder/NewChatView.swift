@@ -170,6 +170,7 @@ struct NewChatView: View {
     @State private var hostID: String?
     @State private var draft = NewChatDraft()
     @State private var sending = false
+    @State private var sendTask = NewChatSendTask()
     @State private var failure: String?
     @State private var addingProject = false
     @State private var pairing = false
@@ -195,7 +196,7 @@ struct NewChatView: View {
                         linkedProjectRecovery(model)
                     } else {
                         NewChatContent(library: library, shell: shell, model: model, projects: model.projects,
-                                       hostID: $hostID, draft: $draft, sending: $sending, failure: $failure,
+                                       hostID: $hostID, draft: $draft, sending: $sending, sendTask: $sendTask, failure: $failure,
                                        addingProject: $addingProject, pairing: $pairing,
                                        linkedProjectID: $linkedProjectID)
                     }
@@ -208,6 +209,12 @@ struct NewChatView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: restore)
         .onChange(of: hostID, initial: true) { _, host in shell.draftHost = host }
+        .onChange(of: model.map(ObjectIdentifier.init)) { previous, current in
+            guard previous != current else { return }
+            sendTask.cancel()
+            sending = false
+            failure = nil
+        }
         .onChange(of: shell.newChatRequest) { _, request in apply(request) }
         .onChange(of: library.saved.connections.map(\.credential.hostInstallationId)) { _, hosts in
             if let hostID, !hosts.contains(hostID), linkedProjectID == nil {
@@ -229,7 +236,11 @@ struct NewChatView: View {
             let saved = NewChatDraftStore.save(savedDraft, host: host)
             if !saved, !Task.isCancelled { failure = "Your draft could not be saved. Free some storage before leaving this chat." }
         }
-        .onDisappear { if let hostID { NewChatDraftStore.save(draft, host: hostID) } }
+        .onDisappear {
+            if let hostID { NewChatDraftStore.save(draft, host: hostID) }
+            sendTask.cancel()
+            sending = false
+        }
         .onReceive(NotificationCenter.default.publisher(for: .newChatDictationInserted)) { notification in
             guard let hostID, notification.object as? String == hostID,
                   let saved = NewChatDraftStore.load(host: hostID), saved.requestID == draft.requestID else { return }
@@ -352,13 +363,15 @@ struct NewChatView: View {
             // attachments from another Mac or project into the linked target.
             let destination = ChatDestination.project(id: id)
             if host != hostID || draft.destination != destination {
-                if let hostID, !NewChatDraftStore.save(draft, host: hostID) {
+                if !sendTask.cancelAfterSaving(draft, hostID: hostID) {
                     linkedProjectID = id
                     pendingLinkedRequest = request
                     failure = "Your draft could not be saved. Free some storage and try again."
                     shell.newChatRequest = nil
                     return
                 }
+                sending = false
+                failure = nil
                 hostID = host
                 draft = NewChatDraftStore.load(host: host, destination: destination)
                     ?? NewChatDraft(destination: destination)
@@ -370,7 +383,10 @@ struct NewChatView: View {
             shell.newChatRequest = nil
             return
         }
-        if let host = request.host, host != hostID { switchHost(host) }
+        if let host = request.host, host != hostID, !switchHost(host) {
+            shell.newChatRequest = nil
+            return
+        }
         linkedProjectID = nil
         pendingLinkedRequest = nil
         linkedProjectChecked = false
@@ -385,13 +401,18 @@ struct NewChatView: View {
         return nil
     }
 
-    private func switchHost(_ host: String) {
-        guard host != hostID else { return }
-        if let hostID { NewChatDraftStore.save(draft, host: hostID) }
+    private func switchHost(_ host: String) -> Bool {
+        guard host != hostID else { return true }
+        guard sendTask.cancelAfterSaving(draft, hostID: hostID) else {
+            failure = "Your draft could not be saved. Free some storage and try again."
+            return false
+        }
+        sending = false
         draft = NewChatDraft.switching(from: draft, toSaved: NewChatDraftStore.load(host: host))
         hostID = host
         NewChatDraftStore.lastHost = host
         failure = nil
+        return true
     }
 }
 
@@ -407,6 +428,47 @@ private struct ProjectRouteGate<Content: View>: View {
     var body: some View { content() }
 }
 
+/// A send can outlive the view's pairing, including when a replacement uses the
+/// same Mac and the draft still has the same request ID.
+@MainActor struct NewChatSendAttempt {
+    let scope: String
+    let hostID: String
+    let requestID: String
+
+    func applies(to model: ConnectionModel, hostID: String?, draft: NewChatDraft) -> Bool {
+        scope == model.assignmentScope && !model.accessEnded && hostID == self.hostID &&
+            draft.requestID == requestID && !Task.isCancelled
+    }
+}
+
+/// The view releases its send control immediately when its paired model changes.
+/// Finishing a cancelled request cannot release a newer send's control.
+@MainActor struct NewChatSendTask {
+    private(set) var generation = UUID()
+    private(set) var task: Task<Void, Never>?
+    var isActive: Bool { task != nil }
+
+    mutating func start(_ task: Task<Void, Never>) {
+        guard self.task == nil else { task.cancel(); return }
+        self.task = task
+    }
+    mutating func cancel() {
+        generation = UUID()
+        task?.cancel()
+        task = nil
+    }
+    mutating func cancelAfterSaving(_ draft: NewChatDraft, hostID: String?) -> Bool {
+        if let hostID, !NewChatDraftStore.save(draft, host: hostID) { return false }
+        cancel()
+        return true
+    }
+    mutating func finish(_ expected: UUID) -> Bool {
+        guard generation == expected else { return false }
+        task = nil
+        return true
+    }
+}
+
 private struct NewChatContent: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
@@ -415,6 +477,7 @@ private struct NewChatContent: View {
     @Binding var hostID: String?
     @Binding var draft: NewChatDraft
     @Binding var sending: Bool
+    @Binding var sendTask: NewChatSendTask
     @Binding var failure: String?
     @Binding var addingProject: Bool
     @Binding var pairing: Bool
@@ -602,7 +665,7 @@ private struct NewChatContent: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("new-chat-pending-notice")
                     HStack {
-                        Button { Task { await send() } } label: { Text("Retry message").frame(minHeight: 44) }
+                        Button(action: startSend) { Text("Retry message").frame(minHeight: 44) }
                             .disabled(!canSend).accessibilityIdentifier("new-chat-retry")
                         Button(action: startNewDraft) { Text("New draft").frame(minHeight: 44) }
                             .accessibilityIdentifier("new-chat-start-new-draft")
@@ -686,7 +749,7 @@ private struct NewChatContent: View {
                             return true
                         })
                     if project != nil { projectSettings } else { Spacer(minLength: 0) }
-                    Button { Task { await send() } } label: {
+                    Button(action: startSend) {
                         if sending { ProgressView().frame(width: 44, height: 44) }
                         else { Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44) }
                     }
@@ -711,25 +774,37 @@ private struct NewChatContent: View {
 
     /// Where the chat goes, stacked and left-aligned above the composer.
     private var pickers: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: typeSize.isAccessibilitySize ? 4 : 0) {
             HStack(spacing: 0) { computerMenu.disabled(sending || draft.isSubmitted); Spacer(minLength: 0) }
             HStack(spacing: 0) { projectMenu.disabled(sending || draft.isSubmitted); Spacer(minLength: 0) }
-            HStack(spacing: 0) {
-                Button { showingComputer = true } label: { PickerRow(systemImage: "desktopcomputer", title: "View computer", showsChevron: false) }
-                    .buttonStyle(.plain).disabled(model.accessEnded)
-                    .accessibilityHint("Shows the screen of \(model.macName)")
-                    .accessibilityIdentifier("view-computer")
-                if projectFilesChat != nil {
-                    Button { showingFiles = true } label: { PickerRow(systemImage: "folder", title: "Files", showsChevron: false) }
-                        .buttonStyle(.plain).disabled(model.accessEnded)
-                        .accessibilityHint("Browse the selected project folder and changes")
-                        .accessibilityIdentifier("new-chat-files")
-                        .padding(.leading, 16)
+            if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 4) {
+                    viewComputerButton
+                    if projectFilesChat != nil { filesButton }
                 }
-                Spacer(minLength: 0)
+            } else {
+                HStack(spacing: 16) {
+                    viewComputerButton
+                    if projectFilesChat != nil { filesButton }
+                    Spacer(minLength: 0)
+                }
             }
         }
         .padding(.horizontal, 4)
+    }
+
+    private var viewComputerButton: some View {
+        Button { showingComputer = true } label: { PickerRow(systemImage: "desktopcomputer", title: "View computer", showsChevron: false) }
+            .buttonStyle(.plain).disabled(model.accessEnded)
+            .accessibilityHint("Shows the screen of \(model.macName)")
+            .accessibilityIdentifier("view-computer")
+    }
+
+    private var filesButton: some View {
+        Button { showingFiles = true } label: { PickerRow(systemImage: "folder", title: "Files", showsChevron: false) }
+            .buttonStyle(.plain).disabled(model.accessEnded)
+            .accessibilityHint("Browse the selected project folder and changes")
+            .accessibilityIdentifier("new-chat-files")
     }
 
     private var computerMenu: some View {
@@ -828,9 +903,13 @@ private struct NewChatContent: View {
 
     private func choose(host: String) {
         guard host != hostID else { return }
+        guard sendTask.cancelAfterSaving(draft, hostID: hostID) else {
+            failure = "Your draft could not be saved. Free some storage and try again."
+            return
+        }
+        sending = false
         linkedProjectID = nil
         model.dictation.captureControlsHidden(conversationID: draftChat.id)
-        if let hostID { NewChatDraftStore.save(draft, host: hostID) }
         draft = NewChatDraft.switching(from: draft, toSaved: NewChatDraftStore.load(host: host))
         hostID = host
         NewChatDraftStore.lastHost = host
@@ -995,12 +1074,19 @@ private struct NewChatContent: View {
         }
     }
 
-    private func send() async {
-        guard canSend, case .project(let projectID) = draft.destination, let hostID,
+    private func startSend() {
+        guard !sendTask.isActive else { return }
+        let generation = sendTask.generation
+        sendTask.start(Task { await send(generation: generation) })
+    }
+
+    private func send(generation: UUID) async {
+        defer { if sendTask.finish(generation) { sending = false } }
+        guard generation == sendTask.generation, canSend,
+              case .project(let projectID) = draft.destination, let hostID,
               let device = model.connection?.credential.deviceId else { return }
         sending = true; failure = nil
         let scope = model.assignmentScope
-        defer { sending = false }
         guard draft.submittedDeviceID == nil || draft.submittedDeviceID == device else {
             failure = "This request belongs to the previous pairing. Its delivery must be checked on your Mac before sending again."
             return
@@ -1016,61 +1102,63 @@ private struct NewChatContent: View {
         }
         let body = draft.submittedBody ?? draft.text
         let request = draft.requestID
+        let attempt = NewChatSendAttempt(scope: scope, hostID: hostID, requestID: request)
         let descriptors = draft.attachments ?? []
         let files: [StagedFile]
         do { files = try await Task.detached { try NewChatDraftStore.files(descriptors) }.value }
         catch {
-            guard scope == model.assignmentScope, self.hostID == hostID,
-                  request == draft.requestID, !Task.isCancelled else { return }
+            guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
             if draft.preparedConversationID == nil { rejectSubmission(host: hostID) }
             failure = "A saved attachment is unavailable. Remove it and attach the file again."
             return
         }
-        guard scope == model.assignmentScope, self.hostID == hostID, request == draft.requestID,
-              !model.accessEnded, !Task.isCancelled else { return }
+        guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
         do {
             let conversation: String
             if let prepared = draft.preparedConversationID { conversation = prepared }
             else {
                 let response = try await projects.createThread(projectID: projectID, draft: draft, body: body, deviceID: device)
-                guard scope == model.assignmentScope, self.hostID == hostID,
-                      request == draft.requestID, !Task.isCancelled else { return }
+                guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
                 guard let created = response.conversation.conversationId else { throw PairingFailure.response(500) }
                 conversation = created
                 draft.preparedConversationID = created
                 NewChatDraftStore.save(draft, host: hostID)
             }
             let detail = try await projects.loadDetail(conversation)
-            guard scope == model.assignmentScope, self.hostID == hostID,
-                  request == draft.requestID, !Task.isCancelled else { return }
+            guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
             let chat = model.projectChat(detail)
             try await model.prepareCreation(chat, body: body, requestID: draft.requestID, files: files)
-            guard scope == model.assignmentScope, self.hostID == hostID,
-                  request == draft.requestID, !Task.isCancelled else { return }
+            guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
             guard let next = NewChatDraftStore.complete(draft, host: hostID) else {
                 failure = "Your message is saved, but the new draft could not be saved. Free some storage and retry this message."
                 return
             }
             draft = next
+            // Delivery now belongs to the connection model's durable intent;
+            // leaving New Chat must not cancel it or reopen this screen later.
+            let deliveryModel = model
+            Task { await deliveryModel.deliver(chat) }
             shell.open(host: hostID, conversation: conversation)
-            await model.deliver(chat)
         } catch PairingFailure.response(412) {
-            guard request == draft.requestID, self.hostID == hostID else { return }
+            guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
             rejectSubmission(host: hostID)
+            let visibleRequest = draft.requestID
             await projects.refresh()
+            guard scope == model.assignmentScope, !model.accessEnded, self.hostID == hostID,
+                  draft.requestID == visibleRequest, !Task.isCancelled else { return }
             failure = "The project's folders changed. Review the working folder and send again."
         } catch PairingFailure.response(409) {
-            guard request == draft.requestID, self.hostID == hostID else { return }
+            guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
             failure = "This request conflicts with the saved thread or its folder. Check the project on your Mac, then retry this same request."
         } catch PairingFailure.response(422) {
-            guard request == draft.requestID, self.hostID == hostID else { return }
+            guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
             rejectSubmission(host: hostID)
             failure = "This project, model or access choice can’t be used. Check them and send again."
         } catch PairingFailure.response(503) {
-            guard request == draft.requestID, self.hostID == hostID else { return }
+            guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
             failure = "\(model.macName) isn’t ready yet. Send again in a moment to check the same request."
         } catch {
-            guard request == draft.requestID, self.hostID == hostID, !Task.isCancelled else { return }
+            guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
             failure = "Your Mac didn’t confirm the new thread. Send again to retry the same request; it won’t start twice."
         }
     }
@@ -1118,12 +1206,18 @@ struct PickerRow: View {
     let systemImage: String
     let title: String
     var showsChevron = true
+    @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: systemImage).foregroundStyle(.secondary).frame(width: 22)
-            Text(title).foregroundStyle(.primary).lineLimit(1)
+        HStack(spacing: typeSize.isAccessibilitySize ? 12 : 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: typeSize.isAccessibilitySize ? 28 : 17))
+                .foregroundStyle(.secondary)
+                .frame(width: typeSize.isAccessibilitySize ? 36 : 22)
+            Text(title).foregroundStyle(.primary).lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
             if showsChevron {
-                Image(systemName: "chevron.up.chevron.down").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(typeSize.isAccessibilitySize ? .system(size: 18, weight: .semibold) : .caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
             }
         }
         .font(.callout)

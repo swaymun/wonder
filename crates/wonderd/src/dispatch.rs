@@ -1,7 +1,45 @@
 //! Durable direct Bot sends. The database is the queue; HTTP does not own a task.
 use crate::{AppState, DeliveryState};
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+type ReceiptScans = Arc<Mutex<HashMap<String, BotReceiptScan>>>;
+const RECEIPT_PAGES_PER_CYCLE: usize = 20;
+const RECEIPT_HISTORY_PAGE_LIMIT: usize = 10_000;
+const RECEIPT_RESCAN_DELAY: Duration = Duration::from_secs(60);
+
+struct BotReceiptScan {
+    thread_id: String,
+    client_message_id: String,
+    cursor: Option<String>,
+    seen: HashSet<String>,
+    pages_scanned: usize,
+    resume_after: Instant,
+}
+
+impl BotReceiptScan {
+    fn new(message: &wonder_store::StoredMessage) -> Self {
+        Self {
+            thread_id: message.codex_thread_id.clone().unwrap_or_default(),
+            client_message_id: message.client_message_id.clone(),
+            cursor: None,
+            seen: HashSet::new(),
+            pages_scanned: 0,
+            resume_after: Instant::now(),
+        }
+    }
+
+    fn reset_after(&mut self, delay: Duration) {
+        self.cursor = None;
+        self.seen.clear();
+        self.pages_scanned = 0;
+        self.resume_after = Instant::now() + delay;
+    }
+}
 
 pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx::Error> {
     state.store.recover_dispatch_claims().await?;
@@ -9,12 +47,18 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
     Ok(tokio::spawn(async move {
         let mut groups = tokio::task::JoinSet::new();
         let mut goal_checks = tokio::task::JoinSet::new();
+        let mut project_recovery = tokio::task::JoinSet::new();
+        let mut bot_recovery = tokio::task::JoinSet::new();
         let mut next_goal_check = tokio::time::Instant::now();
         let mut next_project_recovery = tokio::time::Instant::now();
+        let mut next_bot_recovery = tokio::time::Instant::now();
+        let bot_receipt_scans: ReceiptScans = Arc::default();
         let mut next_update_recovery = tokio::time::Instant::now();
         loop {
             while groups.try_join_next().is_some() {}
             while goal_checks.try_join_next().is_some() {}
+            while project_recovery.try_join_next().is_some() {}
+            while bot_recovery.try_join_next().is_some() {}
             if goal_checks.is_empty() && tokio::time::Instant::now() >= next_goal_check {
                 let goal_state = state.clone();
                 goal_checks
@@ -50,13 +94,30 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
                     );
                 }
             }
-            // Reconciliation must also run when a blocked notification queue
-            // prevents new sends. Exact native history is still safe to read.
-            if tokio::time::Instant::now() >= next_project_recovery {
-                crate::projects::recover(&state).await;
+            drop(_admission);
+            // Native history can span many pages. Keep these reads outside
+            // update admission and dispatch; recheck each receipt under both
+            // locks before applying an observation.
+            if bot_recovery.is_empty() && tokio::time::Instant::now() >= next_bot_recovery {
+                let recovery_state = state.clone();
+                let scans = bot_receipt_scans.clone();
+                bot_recovery.spawn(async move {
+                    if let Err(error) = recover_bot_receipts(&recovery_state, &scans).await {
+                        let _ = recovery_state.logger.record(
+                            "error",
+                            "bot_receipt_recovery_failed",
+                            json!({"error":error}),
+                        );
+                    }
+                });
+                next_bot_recovery = tokio::time::Instant::now() + Duration::from_secs(5);
+            }
+            if project_recovery.is_empty() && tokio::time::Instant::now() >= next_project_recovery {
+                let recovery_state = state.clone();
+                project_recovery
+                    .spawn(async move { crate::projects::recover(&recovery_state).await });
                 next_project_recovery = tokio::time::Instant::now() + Duration::from_secs(5);
             }
-            drop(_admission);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }))
@@ -87,38 +148,6 @@ async fn tick(state: &AppState) -> Result<(), String> {
             .recover_direct_dispatch_claims()
             .await
             .map_err(|e| e.to_string())?;
-        drop(_guard);
-        for message in state
-            .store
-            .ambiguous_dispatch_messages()
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            if !message_ready(state, &message).await {
-                continue;
-            }
-            if let Some(turn_id) = find_accepted_turn(state, &message).await? {
-                state
-                    .store
-                    .update_message_delivery(
-                        &message.id,
-                        "accepted_by_codex",
-                        message.codex_thread_id.as_deref(),
-                        Some(&turn_id),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                state.ingestion.request_reconciliation();
-                crate::publish_message_state(
-                    state,
-                    &message,
-                    DeliveryState::AcceptedByCodex,
-                    message.codex_thread_id.as_deref(),
-                    Some(&turn_id),
-                )
-                .await;
-            }
-        }
     }
     for (message, turn) in state
         .store
@@ -148,6 +177,154 @@ async fn tick(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+async fn recover_bot_receipts(state: &AppState, scans: &ReceiptScans) -> Result<(), String> {
+    let messages = state
+        .store
+        .ambiguous_dispatch_messages()
+        .await
+        .map_err(|e| e.to_string())?;
+    let ids = messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<HashSet<_>>();
+    scans
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|id, _| ids.contains(id.as_str()));
+    for message in messages {
+        if state.update_admission.work_paused() {
+            return Ok(());
+        }
+        if crate::projects::is_project(state, &message.conversation_id).await
+            || !message_ready(state, &message).await
+        {
+            continue;
+        }
+        let mut scan = scans
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&message.id)
+            .filter(|scan| {
+                scan.thread_id == message.codex_thread_id.as_deref().unwrap_or_default()
+                    && scan.client_message_id == message.client_message_id
+            })
+            .unwrap_or_else(|| BotReceiptScan::new(&message));
+        if scan.resume_after > Instant::now() {
+            scans
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(message.id.clone(), scan);
+            continue;
+        }
+        // Resume/setup can change native runtime state, so it stays behind
+        // update admission. Only the potentially long history read runs free.
+        let runtime = {
+            let Some(_admission) = state.update_admission.claim_guard().await else {
+                scans
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(message.id.clone(), scan);
+                return Ok(());
+            };
+            prepare_bot_receipt_runtime(state, &message).await
+        };
+        let runtime = match runtime {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                scan.reset_after(RECEIPT_RESCAN_DELAY);
+                scans
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(message.id.clone(), scan);
+                let _ = state.logger.record(
+                    "error",
+                    "bot_receipt_runtime_failed",
+                    json!({"error":error,"message_id":message.id}),
+                );
+                continue;
+            }
+        };
+        let Some(runtime) = runtime else {
+            scans
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(message.id.clone(), scan);
+            continue;
+        };
+        let found = scan_bot_receipt_pages(
+            state,
+            &message,
+            &runtime,
+            &mut scan,
+            RECEIPT_PAGES_PER_CYCLE,
+        )
+        .await;
+        let Some(turn_id) = (match found {
+            Ok(turn) => turn,
+            Err(error) => {
+                scan.reset_after(RECEIPT_RESCAN_DELAY);
+                let _ = state.logger.record(
+                    "error",
+                    "bot_receipt_history_failed",
+                    json!({"error":error,"message_id":message.id}),
+                );
+                None
+            }
+        }) else {
+            scans
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(message.id.clone(), scan);
+            continue;
+        };
+        let Some(_admission) = state.update_admission.claim_guard().await else {
+            scans
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(message.id.clone(), scan);
+            return Ok(());
+        };
+        let _dispatch = state.dispatch_lock.lock().await;
+        let current = state
+            .store
+            .ambiguous_dispatch_messages()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !current.iter().any(|current| {
+            current.id == message.id
+                && current.conversation_id == message.conversation_id
+                && current.client_message_id == message.client_message_id
+                && current.codex_thread_id == message.codex_thread_id
+        }) {
+            continue;
+        }
+        state
+            .store
+            .update_message_delivery(
+                &message.id,
+                "accepted_by_codex",
+                message.codex_thread_id.as_deref(),
+                Some(&turn_id),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        state.ingestion.request_reconciliation();
+        crate::publish_message_state(
+            state,
+            &message,
+            DeliveryState::AcceptedByCodex,
+            message.codex_thread_id.as_deref(),
+            Some(&turn_id),
+        )
+        .await;
+        scans
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&message.id);
+    }
+    Ok(())
+}
+
 pub(crate) async fn find_accepted_turn(
     state: &AppState,
     message: &wonder_store::StoredMessage,
@@ -155,6 +332,22 @@ pub(crate) async fn find_accepted_turn(
     if crate::projects::is_project(state, &message.conversation_id).await {
         return crate::projects::find_accepted_turn(state, message).await;
     }
+    let runtime = {
+        let Some(_admission) = state.update_admission.claim_guard().await else {
+            return Ok(None);
+        };
+        prepare_bot_receipt_runtime(state, message).await?
+    };
+    let Some(runtime) = runtime else {
+        return Ok(None);
+    };
+    scan_bot_receipt(state, message, &runtime).await
+}
+
+async fn prepare_bot_receipt_runtime(
+    state: &AppState,
+    message: &wonder_store::StoredMessage,
+) -> Result<Option<wonder_app_server::RpcClient>, String> {
     let Some(thread_id) = message.codex_thread_id.as_deref() else {
         return Ok(None);
     };
@@ -206,40 +399,77 @@ pub(crate) async fn find_accepted_turn(
         }
         runtime
     };
+    Ok(Some(runtime))
+}
 
-    let mut cursor = None;
-    let mut seen = std::collections::HashSet::new();
-    for _ in 0..10_000 {
-        let mut params = json!({"threadId":thread_id,"limit":100});
-        if let Some(value) = cursor.take() {
-            params["cursor"] = value;
+async fn scan_bot_receipt(
+    state: &AppState,
+    message: &wonder_store::StoredMessage,
+    runtime: &wonder_app_server::RpcClient,
+) -> Result<Option<String>, String> {
+    let mut scan = BotReceiptScan::new(message);
+    scan_bot_receipt_pages(
+        state,
+        message,
+        runtime,
+        &mut scan,
+        RECEIPT_HISTORY_PAGE_LIMIT,
+    )
+    .await
+}
+
+async fn scan_bot_receipt_pages(
+    state: &AppState,
+    message: &wonder_store::StoredMessage,
+    runtime: &wonder_app_server::RpcClient,
+    scan: &mut BotReceiptScan,
+    budget: usize,
+) -> Result<Option<String>, String> {
+    let Some(thread_id) = message.codex_thread_id.as_deref() else {
+        return Ok(None);
+    };
+    for _ in 0..budget.min(RECEIPT_HISTORY_PAGE_LIMIT.saturating_sub(scan.pages_scanned)) {
+        if state.update_admission.work_paused() {
+            return Ok(None);
+        }
+        let mut params = json!({"threadId":thread_id,"limit":100,"sortDirection":"desc"});
+        if let Some(value) = scan.cursor.as_deref() {
+            params["cursor"] = json!(value);
         }
         let response = runtime
             .request("thread/items/list", params)
             .await
             .map_err(|e| e.to_string())?;
         if response.error.is_some() {
+            scan.reset_after(RECEIPT_RESCAN_DELAY);
             return Ok(None);
         }
         let Some(result) = response.result else {
+            scan.reset_after(RECEIPT_RESCAN_DELAY);
             return Ok(None);
         };
         if let Some(turn_id) = crate::find_client_message(&result, &message.client_message_id) {
             return Ok(Some(turn_id));
         }
-        cursor = result
+        scan.pages_scanned += 1;
+        scan.cursor = result
             .get("nextCursor")
             .and_then(Value::as_str)
-            .map(|s| json!(s));
-        if cursor
+            .map(str::to_owned);
+        if scan
+            .cursor
             .as_ref()
-            .is_some_and(|value| !seen.insert(value.to_string()))
+            .is_some_and(|value| !scan.seen.insert(value.clone()))
         {
             return Err("History repeated a continuation cursor".into());
         }
-        if cursor.is_none() {
+        if scan.cursor.is_none() {
+            scan.reset_after(RECEIPT_RESCAN_DELAY);
             return Ok(None);
         }
+    }
+    if scan.pages_scanned >= RECEIPT_HISTORY_PAGE_LIMIT {
+        scan.reset_after(RECEIPT_RESCAN_DELAY);
     }
     // Absence, incomplete history, or an unsupported identity field proves
     // nothing about execution. Never redispatch an unknown outcome.
@@ -567,6 +797,335 @@ mod tests {
             .unwrap()
             .lines()
             .any(|l| l == "turn/start"));
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn held_bot_receipt_read_allows_update_without_publishing_stale_state() {
+        let (dir, state) = crate::ingestion::tests::fixture().await;
+        let message = enqueue(&state, "held-receipt", true).await;
+        assert!(state
+            .store
+            .claim_message_for_dispatch(&message.id)
+            .await
+            .unwrap());
+        state
+            .store
+            .begin_dispatch_submission(&message.id, "thread")
+            .await
+            .unwrap();
+        state
+            .store
+            .bind_runtime(
+                &message.conversation_id,
+                wonder_store::AgentFamily::Codex,
+                "thread",
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+        state.store.recover_dispatch_claims().await.unwrap();
+        std::fs::write(
+            dir.path().join("accepted-client"),
+            &message.client_message_id,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("delay-history"), "").unwrap();
+        let _ingestion = crate::ingestion::spawn(state.clone()).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !state.ingestion.readiness(&state.store).await.ready {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let dispatcher = spawn(state.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !dir.path().join("history-waiting").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| {
+            let requests = std::fs::read_to_string(dir.path().join("requests-jsonl"));
+            let logs = std::fs::read_to_string(dir.path().join("logs/test.jsonl"));
+            panic!("{error}: requests {requests:?}; logs {logs:?}");
+        });
+        let update_state = state.clone();
+        let preparing = tokio::spawn(async move {
+            update_state
+                .update_admission
+                .prepare_update("held-bot-receipt", &update_state)
+                .await
+        });
+        let admitted = tokio::time::timeout(Duration::from_secs(1), async {
+            while !state.update_admission.work_paused() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        std::fs::remove_file(dir.path().join("delay-history")).unwrap();
+        if admitted.is_err() {
+            preparing.abort();
+            dispatcher.abort();
+            panic!("Bot history blocked update admission");
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), preparing)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(())
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let saved = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, "uncertain");
+        assert!(
+            state
+                .update_admission
+                .cancel_lease("held-bot-receipt")
+                .await
+        );
+        dispatcher.abort();
+        let _ = dispatcher.await;
+        recover_bot_receipts(&state, &Arc::default()).await.unwrap();
+        let saved = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, "accepted_by_codex");
+        assert_eq!(saved.codex_turn_id.as_deref(), Some("turn"));
+        let requests = std::fs::read_to_string(dir.path().join("requests")).unwrap();
+        assert!(!requests.lines().any(|method| method == "turn/start"));
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn absent_bot_receipt_backs_off_without_resending() {
+        let (dir, state) = crate::ingestion::tests::fixture().await;
+        let message = enqueue(&state, "absent-receipt", true).await;
+        assert!(state
+            .store
+            .claim_message_for_dispatch(&message.id)
+            .await
+            .unwrap());
+        state
+            .store
+            .begin_dispatch_submission(&message.id, "thread")
+            .await
+            .unwrap();
+        state
+            .store
+            .bind_runtime(
+                &message.conversation_id,
+                wonder_store::AgentFamily::Codex,
+                "thread",
+                None,
+                "now",
+            )
+            .await
+            .unwrap();
+        state.store.recover_dispatch_claims().await.unwrap();
+        let _ingestion = crate::ingestion::spawn(state.clone()).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !state.ingestion.readiness(&state.store).await.ready {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let scans: ReceiptScans = Arc::default();
+        recover_bot_receipts(&state, &scans).await.unwrap();
+        recover_bot_receipts(&state, &scans).await.unwrap();
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        assert_eq!(
+            requests
+                .lines()
+                .filter(
+                    |line| serde_json::from_str::<Value>(line).unwrap()["method"]
+                        == "thread/items/list"
+                )
+                .count(),
+            1
+        );
+        assert!(requests.lines().any(|line| {
+            let request = serde_json::from_str::<Value>(line).unwrap();
+            request["method"] == "thread/items/list" && request["params"]["sortDirection"] == "desc"
+        }));
+        assert!(requests.lines().all(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"] != "turn/start"
+        }));
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "uncertain"
+        );
+        std::fs::write(
+            dir.path().join("accepted-client"),
+            &message.client_message_id,
+        )
+        .unwrap();
+        scans
+            .lock()
+            .unwrap()
+            .get_mut(&message.id)
+            .unwrap()
+            .resume_after = Instant::now();
+        recover_bot_receipts(&state, &scans).await.unwrap();
+        let saved = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.state, "accepted_by_codex");
+        assert_eq!(saved.codex_turn_id.as_deref(), Some("turn"));
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn long_bot_receipt_yields_to_later_receipt_and_resumes_its_cursor() {
+        let (dir, state) = crate::ingestion::tests::fixture().await;
+        let old = enqueue(&state, "old-receipt", true).await;
+        let MessageInsert::Inserted(newer) = state
+            .store
+            .insert_dispatch_message(
+                "owner",
+                "new-receipt",
+                "hello",
+                "hash",
+                "automation:bot",
+                &[],
+                "now",
+                true,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("insert")
+        };
+        for (message, thread) in [(&old, "thread"), (&newer, "new-thread")] {
+            assert!(state
+                .store
+                .claim_message_for_dispatch(&message.id)
+                .await
+                .unwrap());
+            state
+                .store
+                .begin_dispatch_submission(&message.id, thread)
+                .await
+                .unwrap();
+            state
+                .store
+                .bind_runtime(
+                    &message.conversation_id,
+                    wonder_store::AgentFamily::Codex,
+                    thread,
+                    None,
+                    "now",
+                )
+                .await
+                .unwrap();
+        }
+        state.store.recover_dispatch_claims().await.unwrap();
+        let pool = sqlx::SqlitePool::connect(&format!(
+            "sqlite://{}",
+            dir.path().join("state.db").display()
+        ))
+        .await
+        .unwrap();
+        for (message, when) in [(&old, "2000-01-01"), (&newer, "2000-01-02")] {
+            sqlx::query("UPDATE messages SET created_at=? WHERE id=?")
+                .bind(when)
+                .bind(&message.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        std::fs::write(dir.path().join("long-history"), "").unwrap();
+        std::fs::write(dir.path().join("accepted-client"), &newer.client_message_id).unwrap();
+        let script_path = dir.path().join("runtime.py");
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        let marker = "elif method == 'thread/items/list':\n        if os.path.exists(root + '/long-history'):";
+        let position = script.rfind(marker).unwrap();
+        let mut script = script;
+        script.replace_range(
+            position..position + marker.len(),
+            "elif method == 'thread/items/list':\n        if os.path.exists(root + '/long-history') and r.get('params',{}).get('threadId') == 'thread':",
+        );
+        std::fs::write(&script_path, script).unwrap();
+        state
+            .app_server
+            .lock()
+            .await
+            .restart(state.launch_config.lock().await.clone())
+            .await
+            .unwrap();
+        let _ingestion = crate::ingestion::spawn(state.clone()).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !state.ingestion.readiness(&state.store).await.ready {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let scans: ReceiptScans = Arc::default();
+        recover_bot_receipts(&state, &scans).await.unwrap();
+        assert_eq!(scans.lock().unwrap()[&old.id].pages_scanned, 20);
+        assert_eq!(scans.lock().unwrap()[&old.id].cursor.as_deref(), Some("20"));
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&old.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "uncertain"
+        );
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&newer.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "accepted_by_codex"
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !message_ready(&state, &old).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        recover_bot_receipts(&state, &scans).await.unwrap();
+        assert_eq!(scans.lock().unwrap()[&old.id].pages_scanned, 40);
+        assert_eq!(scans.lock().unwrap()[&old.id].cursor.as_deref(), Some("40"));
+        let requests = std::fs::read_to_string(dir.path().join("requests-jsonl")).unwrap();
+        assert!(requests.lines().any(|line| {
+            let request: Value = serde_json::from_str(line).unwrap();
+            request["method"] == "thread/items/list"
+                && request["params"]["threadId"] == "thread"
+                && request["params"]["cursor"] == "20"
+        }));
+        assert!(!requests.lines().any(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["method"] == "turn/start"
+        }));
         state.app_server.lock().await.shutdown().await.unwrap();
     }
 }

@@ -36,11 +36,12 @@ development-to-development upgrade does not prove permission retention across
 that signing transition. Do not edit TCC databases to claim a pass.
 
 For an in-place signed update, `install-signed-app.py` retains the previous
-bundle and requires the replacement host to answer `/healthz` after relaunch;
-it restores the previous bundle if launch or that health check fails. Keep the
-retained backup until the installed app also answers `/readyz` and its normal
-window, history and pairing have been checked. `/healthz` alone proves process
-startup, not provider readiness or user-data acceptance.
+bundle and requires the replacement host to answer `/healthz` after relaunch.
+It compares `/readyz` with the running host's pre-update response: a ready host
+must remain ready, while a pre-existing provider outage may retain its exact
+readiness reason. A new or changed failure restores the previous bundle.
+Keep the retained backup until the installed app's normal window, history and
+pairing have been checked. These probes do not prove user-data acceptance.
 
 ## Keeping Mac privacy grants across updates
 

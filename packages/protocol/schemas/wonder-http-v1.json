@@ -2045,6 +2045,7 @@
         "sourceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "anchor": { "oneOf": [
           { "type": "object", "required": ["kind", "startLine", "endLine"], "properties": { "kind": { "const": "textLines" }, "startLine": { "type": "integer", "minimum": 1 }, "endLine": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
+          { "type": "object", "required": ["kind", "startByte", "endByte"], "properties": { "kind": { "const": "textRange" }, "startByte": { "type": "integer", "minimum": 0 }, "endByte": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
           { "type": "object", "required": ["kind", "x", "y", "width", "height"], "properties": { "kind": { "const": "imageRegion" }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 }, "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }, "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 } }, "additionalProperties": false },
           { "type": "object", "required": ["kind", "page", "x", "y", "width", "height"], "properties": { "kind": { "const": "pdfRegion" }, "page": { "type": "integer", "minimum": 1 }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 }, "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }, "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 } }, "additionalProperties": false }
         ] },

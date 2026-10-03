@@ -238,6 +238,15 @@ final class TurnLifecycleTests: XCTestCase {
                                                     isLatestSegmentForTurn: true, isLatestActiveSegment: false), "Couldn’t finish")
         XCTAssertEqual(ChatFeedEntry.lifecycleLabel(rows: [command], turn: turn("stopped", status: "interrupted"),
                                                     isLatestSegmentForTurn: true, isLatestActiveSegment: false), "Stopped")
+        // A desktop-owned Project may already have newer live work that a
+        // separate Wonder App Server cannot observe. Scope saved outcomes to
+        // their earlier response rather than labeling the whole task.
+        XCTAssertEqual(ChatFeedEntry.lifecycleLabel(rows: [command], turn: turn("failed", status: "failed"),
+                                                    isLatestSegmentForTurn: true, isLatestActiveSegment: false,
+                                                    isProjectConversation: true), "This response couldn’t finish")
+        XCTAssertEqual(ChatFeedEntry.lifecycleLabel(rows: [command], turn: turn("stopped", status: "interrupted"),
+                                                    isLatestSegmentForTurn: true, isLatestActiveSegment: false,
+                                                    isProjectConversation: true), "This response stopped")
 
         let unknown = turn("unknown", status: "unknown", startedAt: "0", completedAt: "1000")
         XCTAssertEqual(ChatFeedEntry.lifecycleLabel(rows: [], turn: unknown,

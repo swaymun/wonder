@@ -1378,6 +1378,7 @@ struct DiagnosticSubagentFixtureView: View {
                             turn: model.turn(entry.rows.first?.turnId, in: chat.id),
                             isLatestSegmentForTurn: latestByTurn.contains(entry.id),
                             isLatestActiveSegment: latestActive == entry.id,
+                            isProjectConversation: false,
                             expanded: expandedEntries.contains(entry.id)
                         ) {
                             if let descriptor {

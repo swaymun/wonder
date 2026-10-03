@@ -10,6 +10,7 @@ struct WorkspacePublicationPreview: View {
     let name: String
     let data: Data
     let origin: String
+    var onClose: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var reader = WorkspacePublicationReader()
@@ -26,6 +27,13 @@ struct WorkspacePublicationPreview: View {
                 if let navigator = reader.navigator {
                     PublicationNavigator(navigator: navigator)
                         .accessibilityIdentifier("workspace-epub-content")
+                    if onClose != nil {
+                        HStack(spacing: 16) {
+                            readerControls(navigator)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 16)
+                    }
                     HStack {
                         Button("Previous") { Task { await navigator.goBackward() } }
                             .accessibilityIdentifier("workspace-epub-previous")
@@ -51,25 +59,14 @@ struct WorkspacePublicationPreview: View {
             }
             .navigationTitle(reader.title ?? name)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(onClose == nil ? .visible : .hidden, for: .navigationBar)
             .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    if let navigator = reader.navigator {
-                        Menu("Chapters") {
-                            ForEach(Array(reader.chapters.enumerated()), id: \.offset) { index, chapter in
-                                Button(chapter.title ?? "Chapter \(index + 1)") {
-                                    Task { await navigator.go(to: chapter) }
-                                }
-                            }
-                        }
-                        .accessibilityIdentifier("workspace-epub-chapters")
-                        Button(largeText ? "Normal Text" : "Large Text") {
-                            largeText.toggle()
-                            navigator.submitPreferences(EPUBPreferences(fontSize: largeText ? 2 : 1))
-                        }
-                        .accessibilityIdentifier("workspace-epub-text-size")
+                if onClose == nil {
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        if let navigator = reader.navigator { readerControls(navigator) }
+                        Button("Done") { dismiss() }
+                            .accessibilityIdentifier("workspace-epub-close")
                     }
-                    Button("Done") { dismiss() }
-                        .accessibilityIdentifier("workspace-epub-close")
                 }
             }
         }
@@ -102,6 +99,22 @@ struct WorkspacePublicationPreview: View {
             }
         }
         .onDisappear { reader.close() }
+    }
+
+    @ViewBuilder private func readerControls(_ navigator: EPUBNavigatorViewController) -> some View {
+        Menu("Chapters") {
+            ForEach(Array(reader.chapters.enumerated()), id: \.offset) { index, chapter in
+                Button(chapter.title ?? "Chapter \(index + 1)") {
+                    Task { await navigator.go(to: chapter) }
+                }
+            }
+        }
+        .accessibilityIdentifier("workspace-epub-chapters")
+        Button(largeText ? "Normal Text" : "Large Text") {
+            largeText.toggle()
+            navigator.submitPreferences(EPUBPreferences(fontSize: largeText ? 2 : 1))
+        }
+        .accessibilityIdentifier("workspace-epub-text-size")
     }
 }
 

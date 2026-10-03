@@ -68,6 +68,38 @@ the normal upload lane remains read-only for signing assets. The Widget target
 and separate group IDs compile in unsigned iPhone/iPad simulators; this does
 not verify signed App Group access, Home Screen presentation or TestFlight upload.
 
+For configured Widget simulator checks, inspect the installed app and Widget
+extension with `codesign -dv --verbose=4` and `codesign -d --entitlements :-`.
+Both must carry the same Apple Development team and the Testing App Group before
+selecting a Project, checking the rendered Home widget, and tapping its link.
+In the Xcode 27 `TestingDiagnostics` simulator build, setting a development
+identity and profiles still produced ad hoc signatures with no team identifier;
+that build could show Projects in the Widget editor but lost the selected App
+Entity when WidgetKit loaded it. A QA copy signed with the existing Apple
+Development identity and minimal Testing App Group entitlement resolved the
+entity and rendered the selected Project. A passing snapshot unit test or
+editor selection alone is not configured Widget acceptance.
+
+The optional `testLiveOwnedProjectMediaPreviewWithoutSending` UI check requires
+an owner-approved, temporarily paired Wonder Testing simulator, the exact owned
+Project deep-link variables used by `liveOwnedProjectURL()`, and
+`WONDER_LIVE_PROJECT_MEDIA=1`. Put a disposable `seekable.mp4` and `tone.m4a`
+under a fresh, disposable Project-root folder; set
+`WONDER_LIVE_PROJECT_MEDIA_FOLDER` to that exact name. The check opens video,
+checks advancing playback, pauses and seeks from the start to about six seconds
+on an eight-second clip, plays audio and returns to the composer without sending. Keep pairing
+codes and result bundles under `.local/`, then remove the files and revoke the
+exact simulator device in Mac Settings. Neither a skipped test nor a visible
+player alone establishes playback acceptance.
+
+Focused Project Files UI checks open Files inside the conversation, then a
+file or diff in the same area. The composer stays available; Full screen and
+Show in chat switch the preview presentation. Text selection opens a comment
+editor, and Save stages an unsent preview note. The `-workspace-large-text-preview`
+Diagnostics fixture serves an 8 MiB text file to verify the 128 KiB visible
+preview bound on both iPhone and iPad. These fixtures do not send a message or
+prove that a live provider receives an annotation.
+
 For explicitly requested physical QA, use the approved Testing development profiles. Set
 `WONDER_APP_SIGNING_STYLE=Manual` and supply `WONDER_MAIN_PROFILE`,
 `WONDER_PUSH_PROFILE`, `WONDER_SHARE_PROFILE` and `WONDER_WIDGET_PROFILE` to `xcodebuild` with the

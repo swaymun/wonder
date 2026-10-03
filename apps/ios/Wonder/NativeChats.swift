@@ -347,6 +347,12 @@ private struct ConversationScroller<Content: View>: View {
                 withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { scrollRequest = ConversationScrollRequest(id: target, anchor: .top, animated: true) }
                 requestedScrollID = nil
             }
+            .onAppear {
+                if let target = requestedScrollID {
+                    scrollRequest = ConversationScrollRequest(id: target, anchor: .top, animated: true)
+                    requestedScrollID = nil
+                }
+            }
             .onDisappear { model.savePosition(readingPosition, chat: chat.id) }
             .task(id: readingPosition) {
                 do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
@@ -448,7 +454,7 @@ struct ConversationView: View {
         model.cameraContextID.uuidString + ":" + chat.id
     }
     private var conversationCovered: Bool {
-        showingDetails || showingApps || showingUsage || workspaceRequest != nil || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents || selectedProjectSubagent != nil || showingProjectSubagents || showingGoal || showingComputer
+        showingDetails || showingApps || showingUsage || importing || selectingPhoto || showingCamera || composerPhoto != nil || messagePhotoGallery != nil || selectedSubagent != nil || showingSubagents || selectedProjectSubagent != nil || showingProjectSubagents || showingGoal || showingComputer
     }
     private var avatarMotionState: ScienceAvatarMotionState {
         guard let turnID = model.activeTurn(chat.id),
@@ -521,6 +527,7 @@ struct ConversationView: View {
                                                       turn: entry.rows.first?.turnId.flatMap { turns[$0] },
                                                       isLatestSegmentForTurn: latestActivityEntryIDs.contains(entry.id),
                                                       isLatestActiveSegment: latestActiveActivityEntryID == entry.id,
+                                                      isProjectConversation: model.isProject(chat),
                                                       expanded: expandedActivityIDs.contains(entry.id)) {
                                         toggleActivity(entry: entry, isExpanded: expandedActivityIDs.contains(entry.id))
                                     }
@@ -673,7 +680,10 @@ struct ConversationView: View {
         #if WONDER_DIAGNOSTICS
         let timelineStart = ProcessInfo.processInfo.systemUptime
         #endif
-        let prepared = model.timeline(for: chat, focusedRowID: model.searchFocus?.conversationID == chat.id ? model.searchFocus?.rowID : nil)
+        let prepared = workspaceRequest == nil
+            ? model.timeline(for: chat, focusedRowID: model.searchFocus?.conversationID == chat.id ? model.searchFocus?.rowID : nil)
+            : ConversationTimeline(chatID: chat.id, rows: [], activeTurnIDs: [],
+                                   activeTurnID: nil, focusedRowID: nil, turns: nil)
         let timeline = prepared.rows
         let attachmentMetadata = Dictionary((model.files[chat.id] ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let conversationImageFiles = ConversationAttachmentGallery.imageFiles(model.files[chat.id] ?? [])
@@ -715,10 +725,18 @@ struct ConversationView: View {
         let disclosureRevision = disclosureEntries
         let implementablePlanID = planToImplement(in: timeline)
         #if WONDER_DIAGNOSTICS
-        let _ = DiagnosticJournal.shared.record(DiagnosticEvent(operation: "timeline.prepare", durationMs: (ProcessInfo.processInfo.systemUptime - timelineStart) * 1000, count: UInt64(timeline.count)))
+        if workspaceRequest == nil {
+            let _ = DiagnosticJournal.shared.record(DiagnosticEvent(operation: "timeline.prepare", durationMs: (ProcessInfo.processInfo.systemUptime - timelineStart) * 1000, count: UInt64(timeline.count)))
+        }
         #endif
         Group {
-            if model.snapshots[chat.id] != nil || model.groups[chat.id] != nil {
+            if let request = workspaceRequest {
+                WorkspaceBrowser(model: model, chat: chat, attachmentIDs: request.attachmentIDs,
+                                 initialFilePath: request.initialFilePath, preferredRootID: request.preferredRootID,
+                                 reanchor: request.reanchor, replacingAnnotationID: request.replacingAnnotationID,
+                                 onClose: { workspaceRequest = nil })
+                    .id(request.id)
+            } else if model.snapshots[chat.id] != nil || model.groups[chat.id] != nil {
                 ConversationScroller(model: model, projects: model.projects, chat: chat, entries: entries, nodeIDs: nodes.map(\.id),
                     isCovered: conversationCovered,
                     requestedScrollID: $requestedScrollID) {
@@ -836,6 +854,7 @@ struct ConversationView: View {
         .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .onChange(of: disclosureRevision, initial: true) { _, _ in
+            guard workspaceRequest == nil else { return }
             activityDisclosure = ActivityDisclosurePolicy.reconciled(
                 activityDisclosure,
                 entries: disclosureEntries,
@@ -892,11 +911,6 @@ struct ConversationView: View {
                     attachPhoto: { data in await model.stageCameraPhoto(data, chat: chat, scope: cameraScope) }
                 )
             }
-        }
-        .sheet(item: $workspaceRequest) { request in
-            WorkspaceBrowser(model: model, chat: chat, attachmentIDs: request.attachmentIDs,
-                             initialFilePath: request.initialFilePath, preferredRootID: request.preferredRootID,
-                             reanchor: request.reanchor, replacingAnnotationID: request.replacingAnnotationID)
         }
         .sheet(item: $annotationEdit) { attachment in
             ArtifactNoteEditor(model: model, chat: chat, attachment: attachment) { annotation in
@@ -1081,6 +1095,7 @@ struct ConversationView: View {
                 if let request = model.requests(for: chat).first(where: { !$0.isQuestion }) {
                     Button("Review request", systemImage: "hand.raised") {
                         requestedScrollID = "approval-" + request.id
+                        workspaceRequest = nil
                     }.font(.subheadline).frame(minHeight: 44).accessibilityIdentifier("review-approval-request")
                 }
                 QuestionDock(model: model, chat: chat)
@@ -1109,7 +1124,10 @@ struct ConversationView: View {
                     VStack(spacing: 4) {
                         HStack(alignment: .bottom, spacing: 4) {
                             ComputerDock(isPresented: $showingComputer)
-                            FilesDock { workspaceRequest = WorkspaceBrowserRequest() }
+                            FilesDock(isPresented: workspaceRequest != nil) {
+                                if workspaceRequest == nil { workspaceRequest = WorkspaceBrowserRequest() }
+                                else { workspaceRequest = nil }
+                            }
                             Spacer(minLength: 0)
                             if let goal = model.goals[chat.id], (chat.botId != nil || model.isProject(chat)),
                                model.groups[chat.id] == nil, !model.isSubagent(chat) {
@@ -2727,12 +2745,17 @@ struct PhotoViewer: View {
     private let items: [PhotoViewerItem]
     @State private var selectedIndex: Int
     @Environment(\.dismiss) private var dismiss
+    var onClose: (() -> Void)? = nil
+    var showsHeader = true
     @State private var verifiedData: [String: Data] = [:]
     @State private var copyStatus: String?
 
-    init(model: ConnectionModel, chat: ChatSummary, file: ConversationFile, galleryFiles: [ConversationFile] = [], initialFileID: String? = nil) {
+    init(model: ConnectionModel, chat: ChatSummary, file: ConversationFile, galleryFiles: [ConversationFile] = [], initialFileID: String? = nil,
+         onClose: (() -> Void)? = nil, showsHeader: Bool = true) {
         self.model = model
         self.chat = chat
+        self.onClose = onClose
+        self.showsHeader = showsHeader
         let sources = galleryFiles.isEmpty ? [file] : ConversationAttachmentGallery.imageFiles(galleryFiles)
         let bounded = Self.boundedItems(sources.map { PhotoViewerItem(id: $0.id, name: $0.name, mimeType: $0.mimeType ?? "", sourceFile: $0, localData: nil) }, initialID: initialFileID ?? file.id)
         self.items = bounded.items
@@ -2749,9 +2772,12 @@ struct PhotoViewer: View {
         _selectedIndex = State(initialValue: bounded.index)
     }
 
-    init(model: ConnectionModel, chat: ChatSummary, name: String, mimeType: String, sourceID: String, localData: Data?, file: ConversationFile?, revision: String? = nil) {
+    init(model: ConnectionModel, chat: ChatSummary, name: String, mimeType: String, sourceID: String, localData: Data?, file: ConversationFile?, revision: String? = nil,
+         onClose: (() -> Void)? = nil, showsHeader: Bool = true) {
         self.model = model
         self.chat = chat
+        self.onClose = onClose
+        self.showsHeader = showsHeader
         self.items = [PhotoViewerItem(id: sourceID, name: name, mimeType: mimeType, sourceFile: file, localData: localData, localRevision: revision)]
         _selectedIndex = State(initialValue: 0)
     }
@@ -2775,7 +2801,8 @@ struct PhotoViewer: View {
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            HStack(alignment: .top, spacing: 12) {
+            if showsHeader {
+                HStack(alignment: .top, spacing: 12) {
                 if let item = currentItem {
                     Text(item.name)
                         .font(.headline)
@@ -2791,7 +2818,7 @@ struct PhotoViewer: View {
                         .foregroundStyle(.white)
                         .accessibilityIdentifier("photo-viewer-position")
                 }
-                Button { dismiss() } label: {
+                Button { if let onClose { onClose() } else { dismiss() } } label: {
                     Image(systemName: "xmark")
                         .font(.body.weight(.semibold))
                         .frame(width: 44, height: 44)
@@ -2801,10 +2828,11 @@ struct PhotoViewer: View {
                 .foregroundStyle(.white)
                 .accessibilityLabel("Close photo viewer")
                 .accessibilityIdentifier("photo-viewer-close")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(.black.opacity(0.78))
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 4)
-            .background(.black.opacity(0.78))
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let copyStatus {
@@ -2862,6 +2890,129 @@ private struct WorkspacePreviewSelection: Identifiable {
     var scope: String? = nil
 }
 
+/// One selected file owns its verified revision across inline and full-screen
+/// presentations. Switching presentation must not discard an offered update.
+@MainActor final class WorkspaceRevisionState: ObservableObject {
+    @Published var currentData: Data
+    @Published var currentSha256: String
+    @Published var offeredData: Data?
+    @Published var offeredSha256: String?
+    @Published var refreshFailure: String?
+    @Published var refreshing = false
+    @Published var preparedText: String?
+    @Published var preparingText = true
+    @Published var previewTruncated = false
+    var observedSequence: UInt64?
+    var manualRefreshTask: Task<Void, Never>?
+    private var preparedSha256: String?
+    private var closed = false
+
+    init(data: Data, sha256: String) {
+        currentData = data
+        currentSha256 = sha256
+    }
+
+    func prepareTextIfNeeded(mimeType: String) async {
+        guard !closed, mimeType != "application/pdf", preparedSha256 != currentSha256 else { return }
+        let data = currentData
+        let sha256 = currentSha256
+        preparingText = true
+        let prepared = await Task.detached(priority: .userInitiated) { () -> (String?, Bool) in
+            // TextKit must never lay out an entire multi-megabyte source on the
+            // main thread. The preview is an exact prefix of the verified bytes,
+            // so a selection still maps to the same UTF-8 source offsets.
+            guard String(data: data, encoding: .utf8) != nil else { return (nil, false) }
+            let limit = 128 * 1024
+            guard data.count > limit else { return (String(data: data, encoding: .utf8), false) }
+            guard mimeType != "text/html" else { return (nil, true) }
+            var end = limit
+            while end > 0, String(data: data.prefix(end), encoding: .utf8) == nil { end -= 1 }
+            return (String(data: data.prefix(end), encoding: .utf8), true)
+        }.value
+        guard !Task.isCancelled, !closed, currentSha256 == sha256 else { return }
+        preparedText = prepared.0
+        previewTruncated = prepared.1
+        preparedSha256 = sha256
+        preparingText = false
+    }
+
+    @discardableResult func checkForRevision(refresh: (() async throws -> Data)?,
+                          onRevision: ((String) async -> Void)?, failureMessage: String) async -> Bool {
+        guard let refresh, !closed, !refreshing else { return false }
+        refreshing = true; refreshFailure = nil
+        defer { refreshing = false }
+        do {
+            let data = try await refresh()
+            guard !Task.isCancelled, !closed else { return false }
+            let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
+            guard !Task.isCancelled, !closed else { return false }
+            if sha256 != currentSha256 {
+                offeredData = data; offeredSha256 = sha256
+                await onRevision?(sha256)
+            } else { offeredData = nil; offeredSha256 = nil }
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard !Task.isCancelled, !closed else { return false }
+            refreshFailure = failureMessage
+            return true
+        }
+    }
+
+    func observe(sequence: UInt64, refresh: (() async throws -> Data)?,
+                 onRevision: ((String) async -> Void)?, failureMessage: String) async {
+        guard !closed, refresh != nil else { return }
+        if observedSequence == nil { observedSequence = sequence; return }
+        guard sequence > (observedSequence ?? 0) else { return }
+        // A newer SwiftUI task cancels the previous check before its defer
+        // clears `refreshing`. Wait for that cleanup, then check the newest
+        // sequence; never mark a sequence observed when its check was skipped.
+        while refreshing {
+            do { try await Task.sleep(for: .milliseconds(30)) }
+            catch { return }
+            guard !closed else { return }
+            if sequence <= (observedSequence ?? 0) { return }
+        }
+        guard !Task.isCancelled, !closed else { return }
+        let checked = await checkForRevision(refresh: refresh, onRevision: onRevision, failureMessage: failureMessage)
+        guard checked, !Task.isCancelled, !closed, sequence > (observedSequence ?? 0) else { return }
+        observedSequence = sequence
+    }
+
+    func showOfferedRevision() {
+        guard !closed, let data = offeredData, let sha256 = offeredSha256 else { return }
+        preparingText = true
+        preparedText = nil
+        previewTruncated = false
+        currentData = data; currentSha256 = sha256
+        offeredData = nil; offeredSha256 = nil
+    }
+
+    func close() { closed = true; manualRefreshTask?.cancel(); manualRefreshTask = nil }
+}
+
+@MainActor private final class WorkspaceTextAnnotationDraft: ObservableObject {
+    @Published var selectedRange: NSRange?
+    @Published var selectionResetID = UUID()
+    @Published var editingSelection = false
+    @Published var note = ""
+    @Published var error: String?
+
+    func clearSelection(discardNote: Bool) {
+        selectedRange = nil
+        selectionResetID = UUID()
+        editingSelection = false
+        error = nil
+        if discardNote { note = "" }
+    }
+
+    func reset(note: String = "") {
+        clearSelection(discardNote: true)
+        self.note = note
+    }
+}
+
 struct ArtifactPreviewContext {
     let projectID: String
     let conversationID: String
@@ -2881,11 +3032,15 @@ struct WorkspaceBrowserRequest: Identifiable {
     var replacingAnnotationID: String? = nil
 }
 
-private struct WorkspaceMediaSelection: Identifiable {
+@MainActor private final class WorkspaceMediaSelection: ObservableObject, Identifiable {
     let id: String
     let name: String
     let loader: WorkspaceMediaResourceLoader
     let asset: AVURLAsset
+    @Published private(set) var player: AVPlayer?
+    @Published private(set) var failure: String?
+    private var monitor: Task<Void, Never>?
+    private var closed = false
 
     init(id: String, name: String, loader: WorkspaceMediaResourceLoader) throws {
         self.id = id
@@ -2893,6 +3048,55 @@ private struct WorkspaceMediaSelection: Identifiable {
         self.loader = loader
         asset = try loader.asset(filename: name)
     }
+
+    func start() {
+        guard monitor == nil, !closed else { return }
+        let asset = asset
+        monitor = Task { [weak self] in
+            do {
+                guard try await asset.load(.isPlayable) else {
+                    self?.failure = "This audio or video format cannot be played on this device."
+                    return
+                }
+                guard !Task.isCancelled, self?.closed == false else { return }
+                let item = AVPlayerItem(asset: asset)
+                self?.player = AVPlayer(playerItem: item)
+                while !Task.isCancelled {
+                    if self?.reportFailureIfNeeded(for: item) == true { return }
+                    try await Task.sleep(for: .milliseconds(500))
+                }
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled, self?.closed == false else { return }
+                self?.failure = self?.loader.fileChanged == true
+                    ? "File changed. Close and reopen the preview."
+                    : "This file could not be streamed. Check your Mac connection and try again."
+            }
+        }
+    }
+
+    private func reportFailureIfNeeded(for item: AVPlayerItem) -> Bool {
+        guard item.status == .failed else { return false }
+        failure = loader.fileChanged
+            ? "File changed. Close and reopen the preview."
+            : "Playback stopped. Check your Mac connection or try a different file."
+        player?.pause()
+        player = nil
+        return true
+    }
+
+    func close() {
+        guard !closed else { return }
+        closed = true
+        monitor?.cancel()
+        monitor = nil
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+        loader.cancelAll()
+    }
+
+    deinit { loader.cancelAll() }
 }
 
 struct WorkspaceBrowser: View {
@@ -2903,6 +3107,7 @@ struct WorkspaceBrowser: View {
     var preferredRootID: String? = nil
     var reanchor: ArtifactAnnotation? = nil
     var replacingAnnotationID: String? = nil
+    var onClose: (() -> Void)? = nil
     @State private var openedInitialFile = false
     @Environment(\.dismiss) private var dismiss
     @State private var response: WorkspaceRootsResponse?
@@ -2914,6 +3119,7 @@ struct WorkspaceBrowser: View {
     @State private var viewMode = "all"
     @State private var showHidden = false
     @State private var loadingRequests: Set<UUID> = []
+    @State private var rootsLoadingID: UUID?
     @State private var locationGeneration = UUID()
     @State private var rootsRequestID = UUID()
     @State private var directoryRequestID = UUID()
@@ -2924,6 +3130,7 @@ struct WorkspaceBrowser: View {
     @State private var failure: String?
     @State private var selection: WorkspacePreviewSelection?
     @State private var documentSelection: WorkspacePreviewSelection?
+    @State private var previewRevision: WorkspaceRevisionState?
     @State private var mediaSelection: WorkspaceMediaSelection?
     @State private var attachmentPhoto: ConversationFile?
     @State private var attachmentSelection: ConversationFile?
@@ -2932,6 +3139,9 @@ struct WorkspaceBrowser: View {
     @State private var selectedDiff: WorkspaceGitChange?
     @State private var diffChoice: WorkspaceGitChange?
     @State private var diffText: String?
+    @State private var expandedPreview = false
+    @State private var collapsingPreview = false
+    @StateObject private var textAnnotationDraft = WorkspaceTextAnnotationDraft()
 
     private var loading: Bool { !loadingRequests.isEmpty }
     private var selectedRoot: WorkspaceRoot? { response?.roots.first(where: { $0.id == selectedRootID }) }
@@ -2944,10 +3154,33 @@ struct WorkspaceBrowser: View {
     // this task identity scoped to navigation prevents one tap from starting
     // both the implicit task and the explicit refresh.
     private var directoryTaskID: String { "\(model.assignmentScope):\(selectedRootID ?? ""):\(directoryPath)" }
+    private var hasPreview: Bool {
+        selection != nil || documentSelection != nil || mediaSelection != nil ||
+        attachmentPhoto != nil || (attachmentSelection != nil && attachmentData != nil && attachmentDigest != nil) ||
+        (selectedDiff != nil && diffText != nil)
+    }
+    private var previewName: String {
+        selection?.name ?? documentSelection?.name ?? mediaSelection?.name ?? attachmentPhoto?.name ??
+        attachmentSelection?.name ?? selectedDiff?.path ?? "Preview"
+    }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
+        Group {
+            if hasPreview {
+                inlinePreview
+            } else {
+                NavigationStack {
+                    VStack(spacing: 0) {
+                        if onClose != nil {
+                            HStack {
+                                Text("Files").font(.headline)
+                                Spacer()
+                                Button("Chat", systemImage: "xmark") { onClose?() }
+                                    .frame(minWidth: 44, minHeight: 44)
+                                    .accessibilityIdentifier("workspace-close")
+                            }
+                            .padding(.horizontal, 12)
+                        }
                 Picker("Files view", selection: $viewMode) {
                     Text("All files").tag("all")
                     Text("Modified").tag("modified")
@@ -2990,18 +3223,23 @@ struct WorkspaceBrowser: View {
                 } else {
                     allFilesView
                 }
-            }
-            .navigationTitle("Files")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    WorkspaceBrowserDoneButton { dismiss() }
+                    }
+                    .navigationTitle("Files")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        if onClose == nil {
+                            ToolbarItem(placement: .cancellationAction) {
+                                WorkspaceBrowserDoneButton { dismiss() }
+                            }
+                        }
+                    }
                 }
             }
+        }
             .task(id: model.assignmentScope) {
                 invalidateLocation()
                 response = nil; selectedRootID = nil; directoryPath = ""; directory = nil; git = nil
-                _ = await loadRoots()
+                if await loadRoots(), viewMode == "modified" { await loadGit() }
             }
             .task(id: directoryTaskID) {
                 guard viewMode == "all", selectedRoot?.isDirectory == true else { return }
@@ -3009,80 +3247,45 @@ struct WorkspaceBrowser: View {
                 await openInitialFileIfNeeded()
             }
             .onChange(of: viewMode) { _, next in
-                invalidateLocation()
+                // The first roots request belongs to Files, not either tab.
+                // Keep it alive when Modified is selected before roots arrive.
+                invalidateLocation(preserveRoots: rootsLoadingID != nil)
                 failure = nil
                 if next == "modified" { git = nil; Task { await loadGit() } }
                 else if selectedRoot?.isDirectory == true { Task { await loadDirectory(reset: true) } }
             }
-            .sheet(item: $selection) { item in
-                Group {
-                    if let context = annotationContext(for: item) {
-                        let replacement = reanchorDraft(for: item)
-                        WorkspaceImagePreview(model: model, chat: chat, item: item, context: context,
-                                              refresh: revisionRefresh(for: item),
-                                              onRevision: revisionNotice(for: item),
-                                              refreshSequence: model.snapshots[chat.id]?.lastSequence,
-                                              initialNote: replacement?.note ?? "") { annotation in
-                            try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
-                                                      replacing: replacement?.id)
-                            selection = nil
-                            dismiss()
+            .onDisappear {
+                // A full-screen cover temporarily hides the browser; closing
+                // Files or leaving the conversation must release its work.
+                if !expandedPreview {
+                    mediaSelection?.close()
+                    previewRevision?.close()
+                }
+            }
+            .fullScreenCover(isPresented: $expandedPreview) {
+                VStack(spacing: 0) {
+                    HStack {
+                        Button("Show in chat", systemImage: "arrow.down.right.and.arrow.up.left") {
+                            collapsingPreview = true
+                            expandedPreview = false
                         }
-                    } else {
-                        PhotoViewer(model: model, chat: chat, name: item.name, mimeType: item.mimeType, sourceID: item.id, localData: item.data, file: nil)
+                        .accessibilityIdentifier("workspace-preview-collapse")
+                        Spacer()
+                        Text(previewName).font(.subheadline.weight(.semibold)).lineLimit(1)
                     }
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 44)
+                    previewContent
                 }
-                .presentationCompactAdaptation(.fullScreenCover)
-            }
-            .fullScreenCover(item: $attachmentPhoto) { file in
-                PhotoViewer(
-                    model: model,
-                    chat: chat,
-                    file: file,
-                    galleryFiles: ConversationAttachmentGallery.imageFiles(visibleAttachments),
-                    initialFileID: file.id
-                )
-            }
-            .sheet(item: $documentSelection) { item in
-                if WorkspaceModelPreview.supports(item.name) {
-                    WorkspaceModelPreview(name: item.name, data: item.data, revision: item.sha256)
-                } else if WorkspacePublicationPreview.supports(item.name) {
-                    WorkspacePublicationPreview(name: item.name, data: item.data,
-                                                origin: "workspace:\(model.assignmentScope):\(chat.id):\(item.id)")
-                } else {
-                    let context = annotationContext(for: item)
-                    let replacement = reanchorDraft(for: item)
-                    WorkspaceDocumentPreview(name: item.name, mimeType: item.mimeType, data: item.data,
-                                             annotationContext: context, onAnnotation: { annotation in
-                        guard let context else { throw FileFailure.integrity }
-                        try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
-                                                  replacing: replacement?.id)
-                        documentSelection = nil
-                        dismiss()
-                    }, refresh: revisionRefresh(for: item), onRevision: revisionNotice(for: item),
-                                             refreshSequence: model.snapshots[chat.id]?.lastSequence,
-                                             initialNote: replacement?.note ?? "", initialSha256: item.sha256)
-                }
-            }
-            .sheet(item: $mediaSelection) { item in
-                WorkspaceMediaPreview(selection: item)
-            }
-            .sheet(isPresented: Binding(get: { attachmentSelection != nil && attachmentData != nil && attachmentDigest != nil }, set: { if !$0 { attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil } })) {
-                if let attachmentSelection, let attachmentData, let attachmentDigest {
-                    if WorkspaceModelPreview.supports(attachmentSelection.name) {
-                        WorkspaceModelPreview(name: attachmentSelection.name, data: attachmentData,
-                                              revision: attachmentDigest)
-                    } else if WorkspacePublicationPreview.supports(attachmentSelection.name) {
-                        WorkspacePublicationPreview(name: attachmentSelection.name, data: attachmentData,
-                                                    origin: "attachment:\(model.assignmentScope):\(chat.id):\(attachmentSelection.id)")
-                    } else {
-                        WorkspaceDocumentPreview(name: attachmentSelection.name, mimeType: attachmentSelection.mimeType ?? "application/octet-stream", data: attachmentData)
+                .onDisappear {
+                    // A parent navigation can dismiss the cover while the
+                    // browser's onDisappear is suppressed by presentation.
+                    // Only the explicit collapse keeps the selected work.
+                    if !collapsingPreview {
+                        mediaSelection?.close()
+                        previewRevision?.close()
                     }
-                }
-            }
-            .sheet(isPresented: Binding(get: { selectedDiff != nil && diffText != nil }, set: { if !$0 { diffRequestID = UUID(); selectedDiff = nil; diffText = nil } })) {
-                if let selectedDiff, let diffText {
-                    WorkspaceDiffPreview(path: selectedDiff.path, state: selectedDiff.state, diff: diffText)
+                    collapsingPreview = false
                 }
             }
             .confirmationDialog("Choose diff", isPresented: Binding(get: { diffChoice != nil }, set: { if !$0 { diffChoice = nil } })) {
@@ -3093,7 +3296,108 @@ struct WorkspaceBrowser: View {
             } message: {
                 Text("This file has both staged and unstaged changes.")
             }
+    }
+
+    private var inlinePreview: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button { closePreview() } label: {
+                    Label("Files", systemImage: "chevron.left")
+                        .frame(minHeight: 44)
+                }
+                .accessibilityIdentifier("workspace-preview-back")
+                Text(previewName).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                Button("Full screen", systemImage: "arrow.up.left.and.arrow.down.right") {
+                    expandedPreview = true
+                }
+                .labelStyle(.iconOnly)
+                .frame(minWidth: 44, minHeight: 44)
+                .accessibilityIdentifier("workspace-preview-expand")
+            }
+            .padding(.horizontal, 12)
+            .background(Color(uiColor: .secondarySystemBackground))
+            // The full-screen cover owns the preview while expanded. PDFKit,
+            // WebKit and large text/diff layouts must not stay mounted twice.
+            if !expandedPreview { previewContent }
         }
+    }
+
+    @ViewBuilder private var previewContent: some View {
+        if let item = selection {
+            if let context = annotationContext(for: item), let previewRevision {
+                let replacement = reanchorDraft(for: item)
+                WorkspaceImagePreview(model: model, chat: chat, item: item, context: context,
+                                      revision: previewRevision,
+                                      refresh: revisionRefresh(for: item),
+                                      onRevision: revisionNotice(for: item),
+                                      refreshSequence: model.snapshots[chat.id]?.lastSequence,
+                                      initialNote: replacement?.note ?? "", onClose: closePreview) { annotation in
+                    try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
+                                              replacing: replacement?.id)
+                    if expandedPreview { collapsingPreview = true; expandedPreview = false }
+                }
+            } else {
+                PhotoViewer(model: model, chat: chat, name: item.name, mimeType: item.mimeType,
+                            sourceID: item.id, localData: item.data, file: nil,
+                            onClose: closePreview, showsHeader: false)
+            }
+        } else if let file = attachmentPhoto {
+            PhotoViewer(model: model, chat: chat, file: file,
+                        galleryFiles: ConversationAttachmentGallery.imageFiles(visibleAttachments),
+                        initialFileID: file.id, onClose: closePreview, showsHeader: false)
+        } else if let item = documentSelection {
+            if WorkspaceModelPreview.supports(item.name) {
+                WorkspaceModelPreview(name: item.name, data: item.data, revision: item.sha256,
+                                      onClose: closePreview)
+            } else if WorkspacePublicationPreview.supports(item.name) {
+                WorkspacePublicationPreview(name: item.name, data: item.data,
+                                            origin: "workspace:\(model.assignmentScope):\(chat.id):\(item.id)",
+                                            onClose: closePreview)
+            } else if let previewRevision {
+                let context = annotationContext(for: item)
+                let replacement = reanchorDraft(for: item)
+                WorkspaceDocumentPreview(name: item.name, mimeType: item.mimeType,
+                                         revision: previewRevision, draft: textAnnotationDraft,
+                                         annotationContext: context, onAnnotation: { annotation in
+                    guard let context else { throw FileFailure.integrity }
+                    try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
+                                              replacing: replacement?.id)
+                    if expandedPreview { collapsingPreview = true; expandedPreview = false }
+                }, refresh: revisionRefresh(for: item), onRevision: revisionNotice(for: item),
+                                         refreshSequence: model.snapshots[chat.id]?.lastSequence,
+                                         onClose: closePreview)
+            }
+        } else if let item = mediaSelection {
+            WorkspaceMediaPreview(selection: item, onClose: closePreview)
+        } else if let file = attachmentSelection, let data = attachmentData,
+                  let digest = attachmentDigest {
+            if WorkspaceModelPreview.supports(file.name) {
+                WorkspaceModelPreview(name: file.name, data: data, revision: digest, onClose: closePreview)
+            } else if WorkspacePublicationPreview.supports(file.name) {
+                WorkspacePublicationPreview(name: file.name, data: data,
+                                            origin: "attachment:\(model.assignmentScope):\(chat.id):\(file.id)",
+                                            onClose: closePreview)
+            } else if let previewRevision {
+                WorkspaceDocumentPreview(name: file.name, mimeType: file.mimeType ?? "application/octet-stream",
+                                         revision: previewRevision, draft: textAnnotationDraft,
+                                         onClose: closePreview)
+            }
+        } else if let change = selectedDiff, let diffText {
+            WorkspaceDiffPreview(path: change.path, state: change.state, diff: diffText,
+                                 onClose: closePreview)
+        }
+    }
+
+    private func closePreview() {
+        mediaSelection?.close()
+        previewRevision?.close()
+        expandedPreview = false
+        fileRequestID = UUID(); attachmentRequestID = UUID()
+        textAnnotationDraft.reset()
+        selection = nil; documentSelection = nil; previewRevision = nil; mediaSelection = nil
+        attachmentPhoto = nil; attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil
+        diffRequestID = UUID(); selectedDiff = nil; diffText = nil
     }
 
     @ViewBuilder private var allFilesView: some View {
@@ -3160,6 +3464,7 @@ struct WorkspaceBrowser: View {
                 }
                 if let failure { Section { FailureDetails(message: failure) } }
             }
+            .accessibilityIdentifier("workspace-file-list")
         }
     }
 
@@ -3185,6 +3490,7 @@ struct WorkspaceBrowser: View {
                 }
                 .accessibilityIdentifier("workspace-modified-entry:\(change.path)")
             }
+            .accessibilityIdentifier("workspace-modified-list")
         } else {
             ProgressView("Checking changes…").frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -3210,17 +3516,21 @@ struct WorkspaceBrowser: View {
         loadingRequests.insert(id)
         return id
     }
-    private func invalidateLocation() {
+    private func invalidateLocation(preserveRoots: Bool = false) {
         locationGeneration = UUID()
-        rootsRequestID = UUID()
+        mediaSelection?.close()
+        previewRevision?.close()
+        expandedPreview = false
+        if preserveRoots, let rootsLoadingID { loadingRequests = [rootsLoadingID] }
+        else { rootsRequestID = UUID(); rootsLoadingID = nil; loadingRequests.removeAll() }
         directoryRequestID = UUID()
         gitRequestID = UUID()
         diffRequestID = UUID()
         fileRequestID = UUID()
         attachmentRequestID = UUID()
-        loadingRequests.removeAll()
+        textAnnotationDraft.reset()
         selectedDiff = nil; diffChoice = nil; diffText = nil
-        selection = nil; documentSelection = nil; mediaSelection = nil
+        selection = nil; documentSelection = nil; previewRevision = nil; mediaSelection = nil
         attachmentPhoto = nil; attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil
     }
     private func navigate(to path: String) {
@@ -3243,16 +3553,19 @@ struct WorkspaceBrowser: View {
     }
     @discardableResult private func loadRoots() async -> Bool {
         let scope = model.assignmentScope
-        let generation = locationGeneration
         let requestID = UUID()
         rootsRequestID = requestID
         let loadingID = beginLoading()
+        rootsLoadingID = loadingID
         failure = nil
-        defer { loadingRequests.remove(loadingID) }
+        defer {
+            loadingRequests.remove(loadingID)
+            if rootsLoadingID == loadingID { rootsLoadingID = nil }
+        }
         do {
             let next = try await model.loadWorkspaceRoots(chat)
             guard !Task.isCancelled, !model.accessEnded, scope == model.assignmentScope,
-                  generation == locationGeneration, requestID == rootsRequestID else { return false }
+                  requestID == rootsRequestID else { return false }
             let previousRootID = selectedRootID
             let previousPath = directoryPath
             invalidateLocation()
@@ -3281,7 +3594,7 @@ struct WorkspaceBrowser: View {
             return true
         } catch {
             guard !Task.isCancelled, !model.accessEnded, scope == model.assignmentScope,
-                  generation == locationGeneration, requestID == rootsRequestID else { return false }
+                  requestID == rootsRequestID else { return false }
             failure = workspaceBrowserError(error)
             return false
         }
@@ -3388,6 +3701,15 @@ struct WorkspaceBrowser: View {
             let data = try await model.downloadWorkspaceFile(chat, root: root, entry: entry)
             let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
             guard isCurrent(captured), requestID == fileRequestID else { return false }
+            let carriedNote: String
+            if let reanchor, replacingAnnotationID != nil,
+               reanchor.conversationId == chat.id,
+               reanchor.projectId == model.projects.details[chat.id]?.projectId,
+               reanchor.rootId == root.id, reanchor.path == entry.path {
+                carriedNote = reanchor.note
+            } else { carriedNote = "" }
+            textAnnotationDraft.reset(note: carriedNote)
+            previewRevision = WorkspaceRevisionState(data: data, sha256: sha256)
             if PhotoViewerRouting.isImage(mimeType: entry.mimeType) { selection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "image/*", data: data, sha256: sha256, rootID: root.id, path: entry.path, scope: captured.scope) }
             else { attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil; selection = nil; selectedDiff = nil; diffText = nil; documentSelection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "application/octet-stream", data: data, sha256: sha256, rootID: root.id, path: entry.path, scope: captured.scope) }
             return true
@@ -3452,6 +3774,8 @@ struct WorkspaceBrowser: View {
             let digest = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
             guard isCurrent(captured), requestID == attachmentRequestID,
                   visibleAttachments.contains(where: { $0.id == file.id }) else { return }
+            textAnnotationDraft.reset()
+            previewRevision = WorkspaceRevisionState(data: data, sha256: digest)
             attachmentSelection = file; attachmentData = data; attachmentDigest = digest
         }
         catch {
@@ -3501,20 +3825,18 @@ struct WorkspaceBrowser: View {
 }
 
 private struct WorkspaceMediaPreview: View {
-    let selection: WorkspaceMediaSelection
+    @ObservedObject var selection: WorkspaceMediaSelection
+    var onClose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
-    @State private var player: AVPlayer?
-    @State private var failure: String?
-    private let changedMessage = "File changed. Close and reopen the preview."
 
     var body: some View {
         NavigationStack {
             Group {
-                if let failure {
+                if let failure = selection.failure {
                     ContentUnavailableView("Playback unavailable", systemImage: "play.slash",
                                            description: Text(failure))
                         .accessibilityIdentifier("workspace-media-unavailable")
-                } else if let player {
+                } else if let player = selection.player {
                     VideoPlayer(player: player)
                         .accessibilityIdentifier("workspace-media-player")
                 } else {
@@ -3524,41 +3846,14 @@ private struct WorkspaceMediaPreview: View {
             }
             .navigationTitle(selection.name)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(onClose == nil ? .visible : .hidden, for: .navigationBar)
             .toolbar {
-                Button("Done") { dismiss() }
-                    .accessibilityIdentifier("workspace-media-close")
-            }
-            .task {
-                do {
-                    guard try await selection.asset.load(.isPlayable) else {
-                        failure = "This audio or video format cannot be played on this device."
-                        return
-                    }
-                    guard !Task.isCancelled else { return }
-                    let item = AVPlayerItem(asset: selection.asset)
-                    player = AVPlayer(playerItem: item)
-                    while !Task.isCancelled {
-                        if item.status == .failed {
-                            failure = selection.loader.fileChanged ? changedMessage :
-                                "Playback stopped. Check your Mac connection or try a different file."
-                            player?.pause()
-                            player = nil
-                            return
-                        }
-                        try await Task.sleep(for: .milliseconds(500))
-                    }
-                } catch is CancellationError {
-                    // Closing the preview cancels its outstanding range request.
-                } catch {
-                    failure = selection.loader.fileChanged ? changedMessage :
-                        "This file could not be streamed. Check your Mac connection and try again."
+                if onClose == nil {
+                    Button("Done") { dismiss() }
+                        .accessibilityIdentifier("workspace-media-close")
                 }
             }
-            .onDisappear {
-                player?.pause()
-                player?.replaceCurrentItem(with: nil)
-                selection.loader.cancelAll()
-            }
+            .onAppear { selection.start() }
         }
     }
 }
@@ -3591,63 +3886,57 @@ private struct WorkspaceImagePreview: View {
     let onRevision: ((String) async -> Void)?
     let refreshSequence: UInt64?
     let initialNote: String
+    let onClose: () -> Void
     let onAnnotation: (ArtifactAnnotation) throws -> Void
+    @ObservedObject var revision: WorkspaceRevisionState
     @State private var showingRegion = false
-    @State private var currentData: Data
-    @State private var currentSha256: String
-    @State private var offeredData: Data?
-    @State private var offeredSha256: String?
-    @State private var refreshFailure: String?
-    @State private var refreshing = false
-    @State private var observedSequence: UInt64?
-    @State private var manualRefreshTask: Task<Void, Never>?
 
     init(model: ConnectionModel, chat: ChatSummary, item: WorkspacePreviewSelection,
-         context: ArtifactPreviewContext, refresh: (() async throws -> Data)?,
+         context: ArtifactPreviewContext, revision: WorkspaceRevisionState,
+         refresh: (() async throws -> Data)?,
          onRevision: ((String) async -> Void)?, refreshSequence: UInt64?,
-         initialNote: String,
+         initialNote: String, onClose: @escaping () -> Void,
          onAnnotation: @escaping (ArtifactAnnotation) throws -> Void) {
         self.model = model; self.chat = chat; self.item = item; self.context = context
+        self.revision = revision
         self.refresh = refresh; self.onRevision = onRevision; self.refreshSequence = refreshSequence
         self.initialNote = initialNote
+        self.onClose = onClose
         self.onAnnotation = onAnnotation
-        _currentData = State(initialValue: item.data)
-        _currentSha256 = State(initialValue: item.sha256)
     }
 
     var body: some View {
         PhotoViewer(model: model, chat: chat, name: item.name, mimeType: item.mimeType,
-                    sourceID: item.id, localData: currentData, file: nil, revision: currentSha256)
+                    sourceID: item.id, localData: revision.currentData, file: nil, revision: revision.currentSha256,
+                    onClose: onClose, showsHeader: false)
             .overlay(alignment: .top) {
                 if refresh != nil {
                     VStack(alignment: .trailing, spacing: 8) {
                         Button("Check for changes", systemImage: "arrow.clockwise") {
-                            manualRefreshTask?.cancel()
-                            manualRefreshTask = Task { await checkForRevision() }
+                            revision.manualRefreshTask?.cancel()
+                            revision.manualRefreshTask = Task { await checkForRevision() }
                         }
-                            .disabled(refreshing)
+                            .disabled(revision.refreshing)
                             .accessibilityIdentifier("workspace-image-refresh")
-                        if offeredData != nil {
+                        if revision.offeredData != nil {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("New image version available. Preview notes on the old version need a new selection.")
                                     .accessibilityIdentifier("workspace-image-revision-warning")
                                 Button("Show new version") {
-                                    guard let offeredData, let offeredSha256 else { return }
-                                    currentData = offeredData; currentSha256 = offeredSha256
-                                    self.offeredData = nil; self.offeredSha256 = nil
+                                    revision.showOfferedRevision()
                                 }
                                 .accessibilityIdentifier("workspace-image-show-revision")
                             }
                             .frame(maxWidth: .infinity, alignment: .leading).padding(10)
                             .background(Color.orange.opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
-                        } else if let refreshFailure {
+                        } else if let refreshFailure = revision.refreshFailure {
                             Text(refreshFailure).frame(maxWidth: .infinity, alignment: .leading)
                                 .accessibilityIdentifier("workspace-image-refresh-error")
                         }
                         Spacer(minLength: 0)
                     }
                     .font(.footnote).foregroundStyle(.white)
-                    .padding(.horizontal, 16).padding(.top, 76)
+                    .padding(.horizontal, 16).padding(.top, 8)
                 }
             }
             .overlay(alignment: .bottom) {
@@ -3656,37 +3945,20 @@ private struct WorkspaceImagePreview: View {
                     .padding(.bottom, 18)
                     .accessibilityIdentifier("annotation-image-open")
             }
-            .sheet(isPresented: $showingRegion) {
-                WorkspaceRegionEditor(name: item.name, source: currentData, context: context,
+            .fullScreenCover(isPresented: $showingRegion) {
+                WorkspaceRegionEditor(name: item.name, source: revision.currentData, context: context,
                                       format: .image, onAnnotation: onAnnotation, initialNote: initialNote)
-                    .presentationCompactAdaptation(.fullScreenCover)
             }
             .task(id: refreshSequence) {
-                guard let refreshSequence, refresh != nil else { return }
-                if let observedSequence, observedSequence != refreshSequence { await checkForRevision() }
-                observedSequence = refreshSequence
+                guard let refreshSequence else { return }
+                await revision.observe(sequence: refreshSequence, refresh: refresh, onRevision: onRevision,
+                    failureMessage: "Could not check this image. Check your Mac or workspace access and try again.")
             }
-            .onDisappear { manualRefreshTask?.cancel() }
     }
 
     private func checkForRevision() async {
-        guard let refresh, !refreshing else { return }
-        refreshing = true; refreshFailure = nil
-        defer { refreshing = false }
-        do {
-            let data = try await refresh()
-            guard !Task.isCancelled else { return }
-            let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
-            guard !Task.isCancelled else { return }
-            if sha256 != currentSha256 {
-                offeredData = data; offeredSha256 = sha256
-                await onRevision?(sha256)
-            } else { offeredData = nil; offeredSha256 = nil }
-        } catch is CancellationError {
-        } catch {
-            guard !Task.isCancelled else { return }
-            refreshFailure = "Could not check this image. Check your Mac or workspace access and try again."
-        }
+        await revision.checkForRevision(refresh: refresh, onRevision: onRevision,
+            failureMessage: "Could not check this image. Check your Mac or workspace access and try again.")
     }
 }
 
@@ -3714,13 +3986,21 @@ private struct WorkspaceRegionEditor: View {
             VStack(spacing: 0) {
                 if format == .pdf, pageCount > 0 {
                     HStack {
-                        Button("Previous page", systemImage: "chevron.left") { page -= 1 }
-                            .disabled(page <= 1).accessibilityIdentifier("annotation-previous-page")
+                        Button("Previous page", systemImage: "chevron.left") {
+                            guard !loading else { return }
+                            loading = true
+                            page -= 1
+                        }
+                            .disabled(loading || page <= 1).accessibilityIdentifier("annotation-previous-page")
                         Spacer()
                         Text("Page \(page) of \(pageCount)").accessibilityIdentifier("annotation-page-position")
                         Spacer()
-                        Button("Next page", systemImage: "chevron.right") { page += 1 }
-                            .disabled(page >= pageCount).accessibilityIdentifier("annotation-next-page")
+                        Button("Next page", systemImage: "chevron.right") {
+                            guard !loading else { return }
+                            loading = true
+                            page += 1
+                        }
+                            .disabled(loading || page >= pageCount).accessibilityIdentifier("annotation-next-page")
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
                 }
@@ -3745,7 +4025,7 @@ private struct WorkspaceRegionEditor: View {
                     Button(format == .pdf ? "Select whole page" : "Select whole image") {
                         region = CGRect(x: 0, y: 0, width: 1, height: 1)
                     }
-                    .disabled(preview == nil)
+                    .disabled(loading || preview == nil)
                     .accessibilityIdentifier("annotation-region-all")
                     DisclosureGroup("Adjust selected area", isExpanded: $showingAreaControls) {
                         Slider(value: regionValue(\.minX), in: 0...0.99, step: 0.01) { Text("Left") }
@@ -3753,7 +4033,7 @@ private struct WorkspaceRegionEditor: View {
                         Slider(value: regionValue(\.width), in: 0.01...1, step: 0.01) { Text("Width") }
                         Slider(value: regionValue(\.height), in: 0.01...1, step: 0.01) { Text("Height") }
                     }
-                    .disabled(preview == nil)
+                    .disabled(loading || preview == nil)
                     .onChange(of: showingAreaControls) { _, expanded in
                         if expanded && region == nil { region = CGRect(x: 0, y: 0, width: 1, height: 1) }
                     }
@@ -3765,7 +4045,7 @@ private struct WorkspaceRegionEditor: View {
                     if let failure { Text(failure).font(.footnote).foregroundStyle(.red).accessibilityIdentifier("annotation-region-error") }
                     Button("Add to message") { addAnnotation() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(region == nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
+                        .disabled(loading || region == nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
                         .accessibilityIdentifier("annotation-region-add")
                 }
                 .padding(12)
@@ -3801,7 +4081,7 @@ private struct WorkspaceRegionEditor: View {
     }
 
     private func addAnnotation() {
-        guard let region else { return }
+        guard !loading, let region else { return }
         do {
             let x = Double(region.minX), y = Double(region.minY)
             let width = Double(region.width), height = Double(region.height)
@@ -3910,7 +4190,87 @@ private struct WorkspaceRegionCanvas: View {
     }
 }
 
-struct WorkspaceDocumentPreview: View {
+/// Native selection preserves the exact highlighted characters, including
+/// Unicode and line endings, for a revision-bound preview comment.
+private struct SelectablePreviewText: UIViewRepresentable {
+    let text: String
+    @Binding var selectedRange: NSRange?
+    let selectionResetID: UUID
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selectedRange: $selectedRange, selectionResetID: selectionResetID)
+    }
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        context.coordinator.isUpdating = true
+        view.delegate = context.coordinator
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = true
+        view.backgroundColor = .clear
+        view.textColor = .label
+        view.tintColor = .tintColor
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        view.textContainer.lineFragmentPadding = 0
+        view.adjustsFontForContentSizeCategory = true
+        view.font = UIFontMetrics(forTextStyle: .body).scaledFont(
+            for: .monospacedSystemFont(ofSize: 15, weight: .regular))
+        view.text = text
+        if let selectedRange { view.selectedRange = selectedRange }
+        context.coordinator.isUpdating = false
+        return view
+    }
+    func updateUIView(_ view: UITextView, context: Context) {
+        context.coordinator.selectedRange = $selectedRange
+        let reset = context.coordinator.selectionResetID != selectionResetID
+        if reset {
+            context.coordinator.selectionResetID = selectionResetID
+            context.coordinator.pendingSelection = nil
+            context.coordinator.selectionEventID = UUID()
+        }
+        context.coordinator.isUpdating = true
+        // The view is recreated for each source SHA; text is immutable within
+        // that identity. Do not compare or assign 128 KB on every note keystroke.
+        if reset || (selectedRange == nil && context.coordinator.pendingSelection == nil) {
+            if view.selectedRange.length > 0 {
+                view.selectedRange = NSRange(location: view.selectedRange.location, length: 0)
+            }
+        } else if let selectedRange, context.coordinator.pendingSelection == nil,
+                  view.selectedRange != selectedRange {
+            view.selectedRange = selectedRange
+        }
+        context.coordinator.isUpdating = false
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var selectedRange: Binding<NSRange?>
+        var selectionResetID: UUID
+        var selectionEventID = UUID()
+        var pendingSelection: NSRange?
+        var isUpdating = false
+        init(selectedRange: Binding<NSRange?>, selectionResetID: UUID) {
+            self.selectedRange = selectedRange
+            self.selectionResetID = selectionResetID
+        }
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            guard !isUpdating else { return }
+            let range = textView.selectedRange
+            let selected = range.length > 0 ? range : nil
+            pendingSelection = selected
+            let eventID = UUID()
+            selectionEventID = eventID
+            Task { @MainActor [weak self] in
+                guard let self, self.selectionEventID == eventID else { return }
+                self.pendingSelection = nil
+                if self.selectedRange.wrappedValue != selected {
+                    self.selectedRange.wrappedValue = selected
+                }
+            }
+        }
+    }
+}
+
+private struct WorkspaceDocumentPreview: View {
     let name: String
     let mimeType: String
     let annotationContext: ArtifactPreviewContext?
@@ -3918,228 +4278,209 @@ struct WorkspaceDocumentPreview: View {
     let refresh: (() async throws -> Data)?
     let onRevision: ((String) async -> Void)?
     let refreshSequence: UInt64?
-    @State private var currentData: Data
-    @State private var currentSha256: String
-    @State private var preparedText: String?
-    @State private var preparedLines: [String] = []
-    @State private var preparingText = true
-    init(name: String, mimeType: String, data: Data,
+    let onClose: (() -> Void)?
+    @ObservedObject var revision: WorkspaceRevisionState
+    @ObservedObject var draft: WorkspaceTextAnnotationDraft
+    init(name: String, mimeType: String, revision: WorkspaceRevisionState,
+         draft: WorkspaceTextAnnotationDraft,
          annotationContext: ArtifactPreviewContext? = nil,
          onAnnotation: ((ArtifactAnnotation) throws -> Void)? = nil,
          refresh: (() async throws -> Data)? = nil,
          onRevision: ((String) async -> Void)? = nil,
          refreshSequence: UInt64? = nil,
-         initialNote: String = "", initialSha256: String? = nil) {
+         onClose: (() -> Void)? = nil) {
         self.name = name; self.mimeType = mimeType
+        self.revision = revision
+        self.draft = draft
         self.annotationContext = annotationContext; self.onAnnotation = onAnnotation
         self.refresh = refresh; self.onRevision = onRevision; self.refreshSequence = refreshSequence
-        _currentData = State(initialValue: data)
-        // Only workspace previews refresh. Keep attachment previews cheap to create.
-        _currentSha256 = State(initialValue: initialSha256 ?? "")
-        _note = State(initialValue: initialNote)
+        self.onClose = onClose
     }
     @Environment(\.dismiss) private var dismiss
-    @State private var selectingLines = false
-    @State private var firstLine: Int?
-    @State private var lastLine: Int?
-    @State private var note = ""
-    @State private var annotationError: String?
     @State private var showingPDFRegion = false
-    @State private var offeredData: Data?
-    @State private var offeredSha256: String?
-    @State private var refreshFailure: String?
-    @State private var refreshing = false
-    @State private var observedSequence: UInt64?
-    @State private var manualRefreshTask: Task<Void, Never>?
     var body: some View {
         NavigationStack {
             Group {
-                if mimeType == "application/pdf" { PDFPreview(data: currentData, revision: currentSha256).ignoresSafeArea(edges: .bottom) }
-                else if preparingText && preparedText == nil { ProgressView("Preparing preview…") }
-                else if mimeType == "text/html", let html = preparedText { ConstrainedHTML(html: html) }
-                else if let text = preparedText {
+                if mimeType == "application/pdf" {
+                    PDFPreview(data: revision.currentData, revision: revision.currentSha256)
+                        .ignoresSafeArea(edges: .bottom)
+                        .accessibilityIdentifier("workspace-pdf-preview")
+                }
+                else if revision.preparingText && revision.preparedText == nil { ProgressView("Preparing preview…") }
+                else if mimeType == "text/html", let html = revision.preparedText { ConstrainedHTML(html: html) }
+                else if let text = revision.preparedText, canAnnotate {
+                    SelectablePreviewText(text: text, selectedRange: $draft.selectedRange,
+                                          selectionResetID: draft.selectionResetID)
+                        .id(revision.currentSha256)
+                        .accessibilityIdentifier("annotation-selectable-text")
+                } else if let text = revision.preparedText {
                     ScrollView {
-                        if selectingLines {
-                            LazyVStack(alignment: .leading, spacing: 0) {
-                                ForEach(preparedLines.indices, id: \.self) { index in
-                                    let number = index + 1
-                                    Button { select(number) } label: {
-                                        HStack(alignment: .top, spacing: 10) {
-                                            Text("\(number)").foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
-                                            Text(preparedLines[index].isEmpty ? " " : preparedLines[index]).frame(maxWidth: .infinity, alignment: .leading)
-                                        }
-                                        .font(.system(.footnote, design: .monospaced))
-                                        .padding(.vertical, 7)
-                                        .padding(.horizontal, 10)
-                                        .frame(minHeight: 44)
-                                        .background(isSelected(number) ? Color.accentColor.opacity(0.18) : Color.clear)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel("Line \(number): \(preparedLines[index])")
-                                    .accessibilityAddTraits(isSelected(number) ? .isSelected : [])
-                                    .accessibilityIdentifier("annotation-line:\(number)")
-                                }
-                            }
-                        } else {
-                            Text(text).font(.system(.body, design: .monospaced))
-                                .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding()
-                        }
+                        Text(text).font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding()
                     }
                 }
-                else { ContentUnavailableView("Preview unavailable", systemImage: "doc", description: Text("This file type does not have a preview in Wonder.")) }
+                else {
+                    ContentUnavailableView("Preview unavailable", systemImage: "doc",
+                        description: Text(revision.previewTruncated
+                            ? "This HTML file is too large to preview safely. Open it on your Mac."
+                            : "This file type does not have a preview in Wonder."))
+                }
             }
             .navigationTitle(name).navigationBarTitleDisplayMode(.inline)
+            .toolbar(onClose == nil ? .visible : .hidden, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if mimeType == "application/pdf", annotationContext != nil, onAnnotation != nil {
-                        Button("Annotate region") { showingPDFRegion = true }
-                            .accessibilityIdentifier("annotation-pdf-open")
-                    } else if canAnnotate {
-                        Button(selectingLines ? "Cancel selection" : "Annotate lines") {
-                            selectingLines.toggle(); firstLine = nil; lastLine = nil; annotationError = nil
+                if onClose == nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        if mimeType == "application/pdf", annotationContext != nil, onAnnotation != nil {
+                            Button("Annotate region") { showingPDFRegion = true }
+                                .accessibilityIdentifier("annotation-pdf-open")
                         }
-                        .accessibilityIdentifier("annotation-select-lines")
                     }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }.accessibilityIdentifier("workspace-document-close")
-                }
-                if refresh != nil {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("Check for changes", systemImage: "arrow.clockwise") {
-                            manualRefreshTask?.cancel()
-                            manualRefreshTask = Task { await checkForRevision() }
-                        }
-                            .disabled(refreshing)
-                            .accessibilityIdentifier("workspace-document-refresh")
+                        Button("Done") { dismiss() }
+                            .accessibilityIdentifier("workspace-document-close")
+                    }
+                    if refresh != nil {
+                        ToolbarItem(placement: .topBarTrailing) { refreshButton }
                     }
                 }
             }
             .safeAreaInset(edge: .top) {
-                if offeredData != nil {
+                if revision.previewTruncated, revision.preparedText != nil {
+                    Text("Showing the first 128 KB. Open the file on your Mac to read the rest.")
+                        .font(.footnote)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Color(uiColor: .secondarySystemBackground))
+                        .accessibilityIdentifier("workspace-document-truncated")
+                }
+                if onClose != nil && (refresh != nil || mimeType == "application/pdf" && annotationContext != nil && onAnnotation != nil) {
+                    HStack {
+                        if mimeType == "application/pdf", annotationContext != nil, onAnnotation != nil {
+                            Button("Annotate region") { showingPDFRegion = true }
+                                .accessibilityIdentifier("annotation-pdf-open")
+                        }
+                        Spacer()
+                        if refresh != nil { refreshButton }
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 44)
+                }
+                if revision.offeredData != nil {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("New file version available. Preview notes on the old version need a new selection.")
                             .font(.footnote)
                             .accessibilityIdentifier("workspace-document-revision-warning")
-                        Button("Show new version") { Task { await showOfferedRevision() } }
+                        Button("Show new version") { showOfferedRevision() }
                             .accessibilityIdentifier("workspace-document-show-revision")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading).padding(10)
                     .background(Color.orange.opacity(0.16))
-                } else if let refreshFailure {
+                } else if let refreshFailure = revision.refreshFailure {
                     Text(refreshFailure).font(.footnote).foregroundStyle(.red)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(10)
                         .accessibilityIdentifier("workspace-document-refresh-error")
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                if selectingLines {
+                if canAnnotate, let selectedTextRange = draft.selectedRange, selectedTextRange.length > 0 {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(selectedLabel).font(.footnote).foregroundStyle(.secondary)
-                        TextField("What should the agent notice?", text: $note, axis: .vertical)
-                            .lineLimit(2...4)
-                            .accessibilityIdentifier("annotation-note")
-                        if note.utf8.count > 4096 { Text("Keep the note under 4,096 bytes.").font(.footnote).foregroundStyle(.red) }
-                        if let annotationError { Text(annotationError).font(.footnote).foregroundStyle(.red) }
-                        Button("Add to message") { addAnnotation() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(firstLine == nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
-                            .accessibilityIdentifier("annotation-add")
+                        HStack(spacing: 10) {
+                            Text(selectedExcerpt(for: selectedTextRange))
+                                .font(.footnote).lineLimit(2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("annotation-selected-text")
+                            Button("Cancel comment", systemImage: "xmark") {
+                                draft.clearSelection(discardNote: true)
+                            }
+                            .labelStyle(.iconOnly)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .accessibilityIdentifier("annotation-cancel")
+                            if draft.editingSelection {
+                                Button("Save comment", systemImage: "checkmark") { addAnnotation() }
+                                    .labelStyle(.iconOnly)
+                                    .frame(minWidth: 44, minHeight: 44)
+                                    .disabled(draft.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.note.utf8.count > 4096)
+                                    .accessibilityIdentifier("annotation-add")
+                            } else {
+                                Button("Comment", systemImage: "text.bubble") { draft.editingSelection = true }
+                                    .frame(minHeight: 44)
+                                    .accessibilityIdentifier("annotation-comment")
+                            }
+                        }
+                        if draft.editingSelection {
+                            TextField("Add a comment", text: $draft.note, axis: .vertical)
+                                .lineLimit(2...4)
+                                .accessibilityIdentifier("annotation-note")
+                        }
+                        if draft.note.utf8.count > 4096 { Text("Keep the comment under 4,096 bytes.").font(.footnote).foregroundStyle(.red) }
+                        if let error = draft.error { Text(error).font(.footnote).foregroundStyle(.red) }
                     }
-                    .padding(12)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.regularMaterial)
                 }
             }
             .fullScreenCover(isPresented: $showingPDFRegion) {
                 if let annotationContext, let onAnnotation {
-                    WorkspaceRegionEditor(name: name, source: currentData, context: annotationContext,
-                                          format: .pdf, onAnnotation: onAnnotation, initialNote: note)
+                    WorkspaceRegionEditor(name: name, source: revision.currentData, context: annotationContext,
+                                          format: .pdf, onAnnotation: onAnnotation, initialNote: draft.note)
                 }
             }
             .task(id: refreshSequence) {
-                guard let refreshSequence, refresh != nil else { return }
-                if let observedSequence, observedSequence != refreshSequence { await checkForRevision() }
-                observedSequence = refreshSequence
+                guard let refreshSequence else { return }
+                await revision.observe(sequence: refreshSequence, refresh: refresh, onRevision: onRevision,
+                    failureMessage: "Could not check this file. Check your Mac or workspace access and try again.")
             }
-            .task(id: currentSha256) { await prepareText() }
-            .onDisappear { manualRefreshTask?.cancel() }
+            .task(id: revision.currentSha256) { await revision.prepareTextIfNeeded(mimeType: mimeType) }
         }
     }
 
     private var canAnnotate: Bool {
-        !preparingText && annotationContext != nil && onAnnotation != nil && mimeType != "text/html" &&
+        !revision.preparingText && annotationContext != nil && onAnnotation != nil && mimeType != "text/html" &&
         (mimeType.hasPrefix("text/") || ["application/json", "application/yaml", "application/xml", "application/sql"].contains(mimeType)) &&
-        preparedText != nil && !preparedLines.isEmpty
+        revision.preparedText != nil
     }
-    private var selectedLabel: String {
-        guard let firstLine else { return "Select the first line in the preview." }
-        guard let lastLine else { return "Line \(firstLine) selected. Select an end line, or add this line." }
-        return "Lines \(min(firstLine, lastLine))–\(max(firstLine, lastLine)) selected."
+    private var refreshButton: some View {
+        Button("Check for changes", systemImage: "arrow.clockwise") {
+            revision.manualRefreshTask?.cancel()
+            revision.manualRefreshTask = Task { await checkForRevision() }
+        }
+        .labelStyle(.iconOnly)
+        .frame(minWidth: 44, minHeight: 44)
+        .disabled(revision.refreshing)
+        .accessibilityIdentifier("workspace-document-refresh")
     }
-    private func isSelected(_ number: Int) -> Bool {
-        guard let firstLine else { return false }
-        return (min(firstLine, lastLine ?? firstLine)...max(firstLine, lastLine ?? firstLine)).contains(number)
-    }
-    private func select(_ number: Int) {
-        if firstLine == nil || lastLine != nil { firstLine = number; lastLine = nil }
-        else { lastLine = number }
+    private func selectedExcerpt(for range: NSRange) -> String {
+        guard let text = revision.preparedText, NSMaxRange(range) <= (text as NSString).length else { return "Selected text" }
+        let selected = (text as NSString).substring(with: range)
+        return String(selected.prefix(120)).replacingOccurrences(of: "\n", with: " ")
     }
     private func addAnnotation() {
-        guard let annotationContext, let onAnnotation, let firstLine else { return }
+        guard let annotationContext, let onAnnotation, let selectedTextRange = draft.selectedRange,
+              let text = revision.preparedText, let range = Range(selectedTextRange, in: text) else { return }
         do {
+            let start = text[..<range.lowerBound].utf8.count
+            let end = start + text[range].utf8.count
             let annotation = try ArtifactAnnotation(projectId: annotationContext.projectID,
                 conversationId: annotationContext.conversationID, rootId: annotationContext.rootID,
-                path: annotationContext.path, source: currentData,
-                startLine: min(firstLine, lastLine ?? firstLine), endLine: max(firstLine, lastLine ?? firstLine), note: note)
+                path: annotationContext.path, source: revision.currentData, mimeType: mimeType,
+                startByte: start, endByte: end, note: draft.note)
             try onAnnotation(annotation)
-        } catch { annotationError = "The preview note could not be saved. Reopen the file and try again." }
+            draft.clearSelection(discardNote: true)
+        } catch { draft.error = "The preview note could not be saved. Reopen the file and try again." }
     }
 
     private func checkForRevision() async {
-        guard let refresh, !refreshing else { return }
-        refreshing = true; refreshFailure = nil
-        defer { refreshing = false }
-        do {
-            let data = try await refresh()
-            guard !Task.isCancelled else { return }
-            let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
-            guard !Task.isCancelled else { return }
-            if sha256 != currentSha256 {
-                offeredData = data; offeredSha256 = sha256
-                await onRevision?(sha256)
-            } else { offeredData = nil; offeredSha256 = nil }
-        } catch is CancellationError {
-        } catch {
-            guard !Task.isCancelled else { return }
-            refreshFailure = "Could not check this file. Check your Mac or workspace access and try again."
-        }
+        await revision.checkForRevision(refresh: refresh, onRevision: onRevision,
+            failureMessage: "Could not check this file. Check your Mac or workspace access and try again.")
     }
 
-    private func showOfferedRevision() async {
-        guard let data = offeredData, let sha256 = offeredSha256 else { return }
-        // Keep the existing scroll view and reading offset until the new text
-        // has been prepared. Selection stays disabled during that transition.
-        currentData = data; currentSha256 = sha256
-        preparingText = true
-        offeredData = nil; offeredSha256 = nil
-        selectingLines = false; firstLine = nil; lastLine = nil
-        annotationError = nil
-    }
-
-    private func prepareText() async {
-        guard mimeType != "application/pdf" else { return }
-        let data = currentData
-        let sha256 = currentSha256
-        let prepared = await Task.detached(priority: .userInitiated) { () -> (String?, [String]) in
-            let text = String(data: data, encoding: .utf8)
-            guard let text else { return (nil, []) }
-            var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            if text.hasSuffix("\n") { lines.removeLast() }
-            return (text, lines.count <= 4_000 ? (lines.isEmpty ? [""] : lines) : [])
-        }.value
-        guard !Task.isCancelled, currentSha256 == sha256 else { return }
-        preparedText = prepared.0; preparedLines = prepared.1; preparingText = false
+    private func showOfferedRevision() {
+        // Clear the old text before the replacement is decoded so its visible
+        // content cannot be mistaken for the newly selected revision.
+        revision.showOfferedRevision()
+        draft.clearSelection(discardNote: false)
     }
 }
 
@@ -4233,6 +4574,7 @@ private struct ArtifactNoteEditor: View {
     private func anchorDescription(_ anchor: ArtifactAnnotation.Anchor) -> String {
         switch anchor {
         case .textLines(let start, let end): "Lines \(start)–\(end)"
+        case .textRange: "Highlighted text"
         case .imageRegion: "Selected image area"
         case .pdfRegion(let page, _, _, _, _): "Selected area on page \(page)"
         }
@@ -4243,15 +4585,19 @@ struct WorkspaceDiffPreview: View {
     let path: String
     let state: String
     let diff: String
+    var onClose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
             ScrollView { Text(diff.isEmpty ? "No textual diff is available for this change." : diff).font(.system(.footnote, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding().accessibilityIdentifier("workspace-diff-text") }
                 .navigationTitle(path).navigationBarTitleDisplayMode(.inline)
+                .toolbar(onClose == nil ? .visible : .hidden, for: .navigationBar)
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Done") { dismiss() }
-                            .accessibilityIdentifier("workspace-diff-close")
+                    if onClose == nil {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { dismiss() }
+                                .accessibilityIdentifier("workspace-diff-close")
+                        }
                     }
                 }
                 .safeAreaInset(edge: .bottom) { Text(state.capitalized).font(.caption).foregroundStyle(.secondary).padding(.bottom, 8) }
@@ -4847,10 +5193,12 @@ struct ActivityGroupView: View {
     let turn: ReadTurn?
     let isLatestSegmentForTurn: Bool
     let isLatestActiveSegment: Bool
+    let isProjectConversation: Bool
     let expanded: Bool
     let toggle: () -> Void
     private var lifecycleLabel: String {
-        ChatFeedEntry.lifecycleLabel(rows: rows, turn: turn, isLatestSegmentForTurn: isLatestSegmentForTurn, isLatestActiveSegment: isLatestActiveSegment)
+        ChatFeedEntry.lifecycleLabel(rows: rows, turn: turn, isLatestSegmentForTurn: isLatestSegmentForTurn,
+                                     isLatestActiveSegment: isLatestActiveSegment, isProjectConversation: isProjectConversation)
     }
     private var showsSpinner: Bool {
         turn?.isInProgress == true && isLatestActiveSegment

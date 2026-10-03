@@ -378,13 +378,13 @@ struct PairComputerView: View {
     @StateObject var model: ConnectionModel
     @Environment(\.dismiss) private var dismiss
     @State private var link = ""
+    @State private var address = ""
+    @State private var code = ""
+    @State private var enteringCode = false
     @State private var scanning = false
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    Text("On your Mac, open Wonder → Settings → Devices → Pair Device.")
-                }
                 if model.busy {
                     Section {
                         ProgressView(model.status)
@@ -395,16 +395,59 @@ struct PairComputerView: View {
                         Button("Stop pairing", role: .cancel) { model.cancel() }
                     }
                 } else {
-                    Section("QR code or pairing link") {
-                        if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
-                            Button("Scan QR code", systemImage: "qrcode.viewfinder") { scanning = true }
-                        } else { Text("Camera scanning is unavailable. Paste a pairing link to connect.").foregroundStyle(.secondary) }
-                        TextField("Or paste pairing link", text: $link).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                        Button("Connect to computer") { model.pair(link: link, address: "", code: "") }
-                            .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if enteringCode {
+                        Section("Mac HTTPS address and code") {
+                            TextField("Mac HTTPS address", text: $address)
+                                .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                                .accessibilityIdentifier("pairing-mac-address")
+                            TextField("Pairing code", text: $code)
+                                .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                                .accessibilityIdentifier("pairing-code")
+                        }
+                    } else {
+                        Section {
+                            if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
+                                Button("Scan QR code", systemImage: "qrcode.viewfinder") { scanning = true }
+                            }
+                            TextField("Or paste pairing link", text: $link).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                        } header: {
+                            Text("QR code or pairing link")
+                        } footer: {
+                            if !DataScannerViewController.isSupported || !DataScannerViewController.isAvailable {
+                                Text("Camera scanning is unavailable on this device. Paste a pairing link instead.")
+                            }
+                        }
+                    }
+                    Section {
+                        Button(enteringCode ? "Use QR or pairing link" : "Use pairing code") {
+                            enteringCode.toggle()
+                        }
+                        .accessibilityIdentifier("pairing-entry-mode")
                     }
                 }
+                Section {
+                    Text("On your Mac, open Wonder → Settings → Devices → Pair Device.")
+                }
                 if let error = model.error { FailureDetails("Couldn’t connect", message: error) }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if !model.busy {
+                    Button(enteringCode ? "Connect with code" : "Connect to computer") {
+                        model.pair(link: enteringCode ? "" : link,
+                                   address: enteringCode ? address : "",
+                                   code: enteringCode ? code : "")
+                    }
+                    .disabled(enteringCode
+                        ? address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                          code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        : link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier(enteringCode ? "pairing-connect-code" : "pairing-connect-link")
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial)
+                }
             }
             .navigationTitle("Add computer").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { model.cancel(); dismiss() } } }

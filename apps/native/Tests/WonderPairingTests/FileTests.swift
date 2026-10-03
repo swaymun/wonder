@@ -47,6 +47,32 @@ final class FileTests: XCTestCase {
             path: "a.txt", source: Data([0xff]), startLine: 1, endLine: 1, note: "Review"))
     }
 
+    func testSelectedTextRangeUsesExclusiveUTF8BytesAndRejectsBrokenSelections() throws {
+        let source = Data("Aé🦊Z\n".utf8)
+        let annotation = try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "workspace",
+            path: "notes.md", source: source, mimeType: "text/markdown",
+            startByte: 1, endByte: 7, note: "Explain this selection")
+        XCTAssertEqual(annotation.sourceSha256, ConversationFile.digest(source))
+        XCTAssertEqual(annotation.anchor, .textRange(startByte: 1, endByte: 7))
+        let staged = try annotation.stagedFile()
+        XCTAssertEqual(try ArtifactAnnotation.read(staged.data), annotation)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: staged.data) as? [String: Any])
+        let anchor = try XCTUnwrap(json["anchor"] as? [String: Any])
+        XCTAssertEqual(anchor["kind"] as? String, "textRange")
+        XCTAssertEqual(anchor["startByte"] as? Int, 1)
+        XCTAssertEqual(anchor["endByte"] as? Int, 7)
+        for (mime, start, end) in [("text/markdown", 2, 7), ("text/markdown", 1, 6),
+                                   ("text/markdown", 7, 7), ("text/markdown", 1, 99),
+                                   ("text/html", 1, 7), ("image/png", 1, 7)] {
+            XCTAssertThrowsError(try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "workspace",
+                path: "notes.md", source: source, mimeType: mime,
+                startByte: start, endByte: end, note: "Review"))
+        }
+        XCTAssertThrowsError(try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "workspace",
+            path: "notes.md", source: Data([0xff, 0xfe]), mimeType: "text/plain",
+            startByte: 0, endByte: 2, note: "Review"))
+    }
+
     func testImageAndPDFRegionsEncodeExactNormalizedAnchorsAndRejectInvalidBounds() throws {
         let image = Data([137, 80, 78, 71, 13, 10, 26, 10, 0])
         let imageNote = try ArtifactAnnotation(projectId: "p", conversationId: "c", rootId: "r",

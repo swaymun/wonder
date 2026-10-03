@@ -19,7 +19,6 @@ struct BridgeCommand: Decodable, Sendable {
     let action: String
     var enabled: Bool?
     var key: String?
-    var paths: [String]?
     var setup: Bool?
     var verification: String?
     var step: Int?
@@ -38,12 +37,14 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
         setup = SetupProgress(defaults: defaults)
         sharedDisplay = SharedDisplayPreference(defaults: defaults)
         super.init()
+        // The former Settings folder list did not grant daemon access. Discard
+        // its saved paths and bookmarks now that the list is gone.
+        defaults.removeObject(forKey: "computer.selectedFolders.v1")
+        defaults.removeObject(forKey: "computer.importedFolders.v1")
     }
     let permissions = PermissionModel()
     let pairing = PhonePairing()
     let files = FileAccessModel()
-    let computerFolders = ComputerFolders()
-    private var importedFolders = false
     private var lastState = Data()
     private var timer: Timer?
     private var commandBusy = false
@@ -73,10 +74,6 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             while !Task.isCancelled {
                 refresh()
                 await files.load()
-                if !importedFolders, let paths = try? await files.existingFolderPaths() {
-                    computerFolders.importExisting(paths)
-                    importedFolders = true
-                }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
@@ -196,16 +193,12 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
         case "revoke":
             guard let phone = pairing.devices.first(where: { $0.id == command.key && $0.revokedAt == nil }) else { return }
             await pairing.revoke(phone)
-        case "computer-folder-add":
-            computerFolders.message = nil
-            for path in command.paths ?? [] {
-                do { try computerFolders.remember(URL(fileURLWithPath: path, isDirectory: true)) }
-                catch { computerFolders.message = error.localizedDescription }
+        case "computer-full-disk":
+            let opened = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                .map { PrivacySettings.open($0, revealApplication: command.setup == true) } ?? false
+            if !opened {
+                commandError = "Open System Settings → Privacy & Security to manage Wonder’s access."
             }
-        case "computer-folder-remove":
-            if let path = command.key { computerFolders.remove(path) }
-        case "computer-folder-settings": computerFolders.openPrivacy(fullDisk: false)
-        case "computer-full-disk": computerFolders.openPrivacy(fullDisk: true, setup: command.setup == true)
         case "review-folder", "decline-folder":
             guard let item = files.requests.first(where: { $0.id == command.key }) else { return }
             if command.action == "review-folder" { NSApp.activate(ignoringOtherApps: true); files.review(item) }
@@ -255,7 +248,6 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             "pending": pairing.pending.filter { $0.isValid(at: Date()) }.map { ["id": $0.id, "label": $0.label, "verification": $0.challenge.verification, "expiresAtMs": $0.challenge.expiresAtMs] as [String: Any] },
             "devices": pairing.devices.map { ["id": $0.id, "label": $0.label, "revoked": $0.revokedAt != nil, "lastSeen": $0.lastSeenAt ?? "", "pairedAt": $0.createdAt ?? ""] as [String: Any] },
             "permissionDrag": PrivacySettings.dragRequest,
-            "computerFolders": computerFolders.rows, "computerFoldersMessage": computerFolders.message ?? "",
             "filesBusy": files.busy, "filesMessage": files.message ?? "",
             "fileRequests": files.requests.map { ["id": $0.id, "path": $0.path, "access": $0.access, "project": $0.useAsWorkingDirectory, "botName": files.snapshot?.botName ?? "Bot"] as [String: Any] }
         ]

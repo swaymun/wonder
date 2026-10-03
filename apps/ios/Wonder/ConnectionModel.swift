@@ -368,6 +368,7 @@ struct ManagedBotListMutationState {
             let composerRunningPreview = arguments.contains("-composer-running-preview")
             let composerQueuedPreview = arguments.contains("-composer-queued-preview")
             let messageAttachmentsPreview = arguments.contains("-message-attachments-preview")
+            let projectTerminalTurnPreview = arguments.contains("-project-terminal-turn-preview")
             var group: [String: Any] = [
                 "id": "preview-group", "conversationId": "preview", "name": saved?.hostName == "Laptop" ? "Travel plans" : saved?.hostName == "Home" ? "Reading list" : "Weekend plans", "isArchived": false,
                 "members": [["botId":"ada", "botName":"Ada", "role":"worker"]],
@@ -402,18 +403,27 @@ struct ManagedBotListMutationState {
                 macConnected = !ProcessInfo.processInfo.arguments.contains("-disconnected-preview")
                 cachedConversationIds = ["preview"]
                 if ProcessInfo.processInfo.arguments.contains("-send-preview") ||
-                    composerAttachmentsPreview || composerRestoredPreview || composerRunningPreview || composerQueuedPreview || messageAttachmentsPreview ||
+                    composerAttachmentsPreview || composerRestoredPreview || composerRunningPreview || composerQueuedPreview || messageAttachmentsPreview || projectTerminalTurnPreview ||
                     (ProcessInfo.processInfo.arguments.contains("-connections-preview") && saved?.hostName == "Studio") {
-                    let thread: [String: Any] = composerRunningPreview
+                    var thread: [String: Any] = composerRunningPreview
                         ? ["hydrated": true, "turns": [[
                             "id": "fixture-turn", "status": "inProgress", "startedAt": "1700000000000", "items": []
                         ]]]
                         : ["hydrated": true]
+                    if projectTerminalTurnPreview {
+                        thread = ["hydrated": true, "turns": [[
+                            "id": "fixture-turn", "status": "interrupted", "items": [[
+                                "id": "stopped-command", "type": "commandExecution", "state": "interrupted",
+                                "createdAt": "1700000001000", "payload": ["command": "swift test"]
+                            ]]
+                        ]]]
+                    }
                     var assistantMessages: [[String: Any]] = [[
                         "messageId": "2", "codexTurnId": "fixture-turn", "itemId": "fixture-item",
                         "text": "Start with breakfast at home, then take a walk. Leave the afternoon open so the day stays flexible.",
                         "state": "completed", "createdAt": "1700000001000", "updatedAt": "1700000001000"
                     ]]
+                    if projectTerminalTurnPreview { assistantMessages = [] }
                     if composerQueuedPreview {
                         assistantMessages = []
                         for index in 1...14 {
@@ -432,7 +442,7 @@ struct ManagedBotListMutationState {
                         "assistantMessages": assistantMessages,
                         "thread": thread
                     ]
-                    let projectFilesConversation = arguments.contains("-project-files-conversation-preview")
+                    let projectFilesConversation = arguments.contains("-project-files-conversation-preview") || projectTerminalTurnPreview
                     var summary: [String: Any] = ["conversationId": "preview", "botId": "ada", "title": "Ada", "lastMessagePreview": "Leave the afternoon open so the day stays flexible.", "messageCount": 2, "hasUnread": false, "isArchived": false, "isPinned": false]
                     if projectFilesConversation { summary["botId"] = nil; summary["title"] = "Project notes" }
                     if let data = try? JSONSerialization.data(withJSONObject: fixture),
@@ -1270,7 +1280,8 @@ struct ManagedBotListMutationState {
     private func connectionReady() async -> Bool {
         await preparation?.value
         if let connectionCheck { await connectionCheck.value }
-        return macConnected == true && !accessEnded
+        else if macConnected != true && !accessEnded && !Task.isCancelled { await check() }
+        return macConnected == true && !accessEnded && !Task.isCancelled
     }
 
     /// Retries a conversation that has no saved content after a failed load.
@@ -2132,6 +2143,9 @@ struct ManagedBotListMutationState {
                     }
                 }
             }
+            if ProcessInfo.processInfo.arguments.contains("-workspace-delayed-roots") {
+                try await Task.sleep(for: .seconds(5))
+            }
             #endif
             return previewWorkspaceRoots(chat)
         }
@@ -2287,6 +2301,10 @@ struct ManagedBotListMutationState {
             if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview") {
                 rootEntries += DiagnosticWorkspaceFileFixtures.entries
             }
+            if ProcessInfo.processInfo.arguments.contains("-workspace-large-text-preview") {
+                rootEntries.append(WorkspaceEntry(name: "large.txt", path: "large.txt", isDirectory: false,
+                                                  byteSize: 8 * 1024 * 1024, mimeType: "text/plain"))
+            }
             #endif
             values = rootEntries
         }
@@ -2294,6 +2312,9 @@ struct ManagedBotListMutationState {
     }
     private func previewWorkspaceData(entry: WorkspaceEntry) -> Data {
         #if WONDER_DIAGNOSTICS
+        if ProcessInfo.processInfo.arguments.contains("-workspace-large-text-preview"), entry.name == "large.txt" {
+            return Data(repeating: 65, count: 8 * 1024 * 1024)
+        }
         if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview"),
            let data = DiagnosticWorkspaceFileFixtures.data(name: entry.name) { return data }
         #endif

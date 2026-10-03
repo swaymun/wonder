@@ -76,25 +76,215 @@ Native progressive dictation had no supported SpeechTranscriber locale on the
 tested iOS 26.5 simulators, so the existing dictation path remains in place.
 EPUB and read-only USDZ/OBJ/PLY/STL viewers passed focused checks, while
 repeated SceneKit conversion retained measurable memory; broader GLB support
-remains at a research gate. Actual Widget Home Screen presentation, paired
-mobile-to-Mac Files/media and provider-send roundtrips, and TestFlight
-installation remain unverified.
+remains at a research gate. Configured small Widget presentation and new-chat
+taps now pass on both simulators with a team-signed Testing QA copy. Recent-chat
+Widget taps, paired mobile-to-Mac provider-send roundtrips, and TestFlight
+installation remain unverified. Paired read-only Files, PNG/PDF previews,
+audio/video playback and seeking, and an unsent preview note passed on both
+simulators as described below.
 
 The post-release hardening review additionally corrected Bot and Project
-history/lifecycle waits that could delay update handoff; the combined daemon
-library suite passed 341 tests with three existing ignores, and the installer
+history/lifecycle waits that could delay update handoff. One ambiguous Bot
+receipt now yields after 20 history pages, and Project recovery cannot restart
+its runtime during the update lease. The combined daemon library suite passed
+345 tests with three existing ignores, and the installer
 handoff suite passed 12/12. A visible Chats control in the iPad conversation
 shell passed a real-shell accessibility-size UI regression on iPad and the
 corresponding iPhone check (1/1 each). These changes remain in unshipped draft
-PR #61. With the owner's approval, a read-only pairing attempt found the
-installed Mac did not expose a usable full link through the accessible Devices
-UI, and the available simulator builds lacked durable pairing entitlements.
-No new owner device appeared; paired mobile acceptance remains open.
+PR #61. A further cold-Project regression passed 1/1 after a history refresh
+race was fixed: a cached Project now waits for session renewal before reporting
+failure. The Project toolbar title was bounded at large text sizes and passed
+a visible-header check on both simulators (1/1 each). New Chat host switching
+now keeps its draft visible if saving fails. These fixes are also unshipped.
+With the owner's approval, enlarging and scrolling Mac Settings →
+Devices exposed a usable copied pairing link. The owner approved exactly two
+Wonder Testing development profiles (main app and Widget) using the existing
+certificate; both were verified and installed. The TestingDiagnostics app
+built and launched on the owned iPhone and iPad. Xcode's simulator signature
+has an empty entitlement payload, while its simulated entitlements contain the
+Testing App Group and Keychain groups. Each simulator claimed a fresh copied
+HTTPS link, showed verification text matching the Mac, and connected only after
+owner approval in the installed Mac Devices UI. The exact two temporary devices
+appeared in the Mac roster. Each passed a live paired-host check through ten
+app relaunches and twenty foreground resumes (1/1 each). This confirms the
+effective simulator Keychain path for these builds; it does not verify a
+TestFlight install or a physical device.
 An address-and-code option now exposes the existing pairing-code path in draft
 PR #61. Its focused UI check passed 1/1 on each iPhone and iPad simulator,
-including codes with `-` and `_`. A simulator-only ad-hoc signed build produced
-an empty entitlement payload and was not installed for owner pairing. A live
-code claim, Mac approval and paired Files/media/send roundtrip remain open.
+including codes with `-` and `_`. The first live link UI attempt exposed a
+keyboard-obscured connect action on iPad. PR #61 pins that action and puts
+the fields before large-text instructions; a focused accessibility XXL UI
+check for both link and code routes passed 1/1 on iPad and 1/1 on iPhone with
+the keyboard open. The subsequent live claims, Mac approval and durable
+relaunch checks passed on both simulators. The installed host's authenticated
+read-only workspace route returned the Project root, README, PNG and PDF with
+matching MIME, size and SHA-256, plus a live Git status and diff. A second
+temporary pairing session used the same owned Project thread after the Mac
+was unlocked. On both iPhone and iPad, a focused live UI check opened README,
+staged a line note as a composer attachment, removed it without sending, and
+displayed a live Git diff (1/1 each). iPhone rendered the authenticated PNG
+and PDF in one passing live UI check; iPad rendered the PNG in a partial media
+run and rendered the PDF in a separate passing focused check. The first iPad
+Files attempt had stalled while the Mac was locked, and broad iPad media
+navigation runs failed on test scrolling or a disappearing sheet; their failures
+are not counted as preview passes. At that stage, audio/video, a revision refresh after
+annotation, and a mobile provider send remain unverified. No model request was
+sent during the paired mobile checks. Both devices from each temporary pairing
+session were revoked and their `revokedAt` state verified without changing
+other devices. The exact disposable Project conversation was rearchived after
+the first session, then unarchived for the second. Its second-session archive
+and one guarded retry through Wonder returned HTTP 503. The same exact idle
+native thread was then archived through the Codex app; its archived listing
+and Wonder's fresh conversation read both confirmed `isArchived=true`.
+Wonder's archive error path still needs investigation. A focused held-send
+New Chat draft test passed 1/1 on iPhone after
+the host-switch fix. These postrelease corrections remain in draft PR #61 and
+are not in the uploaded Release builds.
+
+The second-session archive 503 prompted a further draft-only host fix. Wonder
+now confirms provider archive state after a failed RPC response, maps Codex's
+active-writer rejection to a recoverable 409 with a Mac action, and rejects
+archive during a host update lease before contacting the provider. The focused
+fake-provider regression passed, the daemon library suite passed 345 tests
+with three existing ignores, and strict Clippy passed. An independent review
+found no remaining concrete race in this path. The exact live provider error
+from the earlier 503 was not retained; this fix has not been installed or
+checked against that live condition.
+
+An actual Wonder Testing Widget was placed from SpringBoard's gallery on the
+iPhone and iPad simulators (one passing focused placement test each). The
+small unconfigured Widget rendered on both Home Screens; its initial title and
+instruction clipped. Draft Widget source shortens that small empty state. The
+iPhone Project picker displayed three saved fixture Projects and showed a
+selected Project in its editor. The first rebuilt extension appeared to retain
+WidgetKit's old timeline, so that attempt did not accept the revised rendering.
+
+An earlier October 2 configured-Widget retry stopped before acceptance: the
+Diagnostics fixture did not change the simulator's saved App Group snapshot,
+and SpringBoard stalled twice while opening the Widget editor. Independent
+review also found that SpringBoard can expose the Widget icon without its
+rendered text as accessible descendants, so the proposed text assertion could
+have rejected a correct Widget. The fixture and test were removed. The retained
+attempt log is
+`.local/build/widget-configured-iphone-final.log`.
+
+A later signed Testing QA copy carried the existing Apple Development team and
+Testing App Group entitlement on both the app and Widget. The prior simulator
+ad hoc signature let the editor list Projects but caused WidgetKit to resolve
+the saved App Entity as nil. With team signing, the selected `Project 1` card
+rendered on both Home Screens. A small-card `Link` opened the Project's unsent
+New Chat view after a fresh WidgetKit timeline on iPhone and iPad; the focused
+foreground/destination/composer check passed 1/1 each, and both destination
+screenshots were inspected. Earlier iPad tap probes with a cached timeline
+failed the foreground check and are not counted as passes. Recent-chat Widget
+links and TestFlight Widget installation remain open. The exact two temporary
+simulator pairings for this check were revoked; the Mac roster showed six
+revoked devices and neither overnight QA device in the paired list.
+
+At the owner's request, draft Mac Settings removes its redundant Folders list.
+Project roots and Bot file grants are separate daemon-owned controls; a
+read-only review found no access boundary using that list. The retired list's
+saved paths/bookmarks are cleared when the new bridge starts, while the Full
+Disk Access action remains. Its previous owning tests passed 3/3 before
+removal; the current Mac menu suite passed 33/33 and both desktop binary checks
+passed. The new Access screen is not installed or visually accepted in Mac
+1.0.108. No additional DMG or TestFlight upload was made beyond the owner's
+specified one pair and one replacement DMG.
+
+A live Project conversation showed “Stopped” while its task was active in
+Codex desktop. Read-only comparison confirmed that Codex desktop reported the
+thread active, while Wonder's separate App Server reported `notLoaded` and
+only an older interrupted turn. The draft client now labels that saved turn
+“This response stopped” (and a failed turn “This response couldn’t finish”),
+without claiming to know the current desktop task state. The shared
+turn-label test passed, and the actual Project view passed a focused 1/1 UI
+check on each iPhone and iPad simulator; both screenshots were inspected.
+The installed app still has the old wording. A truthful live Running indicator
+for desktop-owned turns needs a supported shared status source and remains open.
+
+The same Widget destination review exposed oversized New Chat picker icons
+overlapping labels at accessibility text sizes. Draft UI now stacks secondary
+actions, allows two-line picker labels and bounds decorative symbols. The
+existing New Project Files test checked ordinary large and accessibility XXXL
+text in one run. It passed 1/1 on each iPhone and iPad simulator, including
+distinct visible controls and Files → Modified → diff navigation. All four
+final screenshots were inspected. This UI
+correction is unshipped in draft PR #61.
+
+Final independent review found a New Chat send lifetime edge: a late creation
+response could navigate back after leaving the screen. Draft source cancels the
+view-owned creation task on disappearance and lets the connection model deliver
+an already prepared, durable message. The held-response test passed 1/1, the
+pairing-replacement regression passed 1/1, and focused New Chat UI passed 1/1
+on each iPhone and iPad simulator at two text sizes. A live held-response
+navigation UI test was not run. The desktop-owned writer-lock path was also
+checked: the provider rejects a competing resume/archive before another turn
+starts. Draft Wonder now gives a specific retry message on the exact resume
+writer conflict; a `notLoaded` plus interrupted-turn fixture passed 1/1 with
+no `turn/start`, archive regression passed 1/1, and strict Clippy/fmt passed.
+These changes remain unshipped; accurate live desktop Running is still open.
+
+On October 3, a fresh, owner-authorized temporary Wonder Testing pairing to
+the installed Mac passed on iPhone and iPad. Each simulator opened a disposable
+8-second H.264/AAC Project video from the Mac's authenticated Files route,
+showed a rendered frame in retained screenshots, advanced playback, and while
+paused sought first to the start and then to about six seconds (75% of the timeline),
+then opened an AAC audio file and advanced its playback before returning to
+the conversation composer. The focused live UI test passed 1/1 on each
+simulator, with video tap-to-player at 2.08 seconds on iPhone and 2.33 seconds
+on iPad; paused seek interaction took 1.71 and 2.10 seconds respectively.
+The passing bundles are `.local/build/live-media-strong-seek-iphone.xcresult`
+and `.local/build/live-media-strong-seek-ipad.xcresult`. These are
+single end-to-end UI samples over the configured Mac route, not transfer-only
+latency or same-Wi-Fi versus remote measurements. One first iPad pairing test
+timed out before the Mac approval was visible in Wonder; that orphaned Mac
+device was revoked and the second code pairing passed. The exact final iPhone
+and iPad test devices were also revoked, and neither remains in the paired
+roster; Mac Settings shows 12 revoked devices. The synthetic media directory
+and temporary code files were removed.
+No mobile model turn was sent. Live unsupported-codec and offline recovery,
+background/reopen with these larger files, repeated performance samples and
+TestFlight-installed media playback remain open; F2 stays pending.
+
+The next source-only Files slice replaces the Project conversation timeline
+with its file browser and selected preview while keeping the composer visible.
+An explicit full-screen control works on iPhone and iPad. Text selection opens
+a compact comment editor; saving stages a versioned preview note in the
+composer without changing the file or closing the preview. A file revision
+check offers new bytes without silently rebinding an unsent note. Shared
+preview state preserves unsaved comments and offered revisions across
+expansion; the video player survives expansion and collapse. The focused
+Files, text annotation, revision and video paths passed on both simulators;
+the latest iPad rerun passed 4/4, the iPhone Files/annotation/revision paths
+passed 3/3, and its comment-draft and video reruns passed 1/1 each. An 8 MiB
+text file opened with a visible 128 KiB preview limit and usable Files/composer
+controls in 1/1 focused checks on each simulator. Inline and expanded iPhone
+and iPad screenshots were inspected. An earlier iPad approval-shortcut test
+failed because its selector matched two Files controls; after correcting the
+selector, the shortcut passed 1/1 on each simulator. These
+changes are unshipped: they are absent from Testing 20 and production 82.
+An actual mobile send with Files left open, paired-host live revision timing,
+large-file repeated memory behavior, narrow iPad windows and TestFlight
+installation remain unverified. No model turn was sent by these simulator tests.
+
+A further review caught duplicate full-screen PDF and diff rendering. The
+inline renderer now unmounts while the cover owns the selected preview. The
+focused iPhone Files/diff and PDF annotation checks passed 2/2, including
+returning to the composer. The new image check initially used the wrong
+accessibility element type; its corrected one-page assertion passed 1/1 on
+iPhone. Full-screen transitions still reset PDF page/zoom, HTML and diff
+scroll position, EPUB text size and 3D camera position. Those reading-state
+handoffs remain open before F1/F2 acceptance; the selected file and staged
+annotation/revision state stay bound to the conversation.
+After the single-renderer change, five focused iPhone tests passed in a
+finalized result bundle (comment draft, revision, video, EPUB and 3D), and
+four focused iPad tests passed in a finalized bundle (Files/diff, image, PDF
+and EPUB). The broader iPad log executed 8/8 tests with zero failures, but
+Xcode stalled while finalizing that result bundle; its log is supporting
+evidence only. A 3D test emitted an XCTest quality-of-service inversion
+warning, so repeated model preview performance remains open. These checks
+used TestingDiagnostics on iOS 26.5 simulators; the source is still absent
+from the uploaded Release builds.
 
 ## Earlier qualification
 

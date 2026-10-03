@@ -213,21 +213,44 @@ def launch(app):
     subprocess.run(['open', '-n', str(app)], check=True)
 
 
-def wait_for_health(origin, timeout=45):
-    """Confirm the replacement host is serving before accepting an update."""
+def readiness(origin, opener):
+    """Read the local host's readiness, including a pre-existing 503 reason."""
+    try:
+        response = opener.open(origin + '/readyz', timeout=2)
+    except urllib.error.HTTPError as error:
+        if error.code != 503:
+            error.close()
+            raise
+        response = error
+    with response:
+        status = response.status
+        payload = json.load(response)
+    ready = payload.get('ready')
+    reason = payload.get('reason')
+    if ((status == 200 and ready is True and reason == 'ready')
+            or (status == 503 and ready is False and isinstance(reason, str)
+                and reason != 'ready' and re.fullmatch(r'[a-z_]{1,64}', reason))):
+        return None if ready else reason
+    raise ValueError('Invalid Wonder readiness response')
+
+
+def wait_for_health(origin, baseline_reason=None, timeout=45):
+    """Confirm the replacement is live without worsening pre-existing readiness."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     deadline = time.monotonic() + timeout
     while True:
         try:
             with opener.open(origin + '/healthz', timeout=2) as response:
                 if response.status == 200 and json.load(response).get('status') == 'ok':
-                    return
+                    current_reason = readiness(origin, opener)
+                    if current_reason is None or current_reason == baseline_reason:
+                        return
         except urllib.error.HTTPError as error:
             error.close()
         except (OSError, ValueError, urllib.error.URLError):
             pass
         if time.monotonic() >= deadline:
-            raise RuntimeError('The replacement Wonder host did not become healthy')
+            raise RuntimeError('The replacement Wonder host did not become ready')
         time.sleep(.5)
 
 
@@ -274,8 +297,10 @@ def install(source, directory):
         if was_running:
             handoff = UpdateHandoff(destination)
             handoff.prepare()
-        stopped = was_running
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+            baseline_reason = readiness(handoff.origin, opener)
         stop(destination, pids)
+        stopped = was_running
         if destination.exists():
             root = data_directory() / 'Backups'
             root.mkdir(parents=True, exist_ok=True)
@@ -286,7 +311,7 @@ def install(source, directory):
         verify(destination)
         if was_running:
             launch(destination)
-            wait_for_health(handoff.origin)
+            wait_for_health(handoff.origin, baseline_reason)
         print(f'Installed and verified {destination}')
         if backup:
             print(f'Previous bundle: {backup}')

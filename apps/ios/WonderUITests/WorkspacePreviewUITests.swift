@@ -51,7 +51,13 @@ import XCTest
         app.buttons["workspace-epub-text-size"].tap()
         XCTAssertTrue(app.buttons["Normal Text"].waitForExistence(timeout: 5))
         capture(app, name: "EPUB chapter and large text")
-        app.buttons["workspace-epub-close"].tap()
+        app.buttons["workspace-preview-expand"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "workspace-epub-content").count, 1,
+                       "Full screen must not mount a second EPUB navigator")
+        app.buttons["workspace-preview-collapse"].tap()
+        XCTAssertTrue(secondPage.waitForExistence(timeout: 10), "Collapse should restore Chapter 2")
+        app.buttons["workspace-preview-back"].tap()
         XCTAssertTrue(app.buttons["workspace-file-entry:workspace-reader.epub"].waitForExistence(timeout: 5))
         app.terminate()
 
@@ -61,7 +67,7 @@ import XCTest
             NSPredicate(format: "label CONTAINS[c] %@", "second page remains here"))
             .firstMatch.waitForExistence(timeout: 10), "The same revision should reopen at Chapter 2")
         capture(reopened, name: "EPUB retained chapter")
-        reopened.buttons["workspace-epub-close"].tap()
+        reopened.buttons["workspace-preview-back"].tap()
     }
 
     func testSingleFileModelsAndUnsupportedInputs() {
@@ -75,7 +81,7 @@ import XCTest
             capture(app, name: "Model initial \(name)")
             scene.swipeLeft()
             capture(app, name: "Model \(name)")
-            app.buttons["workspace-model-close"].tap()
+            app.buttons["workspace-preview-back"].tap()
             XCTAssertTrue(app.buttons["workspace-file-entry:\(name)"].waitForExistence(timeout: 5))
             app.buttons["workspace-close"].tap()
             XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 5))
@@ -85,7 +91,7 @@ import XCTest
             XCTAssertTrue(app.descendants(matching: .any)["workspace-model-error"]
                 .waitForExistence(timeout: 10), "\(name) should explain its unsupported input")
             capture(app, name: "Unsupported model \(name)")
-            app.buttons["workspace-model-close"].tap()
+            app.buttons["workspace-preview-back"].tap()
             app.buttons["workspace-close"].tap()
         }
     }
@@ -112,5 +118,12 @@ import XCTest
         app.buttons["workspace-model-zoom-out"].tap()
         capture(app, name: "Tetra controls restored")
         XCTAssertTrue(scene.isHittable)
+        app.buttons["workspace-preview-expand"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "workspace-model-scene").count, 1,
+                       "Full screen must not mount a second 3D scene")
+        app.buttons["workspace-preview-collapse"].tap()
+        XCTAssertTrue(scene.waitForExistence(timeout: 12))
+        XCTAssertTrue(app.buttons["workspace-model-zoom-in"].isHittable)
     }
 }

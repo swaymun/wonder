@@ -13,6 +13,7 @@ use wonder_store::{StoredConversationFile, StoredProject};
 pub(crate) const MIME: &str = wonder_store::ARTIFACT_ANNOTATION_MIME;
 const MAX_RECORD_BYTES: usize = 16 * 1024;
 const MAX_NOTE_BYTES: usize = 4096;
+const MAX_TEXT_EXCERPT_BYTES: usize = 2048;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -38,6 +39,10 @@ pub(crate) enum PreviewAnchor {
     TextLines {
         start_line: u32,
         end_line: u32,
+    },
+    TextRange {
+        start_byte: usize,
+        end_byte: usize,
     },
     ImageRegion {
         x: f64,
@@ -66,6 +71,14 @@ fn valid_region(x: f64, y: f64, width: f64, height: f64) -> bool {
         && height > 0.0
         && x + width <= 1.0
         && y + height <= 1.0
+}
+
+fn text_format(mime: &str) -> bool {
+    (mime.starts_with("text/") && mime != "text/html")
+        || matches!(
+            mime,
+            "application/json" | "application/yaml" | "application/xml" | "application/sql"
+        )
 }
 
 #[cfg(target_os = "macos")]
@@ -149,18 +162,24 @@ fn validate_record(
             start_line,
             end_line,
         } => {
-            let text_format = (mime.starts_with("text/") && mime != "text/html")
-                || matches!(
-                    mime,
-                    "application/json" | "application/yaml" | "application/xml" | "application/sql"
-                );
             let lines = std::str::from_utf8(bytes)
                 .map(|text| text.lines().count().max(1))
                 .unwrap_or(0);
-            text_format
+            text_format(mime)
                 && *start_line > 0
                 && *end_line >= *start_line
                 && *end_line as usize <= lines
+        }
+        PreviewAnchor::TextRange {
+            start_byte,
+            end_byte,
+        } => {
+            text_format(mime)
+                && *end_byte > *start_byte
+                && std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|text| text.get(*start_byte..*end_byte))
+                    .is_some()
         }
         PreviewAnchor::ImageRegion {
             x,
@@ -248,12 +267,20 @@ fn source_location(
         .ok_or_else(|| invalid("This annotation's file path cannot be read."))
 }
 
-fn prompt_text(record: &PreviewAnnotation, snapshot_path: &str) -> String {
+fn prompt_text(
+    record: &PreviewAnnotation,
+    snapshot_path: &str,
+    source: &[u8],
+) -> Result<String, (StatusCode, String)> {
     let anchor = match &record.anchor {
         PreviewAnchor::TextLines {
             start_line,
             end_line,
         } => format!("lines {start_line}-{end_line}"),
+        PreviewAnchor::TextRange {
+            start_byte,
+            end_byte,
+        } => format!("UTF-8 bytes {start_byte}..{end_byte} (end exclusive)"),
         PreviewAnchor::ImageRegion {
             x,
             y,
@@ -268,11 +295,35 @@ fn prompt_text(record: &PreviewAnnotation, snapshot_path: &str) -> String {
             height,
         } => format!("PDF page {page}, region (normalized 0-1, origin at top left) x={x}, y={y}, width={width}, height={height}"),
     };
-    format!(
+    let mut prompt = format!(
         "Artifact annotation (v1)\nProject: {}\nOriginal file: {}/{}\nVerified source copy: {}\nSource SHA-256: {}\nAnchor: {}\nNote:\n{}",
         record.project_id, record.root_id, record.path, snapshot_path,
         record.source_sha256, anchor, record.note
-    )
+    );
+    if let PreviewAnchor::TextRange {
+        start_byte,
+        end_byte,
+    } = &record.anchor
+    {
+        let text = std::str::from_utf8(source)
+            .ok()
+            .and_then(|text| text.get(*start_byte..*end_byte))
+            .ok_or_else(|| invalid("This annotation no longer fits the verified source copy."))?;
+        let mut limit = text.len().min(MAX_TEXT_EXCERPT_BYTES);
+        while !text.is_char_boundary(limit) {
+            limit -= 1;
+        }
+        let excerpt = serde_json::to_string(&text[..limit])
+            .map_err(|_| invalid("This annotation's selected text could not be read."))?;
+        prompt.push_str("\nSelected source text excerpt (JSON string):\n");
+        prompt.push_str(&excerpt);
+        if limit < text.len() {
+            prompt.push_str(
+                "\n[Excerpt truncated; use the verified source copy for the full selection.]",
+            );
+        }
+    }
+    Ok(prompt)
 }
 
 async fn source_copy_path(
@@ -284,7 +335,7 @@ async fn source_copy_path(
     crate::attachment_path(workspace, &copy_id, create).await
 }
 
-async fn verified_source_copy(path: &Path, hash: &str) -> Result<(), (StatusCode, String)> {
+async fn verified_source_copy(path: &Path, hash: &str) -> Result<Vec<u8>, (StatusCode, String)> {
     let file = tokio::fs::File::open(path).await.map_err(|_| {
         (
             StatusCode::CONFLICT,
@@ -307,7 +358,7 @@ async fn verified_source_copy(path: &Path, hash: &str) -> Result<(), (StatusCode
             "The annotated source copy changed. Reopen the preview and send a new note.".into(),
         ));
     }
-    Ok(())
+    Ok(bytes)
 }
 
 /// Checks selected annotation attachment bytes against the current Project
@@ -440,8 +491,8 @@ pub(crate) async fn selected_inputs(
                     )
                 })?;
         }
-        verified_source_copy(&copy, &record.source_sha256).await?;
-        inputs.push(json!({"type":"text", "text":prompt_text(&record, copy.to_str().ok_or_else(|| invalid("The source copy path cannot be read."))?)}));
+        let source = verified_source_copy(&copy, &record.source_sha256).await?;
+        inputs.push(json!({"type":"text", "text":prompt_text(&record, copy.to_str().ok_or_else(|| invalid("The source copy path cannot be read."))?, &source)?}));
     }
     Ok(inputs)
 }
@@ -495,6 +546,67 @@ mod tests {
     };
     use base64::Engine as _;
     use wonder_store::{AgentFamily, ProjectConversationInsert, ProjectRootInput};
+
+    #[test]
+    fn selected_text_range_is_bound_to_utf8_source_and_bounded_in_provider_prompt() {
+        let source = "Aé🦊Z\n".as_bytes();
+        let mut record = PreviewAnnotation {
+            version: 1,
+            project_id: "project".into(),
+            conversation_id: "chat".into(),
+            root_id: "workspace".into(),
+            path: "notes.md".into(),
+            source_sha256: hex::encode(Sha256::digest(source)),
+            anchor: PreviewAnchor::TextRange {
+                start_byte: 1,
+                end_byte: 7,
+            },
+            note: "Inspect this exact phrase".into(),
+        };
+        let wire = serde_json::to_value(&record).unwrap();
+        crate::tests::validate_http_contract("artifactAnnotation", &wire);
+        assert_eq!(
+            wire["anchor"],
+            json!({"kind":"textRange","startByte":1,"endByte":7})
+        );
+        assert!(validate_record(&record, "text/markdown", source).is_ok());
+        let prompt = prompt_text(&record, "/verified/copy", source).unwrap();
+        assert!(prompt.contains("UTF-8 bytes 1..7 (end exclusive)"));
+        assert!(prompt.contains("\"é🦊\""));
+
+        assert!(validate_record(&record, "text/html", source).is_err());
+        assert!(validate_record(&record, "image/png", source).is_err());
+        record.anchor = PreviewAnchor::TextRange {
+            start_byte: 2,
+            end_byte: 7,
+        };
+        assert!(validate_record(&record, "text/markdown", source).is_err());
+        record.anchor = PreviewAnchor::TextRange {
+            start_byte: 1,
+            end_byte: 6,
+        };
+        assert!(validate_record(&record, "text/markdown", source).is_err());
+        record.anchor = PreviewAnchor::TextRange {
+            start_byte: 7,
+            end_byte: 7,
+        };
+        assert!(validate_record(&record, "text/markdown", source).is_err());
+        record.anchor = PreviewAnchor::TextRange {
+            start_byte: 0,
+            end_byte: MAX_TEXT_EXCERPT_BYTES + 500,
+        };
+        assert!(validate_record(&record, "text/markdown", source).is_err());
+        let long_source = "é".repeat(MAX_TEXT_EXCERPT_BYTES);
+        record.anchor = PreviewAnchor::TextRange {
+            start_byte: 0,
+            end_byte: long_source.len(),
+        };
+        record.source_sha256 = hex::encode(Sha256::digest(long_source.as_bytes()));
+        assert!(validate_record(&record, "text/plain", long_source.as_bytes()).is_ok());
+        let prompt = prompt_text(&record, "/verified/copy", long_source.as_bytes()).unwrap();
+        assert!(prompt.contains("[Excerpt truncated;"));
+        assert!(!prompt.contains(&"é".repeat(MAX_TEXT_EXCERPT_BYTES)));
+    }
 
     #[tokio::test]
     async fn annotation_is_bound_to_current_source_and_durable_message_selection() {
@@ -553,9 +665,9 @@ mod tests {
             root_id: "workspace".into(),
             path: "note.txt".into(),
             source_sha256: hex::encode(Sha256::digest(std::fs::read(&source_file).unwrap())),
-            anchor: PreviewAnchor::TextLines {
-                start_line: 2,
-                end_line: 2,
+            anchor: PreviewAnchor::TextRange {
+                start_byte: 11,
+                end_byte: 22,
             },
             note: "Check this line".into(),
         };
@@ -631,6 +743,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Check this line"));
+        assert!(input[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"second line\""));
         let request = crate::SendMessageRequest {
             model_selection_revision: None,
             group_routing: None,
@@ -694,6 +810,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(copy.to_str().unwrap()));
+        assert!(frozen[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"second line\""));
         assert_eq!(std::fs::read(&copy).unwrap(), b"first line\nsecond line\n");
         // An accepted retry remains accepted; new intent must reopen the preview.
         let retry = crate::send_message_inner(

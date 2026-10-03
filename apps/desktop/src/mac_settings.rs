@@ -269,10 +269,8 @@ pub struct MacSettings {
     revoked_expanded: bool,
     device_details: Option<String>,
     connection_details: bool,
-    selected_folder: Option<String>,
     permission_drag_id: String,
     permission_drag_window: Option<WindowHandle<Root>>,
-    folder_picker_busy: bool,
     last_clock: Instant,
     voice: voice::VoiceSettings,
 }
@@ -314,10 +312,8 @@ impl MacSettings {
             revoked_expanded: false,
             device_details: None,
             connection_details: false,
-            selected_folder: None,
             permission_drag_id: String::new(),
             permission_drag_window: None,
-            folder_picker_busy: false,
             last_clock: Instant::now(),
             voice: voice::VoiceSettings::default(),
         }
@@ -1008,85 +1004,6 @@ impl MacSettings {
         }
         view
     }
-    fn add_computer_folders(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.disabled() || self.folder_picker_busy {
-            return;
-        }
-        self.folder_picker_busy = true;
-        let picker = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: true,
-            prompt: Some("Add folders".into()),
-        });
-        cx.spawn(async move |view, cx| {
-            let result = picker.await;
-            let _ = view.update(cx, |this, cx| {
-                this.folder_picker_busy = false;
-                match result {
-                    Ok(Ok(Some(paths))) => {
-                        let paths: Option<Vec<String>> = paths
-                            .iter()
-                            .map(|path| path.to_str().map(str::to_owned))
-                            .collect();
-                        if let Some(paths) = paths {
-                            this.send(json!({"action":"computer-folder-add", "paths":paths}), cx);
-                        } else {
-                            this.error = Some("A folder name could not be saved.".into());
-                        }
-                    }
-                    Ok(Ok(None)) => {}
-                    _ => this.error = Some("The folder picker could not open. Try again.".into()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-    fn computer_folders(&self, cx: &Context<Self>) -> Div {
-        let folders = array(&self.state, "computerFolders");
-        let mut list = stack().gap_0().min_h(px(100.));
-        if folders.is_empty() {
-            list = list.child(
-                note("Add folders to prepare access before using your phone.")
-                    .p_3()
-                    .text_color(cx.theme().muted_foreground),
-            );
-        }
-        for folder in folders {
-            let path = text(folder, "path").to_owned();
-            let selected = self.selected_folder.as_deref() == Some(path.as_str());
-            let target = path.clone();
-            list = list.child(
-                Button::new(SharedString::from(format!("folder-{path}")))
-                    .ghost()
-                    .w_full()
-                    .h_auto()
-                    .p_3()
-                    .selected(selected)
-                    .accessibility_label(format!("Select folder {path}"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_folder = Some(target.clone());
-                        cx.notify();
-                    }))
-                    .child(note(path).w_full()),
-            );
-        }
-        let chosen = self
-            .selected_folder
-            .as_deref()
-            .filter(|path| folders.iter().any(|f| text(f, "path") == *path));
-        stack().child(heading("Folders"))
-            .child(div().border_1().border_color(cx.theme().border).rounded_md().overflow_hidden()
-                .child(div().id("computer-folder-list").max_h(px(220.)).overflow_y_scroll().child(list))
-                .child(div().flex().justify_end().gap_1().p_1().border_t_1().border_color(cx.theme().border)
-                    .child(Button::new("computer-folder-add").label("+").disabled(self.disabled() || self.folder_picker_busy).accessibility_label("Add folders").on_click(cx.listener(|this, _, window, cx| this.add_computer_folders(window, cx))))
-                    .child(self.action("computer-folder-remove", "−", json!({"action":"computer-folder-remove","key":chosen}), self.folder_picker_busy || chosen.is_none(), cx).accessibility_label("Remove selected folder"))))
-            .child(note("Includes files and subfolders. Bot permissions still apply. Removing a selection does not revoke macOS permissions.").text_sm().text_color(cx.theme().muted_foreground))
-            .child(self.action("folder-privacy", "Manage folder permissions…", json!({"action":"computer-folder-settings"}), false, cx))
-            .when(!text(&self.state,"computerFoldersMessage").is_empty(), |v| v.child(note(text(&self.state,"computerFoldersMessage"))))
-    }
     fn mac_permissions(&self, setup: bool, cx: &Context<Self>) -> Div {
         let mut rows = stack().gap_1();
         for (action, label, key) in [
@@ -1154,9 +1071,7 @@ impl MacSettings {
                 (!text(&self.state, "permissionsMessage").is_empty())
                     .then(|| note(text(&self.state, "permissionsMessage"))),
             );
-        section
-            .when(!setup, |view| view.child(self.shared_display_choice(cx)))
-            .child(self.computer_folders(cx))
+        section.when(!setup, |view| view.child(self.shared_display_choice(cx)))
     }
     fn shared_display_choice(&self, cx: &Context<Self>) -> Div {
         let displays = array(&self.state, "sharedDisplays");
