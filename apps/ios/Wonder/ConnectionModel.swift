@@ -2301,6 +2301,10 @@ struct ManagedBotListMutationState {
             if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview") {
                 rootEntries += DiagnosticWorkspaceFileFixtures.entries
             }
+            if ProcessInfo.processInfo.arguments.contains("-workspace-html-scroll-preview") {
+                rootEntries.append(WorkspaceEntry(name: "reader.html", path: "reader.html", isDirectory: false,
+                                                  byteSize: nil, mimeType: "text/html"))
+            }
             if ProcessInfo.processInfo.arguments.contains("-workspace-large-text-preview") {
                 rootEntries.append(WorkspaceEntry(name: "large.txt", path: "large.txt", isDirectory: false,
                                                   byteSize: 8 * 1024 * 1024, mimeType: "text/plain"))
@@ -2317,6 +2321,10 @@ struct ManagedBotListMutationState {
         }
         if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview"),
            let data = DiagnosticWorkspaceFileFixtures.data(name: entry.name) { return data }
+        if ProcessInfo.processInfo.arguments.contains("-workspace-html-scroll-preview"), entry.name == "reader.html" {
+            let paragraphs = (1...30).map { "<p style='min-height:80px'>Reading section \($0)</p>" }.joined()
+            return Data("<h1>Original reading page</h1>\(paragraphs)<p>End of original page</p>".utf8)
+        }
         #endif
         if entry.mimeType?.hasPrefix("image/") == true, let data = previewBytes["Saturday.png"] { return data }
         if entry.name == "Weekend.pdf", let data = previewBytes["notes.pdf"] { return data }
@@ -2325,6 +2333,9 @@ struct ManagedBotListMutationState {
     }
     #if WONDER_DIAGNOSTICS
     private func previewWorkspaceRevisionData(entry: WorkspaceEntry) -> Data {
+        if entry.name == "reader.html" {
+            return Data("<h1>Revised reading page</h1><p>Accepted HTML revision</p>".utf8)
+        }
         if entry.name == "workspace-reader.epub",
            let revised = DiagnosticWorkspaceFileFixtures.data(name: "workspace-reader-revised.epub") {
             return revised

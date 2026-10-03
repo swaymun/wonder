@@ -3148,6 +3148,7 @@ struct WorkspaceBrowser: View {
     @State private var expandedPreview = false
     @State private var collapsingPreview = false
     @State private var pdfSession = PDFPreviewSession()
+    @State private var htmlSession = WorkspaceHTMLPreviewSession()
     @State private var modelSession: WorkspaceModelPreviewSession?
     @StateObject private var textAnnotationDraft = WorkspaceTextAnnotationDraft()
 
@@ -3283,6 +3284,7 @@ struct WorkspaceBrowser: View {
                     HStack {
                         Button("Show in chat", systemImage: "arrow.down.right.and.arrow.up.left") {
                             pdfSession.capture()
+                            htmlSession.capture()
                             collapsingPreview = true
                             expandedPreview = false
                         }
@@ -3328,6 +3330,7 @@ struct WorkspaceBrowser: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                 Button("Full screen", systemImage: "arrow.up.left.and.arrow.down.right") {
                     pdfSession.capture()
+                    htmlSession.capture()
                     expandedPreview = true
                 }
                 .labelStyle(.iconOnly)
@@ -3386,6 +3389,7 @@ struct WorkspaceBrowser: View {
                 WorkspaceDocumentPreview(name: item.name, mimeType: item.mimeType,
                                          revision: previewRevision, draft: textAnnotationDraft,
                                          pdfSession: pdfSession,
+                                         htmlSession: htmlSession,
                                          annotationContext: context, onAnnotation: { annotation in
                     guard let context else { throw FileFailure.integrity }
                     try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
@@ -3413,6 +3417,7 @@ struct WorkspaceBrowser: View {
                 WorkspaceDocumentPreview(name: file.name, mimeType: file.mimeType ?? "application/octet-stream",
                                          revision: previewRevision, draft: textAnnotationDraft,
                                          pdfSession: pdfSession,
+                                         htmlSession: htmlSession,
                                          onClose: closePreview)
             }
         } else if let change = selectedDiff, let diffText {
@@ -3427,6 +3432,7 @@ struct WorkspaceBrowser: View {
         modelSession?.close()
         modelSession = nil
         pdfSession = PDFPreviewSession()
+        htmlSession = WorkspaceHTMLPreviewSession()
         expandedPreview = false
         fileRequestID = UUID(); attachmentRequestID = UUID()
         textAnnotationDraft.reset()
@@ -4410,6 +4416,7 @@ private struct WorkspaceDocumentPreview: View {
     let name: String
     let mimeType: String
     let pdfSession: PDFPreviewSession?
+    let htmlSession: WorkspaceHTMLPreviewSession?
     let annotationContext: ArtifactPreviewContext?
     let onAnnotation: ((ArtifactAnnotation) throws -> Void)?
     let refresh: (() async throws -> Data)?
@@ -4421,6 +4428,7 @@ private struct WorkspaceDocumentPreview: View {
     init(name: String, mimeType: String, revision: WorkspaceRevisionState,
          draft: WorkspaceTextAnnotationDraft,
          pdfSession: PDFPreviewSession? = nil,
+         htmlSession: WorkspaceHTMLPreviewSession? = nil,
          annotationContext: ArtifactPreviewContext? = nil,
          onAnnotation: ((ArtifactAnnotation) throws -> Void)? = nil,
          refresh: (() async throws -> Data)? = nil,
@@ -4428,6 +4436,7 @@ private struct WorkspaceDocumentPreview: View {
          refreshSequence: UInt64? = nil,
          onClose: (() -> Void)? = nil) {
         self.name = name; self.mimeType = mimeType; self.pdfSession = pdfSession
+        self.htmlSession = htmlSession
         self.revision = revision
         self.draft = draft
         self.annotationContext = annotationContext; self.onAnnotation = onAnnotation
@@ -4446,7 +4455,9 @@ private struct WorkspaceDocumentPreview: View {
                         .accessibilityIdentifier("workspace-pdf-preview")
                 }
                 else if revision.preparingText && revision.preparedText == nil { ProgressView("Preparing preview…") }
-                else if mimeType == "text/html", let html = revision.preparedText { ConstrainedHTML(html: html) }
+                else if mimeType == "text/html", let html = revision.preparedText {
+                    ConstrainedHTML(html: html, sourceID: revision.currentSha256, session: htmlSession)
+                }
                 else if let text = revision.preparedText, canAnnotate {
                     SelectablePreviewText(text: text, selectedRange: $draft.selectedRange,
                                           selectionResetID: draft.selectionResetID)
@@ -5065,25 +5076,117 @@ private struct WorkspaceAnnotationNoteField: UIViewRepresentable {
         }
     }
 }
+@MainActor final class WorkspaceHTMLPreviewSession {
+    weak var activeView: WKWebView?
+    private var sourceID: String?
+    private var readingFraction: CGFloat = 0
+    private var activeReady = false
+
+    func capture() {
+        guard activeReady, let view = activeView else { return }
+        let scroll = view.scrollView
+        let available = max(0, scroll.contentSize.height - scroll.bounds.height)
+        readingFraction = available > 0 ? min(1, max(0, scroll.contentOffset.y / available)) : 0
+    }
+
+    func install(_ view: WKWebView, sourceID: String) {
+        if self.sourceID != sourceID {
+            self.sourceID = sourceID
+            readingFraction = 0
+        }
+        activeView = view
+        activeReady = false
+    }
+
+    @discardableResult func restore(_ view: WKWebView, sourceID: String) -> Bool {
+        guard activeView === view, self.sourceID == sourceID else { return true }
+        view.scrollView.layoutIfNeeded()
+        guard view.scrollView.bounds.height > 0, view.scrollView.contentSize.height > 0 else { return false }
+        let available = max(0, view.scrollView.contentSize.height - view.scrollView.bounds.height)
+        guard readingFraction == 0 || available > 0 else { return false }
+        view.scrollView.setContentOffset(CGPoint(x: 0, y: readingFraction * available), animated: false)
+        activeReady = true
+        return true
+    }
+}
+
+private final class WorkspaceHTMLWebView: WKWebView {
+    var afterLayout: (() -> Void)?
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        afterLayout?()
+    }
+}
+
 struct ConstrainedHTML: UIViewRepresentable {
     let html: String
+    var sourceID: String? = nil
+    var session: WorkspaceHTMLPreviewSession? = nil
     final class Guard: NSObject, WKNavigationDelegate {
+        var loadedHTML: String?
+        var sourceID: String?
+        weak var session: WorkspaceHTMLPreviewSession?
+        private var contentSizeObservation: NSKeyValueObservation?
+        private var currentNavigation: WKNavigation?
+
+        init(session: WorkspaceHTMLPreviewSession?, sourceID: String?) {
+            self.session = session
+            self.sourceID = sourceID
+        }
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
             decisionHandler(action.request.url?.absoluteString == "about:blank" ? .allow : .cancel)
         }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard let currentNavigation, navigation === currentNavigation else { return }
+            contentSizeObservation?.invalidate()
+            guard sourceID != nil, session != nil else { return }
+            let expectedNavigation = currentNavigation
+            (webView as? WorkspaceHTMLWebView)?.afterLayout = { [weak self, weak webView] in
+                guard let self, let webView else { return }
+                self.restoreIfReady(webView, navigation: expectedNavigation)
+            }
+            contentSizeObservation = webView.scrollView.observe(\.contentSize, options: [.initial, .new]) {
+                [weak self, weak webView] _, _ in
+                Task { @MainActor in
+                    guard let self, let webView else { return }
+                    self.restoreIfReady(webView, navigation: expectedNavigation)
+                }
+            }
+            webView.setNeedsLayout()
+        }
+        private func restoreIfReady(_ view: WKWebView, navigation: WKNavigation) {
+            guard currentNavigation === navigation, let sourceID,
+                  session?.restore(view, sourceID: sourceID) == true else { return }
+            contentSizeObservation?.invalidate()
+            contentSizeObservation = nil
+            (view as? WorkspaceHTMLWebView)?.afterLayout = nil
+        }
+        func load(_ html: String, in view: WKWebView) {
+            contentSizeObservation?.invalidate()
+            contentSizeObservation = nil
+            (view as? WorkspaceHTMLWebView)?.afterLayout = nil
+            loadedHTML = html
+            let csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"
+            currentNavigation = view.loadHTMLString("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>body{font:-apple-system-body}button,input{font:inherit}</style><meta http-equiv=\"Content-Security-Policy\" content=\"\(csp)\">" + html, baseURL: nil)
+        }
     }
-    func makeCoordinator() -> Guard { Guard() }
+    func makeCoordinator() -> Guard { Guard(session: session, sourceID: sourceID) }
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-        let view = WKWebView(frame: .zero, configuration: configuration)
+        let view = WorkspaceHTMLWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
-        let csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"
-        view.loadHTMLString("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>body{font:-apple-system-body}button,input{font:inherit}</style><meta http-equiv=\"Content-Security-Policy\" content=\"\(csp)\">" + html, baseURL: nil)
+        if let sourceID { session?.install(view, sourceID: sourceID) }
+        context.coordinator.load(html, in: view)
         return view
     }
-    func updateUIView(_ view: WKWebView, context: Context) {}
+    func updateUIView(_ view: WKWebView, context: Context) {
+        guard context.coordinator.loadedHTML != html || context.coordinator.sourceID != sourceID else { return }
+        context.coordinator.sourceID = sourceID
+        if let sourceID { session?.install(view, sourceID: sourceID) }
+        context.coordinator.load(html, in: view)
+    }
 }
 
 struct ExportedFile: FileDocument {

@@ -9,11 +9,12 @@ import XCTest
         #endif
     }
 
-    private func launchProjectFiles(revision: Bool = false) -> XCUIApplication {
+    private func launchProjectFiles(revision: Bool = false, html: Bool = false) -> XCUIApplication {
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
                                "-project-files-conversation-preview", "-workspace-document-preview"]
         if revision { app.launchArguments.append("-artifact-revision-preview") }
+        if html { app.launchArguments.append("-workspace-html-scroll-preview") }
         app.launch()
         XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
         return app
@@ -55,6 +56,11 @@ import XCTest
         image.name = name
         image.lifetime = .keepAlways
         add(image)
+    }
+
+    private func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }
 
     func testEPUBNavigationTextSizeAndRetainedChapter() {
@@ -202,5 +208,45 @@ import XCTest
         XCTAssertTrue(scene.waitForExistence(timeout: 12), "Accepted OBJ should replace the unsupported source")
         XCTAssertTrue(scene.isHittable)
         capture(app, name: "Accepted OBJ revision")
+    }
+
+    func testHTMLReadingPositionAndAcceptedRevision() {
+        continueAfterFailure = false
+        let app = launchProjectFiles(revision: true, html: true)
+        open("reader.html", in: app)
+        let web = app.webViews.containing(.staticText, identifier: "Original reading page").firstMatch
+        XCTAssertTrue(web.waitForExistence(timeout: 10))
+        let section = web.staticTexts["Reading section 25"]
+        for _ in 0..<15 {
+            if section.isHittable { break }
+            web.swipeUp()
+        }
+        XCTAssertTrue(waitUntilHittable(section), "The lower part of the HTML should be reachable")
+        capture(app, name: "HTML reading position inline")
+        app.buttons["workspace-preview-expand"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
+        let expanded = app.webViews.containing(.staticText, identifier: "Original reading page").firstMatch
+        XCTAssertTrue(waitUntilHittable(expanded.staticTexts["Reading section 25"]),
+                      "Full screen should keep the reading position")
+        app.buttons["workspace-preview-collapse"].tap()
+        XCTAssertTrue(waitUntilHittable(app.webViews.containing(.staticText, identifier: "Original reading page")
+            .firstMatch.staticTexts["Reading section 25"]),
+                      "Collapsing should keep the reading position")
+        app.buttons["workspace-preview-expand"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
+        app.buttons["workspace-preview-collapse"].tap()
+        XCTAssertTrue(waitUntilHittable(app.webViews.containing(.staticText, identifier: "Original reading page")
+            .firstMatch.staticTexts["Reading section 25"]),
+            "A quick full-screen round trip should not overwrite the saved reading position")
+        app.buttons["workspace-document-refresh"].tap()
+        let show = app.buttons["workspace-document-show-revision"]
+        XCTAssertTrue(show.waitForExistence(timeout: 10))
+        show.tap()
+        XCTAssertTrue(waitUntilHittable(app.webViews.containing(.staticText, identifier: "Accepted HTML revision")
+            .firstMatch.staticTexts["Accepted HTML revision"], timeout: 10),
+            "Accepted bytes must replace the old HTML at a visible position")
+        XCTAssertFalse(app.webViews.containing(.staticText, identifier: "Original reading page")
+            .allElementsBoundByIndex.contains(where: { $0.isHittable }))
+        capture(app, name: "Accepted HTML revision")
     }
 }

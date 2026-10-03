@@ -331,6 +331,15 @@ files, not timing of changes from a paired Mac. Valid-scene-to-valid-scene
 replacement, camera gesture pose, VoiceOver, rotation, narrow iPad windows,
 memory/performance sampling and installed Release behavior remain open.
 
+HTML in-conversation previews now retain an approximate reading position when
+expanded to full screen and returned to chat. The web view also reloads when
+the owner accepts verified new HTML bytes; previously its empty update path
+could keep showing the old page. A long synthetic HTML page was scrolled to a
+lower section, expanded, collapsed, quickly repeated that round trip and revised in focused signed Diagnostics
+UI tests: 1/1 each on iPhone and iPad. Inline and accepted-revision screenshots
+were inspected. Narrow iPad windows, a real paired-host revision, repeated
+WebKit memory and installed Release behavior remain open.
+
 ## Earlier qualification
 
 Testing build 7 and production build 71 passed six focused iPhone Simulator
