@@ -3523,10 +3523,36 @@ import UIKit
         for _ in 0..<15 where !pdf.isHittable { fileList.swipeUp() }
         XCTAssertTrue(pdf.isHittable)
         pdf.tap()
+        let back = app.buttons["workspace-preview-back"]
+        let expand = app.buttons["workspace-preview-expand"]
+        let title = app.staticTexts["workspace-preview-title"]
+        XCTAssertTrue(back.isHittable && expand.isHittable)
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertEqual(title.label, "Weekend.pdf", "The full filename must remain available at large text sizes")
+        XCTAssertLessThanOrEqual(back.frame.maxY, title.frame.minY,
+                                 "Preview controls must not crowd or wrap into the filename")
+        let remove = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "composer-attachment-remove:")).firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 5) && remove.isHittable,
+                      "The attachment remove control must remain visible at large text sizes")
+        XCTAssertLessThanOrEqual(remove.frame.maxX, app.frame.maxX - 8)
+        XCTAssertGreaterThanOrEqual(app.textViews["message-draft"].frame.height, 80,
+                                    "The draft should show more than one line at Accessibility XXXL")
         let error = app.staticTexts["workspace-pdf-error"]
         XCTAssertTrue(error.waitForExistence(timeout: 5) && error.isHittable,
                       "An invalid PDF must explain the blank preview")
         retainMenuScreenshot(app, name: "Invalid PDF on first open")
+        expand.tap()
+        let collapse = app.buttons["workspace-preview-collapse"]
+        let expandedTitle = app.staticTexts["workspace-preview-expanded-title"]
+        XCTAssertTrue(collapse.waitForExistence(timeout: 5) && collapse.isHittable)
+        XCTAssertTrue(expandedTitle.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(collapse.frame.maxY, expandedTitle.frame.minY,
+                                 "The full-screen filename should have its own row at large text sizes")
+        XCTAssertTrue(error.isHittable, "The PDF error must survive full-screen handoff")
+        retainMenuScreenshot(app, name: "Invalid PDF full screen at large text")
+        collapse.tap()
+        XCTAssertTrue(error.waitForExistence(timeout: 5))
         workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
 
         app.terminate()

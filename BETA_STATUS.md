@@ -463,6 +463,16 @@ TestFlight interaction and paired-host provider sends remain open. Production
 stays at build 82 by owner request; no production upload was made for this
 checkpoint.
 
+After that checkpoint, a source-only Accessibility XXXL Files pass gave the
+inline and full-screen preview headers a separate filename row, kept the
+staged-file chip and remove control visible, and allowed two draft lines. A
+focused malformed-PDF and composer UI test passed 1/1 on each iPhone 17 and
+iPad Pro 13-inch M5 simulator (iOS 26.5); both captures were inspected. The
+photo/file strip controls also passed a focused iPhone check and an iPad retry;
+the first iPad attempt stopped on a preserved Widget ExtensionKit startup crash.
+The layout changes are absent from Testing 21 and production 82. The owner requested no
+additional upload yet while reviewing the Testing checkpoint.
+
 [Apple's iPad windowing guide](https://support.apple.com/en-us/125309)
 defines a genuine side-by-side session as two apps visible with a divider.
 The current 698-point check validates Wonder's available width but not that
@@ -470,7 +480,12 @@ two-app arrangement. A dedicated iPadOS 26.5 Safari/Wonder check tried Dock
 swipes and Apple's window-arrangement keyboard shortcut. The Dock gestures
 opened the app switcher or left Wonder full-screen, and the shortcut left
 both reported app windows at full width. Its failed UI test was removed; true
-two-app behavior is still unverified. For [iPhone Duo](https://developer.apple.com/design/human-interface-guidelines/designing-for-iphone-duo),
+two-app behavior is still unverified. A second iPadOS 26.5 XCTest attempt
+confirmed Windowed Apps was selected, launched Safari and Wonder Testing,
+and sent Apple's Control-Shift-Globe-Left shortcut twice; Safari remained
+full screen and Wonder still measured 1032 points. The provisional test was
+removed after its two failures; a visible center divider remains the gate.
+For [iPhone Duo](https://developer.apple.com/design/human-interface-guidelines/designing-for-iphone-duo),
 the outer and inner displays have different size classes and the inner display
 can multitask. Wonder still selects its drawer by iPhone idiom, so inner-display
 layout adaptation is open. This Mac has Xcode 27.0 and no Duo simulator device;

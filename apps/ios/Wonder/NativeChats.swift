@@ -1367,7 +1367,7 @@ struct ConversationView: View {
         BoundedComposerEditor(text: Binding(
             get: { model.composers[chat.id]?.draft ?? "" },
             set: { model.editDraft($0, chat: chat.id) }),
-            maximumLines: typeSize >= .accessibility3 ? 1 : typeSize.isAccessibilitySize ? 2 : 6,
+            maximumLines: typeSize.isAccessibilitySize ? 2 : 6,
             label: "Message \(chat.title)", editable: !model.preparingSends.contains(chat.id) && !model.uploading.contains(chat.id),
             canPasteImages: model.canAttach(chat) && !model.loadingPhotos.contains(chat.id),
             pasteImages: { providers in
@@ -1446,12 +1446,15 @@ struct ComposerAttachmentStrip: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 4)
         }
-        .frame(height: containsImage ? 88 : 52)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(minHeight: containsImage ? 88 : 52)
         .accessibilityIdentifier("composer-attachments")
     }
 }
 
 private struct ComposerAttachmentItem: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     let attachment: ComposerAttachment
     let imagePreviews: ToolImagePreviews
     let imagePreviewScope: UUID
@@ -1550,10 +1553,14 @@ private struct ComposerAttachmentItem: View {
                 Text(attachment.isAnnotation ? "\(isStale ? "Source changed · " : "Preview note · ")\(attachment.name.replacingOccurrences(of: ".annotation.json", with: ""))" : attachment.name)
                     .font(.subheadline)
                     .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: typeSize.isAccessibilitySize ? (horizontalSizeClass == .compact ? 180 : 320) : nil,
+                           alignment: .leading)
+                    .accessibilityLabel(attachment.name)
             }
             .padding(.leading, 10)
             .padding(.trailing, 24)
-            .frame(minHeight: 44)
+            .frame(minHeight: typeSize.isAccessibilitySize ? 64 : 44)
             .background(Color(uiColor: .tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -1571,6 +1578,7 @@ private struct ComposerAttachmentItem: View {
         .padding(.top, 8)
         .padding(.trailing, 8)
         .frame(minHeight: 52, alignment: .bottomLeading)
+        .frame(maxWidth: typeSize.isAccessibilitySize ? (horizontalSizeClass == .compact ? 280 : 420) : nil)
         .accessibilityElement(children: .contain)
     }
 
@@ -3235,6 +3243,7 @@ struct WorkspaceBrowserRequest: Identifiable {
 }
 
 struct WorkspaceBrowser: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
     let attachmentIDs: [String]?
@@ -3471,20 +3480,46 @@ struct WorkspaceBrowser: View {
                 collapsingPreview = false
             }) {
                 VStack(spacing: 0) {
-                    HStack {
-                        Button("Show in chat", systemImage: "arrow.down.right.and.arrow.up.left") {
-                            pdfSession.capture()
-                            htmlSession.capture()
-                            collapsingPreview = true
-                            expandedPreview = false
-                        }
-                        .accessibilityIdentifier("workspace-preview-collapse")
-                        Spacer()
-                        Text(previewName).font(.subheadline.weight(.semibold)).lineLimit(1)
-                        if annotationAdded {
-                            Label("Added to message", systemImage: "checkmark")
-                                .font(.caption).foregroundStyle(.secondary)
-                                .accessibilityIdentifier("workspace-annotation-added")
+                    Group {
+                        if typeSize.isAccessibilitySize {
+                            VStack(spacing: 0) {
+                                HStack {
+                                    Button { collapseExpandedPreview() } label: {
+                                        Image(systemName: "arrow.down.right.and.arrow.up.left")
+                                            .frame(minWidth: 44, minHeight: 44)
+                                    }
+                                    .accessibilityLabel("Show in chat")
+                                    .accessibilityIdentifier("workspace-preview-collapse")
+                                    Spacer()
+                                    if annotationAdded {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .frame(minWidth: 44, minHeight: 44)
+                                            .accessibilityLabel("Added to message")
+                                            .accessibilityIdentifier("workspace-annotation-added")
+                                    }
+                                }
+                                Text(previewName)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(2)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .accessibilityLabel(previewName)
+                                    .accessibilityIdentifier("workspace-preview-expanded-title")
+                                    .padding(.bottom, 8)
+                            }
+                        } else {
+                            HStack {
+                                Button("Show in chat", systemImage: "arrow.down.right.and.arrow.up.left") {
+                                    collapseExpandedPreview()
+                                }
+                                .accessibilityIdentifier("workspace-preview-collapse")
+                                Spacer()
+                                Text(previewName).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                if annotationAdded {
+                                    Label("Added to message", systemImage: "checkmark")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                        .accessibilityIdentifier("workspace-annotation-added")
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 12)
@@ -3504,26 +3539,40 @@ struct WorkspaceBrowser: View {
 
     private var inlinePreview: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Button { closePreview() } label: {
-                    Label("Files", systemImage: "chevron.left")
-                        .frame(minHeight: 44)
+            Group {
+                if typeSize.isAccessibilitySize {
+                    VStack(spacing: 0) {
+                        HStack {
+                            Button { closePreview() } label: {
+                                Image(systemName: "chevron.left")
+                                    .frame(minWidth: 44, minHeight: 44)
+                            }
+                            .accessibilityLabel("Back to Files")
+                            .accessibilityIdentifier("workspace-preview-back")
+                            Spacer()
+                            previewExpandButton
+                        }
+                        Text(previewName)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityLabel(previewName)
+                            .accessibilityIdentifier("workspace-preview-title")
+                            .padding(.bottom, 8)
+                    }
+                } else {
+                    HStack(spacing: 12) {
+                        Button { closePreview() } label: {
+                            Label("Files", systemImage: "chevron.left")
+                                .frame(minHeight: 44)
+                        }
+                        .accessibilityIdentifier("workspace-preview-back")
+                        Text(previewName).font(.subheadline.weight(.semibold)).lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .accessibilityIdentifier("workspace-preview-title")
+                        previewExpandButton
+                    }
                 }
-                .accessibilityIdentifier("workspace-preview-back")
-                Text(previewName).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                Button("Full screen", systemImage: "arrow.up.left.and.arrow.down.right") {
-                    pdfSession.capture()
-                    htmlSession.capture()
-                    expandedPreview = true
-                }
-                .labelStyle(.iconOnly)
-                .frame(minWidth: 44, minHeight: 44)
-                .accessibilityIdentifier("workspace-preview-expand")
-                #if WONDER_DIAGNOSTICS
-                .accessibilityValue(DiagnosticSubagentFixture.projectFilesSendFixture &&
-                    model.composers[chat.id]?.pending?.receipt != nil ? "Host received test message" : "")
-                #endif
             }
             .padding(.horizontal, 12)
             .background(Color(uiColor: .secondarySystemBackground))
@@ -3531,6 +3580,28 @@ struct WorkspaceBrowser: View {
             // WebKit and large text/diff layouts must not stay mounted twice.
             if !expandedPreview { previewContent }
         }
+    }
+
+    private func collapseExpandedPreview() {
+        pdfSession.capture()
+        htmlSession.capture()
+        collapsingPreview = true
+        expandedPreview = false
+    }
+
+    private var previewExpandButton: some View {
+        Button("Full screen", systemImage: "arrow.up.left.and.arrow.down.right") {
+            pdfSession.capture()
+            htmlSession.capture()
+            expandedPreview = true
+        }
+        .labelStyle(.iconOnly)
+        .frame(minWidth: 44, minHeight: 44)
+        .accessibilityIdentifier("workspace-preview-expand")
+        #if WONDER_DIAGNOSTICS
+        .accessibilityValue(DiagnosticSubagentFixture.projectFilesSendFixture &&
+            model.composers[chat.id]?.pending?.receipt != nil ? "Host received test message" : "")
+        #endif
     }
 
     @ViewBuilder private var previewContent: some View {
