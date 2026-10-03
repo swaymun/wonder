@@ -4080,6 +4080,25 @@ import UIKit
         XCTAssertEqual(app.staticTexts["camera-draft-transfers"].label, "Local draft only")
     }
 
+    func testComposerEditWithLargeAttachmentSurvivesDurableReload() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-composer-large-draft"]
+        app.launch()
+        let editor = app.textViews["message-draft"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["camera-draft-count"].label, "Draft attachments: 1")
+        editor.tap()
+        editor.typeText(" More text")
+        let changed = try XCTUnwrap(editor.value as? String)
+        XCTAssertNotEqual(changed, "Keep this draft.")
+        app.buttons["camera-reload-draft"].tap()
+        XCTAssertEqual(editor.value as? String, changed)
+        XCTAssertEqual(app.staticTexts["camera-draft-count"].label, "Draft attachments: 1")
+        XCTAssertEqual(app.staticTexts["camera-pending-send"].label, "No pending send")
+        retainMenuScreenshot(app, name: "Large attachment draft after durable reload")
+    }
+
     func testComposerAttachmentPreviewLoadsAndRemovesOnlyTheSelectedImage() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

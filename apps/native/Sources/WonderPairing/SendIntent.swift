@@ -162,10 +162,34 @@ public struct ComposerIntent: Codable, Sendable {
 
 public extension ReadStore {
     func loadComposer(conversation: String) throws -> ComposerIntent {
-        guard let data = try loadIntent(conversation: conversation) else { return ComposerIntent() }
-        return try JSONDecoder().decode(ComposerIntent.self, from: data)
+        let data = try loadIntent(conversation: conversation)
+        var intent = try data.map { try JSONDecoder().decode(ComposerIntent.self, from: $0) } ?? ComposerIntent()
+        if let overlay = try loadIntent(conversation: draftOverlayKey(conversation)) {
+            let saved = try JSONDecoder().decode(ComposerDraftOverlay.self, from: overlay)
+            if saved.baseRevision == (try intentRevision(conversation: conversation)) { intent.draft = saved.draft }
+            else { try? removeIntent(conversation: draftOverlayKey(conversation)) }
+        }
+        return intent
     }
     func saveComposer(_ intent: ComposerIntent, conversation: String) throws {
         try saveIntent(JSONEncoder().encode(intent), conversation: conversation)
+        // If cleanup is interrupted, the overlay's old file identity still
+        // prevents it from replacing this committed intent on restart.
+        try? removeIntent(conversation: draftOverlayKey(conversation))
+    }
+    func saveComposerDraft(_ draft: String, conversation: String) throws {
+        let overlay = ComposerDraftOverlay(baseRevision: try intentRevision(conversation: conversation), draft: draft)
+        try saveIntent(JSONEncoder().encode(overlay), conversation: draftOverlayKey(conversation))
+    }
+    func removeComposer(conversation: String) throws {
+        try removeIntent(conversation: draftOverlayKey(conversation))
+        try removeIntent(conversation: conversation)
     }
 }
+
+private struct ComposerDraftOverlay: Codable {
+    let baseRevision: String
+    let draft: String
+}
+
+private func draftOverlayKey(_ conversation: String) -> String { "composer-draft-v1:" + conversation }

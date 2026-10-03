@@ -26,6 +26,19 @@ source-only when checked. The shipped iOS checkpoint source is now in
 Testing 21, but its installed TestFlight behavior has not yet been observed.
 Mac source changes after 1.0.108 remain uninstalled.
 
+The October 3 post-checkpoint composer hardening is verified in source and
+signed TestingDiagnostics simulator builds, but is not in Testing 21 or
+production 82. With a large staged attachment, draft edits now persist a
+small text overlay instead of encoding and atomically replacing the attachment
+bytes on every keystroke. The overlay is tied to the base intent file identity
+so an interrupted cleanup cannot restore text after a committed Send; file
+request encoding moves off the UI actor. Native intent and transport tests
+passed 25/25, the focused durable reload UI test passed 1/1 on each iPhone
+and iPad simulator, and `fastlane ios validate` passed. This has not been
+measured as a typing-latency improvement on physical hardware. PDF document
+parsing on preview open or revision is still on the main actor and remains a
+measured performance gate.
+
 A replacement Mac companion, 1.0.108, has been signed, notarized, stapled and
 installed over 1.0.107 on the owner's Mac. The same verified DMG installed and
 first-launched on a clean second Mac; both reached `/readyz`, including after a

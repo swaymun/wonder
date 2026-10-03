@@ -639,19 +639,36 @@ public struct ReadStore: Sendable {
         }
     }
     public func saveIntent(_ data: Data, conversation: String) throws {
-        let name = SHA256.hash(data: Data(conversation.utf8)).map { String(format: "%02x", $0) }.joined()
-        try write(data, name: "intent-" + name + ".json")
+        try write(data, name: intentURL(conversation: conversation).lastPathComponent)
     }
     public func removeIntent(conversation: String) throws {
-        let name = SHA256.hash(data: Data(conversation.utf8)).map { String(format: "%02x", $0) }.joined()
-        let url = directory.appendingPathComponent("intent-" + name + ".json")
+        let url = intentURL(conversation: conversation)
         if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
     }
     public func loadIntent(conversation: String) throws -> Data? {
-        let name = SHA256.hash(data: Data(conversation.utf8)).map { String(format: "%02x", $0) }.joined()
-        let url = directory.appendingPathComponent("intent-" + name + ".json")
+        let url = intentURL(conversation: conversation)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return try Data(contentsOf: url)
+    }
+    /// An atomic intent replacement gets a new file identity. A small draft
+    /// overlay can use this token to avoid restoring text from an older intent
+    /// after Send or another full composer mutation has committed.
+    public func intentRevision(conversation: String) throws -> String {
+        let url = intentURL(conversation: conversation)
+        guard FileManager.default.fileExists(atPath: url.path) else { return "missing" }
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        if let number = attributes[.systemFileNumber] as? NSNumber,
+           let modified = attributes[.modificationDate] as? Date,
+           let size = attributes[.size] as? NSNumber {
+            return "\(number):\(modified.timeIntervalSince1970.bitPattern):\(size)"
+        }
+        // File identity is unavailable on some test filesystems. Keep the
+        // ordering guarantee there even if checking the token costs more.
+        return SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()
+    }
+    private func intentURL(conversation: String) -> URL {
+        let name = SHA256.hash(data: Data(conversation.utf8)).map { String(format: "%02x", $0) }.joined()
+        return directory.appendingPathComponent("intent-" + name + ".json")
     }
     private func write(_ data: Data, name: String) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

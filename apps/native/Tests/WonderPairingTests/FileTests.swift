@@ -118,6 +118,43 @@ final class FileTests: XCTestCase {
         XCTAssertEqual(restored.pending?.request.attachmentIds, ["file"])
         XCTAssertNil(restored.stagedFiles)
     }
+
+    func testLargeStagedDraftEditsStayDurableWithoutRewritingFileOrRestoringSentText() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ReadStore(root: root, host: "mac", device: "phone")
+        let data = Data(repeating: 65, count: 1024 * 1024)
+        let staged = try StagedFile(name: "large.txt", mimeType: "text/plain", data: data)
+        var intent = ComposerIntent()
+        intent.stagedFiles = [staged]
+        try store.saveComposer(intent, conversation: "chat")
+        let original = try XCTUnwrap(store.loadIntent(conversation: "chat"))
+
+        try store.saveComposerDraft("First", conversation: "chat")
+        try store.saveComposerDraft("Final edit", conversation: "chat")
+        let oldOverlay = try XCTUnwrap(store.loadIntent(conversation: "composer-draft-v1:chat"))
+        XCTAssertLessThan(oldOverlay.count, 1024)
+        XCTAssertEqual(try store.loadIntent(conversation: "chat"), original)
+        var restored = try store.loadComposer(conversation: "chat")
+        XCTAssertEqual(restored.draft, "Final edit")
+        XCTAssertEqual(restored.stagedFiles?.first?.data, data)
+
+        let uploaded = ConversationFile(id: "uploaded", name: "large.txt", mimeType: "text/plain",
+            byteSize: data.count, sha256: ConversationFile.digest(data), state: "available", updatedAt: "now")
+        restored.stagedFiles?[0].uploaded = uploaded
+        try restored.begin(device: "phone")
+        try store.saveComposer(restored, conversation: "chat")
+        // Simulate a crash before stale-overlay cleanup after the atomic intent write.
+        try store.saveIntent(oldOverlay, conversation: "composer-draft-v1:chat")
+        let sent = try store.loadComposer(conversation: "chat")
+        XCTAssertTrue(sent.draft.isEmpty)
+        XCTAssertEqual(sent.pending?.request.body, "Final edit")
+        XCTAssertNil(sent.stagedFiles)
+
+        try store.saveComposerDraft("Unsaved conversation", conversation: "new-chat")
+        try store.removeComposer(conversation: "new-chat")
+        XCTAssertTrue(try store.loadComposer(conversation: "new-chat").draft.isEmpty)
+    }
     func testSpoofedMIMEAndOversizeAreRejected() throws {
         XCTAssertThrowsError(try StagedFile(name: "fake.pdf", mimeType: "application/pdf", data: Data("not a PDF".utf8)))
         XCTAssertThrowsError(try StagedFile(name: "big", mimeType: "application/octet-stream", data: Data(count: 8 * 1024 * 1024 + 1)))

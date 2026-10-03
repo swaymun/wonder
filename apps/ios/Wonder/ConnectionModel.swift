@@ -729,8 +729,8 @@ struct ManagedBotListMutationState {
         chatsStatus = "Saved chats"
         if let chat {
             do {
-                if let data = try fixtureStore.loadIntent(conversation: chat.id) {
-                    composers[chat.id] = try JSONDecoder().decode(ComposerIntent.self, from: data)
+                if try fixtureStore.loadIntent(conversation: chat.id) != nil {
+                    composers[chat.id] = try fixtureStore.loadComposer(conversation: chat.id)
                 } else {
                     try fixtureStore.saveComposer(initialIntent, conversation: chat.id)
                     composers[chat.id] = initialIntent
@@ -1386,7 +1386,17 @@ struct ManagedBotListMutationState {
         next.draft = text
         // Keep the text in memory even if disk is full, and block Send until saved.
         composers[chat] = next
-        do { try saveComposer(next, chat: chat); composerErrors[chat] = nil }
+        do {
+            if !previewMode, (next.stagedFiles ?? []).reduce(0, { $0 + $1.data.count }) > 128 * 1024 {
+                guard let store else { throw ReadFailure.resync }
+                // A large staged file is already durable. Save only the new
+                // text until the next full intent mutation or Send.
+                try store.saveComposerDraft(text, conversation: chat)
+            } else {
+                try saveComposer(next, chat: chat)
+            }
+            composerErrors[chat] = nil
+        }
         catch { composerErrors[chat] = "This draft could not be saved. Free some storage before sending." }
     }
 
@@ -1764,7 +1774,7 @@ struct ManagedBotListMutationState {
         next.snapshots.removeValue(forKey: id); next.groups.removeValue(forKey: id)
         next.positions.removeValue(forKey: id); next.markClean(id)
         try commit(next)
-        try store?.removeIntent(conversation: id)
+        try store?.removeComposer(conversation: id)
         try store?.removeIntent(conversation: "async-list-" + id)
         composers.removeValue(forKey: id); composerErrors.removeValue(forKey: id)
         files.removeValue(forKey: id); queues.removeValue(forKey: id); asyncQuestions.removeValue(forKey: id)
@@ -2113,8 +2123,17 @@ struct ManagedBotListMutationState {
         uploading.insert(chat.id)
         defer { if key == partition { uploading.remove(chat.id) } }
         for file in composers[chat.id]?.stagedFiles ?? [] where file.uploaded == nil {
+            let encoding = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                let body = try file.uploadBody()
+                try Task.checkCancellation()
+                return body
+            }
+            let body = try await withTaskCancellationHandler(operation: { try await encoding.value },
+                                                              onCancel: { encoding.cancel() })
+            guard key == partition, scope == assignmentScope, !accessEnded, !Task.isCancelled else { throw CancellationError() }
             let uploaded: ConversationFile = try await api.request("/api/v1/conversations/\(Self.escape(chat.id))/files",
-                origin: saved.origin, body: file.uploadBody(), credential: saved.credential)
+                origin: saved.origin, body: body, credential: saved.credential)
             guard key == partition, scope == assignmentScope, !accessEnded else { throw CancellationError() }
             try uploaded.verify(file.data, mime: file.mimeType)
             guard var next = composers[chat.id], let index = next.stagedFiles?.firstIndex(where: { $0.id == file.id }) else { throw CancellationError() }

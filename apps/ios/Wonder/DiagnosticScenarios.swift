@@ -949,7 +949,8 @@ struct DiagnosticSubagentFixtureView: View {
     private static let commentary=String(repeating:"A commentary paragraph with **formatted text** and a list.\n\n- One item\n- Another item\n\n",count:200)
     init() {
         let arguments = ProcessInfo.processInfo.arguments
-        let cameraRequested = arguments.contains { $0.hasPrefix("-diagnostics-camera-") } || arguments.contains("-diagnostics-composer-paste")
+        let cameraRequested = arguments.contains { $0.hasPrefix("-diagnostics-camera-") } ||
+            arguments.contains("-diagnostics-composer-paste") || arguments.contains("-diagnostics-composer-large-draft")
         let permissionRequested = arguments.contains("-diagnostics-permission-fixture")
         let workingFolderRequested = arguments.contains("-diagnostics-working-folder")
         staleActiveFixture = arguments.contains("-diagnostics-stale-active")
@@ -1277,12 +1278,18 @@ struct DiagnosticSubagentFixtureView: View {
     private let chat: ChatSummary
     private let fixture: CameraCaptureFixture?
     private let scope: String
-    private let pasteFixture = ProcessInfo.processInfo.arguments.contains("-diagnostics-composer-paste")
+    private let pasteFixture = ProcessInfo.processInfo.arguments.contains("-diagnostics-composer-paste") ||
+        ProcessInfo.processInfo.arguments.contains("-diagnostics-composer-large-draft")
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
         var initial = ComposerIntent()
         if arguments.contains("-diagnostics-composer-paste") { initial.draft = "Keep this draft." }
+        if arguments.contains("-diagnostics-composer-large-draft") {
+            initial.draft = "Keep this draft."
+            initial.stagedFiles = [try! StagedFile(id: "large-draft-file", name: "large.txt", mimeType: "text/plain",
+                                                   data: Data(repeating: 65, count: 1024 * 1024))]
+        }
         if arguments.contains("-diagnostics-camera-physical") {
             // Real permission, session, preview and shutter. Only the paired
             // model/store are isolated; no fixture bytes reach capture.
