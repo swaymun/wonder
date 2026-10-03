@@ -3508,6 +3508,47 @@ import UIKit
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
+    func testMalformedPDFShowsErrorOnOpenAndRevision() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        let baseArguments = ["-read-preview", "-send-preview", "-files-preview",
+                             "-project-files-conversation-preview", "-artifact-annotation-preview"]
+        app.launchArguments = baseArguments + ["-malformed-pdf-preview",
+                                               "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        app.buttons["conversation-files-pill"].tap()
+        let pdf = app.buttons["workspace-file-entry:Weekend.pdf"]
+        let fileList = app.collectionViews["workspace-file-list"]
+        XCTAssertTrue(fileList.waitForExistence(timeout: 10))
+        for _ in 0..<15 where !pdf.isHittable { fileList.swipeUp() }
+        XCTAssertTrue(pdf.isHittable)
+        pdf.tap()
+        let error = app.staticTexts["workspace-pdf-error"]
+        XCTAssertTrue(error.waitForExistence(timeout: 5) && error.isHittable,
+                      "An invalid PDF must explain the blank preview")
+        retainMenuScreenshot(app, name: "Invalid PDF on first open")
+        workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
+
+        app.terminate()
+        app.launchArguments = baseArguments + ["-artifact-revision-preview", "-malformed-pdf-revision-preview"]
+        app.launch()
+        app.buttons["conversation-files-pill"].tap()
+        let revisedPDF = app.buttons["workspace-file-entry:Weekend.pdf"]
+        XCTAssertTrue(revisedPDF.waitForExistence(timeout: 10))
+        revisedPDF.tap()
+        XCTAssertFalse(app.staticTexts["workspace-pdf-error"].exists)
+        app.buttons["workspace-document-refresh"].tap()
+        let showRevision = app.buttons["workspace-document-show-revision"]
+        XCTAssertTrue(showRevision.waitForExistence(timeout: 5))
+        showRevision.tap()
+        XCTAssertTrue(app.staticTexts["workspace-pdf-error"].waitForExistence(timeout: 5),
+                      "A malformed update must not silently leave the old page visible")
+        retainMenuScreenshot(app, name: "Invalid PDF revision in viewer")
+        workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].exists)
+    }
+
     func testProjectTitleMenuOpensDetailsAppsAndUsage() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

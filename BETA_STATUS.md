@@ -39,6 +39,16 @@ measured as a typing-latency improvement on physical hardware. PDF document
 parsing on preview open or revision is still on the main actor and remains a
 measured performance gate.
 
+A separate post-checkpoint PDF failure fix is also source-only. A malformed
+PDF now shows a readable error on initial open or after an updated revision,
+instead of a blank or stale page. The focused invalid-PDF UI test and the
+existing valid image/PDF revision test each passed 1/1 on iPhone 17 and iPad
+Pro 13-inch M5 simulators (iOS 26.5). The invalid-file error also passed at
+Accessibility XXXL on both; its final screenshots were inspected. The malformed
+file fixture has a PDF header but no renderable page,
+matching the gap between content-signature validation and PDFKit parsing.
+Testing 21 and production 82 do not contain this correction.
+
 A replacement Mac companion, 1.0.108, has been signed, notarized, stapled and
 installed over 1.0.107 on the owner's Mac. The same verified DMG installed and
 first-launched on a clean second Mac; both reached `/readyz`, including after a

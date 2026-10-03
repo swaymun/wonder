@@ -5325,12 +5325,13 @@ struct PreviewDeck: View {
     }
 
     fileprivate func install(_ view: PDFPreviewView, data: Data, revision: String) {
-        if self.revision != revision || document == nil {
-            document = PDFDocument(data: data)
+        if self.revision != revision {
+            document = parsedPDFDocument(data)
             self.revision = revision
         }
         view.autoScales = true
         view.document = document
+        view.showParseFailure(document == nil)
         activeView = view
         if viewport != nil {
             view.restoreAfterLayout = { [weak self, weak view] in
@@ -5345,6 +5346,12 @@ struct PreviewDeck: View {
         self.revision = revision
         activeView = view
         capture()
+    }
+
+    func fail(revision: String, view: PDFView) {
+        document = nil
+        self.revision = revision
+        activeView = view
     }
 
     private func restore(in view: PDFView) {
@@ -5364,6 +5371,34 @@ struct PreviewDeck: View {
 
 private final class PDFPreviewView: PDFView {
     var restoreAfterLayout: (() -> Void)?
+    private lazy var failureLabel: UILabel = {
+        let label = UILabel()
+        label.text = "Can't open this PDF. Try again."
+        label.textColor = .secondaryLabel
+        label.font = .preferredFont(forTextStyle: .body)
+        label.adjustsFontForContentSizeCategory = true
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        label.backgroundColor = .systemBackground
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.accessibilityIdentifier = "workspace-pdf-error"
+        return label
+    }()
+
+    func showParseFailure(_ failed: Bool) {
+        if failed && failureLabel.superview == nil {
+            addSubview(failureLabel)
+            NSLayoutConstraint.activate([
+                failureLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+                failureLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
+                failureLabel.topAnchor.constraint(equalTo: topAnchor),
+                failureLabel.bottomAnchor.constraint(equalTo: bottomAnchor)
+            ])
+        }
+        failureLabel.isHidden = !failed
+        if failed { bringSubviewToFront(failureLabel) }
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         guard bounds.width > 0, bounds.height > 0 else { return }
@@ -5390,7 +5425,8 @@ struct PDFPreview: UIViewRepresentable {
             session.install(view, data: data, revision: current)
         } else {
             view.autoScales = true
-            view.document = PDFDocument(data: data)
+            view.document = parsedPDFDocument(data)
+            view.showParseFailure(view.document == nil)
         }
         context.coordinator.revision = current
         return view
@@ -5402,9 +5438,16 @@ struct PDFPreview: UIViewRepresentable {
     }
     func updateUIView(_ view: PDFView, context: Context) {
         let nextRevision = revision ?? ConversationFile.digest(data)
-        guard context.coordinator.revision != nextRevision,
-              let document = PDFDocument(data: data) else { return }
+        guard context.coordinator.revision != nextRevision else { return }
         session?.capture()
+        guard let document = parsedPDFDocument(data) else {
+            view.document = nil
+            (view as? PDFPreviewView)?.showParseFailure(true)
+            context.coordinator.revision = nextRevision
+            session?.fail(revision: nextRevision, view: view)
+            return
+        }
+        (view as? PDFPreviewView)?.showParseFailure(false)
         let destination = view.currentDestination
         let oldPage = destination?.page ?? view.currentPage
         let pageIndex = oldPage.flatMap { view.document?.index(for: $0) } ?? 0
@@ -5433,6 +5476,11 @@ struct PDFPreview: UIViewRepresentable {
         context.coordinator.revision = nextRevision
         session?.update(document: document, revision: nextRevision, view: view)
     }
+}
+
+private func parsedPDFDocument(_ data: Data) -> PDFDocument? {
+    guard let document = PDFDocument(data: data), document.pageCount > 0 else { return nil }
+    return document
 }
 
 private struct WorkspaceAnnotationNoteField: UIViewRepresentable {

@@ -2231,11 +2231,19 @@ struct ManagedBotListMutationState {
     func downloadWorkspaceFile(_ chat: ChatSummary, root: WorkspaceRoot, entry: WorkspaceEntry) async throws -> Data {
         if previewMode {
             #if WONDER_DIAGNOSTICS
+            if entry.path == "Weekend.pdf",
+               ProcessInfo.processInfo.arguments.contains("-malformed-pdf-preview") {
+                return Data("%PDF-1.7\ninvalid document".utf8)
+            }
             if ProcessInfo.processInfo.arguments.contains("-artifact-revision-preview") {
                 let key = root.id + ":" + entry.path
                 previewWorkspaceFileReads[key, default: 0] += 1
                 let initialReads = entry.path == "README.md" ? 2 : 1
                 if previewWorkspaceFileReads[key, default: 0] > initialReads {
+                    if entry.path == "Weekend.pdf",
+                       ProcessInfo.processInfo.arguments.contains("-malformed-pdf-revision-preview") {
+                        return Data("%PDF-1.7\ninvalid revision".utf8)
+                    }
                     return previewWorkspaceRevisionData(entry: entry)
                 }
             }
