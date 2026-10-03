@@ -497,13 +497,27 @@ struct ConversationView: View {
         _planModeOn = State(initialValue: model.projects.details[chat.id]?.planMode == true)
         _supportsModes = State(initialValue: model.projects.supportsModes)
     }
-    private func subagent(for row: ReadRow) -> SubagentSummary? {
+    private func subagentThreadIDs(for row: ReadRow) -> [String] {
         guard let item = row.item,
-              item.type == "subAgentActivity" || item.type == "collabAgentToolCall" else { return nil }
-        let threadID = item.payload?["agentThreadId"]?.string
-            ?? item.payload?["receiverThreadIds"]?.array?.compactMap(\.string).first
-        guard let threadID else { return nil }
-        return model.subagents.values.lazy.flatMap { $0 }.first(where: { $0.threadId == threadID })
+              item.type == "subAgentActivity" || item.type == "collabAgentToolCall" else { return [] }
+        if let threadID = item.payload?["agentThreadId"]?.string { return [threadID] }
+        let receivers = item.payload?["receiverThreadIds"]?.array?.compactMap(\.string) ?? []
+        var seen = Set<String>()
+        return receivers.filter { seen.insert($0).inserted }
+    }
+    private func subagent(for row: ReadRow) -> SubagentSummary? {
+        guard chat.botId != nil else { return nil }
+        let agents = model.subagents[chat.id] ?? []
+        return subagentThreadIDs(for: row).lazy.compactMap { threadID in
+            agents.first(where: { $0.threadId == threadID })
+        }.first
+    }
+    private func projectSubagents(for row: ReadRow) -> [ProjectSubagentSummary] {
+        guard chat.botId == nil, model.isProject(chat) else { return [] }
+        let agents = model.projectSubagents[chat.id] ?? []
+        return subagentThreadIDs(for: row).compactMap { threadID in
+            agents.first(where: { $0.threadId == threadID })
+        }
     }
     @ViewBuilder private func entryContent(
         _ entry: ChatFeedEntry,
@@ -632,6 +646,8 @@ struct ConversationView: View {
                 expanded: expandedDetails.contains(row.id),
                 subagent: subagent(for: row),
                 openSubagent: { selectedSubagent = $0 },
+                projectSubagents: projectSubagents(for: row),
+                openProjectSubagent: { selectedProjectSubagent = $0 },
                 openFile: { path in workspaceRequest = WorkspaceBrowserRequest(initialFilePath: path) },
                 toggle: { toggleDetail(row.id) }
             )
@@ -3336,7 +3352,12 @@ struct WorkspaceBrowser: View {
                     modelSession?.close()
                 }
             }
-            .fullScreenCover(isPresented: $expandedPreview) {
+            .fullScreenCover(isPresented: $expandedPreview, onDismiss: {
+                // A nested region editor also hides this cover temporarily.
+                // Release its source only when the outer cover actually closes.
+                if !collapsingPreview { closePreview() }
+                collapsingPreview = false
+            }) {
                 VStack(spacing: 0) {
                     HStack {
                         Button("Show in chat", systemImage: "arrow.down.right.and.arrow.up.left") {
@@ -3357,17 +3378,6 @@ struct WorkspaceBrowser: View {
                     .padding(.horizontal, 12)
                     .frame(minHeight: 44)
                     previewContent
-                }
-                .onDisappear {
-                    // A parent navigation can dismiss the cover while the
-                    // browser's onDisappear is suppressed by presentation.
-                    // Only the explicit collapse keeps the selected work.
-                    if !collapsingPreview {
-                        mediaSelection?.close()
-                        previewRevision?.close()
-                        modelSession?.close()
-                    }
-                    collapsingPreview = false
                 }
             }
             .confirmationDialog("Choose diff", isPresented: Binding(get: { diffChoice != nil }, set: { if !$0 { diffChoice = nil } })) {
@@ -3582,20 +3592,26 @@ struct WorkspaceBrowser: View {
         } else if let git, git.changes.isEmpty {
             ContentUnavailableView("No modified files", systemImage: "checkmark.circle", description: Text("This workspace has no staged, unstaged, or untracked changes."))
         } else if let git {
-            List(git.changes) { change in
-                Button { openDiff(change) } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: change.state == "renamed" ? "arrow.triangle.2.circlepath" : change.state == "conflicted" ? "exclamationmark.triangle" : "doc.text")
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(change.path).lineLimit(1)
-                            Text(change.originalPath.map { "Renamed from \($0)" } ?? (change.indexStatus != " " && change.indexStatus != "?" && change.worktreeStatus != " " ? "Staged and unstaged" : change.state.capitalized))
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                    }
+            List {
+                if selectedDiff != nil && diffText == nil {
+                    ProgressView("Loading diff…")
+                        .accessibilityIdentifier("workspace-diff-loading")
                 }
-                .accessibilityIdentifier("workspace-modified-entry:\(change.path)")
+                ForEach(git.changes) { change in
+                    Button { openDiff(change) } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: change.state == "renamed" ? "arrow.triangle.2.circlepath" : change.state == "conflicted" ? "exclamationmark.triangle" : "doc.text")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(change.path).lineLimit(1)
+                                Text(change.originalPath.map { "Renamed from \($0)" } ?? (change.indexStatus != " " && change.indexStatus != "?" && change.worktreeStatus != " " ? "Staged and unstaged" : change.state.capitalized))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("workspace-modified-entry:\(change.path)")
+                }
             }
             .accessibilityIdentifier("workspace-modified-list")
         } else {
@@ -3916,6 +3932,7 @@ struct WorkspaceBrowser: View {
         diffRequestID = requestID
         selectedDiff = change
         diffText = nil
+        failure = nil
         Task {
             do {
                 let response = try await model.loadWorkspaceGitDiff(chat, root: root, path: change.path, staged: staged)
@@ -4033,12 +4050,15 @@ private struct WorkspaceImagePreview: View {
             .overlay(alignment: .top) {
                 if refresh != nil {
                     VStack(alignment: .trailing, spacing: 8) {
-                        Button("Check for changes", systemImage: "arrow.clockwise") {
+                        Button(revision.refreshing ? "Checking…" : "Check for changes", systemImage: "arrow.clockwise") {
                             revision.manualRefreshTask?.cancel()
                             revision.manualRefreshTask = Task { await checkForRevision() }
                         }
-                            .disabled(revision.refreshing)
-                            .accessibilityIdentifier("workspace-image-refresh")
+                        .buttonStyle(.borderedProminent)
+                        .tint(.black)
+                        .foregroundStyle(.white)
+                        .disabled(revision.refreshing)
+                        .accessibilityIdentifier("workspace-image-refresh")
                         if revision.offeredData != nil {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("New image version available. Preview notes on the old version need a new selection.")
@@ -4049,14 +4069,18 @@ private struct WorkspaceImagePreview: View {
                                 .accessibilityIdentifier("workspace-image-show-revision")
                             }
                             .frame(maxWidth: .infinity, alignment: .leading).padding(10)
-                            .background(Color.orange.opacity(0.9), in: RoundedRectangle(cornerRadius: 10))
+                            .foregroundStyle(.primary)
+                            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
                         } else if let refreshFailure = revision.refreshFailure {
                             Text(refreshFailure).frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(10)
+                                .foregroundStyle(.primary)
+                                .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
                                 .accessibilityIdentifier("workspace-image-refresh-error")
                         }
                         Spacer(minLength: 0)
                     }
-                    .font(.footnote).foregroundStyle(.white)
+                    .font(.footnote)
                     .padding(.horizontal, 16).padding(.top, 8)
                 }
             }
@@ -4764,9 +4788,14 @@ private struct ArtifactNoteEditor: View {
                                 .accessibilityIdentifier("annotation-edit-stale")
                         }
                         Button("Choose a new selection in Files") {
-                            onReanchor(annotation)
-                            dismiss()
+                            do {
+                                onReanchor(try annotation.replacingNote(note))
+                                dismiss()
+                            } catch {
+                                failure = "This note could not be kept. Check its text and try again."
+                            }
                         }
+                        .disabled(note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
                         .accessibilityIdentifier("annotation-edit-reanchor")
                     }
                     Section("Note for the agent") {
@@ -5891,23 +5920,24 @@ private struct FileChangeDisclosureLabel: View {
 }
 
 private struct SubagentActivityLabel: View {
-    let agent: SubagentSummary
+    let title: String
+    let statusLabel: String
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             if dynamicTypeSize.isAccessibilitySize {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(agent.title).font(.subheadline.weight(.medium))
+                    Text(title).font(.subheadline.weight(.medium))
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(agent.statusLabel).font(.caption).foregroundStyle(.secondary)
+                    Text(statusLabel).font(.caption).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                Label(agent.title, systemImage: "person.2")
+                Label(title, systemImage: "person.2")
                     .font(.subheadline.weight(.medium)).lineLimit(1)
                 Spacer()
-                Text(agent.statusLabel).font(.caption).foregroundStyle(.secondary)
+                Text(statusLabel).font(.caption).foregroundStyle(.secondary)
             }
             Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
         }
@@ -5921,6 +5951,8 @@ struct ActivityItemView: View {
     let expanded: Bool
     let subagent: SubagentSummary?
     let openSubagent: ((SubagentSummary) -> Void)?
+    let projectSubagents: [ProjectSubagentSummary]
+    let openProjectSubagent: ((ProjectSubagentSummary) -> Void)?
     let openFile: ((String) -> Void)?
     let toggle: () -> Void
     @State private var cached: ActivityPresentation?
@@ -5930,6 +5962,8 @@ struct ActivityItemView: View {
         expanded: Bool,
         subagent: SubagentSummary? = nil,
         openSubagent: ((SubagentSummary) -> Void)? = nil,
+        projectSubagents: [ProjectSubagentSummary] = [],
+        openProjectSubagent: ((ProjectSubagentSummary) -> Void)? = nil,
         openFile: ((String) -> Void)? = nil,
         toggle: @escaping () -> Void
     ) {
@@ -5937,6 +5971,8 @@ struct ActivityItemView: View {
         self.expanded = expanded
         self.subagent = subagent
         self.openSubagent = openSubagent
+        self.projectSubagents = projectSubagents
+        self.openProjectSubagent = openProjectSubagent
         self.openFile = openFile
         self.toggle = toggle
     }
@@ -5947,12 +5983,26 @@ struct ActivityItemView: View {
             Button {
                 openSubagent(subagent)
             } label: {
-                SubagentActivityLabel(agent: subagent)
+                SubagentActivityLabel(title: subagent.title, statusLabel: subagent.statusLabel)
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("subagent-row:" + subagent.id)
             .accessibilityLabel(subagent.title + ", " + subagent.statusLabel)
             .accessibilityHint("Open read-only agent task.")
+        } else if !projectSubagents.isEmpty, let openProjectSubagent {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(projectSubagents) { projectSubagent in
+                    Button {
+                        openProjectSubagent(projectSubagent)
+                    } label: {
+                        SubagentActivityLabel(title: projectSubagent.title, statusLabel: projectSubagent.statusLabel)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("project-subagent-row:" + projectSubagent.threadId)
+                    .accessibilityLabel(projectSubagent.title + ", " + projectSubagent.statusLabel)
+                    .accessibilityHint("Open read-only agent task.")
+                }
+            }
         } else if let activity {
         Group {
         if let file = row.fileChangeSummary {

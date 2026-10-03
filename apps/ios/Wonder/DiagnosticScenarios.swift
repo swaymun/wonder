@@ -283,6 +283,7 @@ enum DiagnosticSubagentFixture {
     static let childID = "fixture-child-conversation"
     static let parentThreadID = "fixture-parent-thread"
     static let childThreadID = "fixture-child-thread"
+    static let secondChildThreadID = "fixture-second-child-thread"
     static let unavailableChildID = "fixture-unavailable-child-conversation"
     static let unavailableChildThreadID = "fixture-unavailable-child-thread"
     static let ordinaryTaskThreadID = "fixture-created-task-thread"
@@ -322,7 +323,7 @@ enum DiagnosticSubagentFixture {
             cameraFixtureStoreRoot: root,
             saved: savedConnection(),
             chat: questionResolutionFixture ? parentChat() : nil,
-            api: PairingAPI(configuration: configuration), replayEnabled: !chatLayoutFixture && !approvalSettingsFixture,
+            api: PairingAPI(configuration: configuration), replayEnabled: false,
             signingIdentity: projectReadFixture || questionResolutionFixture ? syntheticSigningIdentity() : PhoneIdentity.signing)
         if chatLayoutFixture {
             model.snapshots[parentID] = try! JSONDecoder().decode(ConversationSnapshot.self, from: JSONSerialization.data(withJSONObject: chatLayoutSnapshot()))
@@ -362,7 +363,15 @@ enum DiagnosticSubagentFixture {
         let turns: [[String: Any]] = (1...12).map { index -> [String: Any] in
             let work: [String: Any] = ["id": "layout-work-\(index)", "type": "commandExecution", "state": "completed", "createdAt": String(index * 1000 + 100), "payload": ["command": "fixture check", "exitCode": 0]]
             let reply: [String: Any] = ["id": "layout-reply-\(index)", "type": "agentMessage", "state": "completed", "createdAt": String(index * 1000 + 900), "text": "Reply \(index). " + text]
-            return ["id": "layout-turn-\(index)", "status": "completed", "createdAt": String(index * 1000), "updatedAt": String(index * 1000 + 900), "items": [work, reply]]
+            var items = [work]
+            if projectSubagentFixture && index == 12 {
+                items.append(["id": "layout-project-agents", "type": "collabAgentToolCall", "state": "completed",
+                              "createdAt": String(index * 1000 + 500), "payload": [
+                                "receiverThreadIds": [childThreadID, secondChildThreadID],
+                                "kind": "completed", "status": "completed"]])
+            }
+            items.append(reply)
+            return ["id": "layout-turn-\(index)", "status": "completed", "createdAt": String(index * 1000), "updatedAt": String(index * 1000 + 900), "items": items]
         }
         let messages: [[String: Any]] = (1...12).map { index -> [String: Any] in [
             "messageId": "layout-question-\(index)", "body": "Question \(index): Please check the compact layout and keep the same content spacing.",
@@ -540,6 +549,10 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.childThreadID,
                     "title": "Scout", "agentNickname": "Scout", "agentRole": "research",
                     "status": "idle", "isArchived": false, "canAcceptDirectInput": false
+                ], [
+                    "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.secondChildThreadID,
+                    "title": "Builder", "agentNickname": "Builder", "agentRole": "implementation",
+                    "status": "completed", "isArchived": false, "canAcceptDirectInput": false
                 ]]])); return
             case "/api/v1/project-conversations/\(conversation)/subagents/\(DiagnosticSubagentFixture.childThreadID)/transcript" where DiagnosticSubagentFixture.projectSubagentFixture:
                 finish(status: 200, body: json(["subagent": [
@@ -554,6 +567,21 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                             "createdAt": "1000", "updatedAt": "2000", "items": [[
                                 "id": "project-child-reply", "type": "agentMessage", "state": "completed",
                                 "createdAt": "2000", "text": "Scout found the parser issue."
+                            ]]]]]
+                ]])); return
+            case "/api/v1/project-conversations/\(conversation)/subagents/\(DiagnosticSubagentFixture.secondChildThreadID)/transcript" where DiagnosticSubagentFixture.projectSubagentFixture:
+                finish(status: 200, body: json(["subagent": [
+                    "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.secondChildThreadID,
+                    "title": "Builder", "agentNickname": "Builder", "agentRole": "implementation",
+                    "status": "completed", "isArchived": false, "canAcceptDirectInput": false
+                ], "snapshot": [
+                    "conversationId": "project-agent:\(conversation):\(DiagnosticSubagentFixture.secondChildThreadID)",
+                    "hostEpoch": "fixture", "lastSequence": 0, "messages": [], "assistantMessages": [],
+                    "thread": ["threadId": DiagnosticSubagentFixture.secondChildThreadID, "nextCursor": NSNull(),
+                        "hydrated": true, "turns": [["id": "project-second-child-turn", "status": "completed",
+                            "createdAt": "1000", "updatedAt": "2000", "items": [[
+                                "id": "project-second-child-reply", "type": "agentMessage", "state": "completed",
+                                "createdAt": "2000", "text": "Builder completed the file review."
                             ]]]]]
                 ]])); return
             case "/api/v1/bot-options" where speedFixture:
@@ -810,12 +838,15 @@ struct DiagnosticSubagentFixtureView: View {
             else { ProgressView() }
         }
         .task {
-            model.setForeground(true)
             if DiagnosticSubagentFixture.questionResolutionFixture {
+                model.setForeground(true)
                 await model.loadAttention()
             } else {
+                // setForeground schedules its own read. Finish this fixture's
+                // initial list read before selecting the parent conversation.
                 await model.loadChats(force: true)
                 chat = model.chats.first { $0.id == DiagnosticSubagentFixture.parentID }
+                model.setForeground(true)
             }
         }
     }

@@ -378,6 +378,28 @@ import UIKit
         XCTAssertTrue(app.staticTexts["Read only"].exists)
         app.buttons["project-subagent-sheet-done"].tap()
         XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 5))
+        let group = app.buttons["activity-group:layout-turn-12/layout-work-12"]
+        for _ in 0..<6 where !group.exists {
+            anyElement(app, identifier: "conversation-scroll").swipeDown(velocity: .slow)
+        }
+        XCTAssertTrue(group.waitForExistence(timeout: 5), app.debugDescription)
+        if group.value as? String == "Collapsed" { group.tap() }
+        let activity = app.buttons["project-subagent-row:fixture-child-thread"]
+        XCTAssertTrue(activity.waitForExistence(timeout: 5),
+                      "The inline Project activity should resolve the verified child")
+        activity.tap()
+        XCTAssertTrue(reply.waitForExistence(timeout: 15),
+                      "The inline activity should open the Project transcript")
+        XCTAssertTrue(app.scrollViews["project-subagent-transcript"].exists)
+        app.buttons["project-subagent-sheet-done"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 5))
+        let secondActivity = app.buttons["project-subagent-row:fixture-second-child-thread"]
+        XCTAssertTrue(secondActivity.waitForExistence(timeout: 5),
+                      "A collaboration activity should expose each verified receiver")
+        secondActivity.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Builder completed the file review.")).firstMatch.waitForExistence(timeout: 15))
+        app.buttons["project-subagent-sheet-done"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 5))
     }
 
     func testActivityDisclosureKeepsVisibleReadingAnchorAtLargeText() throws {
@@ -787,7 +809,7 @@ import UIKit
         app.launchArguments = ["-diagnostics-subagent-fixture", "-UIPreferredContentSizeCategoryName", contentSize]
         app.launch()
         let parentDraft = app.textViews["message-draft"]
-        XCTAssertTrue(parentDraft.waitForExistence(timeout: 10))
+        XCTAssertTrue(parentDraft.waitForExistence(timeout: 10), app.debugDescription)
         parentDraft.tap(); parentDraft.typeText("parent draft")
         if app.keyboards.firstMatch.exists {
             let scroll = anyElement(app, identifier: "conversation-scroll")
@@ -831,7 +853,10 @@ import UIKit
         XCTAssertEqual(parentDraft.value as? String, "parent draft")
         XCTAssertEqual(groups.firstMatch.value as? String, "Expanded")
         let activity = app.buttons["subagent-row:fixture-child-conversation"]
-        XCTAssertTrue(activity.waitForExistence(timeout: 5)); activity.tap()
+        let conversationScroll = anyElement(app, identifier: "conversation-scroll")
+        for _ in 0..<6 where !activity.exists { conversationScroll.swipeDown(velocity: .slow) }
+        for _ in 0..<6 where !activity.exists { conversationScroll.swipeUp(velocity: .slow) }
+        XCTAssertTrue(activity.waitForExistence(timeout: 5), app.debugDescription); activity.tap()
         XCTAssertTrue(done.waitForExistence(timeout: 5)); done.tap()
         XCTAssertEqual(pill.value as? String, "Collapsed")
         XCTAssertEqual(parentDraft.value as? String, "parent draft")
@@ -2528,6 +2553,8 @@ import UIKit
         let renamed = app.buttons["workspace-modified-entry:new-name.md"]
         XCTAssertTrue(readme.waitForExistence(timeout: 5))
         readme.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-diff-loading"].waitForExistence(timeout: 5),
+                      "A slow diff should show that Files is opening it")
         renamed.tap()
         XCTAssertTrue(workspacePreviewClose(app, legacyID: "workspace-diff-close").waitForExistence(timeout: 5))
         let diffText = app.staticTexts["workspace-diff-text"]
@@ -2834,6 +2861,8 @@ import UIKit
         image.tap()
         let annotate = app.buttons["annotation-image-open"]
         XCTAssertTrue(annotate.waitForExistence(timeout: 5))
+        app.buttons["workspace-preview-expand"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
         annotate.tap()
         let canvas = app.descendants(matching: .any)["annotation-region-canvas"]
         XCTAssertTrue(canvas.waitForExistence(timeout: 10))
@@ -2848,6 +2877,11 @@ import UIKit
         XCTAssertTrue(note.waitForExistence(timeout: 5))
         note.tap(); note.typeText("Inspect the center diagram")
         app.buttons["annotation-region-add"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5),
+                      "Closing the region editor must return to the same full-screen image")
+        app.buttons["workspace-preview-collapse"].tap()
+        XCTAssertTrue(annotate.waitForExistence(timeout: 5),
+                      "Collapsing must retain the selected image in Files")
         let chip = app.buttons["composer-annotation-edit"]
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         chip.tap()
@@ -2911,11 +2945,15 @@ import UIKit
                       "Editing the note must not clear the old source revision warning")
         chip.tap()
         XCTAssertTrue(app.staticTexts["annotation-edit-stale"].waitForExistence(timeout: 5))
+        let unsavedNote = app.textViews["annotation-edit-note"]
+        unsavedNote.tap(); unsavedNote.typeText(" unsaved addition")
         app.buttons["annotation-edit-reanchor"].tap()
         selectTextForPreviewComment(app)
         let carriedNote = app.descendants(matching: .any)["annotation-note"]
         XCTAssertTrue(carriedNote.waitForExistence(timeout: 5))
         XCTAssertTrue((carriedNote.value as? String)?.contains("keep this note") == true)
+        XCTAssertTrue((carriedNote.value as? String)?.contains("unsaved addition") == true,
+                      "Re-anchoring must carry the current editor text, even before Save")
         app.buttons["annotation-add"].tap()
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons.matching(identifier: "composer-annotation-edit").count, 1)
@@ -2939,7 +2977,6 @@ import UIKit
         XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "workspace-pdf-preview").count, 1,
                        "Full screen should keep one PDF viewer")
-        app.buttons["workspace-preview-collapse"].tap()
         let annotate = app.buttons["annotation-pdf-open"]
         XCTAssertTrue(annotate.waitForExistence(timeout: 5))
         annotate.tap()
@@ -2962,6 +2999,11 @@ import UIKit
         XCTAssertTrue(note.waitForExistence(timeout: 5))
         note.tap(); note.typeText("Review the second page")
         app.buttons["annotation-region-add"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5),
+                      "Closing the region editor must return to the same full-screen PDF")
+        app.buttons["workspace-preview-collapse"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-pdf-preview"].waitForExistence(timeout: 5),
+                      "Collapsing must retain the selected PDF in Files")
         let chip = app.buttons["composer-annotation-edit"]
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         chip.tap()
