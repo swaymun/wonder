@@ -3370,6 +3370,13 @@ import UIKit
                                  "The page should remain large enough to inspect with the keyboard open")
         }
         retainMenuScreenshot(app, name: "Large text PDF comment controls with keyboard")
+        let done = app.buttons["annotation-note-done"]
+        XCTAssertTrue(done.isHittable, "Keyboard focus must have an explicit way back to page controls")
+        done.tap()
+        XCTAssertTrue(wholePage.isHittable, "The whole-page shortcut must return after editing")
+        let nextPage = app.buttons["annotation-next-page"]
+        XCTAssertTrue(nextPage.isHittable && nextPage.isEnabled,
+                      "Page navigation must be usable after editing")
         add.tap()
         XCTAssertTrue(app.buttons["composer-annotation-edit"].waitForExistence(timeout: 5))
     }

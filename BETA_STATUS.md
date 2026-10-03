@@ -104,6 +104,17 @@ retain rows with retry feedback. Synthetic revocation after the initial list
 loaded, transient retry and same-ID root replacement passed 5/5 focused UI
 checks on each simulator, with no skips. The fix remains unshipped.
 
+A compact full-screen iPad mini check found that a PDF annotation page shrank
+to 126 points at Accessibility XXXL with the keyboard open, even though the
+larger iPad Pro passed. Source now gives the page more room while typing and
+provides a visible Done action to restore page navigation and whole-page/image
+selection. The existing focused PDF UI check passed on iPad mini, iPad Pro and
+iPhone (1/1 each); the shared image-region check passed on iPad mini (1/1).
+Files/diff, full-screen text comments and video preview had passed the initial
+compact iPad run (3/4). These are simulator checks of unshipped source. A
+resized iPad window, live paired-host annotation send and TestFlight-installed
+behavior remain unverified.
+
 The post-release hardening review additionally corrected Bot and Project
 history/lifecycle waits that could delay update handoff. One ambiguous Bot
 receipt now yields after 20 history pages, and Project recovery cannot restart

@@ -4415,7 +4415,7 @@ private struct WorkspaceRegionEditor: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if format == .pdf, pageCount > 0 {
+                if format == .pdf, pageCount > 0, !noteFocused {
                     HStack {
                         Button {
                             guard !loading else { return }
@@ -4446,11 +4446,13 @@ private struct WorkspaceRegionEditor: View {
                 if loading { ProgressView("Preparing preview…").frame(maxWidth: .infinity, maxHeight: .infinity) }
                 else if let preview {
                     WorkspaceRegionCanvas(image: preview, region: $region)
-                    Text(regionSummary)
-                        .font(.footnote).foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .accessibilityIdentifier("annotation-region-status")
+                    if !noteFocused {
+                        Text(regionSummary)
+                            .font(.footnote).foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .accessibilityIdentifier("annotation-region-status")
+                    }
                 } else {
                     ContentUnavailableView("Preview unavailable", systemImage: "doc", description: Text("This file could not be prepared for annotation."))
                 }
@@ -4458,16 +4460,24 @@ private struct WorkspaceRegionEditor: View {
             .navigationTitle(name).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    if noteFocused {
+                        Button("Done") { noteFocused = false }
+                            .accessibilityIdentifier("annotation-note-done")
+                    }
+                }
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 8) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 8) {
-                            Button(format == .pdf ? "Select whole page" : "Select whole image") {
-                                region = CGRect(x: 0, y: 0, width: 1, height: 1)
+                            if !noteFocused {
+                                Button(format == .pdf ? "Select whole page" : "Select whole image") {
+                                    region = CGRect(x: 0, y: 0, width: 1, height: 1)
+                                }
+                                .disabled(loading || preview == nil)
+                                .accessibilityIdentifier("annotation-region-all")
                             }
-                            .disabled(loading || preview == nil)
-                            .accessibilityIdentifier("annotation-region-all")
                             DisclosureGroup("Adjust selected area", isExpanded: $showingAreaControls) {
                                 Slider(value: regionValue(\.minX), in: 0...0.99, step: 0.01) { Text("Left") }
                                 Slider(value: regionValue(\.minY), in: 0...0.99, step: 0.01) { Text("Top") }
