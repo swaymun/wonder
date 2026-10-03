@@ -1,11 +1,11 @@
 # Wonder beta status
 
-The signed public Mac beta remains available. The agent workspace Release
-builds, Wonder Testing 1.0 (20) and production Wonder 1.0 (82), were each
-uploaded once and processed by Apple. Wonder Testing build 20 is available in
-the automatic Owner Beta internal group. Production build 82 tester availability
-and installation through TestFlight have not been verified. No external beta
-review or public enrollment was requested.
+The signed public Mac beta remains available. Wonder Testing 1.0 (21) was
+uploaded on October 3, processed by Apple and confirmed available in the
+automatic Owner Beta internal group. It is the owner's requested checkpoint
+for both iPhone and iPad. Production Wonder remains at processed build 82;
+its tester availability and TestFlight installation have not been verified.
+No external beta review or public enrollment was requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -17,9 +17,14 @@ Keep the Mac awake and online while using it remotely.
 | Component | Status |
 | --- | --- |
 | iPhone and iPad | Production Release 1.0 (82) is uploaded and Apple reports processing complete. Its signed archive includes the Project Widget and passed channel identity, APNs, App Group, Keychain and Diagnostics-exclusion checks. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | The separate blue Release 1.0 (20) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed the same channel-specific checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Wonder Testing | The separate blue Release 1.0 (21) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed channel-specific identity, entitlement, Widget, symbol and Diagnostics-exclusion checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
 | Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Replacement 1.0.108 is signed, notarized and installed locally and on a clean second Mac; publication waits for the remaining pairing, permission and draft-upgrade gates. |
-| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). The current internal branch includes post-upload fixes that are absent from Testing 20, production 82 and Mac 1.0.108. Third-party components retain their own licenses. |
+| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Testing 21 was archived from a clean checkpoint; production 82 and Mac 1.0.108 predate the post-upload fixes. Third-party components retain their own licenses. |
+
+The chronological qualification notes below describe whether a change was
+source-only when checked. The shipped iOS checkpoint source is now in
+Testing 21, but its installed TestFlight behavior has not yet been observed.
+Mac source changes after 1.0.108 remain uninstalled.
 
 A replacement Mac companion, 1.0.108, has been signed, notarized, stapled and
 installed over 1.0.107 on the owner's Mac. The same verified DMG installed and
@@ -69,8 +74,8 @@ draft. Rapid PDF page turns can overlap preview work, and long Project history
 scans can delay update handoff or miss receipts beyond 20,000 items. The Mac
 install helper checks process health after replacement; these two installed
 copies were also checked manually for `/readyz`. Source corrections and focused
-iPhone, iPad, daemon and installer checks are complete on an unshipped branch. They are not
-in Testing 20, production 82 or Mac 1.0.108; another release is required.
+iPhone, iPad, daemon and installer checks are complete. The iOS corrections
+are in Testing 21; production 82 and Mac 1.0.108 still need later releases.
 
 Native progressive dictation had no supported SpeechTranscriber locale on the
 tested iOS 26.5 simulators, so the existing dictation path remains in place.
@@ -93,16 +98,17 @@ and iPad, including an accepted synthetic send, a failed-read retry, the
 replacement-root case, HTML reading-position retention and a script-blocked
 HTML preview. An out-of-order annotation download regression passed 1/1 on
 each simulator; the composer keeps the newest stale-source warning. These are
-synthetic checks of unshipped source. A paired live edit and provider send,
-narrow iPad window, current-source TestFlight installation and physical-device
-behavior remain open.
+synthetic checks of source included in Testing 21. A paired live edit and
+provider send, installed TestFlight interaction and physical-device behavior
+remain open.
 
 A final review found that authorization or missing-resource responses during
 Files refresh could leave previously listed rows available. The browser now
 clears cached roots, directory and Git rows in those cases; transient failures
 retain rows with retry feedback. Synthetic revocation after the initial list
 loaded, transient retry and same-ID root replacement passed 5/5 focused UI
-checks on each simulator, with no skips. The fix remains unshipped.
+checks on each simulator, with no skips. The fix is included in Testing 21;
+installed behavior remains unverified.
 
 A compact full-screen iPad mini check found that a PDF annotation page shrank
 to 126 points at Accessibility XXXL with the keyboard open, even though the
@@ -111,9 +117,9 @@ provides a visible Done action to restore page navigation and whole-page/image
 selection. The existing focused PDF UI check passed on iPad mini, iPad Pro and
 iPhone (1/1 each); the shared image-region check passed on iPad mini (1/1).
 Files/diff, full-screen text comments and video preview had passed the initial
-compact iPad run (3/4). These are simulator checks of unshipped source. A
-resized iPad window, live paired-host annotation send and TestFlight-installed
-behavior remain unverified.
+compact iPad run (3/4). The later resized-window check passed as described
+below. A live paired-host annotation send and TestFlight-installed behavior
+remain unverified.
 
 The post-release hardening review additionally corrected Bot and Project
 history/lifecycle waits that could delay update handoff. One ambiguous Bot
@@ -122,12 +128,14 @@ its runtime during the update lease. The combined daemon library suite passed
 345 tests with three existing ignores, and the installer
 handoff suite passed 12/12. A visible Chats control in the iPad conversation
 shell passed a real-shell accessibility-size UI regression on iPad and the
-corresponding iPhone check (1/1 each). These changes remain in unshipped draft
-PR #61. A further cold-Project regression passed 1/1 after a history refresh
+corresponding iPhone check (1/1 each). The iOS source is in Testing 21; Mac
+host corrections remain uninstalled. A further cold-Project regression passed
+1/1 after a history refresh
 race was fixed: a cached Project now waits for session renewal before reporting
 failure. The Project toolbar title was bounded at large text sizes and passed
 a visible-header check on both simulators (1/1 each). New Chat host switching
-now keeps its draft visible if saving fails. These fixes are also unshipped.
+now keeps its draft visible if saving fails. The iOS fixes are included in
+Testing 21, with installed interaction unverified.
 With the owner's approval, enlarging and scrolling Mac Settings →
 Devices exposed a usable copied pairing link. The owner approved exactly two
 Wonder Testing development profiles (main app and Widget) using the existing
@@ -222,8 +230,7 @@ simulator; the exact-conversation deep-link UI check also passed 1/1 on each.
 The Wonder Testing Release simulator build passed with no focused Diagnostics
 markers. A configured medium Widget recent-chat tap, installed TestFlight
 behavior and the current source's paired-host path remain unverified. Testing
-20 and production 82 predate this correction; the requested one upload per
-channel has already been used.
+21 includes this correction; production 82 predates it.
 
 At the owner's request, draft Mac Settings removes its redundant Folders list.
 Project roots and Bot file grants are separate daemon-owned controls; a
@@ -232,8 +239,8 @@ saved paths/bookmarks are cleared when the new bridge starts, while the Full
 Disk Access action remains. Its previous owning tests passed 3/3 before
 removal; the current Mac menu suite passed 33/33 and both desktop binary checks
 passed. The new Access screen is not installed or visually accepted in Mac
-1.0.108. No additional DMG or TestFlight upload was made beyond the owner's
-specified one pair and one replacement DMG.
+1.0.108. No second replacement DMG was made; the later owner-authorized
+Testing 21 checkpoint does not change the installed Mac.
 
 A live Project conversation showed “Stopped” while its task was active in
 Codex desktop. Read-only comparison confirmed that Codex desktop reported the
@@ -243,7 +250,8 @@ only an older interrupted turn. The draft client now labels that saved turn
 without claiming to know the current desktop task state. The shared
 turn-label test passed, and the actual Project view passed a focused 1/1 UI
 check on each iPhone and iPad simulator; both screenshots were inspected.
-The installed app still has the old wording. A truthful live Running indicator
+Production build 82 still has the old wording; Testing 21 includes the scoped
+label, but its installed view has not been checked. A truthful live Running indicator
 for desktop-owned turns needs a supported shared status source and remains open.
 
 The same Widget destination review exposed oversized New Chat picker icons
@@ -252,8 +260,7 @@ actions, allows two-line picker labels and bounds decorative symbols. The
 existing New Project Files test checked ordinary large and accessibility XXXL
 text in one run. It passed 1/1 on each iPhone and iPad simulator, including
 distinct visible controls and Files → Modified → diff navigation. All four
-final screenshots were inspected. This UI
-correction is unshipped in draft PR #61.
+final screenshots were inspected. This UI correction is included in Testing 21.
 
 Final independent review found a New Chat send lifetime edge: a late creation
 response could navigate back after leaving the screen. Draft source cancels the
@@ -266,7 +273,8 @@ checked: the provider rejects a competing resume/archive before another turn
 starts. Draft Wonder now gives a specific retry message on the exact resume
 writer conflict; a `notLoaded` plus interrupted-turn fixture passed 1/1 with
 no `turn/start`, archive regression passed 1/1, and strict Clippy/fmt passed.
-These changes remain unshipped; accurate live desktop Running is still open.
+The iOS retry text is in Testing 21; the Mac host changes remain uninstalled.
+Accurate live desktop Running is still open.
 
 On October 3, a fresh, owner-authorized temporary Wonder Testing pairing to
 the installed Mac passed on iPhone and iPad. Each simulator opened a disposable
@@ -290,7 +298,7 @@ No mobile model turn was sent. Live unsupported-codec and offline recovery,
 background/reopen with these larger files, repeated performance samples and
 TestFlight-installed media playback remain open; F2 stays pending.
 
-The next source-only Files slice replaces the Project conversation timeline
+The subsequent Files slice replaces the Project conversation timeline
 with its file browser and selected preview while keeping the composer visible.
 An explicit full-screen control works on iPhone and iPad. Text selection opens
 a compact comment editor; saving stages a versioned preview note in the
@@ -305,8 +313,8 @@ text file opened with a visible 128 KiB preview limit and usable Files/composer
 controls in 1/1 focused checks on each simulator. Inline and expanded iPhone
 and iPad screenshots were inspected. An earlier iPad approval-shortcut test
 failed because its selector matched two Files controls; after correcting the
-selector, the shortcut passed 1/1 on each simulator. These
-changes are unshipped: they are absent from Testing 20 and production 82.
+selector, the shortcut passed 1/1 on each simulator. These iOS changes are
+included in Testing 21; production 82 predates them.
 An actual mobile send with Files left open, paired-host live revision timing,
 large-file repeated memory behavior, narrow iPad windows and TestFlight
 installation remain unverified. No model turn was sent by these simulator tests.
@@ -316,7 +324,7 @@ inline renderer now unmounts while the cover owns the selected preview. The
 focused iPhone Files/diff and PDF annotation checks passed 2/2, including
 returning to the composer. The new image check initially used the wrong
 accessibility element type; its corrected one-page assertion passed 1/1 on
-iPhone. A later source-only handoff keeps PDF page/reading point/zoom in a
+iPhone. A later handoff keeps PDF page/reading point/zoom in a
 shared session and stores EPUB text size across preview remounts; focused
 diagnostic and simulator checks passed. HTML/diff scroll and 3D camera pose
 remain unverified across full-screen transitions. The selected file and staged
@@ -328,10 +336,10 @@ and EPUB). The broader iPad log executed 8/8 tests with zero failures, but
 Xcode stalled while finalizing that result bundle; its log is supporting
 evidence only. A 3D test emitted an XCTest quality-of-service inversion
 warning, so repeated model preview performance remains open. These checks
-used TestingDiagnostics on iOS 26.5 simulators; the source is still absent
-from the uploaded Release builds.
+used TestingDiagnostics on iOS 26.5 simulators; Testing 21 contains the source,
+but installation and interaction through TestFlight remain unverified.
 
-The October 3 reader-state and annotation polish remains source-only. Repeated
+The October 3 reader-state and annotation polish is included in Testing 21. Repeated
 Files open/close through USDZ, OBJ, PLY, binary STL and unsupported inputs
 passed 1/1 on both iPhone and iPad TestingDiagnostics simulators. An earlier
 test tapped a file row under the composer; the corrected test scrolls the
@@ -347,8 +355,7 @@ No new 3D temporary directories remained after the completed repeated-open
 run; three older simulator test directories remain. Real send retention,
 paired-host revision timing, camera gesture pose, narrow iPad windows,
 TestFlight installation and repeated memory/performance sampling remain open.
-These changes are absent from Testing 20 and production 82 under the requested
-one-upload-per-channel cap; no model turn was sent.
+Production 82 predates these changes; no model turn was sent.
 
 A later October 3 review found that typing after opening a text comment in
 full screen could prepend to the saved draft. The original UI test checked
@@ -359,7 +366,7 @@ that has been replaced or canceled. The test asserts the exact combined note.
 The final caret and add/edit/remove checks passed 2/2 on each iPhone and iPad
 TestingDiagnostics simulator; the final stale-revision check passed 1/1 on both.
 Screenshots show the correct order and persistent source highlight. This fix
-is source-only and has not been installed through TestFlight.
+is in Testing 21; TestFlight-installed interaction has not been checked.
 
 Workspace EPUB and 3D file previews now offer a verified newer version after
 an explicit check or a later conversation sequence, then reopen the reader or
@@ -393,11 +400,10 @@ simulators; the resulting screens were inspected. On iPad, the selected page
 remained large enough to inspect with the keyboard open. The iPhone's smaller
 screen shows the comment controls above the keyboard at that text size; the
 page itself must be inspected before typing or after dismissing the keyboard.
-The change remains source-only under the requested one-upload-per-channel
-limit. A real paired-host annotation send, narrow iPad window and installed
-TestFlight behavior remain open.
+The change is included in Testing 21. A real paired-host annotation send and
+installed TestFlight behavior remain open.
 
-The latest source-only Files review fixed a failed automatic revision check
+The latest pre-checkpoint Files review fixed a failed automatic revision check
 being treated as a completed check. A selected file now retries a pending
 update with bounded delay after a Mac read failure, including a slow timeout;
 manual and automatic checks cannot overwrite each other's outcome or move the
@@ -418,6 +424,32 @@ on each device without a demonstrated plateau; simulator GPU allocation
 could not be measured. Native input validation, complex/near-limit assets,
 GPU tracing and package/license review are still required before adding GLB
 to Wonder. The probe was removed from both simulators.
+
+Testing 21 is a checkpoint of the iOS work through October 3.
+The Release archive was signed from a clean checkout, uploaded once, processed
+and confirmed in Owner Beta with a tester. The source passed a real iPadOS
+window resize from 1032 to 698 points: Chats, Settings, Files, README preview
+and a staged text note remained usable, and the chat viewport stopped above
+the composer. A more extreme 370-point window exposed and verified the same
+viewport fix. Focused clean-simulator Chats and Files/send checks passed on
+both iPhone and iPad; the send check used the visible bottom arrow to inspect
+the accepted message. These checks did not send a live provider request.
+The 698-point check measured a side-by-side-sized Wonder window, not a
+simultaneous two-app iPad session. That, iPhone Duo adaptation, installed
+TestFlight interaction and paired-host provider sends remain open. Production
+stays at build 82 by owner request; no production upload was made for this
+checkpoint.
+
+[Apple's iPad windowing guide](https://support.apple.com/en-us/125309)
+defines a genuine side-by-side session as two apps visible with a divider.
+The current 698-point check validates Wonder's available width but not that
+two-app arrangement. For [iPhone Duo](https://developer.apple.com/design/human-interface-guidelines/designing-for-iphone-duo),
+the outer and inner displays have different size classes and the inner display
+can multitask. Wonder still selects its drawer by iPhone idiom, so inner-display
+layout adaptation is open. This Mac has Xcode 27.0 and no Duo simulator device;
+[Apple's developer walkthrough](https://developer.apple.com/videos/play/tech-talks/111461/)
+specifies Xcode 27.1 and DeviceHub for pose checks. Duo behavior has not been
+verified on a simulator or physical device.
 
 ## Earlier qualification
 

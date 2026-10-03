@@ -745,7 +745,8 @@ struct ConversationView: View {
             let _ = DiagnosticJournal.shared.record(DiagnosticEvent(operation: "timeline.prepare", durationMs: (ProcessInfo.processInfo.systemUptime - timelineStart) * 1000, count: UInt64(timeline.count)))
         }
         #endif
-        Group {
+        VStack(spacing: 0) {
+            Group {
             if let request = workspaceRequest {
                 WorkspaceBrowser(model: model, chat: chat, attachmentIDs: request.attachmentIDs,
                                  initialFilePath: request.initialFilePath, preferredRootID: request.preferredRootID,
@@ -864,6 +865,12 @@ struct ConversationView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("conversation-loading")
             }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if !readOnly {
+                composer
+                    .background(Color(uiColor: .systemBackground))
+            }
         }
         .toolbar(.hidden, for: .tabBar)
         .navigationTitle(chat.title)
@@ -959,11 +966,6 @@ struct ConversationView: View {
                 let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
                 model.stage(url, chat: chat, mime: mime)
             } else if case .failure = result { model.controlErrors[chat.id] = "The file could not be opened. Try selecting it again." }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if !readOnly {
-                composer
-            }
         }
         .sheet(item: $selectedSubagent, onDismiss: {
             model.presentConversation(chat, root: rootChat)

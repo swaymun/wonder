@@ -2743,6 +2743,83 @@ import UIKit
         XCTAssertTrue(files.waitForExistence(timeout: 5))
     }
 
+    func testProjectFilesStayUsableInResizedIPadWindow() throws {
+        continueAfterFailure = false
+        guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("iPad window resizing") }
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved",
+                               "-diagnostics-project-files-send", "-diagnostics-usage-fixture"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let thread = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 15))
+        thread.tap()
+        XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
+        let originalWidth = app.windows.firstMatch.frame.width
+        XCTAssertGreaterThan(originalWidth, 850, "Use a regular full-screen iPad before resizing")
+
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.985, dy: 0.985))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.82))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let deadline = Date().addingTimeInterval(6)
+        while app.windows.firstMatch.frame.width >= originalWidth - 150 && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        let resizedWidth = app.windows.firstMatch.frame.width
+        print("Resized iPad window: \(originalWidth) -> \(resizedWidth) points")
+        XCTAssertLessThan(resizedWidth, originalWidth - 150,
+                          "The app must actually enter a narrower iPad window")
+        XCTAssertGreaterThan(resizedWidth, 500, "This test targets a side-by-side iPad width")
+        XCTAssertLessThan(resizedWidth, 760, "This test requires a compact iPad window")
+        // The system finishes its resize animation after the reported frame changes.
+        Thread.sleep(forTimeInterval: 1.5)
+        let timeline = app.descendants(matching: .any)["conversation-scroll"]
+        let draftInConversation = app.textViews["message-draft"]
+        let composerHint = app.staticTexts["Agent tasks need a newer Wonder on your computer. Update it, then refresh this Project thread."]
+        print("Resized timeline frame: \(timeline.frame); draft frame: \(draftInConversation.frame)")
+        XCTAssertTrue(composerHint.exists)
+        XCTAssertLessThanOrEqual(timeline.frame.maxY, composerHint.frame.minY + 2,
+                                 "The chat viewport must stop above the composer in a narrow iPad window")
+        retainMenuScreenshot(app, name: "Project Files in resized iPad window", fullScreen: true)
+
+        let chats = app.buttons["compact-ipad-chats"]
+        XCTAssertTrue(chats.waitForExistence(timeout: 5) && chats.isHittable,
+                      "Chats must remain reachable below the floating iPad window controls")
+        chats.tap()
+        XCTAssertTrue(app.textFields["sidebar-search"].waitForExistence(timeout: 5),
+                      "The compact Chats control must open the conversation list")
+        retainMenuScreenshot(app, name: "Chats in resized iPad window", fullScreen: true)
+        app.buttons["sidebar-settings"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5),
+                      "Settings must open from compact Chats")
+        leaveSettings(app)
+        XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 5),
+                      "Returning from Chats must keep the conversation")
+        chats.tap()
+        XCTAssertTrue(thread.waitForExistence(timeout: 5))
+        thread.tap()
+
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.isHittable)
+        files.tap()
+        XCTAssertTrue(app.collectionViews["workspace-file-list"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textViews["message-draft"].isHittable)
+        let readme = app.buttons["workspace-file-entry:README.md"]
+        XCTAssertTrue(readme.waitForExistence(timeout: 5))
+        readme.tap()
+        XCTAssertTrue(app.buttons["workspace-preview-expand"].isHittable)
+        XCTAssertTrue(app.textViews["message-draft"].isHittable)
+        retainMenuScreenshot(app, name: "Project preview in resized iPad window", fullScreen: true)
+        selectTextForPreviewComment(app)
+        let note = app.descendants(matching: .any)["annotation-note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        note.tap(); note.typeText("Check this sentence")
+        app.buttons["annotation-add"].tap()
+        XCTAssertTrue(app.buttons["composer-annotation-edit"].waitForExistence(timeout: 5),
+                      "A note from the narrow preview must stage in the composer")
+        retainMenuScreenshot(app, name: "Project note in resized iPad window", fullScreen: true)
+    }
+
     func testProjectFilesKeepsSelectedPreviewDuringOfflineMessageSend() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -2789,6 +2866,8 @@ import UIKit
         retainMenuScreenshot(app, name: "Project file stays open after offline send")
         app.buttons["workspace-preview-back"].tap()
         app.buttons["workspace-close"].tap()
+        let bottom = app.buttons["scroll-to-bottom"]
+        if bottom.exists && bottom.isHittable { bottom.tap() }
         XCTAssertTrue(app.images["Received by your Mac"].waitForExistence(timeout: 10),
                       "The synthetic host must acknowledge the exact message")
     }

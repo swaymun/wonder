@@ -106,7 +106,7 @@ struct ChatShell: View {
     @StateObject private var shell = ShellState()
     @State private var sceneID = UUID()
     @Environment(\.scenePhase) private var phase
-    @State private var columns = NavigationSplitViewVisibility.all
+    @State private var showWideSidebar = true
     @State private var choosingProjectsHost: String?
     /// First launch has no Mac to show, so pairing comes first as a sheet.
     @State private var pairing = false
@@ -118,16 +118,58 @@ struct ChatShell: View {
             // size-class switch used to replace this branch and dismiss the
             // full-screen computer viewer with it.
             if UIDevice.current.userInterfaceIdiom == .pad {
-                NavigationSplitView(columnVisibility: $columns) {
-                    SidebarView(library: library, shell: shell)
-                        .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
-                        .toolbar(.hidden, for: .navigationBar)
-                } detail: {
-                    NavigationStack {
-                        ShellMain(library: library, shell: shell,
-                                  sidebarButtonLabel: columns == .detailOnly ? "Show Chats" : "Hide Chats") {
-                            columns = columns == .detailOnly ? .all : .detailOnly
+                GeometryReader { window in
+                    let compact = window.size.width < 760
+                    let sidebarWidth = compact ? min(window.size.width * 0.85, 420)
+                        : min(380, max(280, window.size.width * 0.31))
+                    let sidebarVisible = compact ? shell.sidebarOpen : showWideSidebar
+                    HStack(spacing: 0) {
+                        Color.clear.frame(width: !compact && showWideSidebar ? sidebarWidth + 1 : 0)
+                            .accessibilityHidden(true)
+                        VStack(spacing: 0) {
+                            if compact {
+                                // iPad window controls overlay the upper leading
+                                // corner instead of contributing to safe area.
+                                Color.clear.frame(height: 52).accessibilityHidden(true)
+                            }
+                            NavigationStack {
+                                ShellMain(library: library, shell: shell,
+                                          compactIPadWindow: compact,
+                                          sidebarButtonLabel: compact || !showWideSidebar ? "Show Chats" : "Hide Chats") {
+                                    if compact { shell.sidebarOpen = true }
+                                    else { showWideSidebar.toggle() }
+                                }
+                            }
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .overlay(alignment: .leading) {
+                        Button { shell.sidebarOpen = false } label: {
+                            Color.black.opacity(compact && shell.sidebarOpen ? 0.35 : 0)
+                                .ignoresSafeArea()
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Close Chats")
+                        .accessibilityIdentifier("ipad-sidebar-scrim")
+                        .allowsHitTesting(compact && shell.sidebarOpen)
+                        .accessibilityHidden(!compact || !shell.sidebarOpen)
+                    }
+                    .overlay(alignment: .leading) {
+                        VStack(spacing: 0) {
+                            if compact { Color.clear.frame(height: 52).accessibilityHidden(true) }
+                            SidebarView(library: library, shell: shell)
+                        }
+                        .frame(width: sidebarWidth)
+                        .background(Color(uiColor: .systemBackground))
+                        .overlay(alignment: .trailing) {
+                            if !compact && showWideSidebar { Divider() }
+                        }
+                        .offset(x: sidebarVisible ? 0 : -sidebarWidth)
+                        .allowsHitTesting(sidebarVisible)
+                        .accessibilityHidden(!sidebarVisible)
+                    }
+                    .onChange(of: compact) { _, isCompact in
+                        if !isCompact { shell.sidebarOpen = false }
                     }
                 }
             } else {
@@ -256,7 +298,8 @@ private struct PhoneDrawerLayout: View {
             let progress = width > 0 ? 1 + offset / width : 0
             ZStack(alignment: .leading) {
                 NavigationStack {
-                    ShellMain(library: library, shell: shell, sidebarButtonLabel: "Open sidebar") {
+                    ShellMain(library: library, shell: shell, compactIPadWindow: false,
+                              sidebarButtonLabel: "Open sidebar") {
                         shell.sidebarOpen = true
                     }
                 }
@@ -403,9 +446,11 @@ private struct ProjectOnboardingObserver: View {
 private struct ShellMain: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
+    let compactIPadWindow: Bool
     let sidebarButtonLabel: String
     let sidebarAction: () -> Void
     @AccessibilityFocusState private var sidebarButtonFocused: Bool
+    @AccessibilityFocusState private var compactChatsFocused: Bool
     @State private var creatingProjectHost: String?
     private var onNewChat: Bool { shell.route == .newChat }
     /// The Mac a new project belongs to: the one the draft is addressed to.
@@ -432,12 +477,27 @@ private struct ShellMain: View {
                 }
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if compactIPadWindow {
+                HStack {
+                    Button("Chats", systemImage: "line.3.horizontal") { shell.sidebarOpen = true }
+                        .accessibilityIdentifier("compact-ipad-chats")
+                        .accessibilityFocused($compactChatsFocused)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .background(Color(uiColor: .systemBackground))
+            }
+        }
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button(action: sidebarAction) { Image(systemName: "line.3.horizontal") }
-                    .accessibilityLabel(sidebarButtonLabel)
-                    .accessibilityIdentifier("open-sidebar")
-                    .accessibilityFocused($sidebarButtonFocused)
+            if !compactIPadWindow {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: sidebarAction) { Image(systemName: "line.3.horizontal") }
+                        .accessibilityLabel(sidebarButtonLabel)
+                        .accessibilityIdentifier("open-sidebar")
+                        .accessibilityFocused($sidebarButtonFocused)
+                }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { plus() } label: { Image(systemName: onNewChat ? "folder.badge.plus" : "plus") }
@@ -455,7 +515,11 @@ private struct ShellMain: View {
                 }
             }
         }
-        .onChange(of: shell.sidebarOpen) { _, open in if !open { sidebarButtonFocused = true } }
+        .onChange(of: shell.sidebarOpen) { _, open in
+            guard !open, !shell.settingsOpen else { return }
+            if compactIPadWindow { compactChatsFocused = true }
+            else { sidebarButtonFocused = true }
+        }
     }
     private func plus() {
         if onNewChat {
