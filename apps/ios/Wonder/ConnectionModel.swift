@@ -210,15 +210,28 @@ struct ManagedBotListMutationState {
     @Published var busy = false
     @Published var verification: String?
     @Published var error: String?
-    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; projectSubagents = [:]; projectSubagentAvailability = [:]; projectSubagentErrors = [:]; projectSubagentLoadTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
+    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; projectSubagents = [:]; projectSubagentLookup = [:]; projectSubagentFreshIDs = [:]; projectSubagentAvailability = [:]; projectSubagentErrors = [:]; projectSubagentNextCurrentCursor = [:]; projectSubagentNextArchivedCursor = [:]; projectSubagentInitialCurrentCursor = [:]; projectSubagentInitialArchivedCursor = [:]; projectSubagentSeenCurrentCursors = [:]; projectSubagentSeenArchivedCursors = [:]; projectSubagentExpandedParents = []; projectSubagentPagingLimited = []; projectSubagentRefreshPending = []; projectSubagentPageRevision = [:]; loadingOlderProjectSubagents = []; projectSubagentLoadTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
     @Published var chats: [ChatSummary] = [] { didSet { noteListChange() } }
     @Published var subagents: [String: [SubagentSummary]] = [:] { didSet { noteListChange() } }
     @Published var subagentAvailability: [String: Bool] = [:]
     @Published var subagentErrors: [String: String] = [:]
     @Published var projectSubagents: [String: [ProjectSubagentSummary]] = [:]
+    @Published var projectSubagentFreshIDs: [String: Set<String>] = [:]
+    private var projectSubagentLookup: [String: [String: ProjectSubagentSummary]] = [:]
     @Published var projectSubagentAvailability: [String: Bool] = [:]
     @Published var projectSubagentErrors: [String: String] = [:]
+    @Published var projectSubagentNextCurrentCursor: [String: String] = [:]
+    @Published var projectSubagentNextArchivedCursor: [String: String] = [:]
+    @Published var loadingOlderProjectSubagents: Set<String> = []
     private var projectSubagentLoadTokens: [String: UUID] = [:]
+    private var projectSubagentSeenCurrentCursors: [String: Set<String>] = [:]
+    private var projectSubagentSeenArchivedCursors: [String: Set<String>] = [:]
+    private var projectSubagentInitialCurrentCursor: [String: String] = [:]
+    private var projectSubagentInitialArchivedCursor: [String: String] = [:]
+    private var projectSubagentExpandedParents: Set<String> = []
+    private var projectSubagentPagingLimited: Set<String> = []
+    private var projectSubagentRefreshPending: Set<String> = []
+    private var projectSubagentPageRevision: [String: Int] = [:]
     @Published var goals: [String: ConversationGoal] = [:]
     @Published var goalErrors: [String: String] = [:]
     private var goalMutationTokens: [String: UUID] = [:]
@@ -956,6 +969,19 @@ struct ManagedBotListMutationState {
         partition = key
         projectSubagentLoadTokens = [:]
         projectSubagentAvailability = [:]
+        projectSubagentLookup = [:]
+        projectSubagentFreshIDs = [:]
+        projectSubagentNextCurrentCursor = [:]
+        projectSubagentNextArchivedCursor = [:]
+        projectSubagentInitialCurrentCursor = [:]
+        projectSubagentInitialArchivedCursor = [:]
+        projectSubagentSeenCurrentCursors = [:]
+        projectSubagentSeenArchivedCursors = [:]
+        projectSubagentExpandedParents = []
+        projectSubagentPagingLimited = []
+        projectSubagentRefreshPending = []
+        projectSubagentPageRevision = [:]
+        loadingOlderProjectSubagents = []
         subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]; loadingConversationIDs = []; loadingTokens = [:]; conversationLoadFailures = [:]
         let store = Self.readStore(for: saved)
         self.store = store
@@ -1246,23 +1272,75 @@ struct ManagedBotListMutationState {
         }
     }
 
+    private func setProjectSubagents(_ agents: [ProjectSubagentSummary], for conversationID: String) {
+        projectSubagentLookup[conversationID] = Dictionary(agents.map { ($0.threadId, $0) },
+                                                           uniquingKeysWith: { _, newer in newer })
+        projectSubagents[conversationID] = agents
+    }
+
+    func projectSubagent(threadID: String, parentConversationID: String) -> ProjectSubagentSummary? {
+        projectSubagentLookup[parentConversationID]?[threadID]
+    }
+
     func loadProjectSubagents(_ parent: ChatSummary) async {
         guard isProject(parent), !previewMode, let saved = connection, !accessEnded else { return }
+        if loadingOlderProjectSubagents.contains(parent.id) {
+            projectSubagentRefreshPending.insert(parent.id)
+            return
+        }
         let key = partition
         let token = UUID()
         projectSubagentLoadTokens[parent.id] = token
+        let pageRevision = projectSubagentPageRevision[parent.id, default: 0]
+        loadingOlderProjectSubagents.remove(parent.id)
         do {
             let path = try ProjectSubagentPaths.roster(parentConversationId: parent.id)
             let response: ProjectSubagentList = try await api.request(path,
                 origin: saved.origin, credential: saved.credential)
             guard key == partition, projectSubagentLoadTokens[parent.id] == token, !Task.isCancelled else { return }
-            projectSubagents[parent.id] = response.subagents.filter { $0.parentConversationId == parent.id }
+            if loadingOlderProjectSubagents.contains(parent.id) {
+                projectSubagentRefreshPending.insert(parent.id)
+                return
+            }
+            if projectSubagentPageRevision[parent.id, default: 0] != pageRevision {
+                Task { [weak self] in await self?.loadProjectSubagents(parent) }
+                return
+            }
+            let firstPage = response.subagents.filter { $0.parentConversationId == parent.id }
+            let fresh = Set(firstPage.map(\.threadId))
+            let preservePaging = projectSubagentExpandedParents.contains(parent.id)
+                && projectSubagentInitialCurrentCursor[parent.id] == response.nextCurrentCursor
+                && projectSubagentInitialArchivedCursor[parent.id] == response.nextArchivedCursor
+            let older = projectSubagentExpandedParents.contains(parent.id)
+                ? (projectSubagents[parent.id] ?? []).filter { !fresh.contains($0.threadId) } : []
+            setProjectSubagents(firstPage + older, for: parent.id)
+            projectSubagentFreshIDs[parent.id] = fresh
             projectSubagentAvailability[parent.id] = response.available
-            projectSubagentErrors[parent.id] = response.detail
+            if !preservePaging {
+                projectSubagentPagingLimited.remove(parent.id)
+                projectSubagentNextCurrentCursor[parent.id] = response.nextCurrentCursor
+                projectSubagentNextArchivedCursor[parent.id] = response.nextArchivedCursor
+                projectSubagentSeenCurrentCursors[parent.id] = []
+                projectSubagentSeenArchivedCursors[parent.id] = []
+            }
+            projectSubagentErrors[parent.id] = projectSubagentPagingLimited.contains(parent.id)
+                ? "Some older agent tasks are beyond this Mac's verified history limit."
+                : response.detail
+            projectSubagentInitialCurrentCursor[parent.id] = response.nextCurrentCursor
+            projectSubagentInitialArchivedCursor[parent.id] = response.nextArchivedCursor
         } catch PairingFailure.response(let status) where [403, 404, 409].contains(status) {
             guard key == partition, projectSubagentLoadTokens[parent.id] == token, !Task.isCancelled else { return }
-            projectSubagents[parent.id] = []
+            setProjectSubagents([], for: parent.id)
+            projectSubagentFreshIDs[parent.id] = []
+            projectSubagentExpandedParents.remove(parent.id)
+            projectSubagentPagingLimited.remove(parent.id)
             projectSubagentAvailability[parent.id] = false
+            projectSubagentNextCurrentCursor[parent.id] = nil
+            projectSubagentNextArchivedCursor[parent.id] = nil
+            projectSubagentInitialCurrentCursor[parent.id] = nil
+            projectSubagentInitialArchivedCursor[parent.id] = nil
+            projectSubagentSeenCurrentCursors[parent.id] = nil
+            projectSubagentSeenArchivedCursors[parent.id] = nil
             projectSubagentErrors[parent.id] = status == 404
                 ? "Agent tasks need a newer Wonder on your computer. Update it, then refresh this Project thread."
                 : "Agent tasks are no longer available in this Project thread. Refresh the Project to try again."
@@ -1270,6 +1348,88 @@ struct ManagedBotListMutationState {
             guard key == partition, projectSubagentLoadTokens[parent.id] == token, !Task.isCancelled else { return }
             projectSubagentAvailability[parent.id] = false
             projectSubagentErrors[parent.id] = "Agent tasks could not be loaded. Refresh this Project thread to try again."
+        }
+    }
+
+    func hasOlderProjectSubagents(_ conversationID: String) -> Bool {
+        projectSubagentNextCurrentCursor[conversationID] != nil
+            || projectSubagentNextArchivedCursor[conversationID] != nil
+    }
+
+    func loadOlderProjectSubagents(_ parent: ChatSummary) async {
+        guard isProject(parent), !previewMode, let saved = connection, !accessEnded,
+              projectSubagentAvailability[parent.id] == true,
+              !loadingOlderProjectSubagents.contains(parent.id),
+              let token = projectSubagentLoadTokens[parent.id] else { return }
+        let archived: Bool
+        let cursor: String
+        if let current = projectSubagentNextCurrentCursor[parent.id] {
+            archived = false; cursor = current
+        } else if let older = projectSubagentNextArchivedCursor[parent.id] {
+            archived = true; cursor = older
+        } else { return }
+        let seenCursors = archived ? projectSubagentSeenArchivedCursors[parent.id] ?? []
+                                   : projectSubagentSeenCurrentCursors[parent.id] ?? []
+        guard !seenCursors.contains(cursor) else {
+            if archived { projectSubagentNextArchivedCursor[parent.id] = nil }
+            else { projectSubagentNextCurrentCursor[parent.id] = nil }
+            projectSubagentErrors[parent.id] = "Older agent tasks could not be loaded. Refresh this Project thread to try again."
+            return
+        }
+        let key = partition
+        loadingOlderProjectSubagents.insert(parent.id)
+        defer {
+            if projectSubagentLoadTokens[parent.id] == token {
+                loadingOlderProjectSubagents.remove(parent.id)
+                if projectSubagentRefreshPending.remove(parent.id) != nil {
+                    Task { [weak self] in await self?.loadProjectSubagents(parent) }
+                }
+            }
+        }
+        do {
+            let path = try ProjectSubagentPaths.roster(parentConversationId: parent.id,
+                                                        archived: archived, cursor: cursor)
+            let response: ProjectSubagentList = try await api.request(path,
+                origin: saved.origin, credential: saved.credential)
+            guard key == partition, projectSubagentLoadTokens[parent.id] == token,
+                  !Task.isCancelled,
+                  (archived ? projectSubagentNextArchivedCursor[parent.id]
+                            : projectSubagentNextCurrentCursor[parent.id]) == cursor else { return }
+            let nextCursor = archived ? response.nextArchivedCursor : response.nextCurrentCursor
+            guard response.available else { throw ReadFailure.resync }
+            let existing = projectSubagents[parent.id] ?? []
+            let verified = response.subagents.filter {
+                $0.parentConversationId == parent.id && $0.isArchived == archived
+            }
+            let updates = Dictionary(verified.map { ($0.threadId, $0) },
+                                     uniquingKeysWith: { _, newer in newer })
+            var seen = Set(existing.map(\.threadId))
+            let added = verified.filter { seen.insert($0.threadId).inserted }
+            setProjectSubagents(existing.map { updates[$0.threadId] ?? $0 } + added, for: parent.id)
+            projectSubagentFreshIDs[parent.id, default: []].formUnion(verified.map(\.threadId))
+            projectSubagentExpandedParents.insert(parent.id)
+            projectSubagentPageRevision[parent.id, default: 0] += 1
+            var consumed = seenCursors
+            consumed.insert(cursor)
+            let nextIsCycle = nextCursor.map { consumed.contains($0) } ?? false
+            let beyondVerifiedLimit = nextCursor != nil && consumed.count >= 9
+            if beyondVerifiedLimit { projectSubagentPagingLimited.insert(parent.id) }
+            if archived {
+                projectSubagentSeenArchivedCursors[parent.id] = consumed
+                projectSubagentNextArchivedCursor[parent.id] = nextIsCycle || beyondVerifiedLimit ? nil : nextCursor
+            } else {
+                projectSubagentSeenCurrentCursors[parent.id] = consumed
+                projectSubagentNextCurrentCursor[parent.id] = nextIsCycle || beyondVerifiedLimit ? nil : nextCursor
+            }
+            projectSubagentErrors[parent.id] = nextIsCycle
+                ? "Older agent tasks could not be loaded. Refresh this Project thread to try again."
+                : projectSubagentPagingLimited.contains(parent.id)
+                    ? "Some older agent tasks are beyond this Mac's verified history limit."
+                    : hasOlderProjectSubagents(parent.id) ? "More agent tasks are available." : nil
+        } catch {
+            guard key == partition, projectSubagentLoadTokens[parent.id] == token,
+                  !Task.isCancelled else { return }
+            projectSubagentErrors[parent.id] = "Older agent tasks could not be loaded. Try again."
         }
     }
 
@@ -3097,6 +3257,19 @@ struct ManagedBotListMutationState {
             partition = nil; store = nil; writer = nil; projection = ProjectionState(); publish(.everything)
             projectSubagentLoadTokens = [:]
             projectSubagentAvailability = [:]
+            projectSubagentLookup = [:]
+            projectSubagentFreshIDs = [:]
+            projectSubagentNextCurrentCursor = [:]
+            projectSubagentNextArchivedCursor = [:]
+            projectSubagentInitialCurrentCursor = [:]
+            projectSubagentInitialArchivedCursor = [:]
+            projectSubagentSeenCurrentCursors = [:]
+            projectSubagentSeenArchivedCursors = [:]
+            projectSubagentExpandedParents = []
+            projectSubagentPagingLimited = []
+            projectSubagentRefreshPending = []
+            projectSubagentPageRevision = [:]
+            loadingOlderProjectSubagents = []
             subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]
             selectedChat = nil; managedBots = []; managedBotMutations = ManagedBotListMutationState(); macConnected = nil; hasConnectedThisLaunch = false; connection = nil; error = nil; accessEnded = false
             status = "Connect to your computer to get started."

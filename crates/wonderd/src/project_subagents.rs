@@ -44,6 +44,8 @@ struct ProjectSubagentList {
     available: bool,
     detail: Option<String>,
     subagents: Vec<ProjectSubagentSummary>,
+    next_current_cursor: Option<String>,
+    next_archived_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -51,6 +53,13 @@ struct ProjectSubagentList {
 struct ProjectSubagentTranscript {
     subagent: ProjectSubagentSummary,
     snapshot: history::ConversationSnapshot,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListQuery {
+    archived: Option<bool>,
+    cursor: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -292,7 +301,15 @@ pub(crate) async fn list(
     State(state): State<AppState>,
     Extension(_authority): Extension<OwnerAuthority>,
     Path(conversation_id): Path<String>,
+    Query(query): Query<ListQuery>,
 ) -> Response {
+    if query
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 2048 || query.archived.is_none())
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let parent = match parent(&state, &conversation_id).await {
         Ok(parent) => parent,
         Err(response) if response.status() == StatusCode::NOT_IMPLEMENTED => {
@@ -300,6 +317,8 @@ pub(crate) async fn list(
                 available: false,
                 detail: Some("Agent task history is available for Codex Projects.".into()),
                 subagents: Vec::new(),
+                next_current_cursor: None,
+                next_archived_cursor: None,
             })
             .into_response();
         }
@@ -310,8 +329,12 @@ pub(crate) async fn list(
     };
     let mut children = Vec::new();
     let mut seen = HashSet::new();
-    let mut truncated = false;
-    for archived in [false, true] {
+    let mut next_current_cursor = None;
+    let mut next_archived_cursor = None;
+    for archived in query
+        .archived
+        .map_or(vec![false, true], |value| vec![value])
+    {
         let result = match request(
             &parent.rpc,
             "thread/list",
@@ -320,6 +343,7 @@ pub(crate) async fn list(
                 "parentThreadId": parent.thread_id,
                 "archived": archived,
                 "limit": MAX_CHILDREN,
+                "cursor": query.cursor,
             }),
         )
         .await
@@ -333,15 +357,19 @@ pub(crate) async fn list(
         if threads.len() > MAX_CHILDREN {
             return unavailable("Codex returned too many agent tasks.");
         }
-        truncated |= result
-            .get("nextCursor")
-            .and_then(Value::as_str)
-            .is_some_and(|cursor| !cursor.is_empty());
-        for thread in threads {
-            if children.len() >= MAX_CHILDREN {
-                truncated = true;
-                break;
+        let next_cursor = match result.get("nextCursor") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(cursor)) if !cursor.is_empty() && cursor.len() <= 2048 => {
+                Some(cursor.clone())
             }
+            _ => return unavailable("Codex returned an invalid agent task cursor."),
+        };
+        if archived {
+            next_archived_cursor = next_cursor;
+        } else {
+            next_current_cursor = next_cursor;
+        }
+        for thread in threads {
             if let Some(child) = verified_child(&parent, thread, archived) {
                 if seen.insert(child.thread_id.clone()) {
                     children.push(child);
@@ -351,9 +379,11 @@ pub(crate) async fn list(
     }
     Json(ProjectSubagentList {
         available: true,
-        detail: truncated
-            .then(|| "Showing the newest 100 agent tasks. Older tasks are not shown.".into()),
+        detail: (next_current_cursor.is_some() || next_archived_cursor.is_some())
+            .then(|| "More agent tasks are available.".into()),
         subagents: children,
+        next_current_cursor,
+        next_archived_cursor,
     })
     .into_response()
 }
@@ -555,6 +585,7 @@ mod tests {
                 State(state.clone()),
                 Extension(OwnerAuthority),
                 Path("project-chat".into()),
+                Query(ListQuery::default()),
             )
             .await,
         )
@@ -566,7 +597,11 @@ mod tests {
         assert_eq!(roster["subagents"][0]["status"], "notLoaded");
         assert_eq!(roster["subagents"][0]["isArchived"], true);
         assert_eq!(roster["subagents"][0]["canAcceptDirectInput"], false);
-        assert!(roster["detail"].as_str().unwrap().contains("Older tasks"));
+        assert!(roster["detail"]
+            .as_str()
+            .unwrap()
+            .contains("More agent tasks"));
+        assert_eq!(roster["nextCurrentCursor"], "older-tasks");
 
         let (status, read) = body(
             transcript(
@@ -596,6 +631,37 @@ mod tests {
             "status":{"type":"idle"}, "isArchived":true
         });
         std::fs::write(&fixture_path, fixture.to_string()).unwrap();
+        let (status, first_page) = body(
+            list(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path("project-chat".into()),
+                Query(ListQuery::default()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        crate::tests::validate_http_contract("projectSubagentList", &first_page);
+        assert_eq!(first_page["subagents"].as_array().unwrap().len(), 0);
+        assert_eq!(first_page["nextArchivedCursor"], "1");
+        let (status, older_page) = body(
+            list(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path("project-chat".into()),
+                Query(ListQuery {
+                    archived: Some(true),
+                    cursor: Some("1".into()),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        crate::tests::validate_http_contract("projectSubagentList", &older_page);
+        assert_eq!(older_page["subagents"][0]["threadId"], "child-thread");
+        assert_eq!(older_page["nextArchivedCursor"], Value::Null);
         let (status, paged) = body(
             transcript(
                 State(state.clone()),
@@ -677,6 +743,7 @@ mod tests {
                 State(state.clone()),
                 Extension(OwnerAuthority),
                 Path("project-chat".into()),
+                Query(ListQuery::default()),
             )
             .await,
         )
@@ -718,6 +785,7 @@ mod tests {
                 State(state.clone()),
                 Extension(OwnerAuthority),
                 Path("project-chat".into()),
+                Query(ListQuery::default()),
             )
             .await,
         )
@@ -742,6 +810,7 @@ mod tests {
                 State(state.clone()),
                 Extension(OwnerAuthority),
                 Path("project-chat".into()),
+                Query(ListQuery::default()),
             )
             .await,
         )
@@ -784,6 +853,7 @@ mod tests {
                 State(state),
                 Extension(OwnerAuthority),
                 Path("project-chat".into()),
+                Query(ListQuery::default()),
             )
             .await,
         )

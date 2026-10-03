@@ -49,6 +49,20 @@ roster still stops at 100 tasks. This source is not installed in Mac 1.0.108;
 Testing 21 and production 82 remain unchanged. Another Device Hub attempt did
 not establish two visible iPad app panes, so Split View remains unverified.
 
+A subsequent source-only Project helper slice adds paged roster loading for
+older verified current and archived tasks. The client keeps loaded older rows
+when the first page refreshes, marks rows not refreshed as “Last known,” and
+preserves paging during first-page refresh, and stops on a repeated provider
+cursor. The roster stops after ten pages per archive state, matching the
+host's transcript verification bound, and explains that limit if more exist.
+Host ownership tests passed 2/2, native
+wire parsing passed 1/1, and the paged roster plus interleaved refresh/cursor
+loop checks passed 2/2 on both iPhone and iPad simulators. Concurrent request
+timing remains unforced by those fixtures. This is not in installed Testing
+21, production 82, or Mac 1.0.108. The provider-side desktop Running relay is
+still unresolved; a historical “Stopped” entry in Testing 21 is not evidence
+that the current desktop turn has stopped.
+
 The October 3 post-checkpoint composer hardening is verified in source and
 signed TestingDiagnostics simulator builds, but is not in Testing 21 or
 production 82. With a large staged attachment, draft edits now persist a

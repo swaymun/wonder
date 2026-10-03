@@ -562,6 +562,84 @@ import UIKit
         XCTAssertTrue(app.staticTexts["project-subagent-roster-detail"].exists)
     }
 
+    func testProjectAgentRosterLoadsOlderVerifiedChild() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+                               "-diagnostics-chat-layout-unsaved", "-diagnostics-project-subagents",
+                               "-diagnostics-project-subagents-paged"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let parent = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(parent.waitForExistence(timeout: 15))
+        parent.tap()
+        let pill = app.buttons["project-subagent-status-pill"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 15))
+        pill.tap()
+        XCTAssertTrue(app.buttons["project-subagent-roster:fixture-child-thread"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["project-subagent-roster:fixture-second-child-thread"].exists)
+        let loadOlder = app.buttons["project-subagent-roster-load-older"]
+        XCTAssertTrue(loadOlder.waitForExistence(timeout: 5))
+        loadOlder.tap()
+        let builder = app.buttons["project-subagent-roster:fixture-second-child-thread"]
+        XCTAssertTrue(builder.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertFalse(loadOlder.exists, "The final provider page clears the load-more control")
+        builder.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@",
+            "Builder completed the file review.")).firstMatch.waitForExistence(timeout: 15))
+        XCTAssertEqual(app.scrollViews["project-subagent-transcript"].textViews.count, 0)
+        app.buttons["project-subagent-sheet-done"].tap()
+        XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 5))
+        app.buttons["new-chat"].tap()
+        openSidebarIfNeeded(app)
+        parent.tap()
+        XCTAssertTrue(pill.waitForExistence(timeout: 10))
+        pill.tap()
+        XCTAssertTrue(builder.waitForExistence(timeout: 5))
+        XCTAssertEqual(builder.label, "Builder, Last known: Completed")
+        builder.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@",
+            "Builder completed the file review.")).firstMatch.waitForExistence(timeout: 15))
+    }
+
+    func testProjectAgentRosterStopsRepeatedProviderCursor() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+                               "-diagnostics-chat-layout-unsaved", "-diagnostics-project-subagents",
+                               "-diagnostics-project-subagents-paged", "-diagnostics-project-subagents-cycle"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let parent = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(parent.waitForExistence(timeout: 15))
+        parent.tap()
+        let pill = app.buttons["project-subagent-status-pill"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 15))
+        pill.tap()
+        let loadOlder = app.buttons["project-subagent-roster-load-older"]
+        XCTAssertTrue(loadOlder.waitForExistence(timeout: 5))
+        loadOlder.tap()
+        let builder = app.buttons["project-subagent-roster:fixture-second-child-thread"]
+        XCTAssertTrue(builder.waitForExistence(timeout: 10))
+        XCTAssertEqual(builder.label, "Builder, Completed")
+        pill.tap()
+        app.buttons["new-chat"].tap()
+        openSidebarIfNeeded(app)
+        parent.tap()
+        XCTAssertTrue(pill.waitForExistence(timeout: 10))
+        pill.tap()
+        XCTAssertTrue(builder.waitForExistence(timeout: 5))
+        XCTAssertEqual(builder.label, "Builder, Last known: Completed")
+        XCTAssertTrue(loadOlder.waitForExistence(timeout: 5))
+        loadOlder.tap()
+        let detail = app.staticTexts["project-subagent-roster-detail"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 10))
+        XCTAssertTrue(detail.label.contains("could not be loaded"), detail.label)
+        XCTAssertEqual(builder.label, "Builder, Running",
+                       "The next verified page refreshes the retained older row")
+        XCTAssertFalse(loadOlder.exists, "A repeated provider cursor must end paging")
+    }
+
     func testActivityDisclosureKeepsVisibleReadingAnchorAtLargeText() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

@@ -93,12 +93,16 @@ struct SubagentDock: View {
 struct ProjectSubagentDock: View {
     let agents: [ProjectSubagentSummary]
     let available: Bool
+    let freshIDs: Set<String>
     let detail: String?
+    let hasOlder: Bool
+    let loadingOlder: Bool
     @Binding var isPresented: Bool
+    let loadOlder: () -> Void
     let open: (ProjectSubagentSummary) -> Void
 
     var body: some View {
-        if !agents.isEmpty {
+        if !agents.isEmpty || hasOlder {
             Button { isPresented.toggle() } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "person.2")
@@ -119,6 +123,15 @@ struct ProjectSubagentDock: View {
                         ForEach(agents) { agent in
                             rosterButton(agent)
                         }
+                        if hasOlder {
+                            Button(action: loadOlder) {
+                                if loadingOlder { ProgressView() }
+                                else { Text("Load older agent tasks") }
+                            }
+                            .disabled(!available || loadingOlder)
+                            .frame(minHeight: 44)
+                            .accessibilityIdentifier("project-subagent-roster-load-older")
+                        }
                         if let detail {
                             Text(detail).font(.caption).foregroundStyle(.secondary)
                                 .accessibilityIdentifier("project-subagent-roster-detail")
@@ -133,12 +146,13 @@ struct ProjectSubagentDock: View {
     }
 
     private func rosterButton(_ agent: ProjectSubagentSummary) -> some View {
-        Button { open(agent) } label: {
+        let fresh = available && freshIDs.contains(agent.threadId)
+        return Button { open(agent) } label: {
             HStack(spacing: 10) {
                 Image(systemName: "person.crop.circle").foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(agent.title).foregroundStyle(.primary)
-                    Text(agent.statusLabel(available: available)).font(.caption).foregroundStyle(.secondary)
+                    Text(agent.statusLabel(available: fresh)).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
@@ -147,7 +161,7 @@ struct ProjectSubagentDock: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("project-subagent-roster:" + agent.threadId)
-        .accessibilityLabel(agent.title + ", " + agent.statusLabel(available: available))
+        .accessibilityLabel(agent.title + ", " + agent.statusLabel(available: fresh))
         .accessibilityHint("Open read-only agent task")
     }
 }

@@ -562,15 +562,36 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     finish(status: 503, body: Data("Agent tasks could not be loaded".utf8)); return
                 }
                 let staleProbe = ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents-stale")
-                finish(status: 200, body: json(["available": true, "detail": NSNull(), "subagents": [[
+                let pagedProbe = ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents-paged")
+                let cycleProbe = ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents-cycle")
+                let cursor = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems }?.first { $0.name == "cursor" }?.value
+                let scout: [String: Any] = [
                     "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.childThreadID,
                     "title": "Scout", "agentNickname": "Scout", "agentRole": "research",
                     "status": staleProbe ? "active" : "notLoaded", "isArchived": false, "canAcceptDirectInput": false
-                ], [
+                ]
+                let builder: [String: Any] = [
                     "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.secondChildThreadID,
                     "title": "Builder", "agentNickname": "Builder", "agentRole": "implementation",
                     "status": "completed", "isArchived": false, "canAcceptDirectInput": false
-                ]]])); return
+                ]
+                if pagedProbe && cursor == "older-page" {
+                    finish(status: 200, body: json(["available": true, "detail": NSNull(),
+                        "subagents": [builder], "nextCurrentCursor": cycleProbe ? "second-page" as Any : NSNull(),
+                        "nextArchivedCursor": NSNull()])); return
+                }
+                if cycleProbe && cursor == "second-page" {
+                    var updatedBuilder = builder
+                    updatedBuilder["status"] = "active"
+                    finish(status: 200, body: json(["available": true, "detail": NSNull(),
+                        "subagents": [updatedBuilder], "nextCurrentCursor": "older-page",
+                        "nextArchivedCursor": NSNull()])); return
+                }
+                finish(status: 200, body: json(["available": true,
+                    "detail": pagedProbe ? "More agent tasks are available." as Any : NSNull(),
+                    "subagents": pagedProbe ? [scout] : [scout, builder],
+                    "nextCurrentCursor": pagedProbe ? "older-page" as Any : NSNull(),
+                    "nextArchivedCursor": NSNull()])); return
             case "/api/v1/project-conversations/\(conversation)/subagents/\(DiagnosticSubagentFixture.childThreadID)/transcript" where DiagnosticSubagentFixture.projectSubagentFixture:
                 if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents-stale") {
                     Self.state.lock.withLock { Self.state.projectSubagentRosterFails = true }

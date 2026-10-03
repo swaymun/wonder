@@ -514,9 +514,8 @@ struct ConversationView: View {
     }
     private func projectSubagents(for row: ReadRow) -> [ProjectSubagentSummary] {
         guard chat.botId == nil, model.isProject(chat) else { return [] }
-        let agents = model.projectSubagents[chat.id] ?? []
         return subagentThreadIDs(for: row).compactMap { threadID in
-            agents.first(where: { $0.threadId == threadID })
+            model.projectSubagent(threadID: threadID, parentConversationID: chat.id)
         }
     }
     @ViewBuilder private func entryContent(
@@ -648,6 +647,7 @@ struct ConversationView: View {
                 openSubagent: { selectedSubagent = $0 },
                 projectSubagents: projectSubagents(for: row),
                 projectSubagentsAvailable: model.macConnected == true && model.projectSubagentAvailability[chat.id] != false,
+                projectSubagentFreshIDs: model.projectSubagentFreshIDs[chat.id] ?? [],
                 openProjectSubagent: { selectedProjectSubagent = $0 },
                 openFile: { path in workspaceRequest = WorkspaceBrowserRequest(initialFilePath: path) },
                 toggle: { toggleDetail(row.id) }
@@ -1171,10 +1171,16 @@ struct ConversationView: View {
                                     }
                                 }
                             }
-                            if model.isProject(chat), !(model.projectSubagents[chat.id] ?? []).isEmpty {
+                            if model.isProject(chat),
+                               !(model.projectSubagents[chat.id] ?? []).isEmpty || model.hasOlderProjectSubagents(chat.id) {
                                 ProjectSubagentDock(agents: model.projectSubagents[chat.id] ?? [],
                                     available: model.macConnected == true && model.projectSubagentAvailability[chat.id] != false,
-                                    detail: model.projectSubagentErrors[chat.id], isPresented: $showingProjectSubagents) { child in
+                                    freshIDs: model.projectSubagentFreshIDs[chat.id] ?? [],
+                                    detail: model.projectSubagentErrors[chat.id],
+                                    hasOlder: model.hasOlderProjectSubagents(chat.id),
+                                    loadingOlder: model.loadingOlderProjectSubagents.contains(chat.id),
+                                    isPresented: $showingProjectSubagents,
+                                    loadOlder: { Task { await model.loadOlderProjectSubagents(chat) } }) { child in
                                     showingProjectSubagents = false
                                     Task { @MainActor in
                                         await Task.yield()
@@ -6357,6 +6363,7 @@ struct ActivityItemView: View {
     let openSubagent: ((SubagentSummary) -> Void)?
     let projectSubagents: [ProjectSubagentSummary]
     let projectSubagentsAvailable: Bool
+    let projectSubagentFreshIDs: Set<String>
     let openProjectSubagent: ((ProjectSubagentSummary) -> Void)?
     let openFile: ((String) -> Void)?
     let toggle: () -> Void
@@ -6369,6 +6376,7 @@ struct ActivityItemView: View {
         openSubagent: ((SubagentSummary) -> Void)? = nil,
         projectSubagents: [ProjectSubagentSummary] = [],
         projectSubagentsAvailable: Bool = true,
+        projectSubagentFreshIDs: Set<String> = [],
         openProjectSubagent: ((ProjectSubagentSummary) -> Void)? = nil,
         openFile: ((String) -> Void)? = nil,
         toggle: @escaping () -> Void
@@ -6379,6 +6387,7 @@ struct ActivityItemView: View {
         self.openSubagent = openSubagent
         self.projectSubagents = projectSubagents
         self.projectSubagentsAvailable = projectSubagentsAvailable
+        self.projectSubagentFreshIDs = projectSubagentFreshIDs
         self.openProjectSubagent = openProjectSubagent
         self.openFile = openFile
         self.toggle = toggle
@@ -6399,16 +6408,18 @@ struct ActivityItemView: View {
         } else if !projectSubagents.isEmpty, let openProjectSubagent {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(projectSubagents) { projectSubagent in
+                    let available = projectSubagentsAvailable
+                        && projectSubagentFreshIDs.contains(projectSubagent.threadId)
                     Button {
                         openProjectSubagent(projectSubagent)
                     } label: {
                         SubagentActivityLabel(title: projectSubagent.title,
-                                              statusLabel: projectSubagent.statusLabel(available: projectSubagentsAvailable))
+                                              statusLabel: projectSubagent.statusLabel(available: available))
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("project-subagent-row:" + projectSubagent.threadId)
                     .accessibilityLabel(projectSubagent.title + ", "
-                                        + projectSubagent.statusLabel(available: projectSubagentsAvailable))
+                                        + projectSubagent.statusLabel(available: available))
                     .accessibilityHint("Open read-only agent task.")
                 }
             }

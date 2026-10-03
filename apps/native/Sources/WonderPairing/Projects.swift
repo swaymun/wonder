@@ -45,6 +45,8 @@ public struct ProjectSubagentList: Codable, Sendable {
     public let available: Bool
     public let detail: String?
     public let subagents: [ProjectSubagentSummary]
+    public let nextCurrentCursor: String?
+    public let nextArchivedCursor: String?
 }
 
 public struct ProjectSubagentTranscript: Codable, Sendable {
@@ -61,8 +63,17 @@ public enum ProjectSubagentPaths {
         return escaped
     }
 
-    public static func roster(parentConversationId: String) throws -> String {
-        "/api/v1/project-conversations/\(try component(parentConversationId))/subagents"
+    public static func roster(parentConversationId: String, archived: Bool? = nil,
+                              cursor: String? = nil) throws -> String {
+        let base = "/api/v1/project-conversations/\(try component(parentConversationId))/subagents"
+        guard let archived else {
+            guard cursor == nil else { throw PairingFailure.invalidLink }
+            return base
+        }
+        let path = base + "?archived=\(archived ? "true" : "false")"
+        guard let cursor else { return path }
+        guard cursor.count <= 2048 else { throw PairingFailure.invalidLink }
+        return path + "&cursor=\(try component(cursor))"
     }
 
     public static func transcript(parentConversationId: String, threadId: String, cursor: String? = nil) throws -> String {

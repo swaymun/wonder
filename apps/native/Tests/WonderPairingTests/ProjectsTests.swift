@@ -61,6 +61,7 @@ final class ProjectsTests: XCTestCase {
     // thread; the read-only transcript route cannot be confused with Bot chat.
     func testProjectSubagentWireAndRequestPaths() async throws {
         let roster = try JSONDecoder().decode(ProjectSubagentList.self, from: Data(#"{"available":true,"detail":null,"subagents":[{"parentConversationId":"project parent","threadId":"child/thread","title":"Scout","agentNickname":"Scout","agentRole":"research","status":"active","isArchived":false,"canAcceptDirectInput":false}]}"#.utf8))
+        XCTAssertNil(roster.nextCurrentCursor, "older hosts omit pagination fields")
         let child = try XCTUnwrap(roster.subagents.first)
         XCTAssertEqual(child.statusLabel, "Running")
         XCTAssertEqual(child.statusLabel(available: false), "Last known: Running")
@@ -85,6 +86,11 @@ final class ProjectsTests: XCTestCase {
         }
         XCTAssertEqual(try ProjectSubagentPaths.roster(parentConversationId: child.parentConversationId),
                        "/api/v1/project-conversations/project%20parent/subagents")
+        XCTAssertEqual(try ProjectSubagentPaths.roster(parentConversationId: child.parentConversationId,
+            archived: true, cursor: "older+page"),
+            "/api/v1/project-conversations/project%20parent/subagents?archived=true&cursor=older%2Bpage")
+        XCTAssertThrowsError(try ProjectSubagentPaths.roster(parentConversationId: child.parentConversationId,
+            cursor: "older+page"))
         XCTAssertEqual(try ProjectSubagentPaths.transcript(parentConversationId: child.parentConversationId,
             threadId: child.threadId, cursor: "older+page"),
             "/api/v1/project-conversations/project%20parent/subagents/child%2Fthread/transcript?cursor=older%2Bpage")

@@ -296,7 +296,7 @@
       }
     },
     "/api/v1/project-conversations/{conversationId}/subagents": {
-      "get": { "response": { "$ref": "#/$defs/projectSubagentList" } }
+      "get": { "query": { "$ref": "#/$defs/projectSubagentListQuery" }, "response": { "$ref": "#/$defs/projectSubagentList" } }
     },
     "/api/v1/project-conversations/{conversationId}/subagents/{threadId}/transcript": {
       "get": { "query": { "$ref": "#/$defs/projectSubagentTranscriptQuery" }, "response": { "$ref": "#/$defs/projectSubagentTranscript" } }
@@ -1451,12 +1451,24 @@
     },
     "projectSubagentList": {
       "type": "object",
-      "required": ["available", "detail", "subagents"],
+      "required": ["available", "detail", "subagents", "nextCurrentCursor", "nextArchivedCursor"],
       "properties": {
         "available": { "type": "boolean" },
         "detail": { "type": ["string", "null"] },
-        "subagents": { "type": "array", "items": { "$ref": "#/$defs/projectSubagentSummary" }, "maxItems": 100 }
+        "subagents": { "type": "array", "items": { "$ref": "#/$defs/projectSubagentSummary" }, "maxItems": 200 },
+        "nextCurrentCursor": { "type": ["string", "null"], "minLength": 1, "maxLength": 2048 },
+        "nextArchivedCursor": { "type": ["string", "null"], "minLength": 1, "maxLength": 2048 }
       },
+      "additionalProperties": false
+    },
+    "projectSubagentListQuery": {
+      "type": "object",
+      "properties": {
+        "archived": { "type": "boolean" },
+        "cursor": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      },
+      "if": { "required": ["cursor"] },
+      "then": { "required": ["archived"] },
       "additionalProperties": false
     },
     "projectSubagentTranscriptQuery": {
