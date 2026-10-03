@@ -2890,6 +2890,11 @@ private struct WorkspacePreviewSelection: Identifiable {
     var scope: String? = nil
 }
 
+struct WorkspaceObservationPoint: Hashable {
+    let hostEpoch: String
+    let sequence: UInt64
+}
+
 /// One selected file owns its verified revision across inline and full-screen
 /// presentations. Switching presentation must not discard an offered update.
 @MainActor final class WorkspaceRevisionState: ObservableObject {
@@ -2902,8 +2907,12 @@ private struct WorkspacePreviewSelection: Identifiable {
     @Published var preparedText: String?
     @Published var preparingText = true
     @Published var previewTruncated = false
-    var observedSequence: UInt64?
+    var observedPoint: WorkspaceObservationPoint?
     var manualRefreshTask: Task<Void, Never>?
+    private var requestedPoint: WorkspaceObservationPoint?
+    private var observationTask: Task<Void, Never>?
+    private var observationGeneration = UUID()
+    private var lastAutomaticCheckAt: TimeInterval?
     private var preparedSha256: String?
     private var closed = false
 
@@ -2947,9 +2956,11 @@ private struct WorkspacePreviewSelection: Identifiable {
             let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
             guard !Task.isCancelled, !closed else { return false }
             if sha256 != currentSha256 {
-                offeredData = data; offeredSha256 = sha256
-                await onRevision?(sha256)
-            } else { offeredData = nil; offeredSha256 = nil }
+                if sha256 != offeredSha256 { offeredData = data; offeredSha256 = sha256 }
+            } else if sha256 == currentSha256 { offeredData = nil; offeredSha256 = nil }
+            // Draft notes may have changed since the last check, or the file
+            // may have reverted to the version the preview is displaying.
+            await onRevision?(sha256)
             return true
         } catch is CancellationError {
             return false
@@ -2960,24 +2971,57 @@ private struct WorkspacePreviewSelection: Identifiable {
         }
     }
 
-    func observe(sequence: UInt64, refresh: (() async throws -> Data)?,
+    func observe(point: WorkspaceObservationPoint, refresh: (() async throws -> Data)?,
                  onRevision: ((String) async -> Void)?, failureMessage: String) async {
-        guard !closed, refresh != nil else { return }
-        if observedSequence == nil { observedSequence = sequence; return }
-        guard sequence > (observedSequence ?? 0) else { return }
-        // A newer SwiftUI task cancels the previous check before its defer
-        // clears `refreshing`. Wait for that cleanup, then check the newest
-        // sequence; never mark a sequence observed when its check was skipped.
-        while refreshing {
-            do { try await Task.sleep(for: .milliseconds(30)) }
-            catch { return }
-            guard !closed else { return }
-            if sequence <= (observedSequence ?? 0) { return }
+        guard !Task.isCancelled, !closed, refresh != nil else { return }
+        if let observedPoint, observedPoint.hostEpoch == point.hostEpoch,
+           point.sequence <= observedPoint.sequence { return }
+        if let requestedPoint, requestedPoint.hostEpoch == point.hostEpoch,
+           point.sequence <= requestedPoint.sequence { return }
+        if requestedPoint?.hostEpoch != nil && requestedPoint?.hostEpoch != point.hostEpoch {
+            observationGeneration = UUID()
+            observationTask?.cancel()
+            observationTask = nil
         }
-        guard !Task.isCancelled, !closed else { return }
-        let checked = await checkForRevision(refresh: refresh, onRevision: onRevision, failureMessage: failureMessage)
-        guard checked, !Task.isCancelled, !closed, sequence > (observedSequence ?? 0) else { return }
-        observedSequence = sequence
+        requestedPoint = point
+        guard observationTask == nil, let refresh else { return }
+        // SwiftUI cancels the previous task(id:) on each new sequence. Keep
+        // one preview-owned read alive and check only the newest pending event.
+        let generation = observationGeneration
+        observationTask = Task { [weak self] in
+            await self?.runObservation(generation: generation, refresh: refresh,
+                                       onRevision: onRevision, failureMessage: failureMessage)
+        }
+    }
+
+    private func runObservation(generation: UUID, refresh: @escaping () async throws -> Data,
+                                onRevision: ((String) async -> Void)?, failureMessage: String) async {
+        defer { if generation == observationGeneration { observationTask = nil } }
+        while !Task.isCancelled, !closed, generation == observationGeneration,
+              let requested = requestedPoint,
+              observedPoint?.hostEpoch != requested.hostEpoch || observedPoint?.sequence != requested.sequence {
+            // Chat streaming can advance the sequence many times per second.
+            // Keep automatic full-file reads bounded while still checking the
+            // newest event during an ongoing turn.
+            if let lastAutomaticCheckAt {
+                let remaining = max(0, 1 - (ProcessInfo.processInfo.systemUptime - lastAutomaticCheckAt))
+                if remaining > 0 {
+                    do { try await Task.sleep(for: .milliseconds(Int64((remaining * 1000).rounded(.up)))) }
+                    catch { return }
+                }
+            }
+            while refreshing {
+                do { try await Task.sleep(for: .milliseconds(30)) } catch { return }
+                guard !closed, generation == observationGeneration else { return }
+            }
+            guard !Task.isCancelled, !closed, generation == observationGeneration else { return }
+            let checkedPoint = requestedPoint ?? requested
+            lastAutomaticCheckAt = ProcessInfo.processInfo.systemUptime
+            let checked = await checkForRevision(refresh: refresh, onRevision: onRevision,
+                                                 failureMessage: failureMessage)
+            guard checked, !Task.isCancelled, !closed, generation == observationGeneration else { return }
+            observedPoint = checkedPoint
+        }
     }
 
     func showOfferedRevision() {
@@ -2989,7 +3033,12 @@ private struct WorkspacePreviewSelection: Identifiable {
         offeredData = nil; offeredSha256 = nil
     }
 
-    func close() { closed = true; manualRefreshTask?.cancel(); manualRefreshTask = nil }
+    func close() {
+        closed = true
+        observationGeneration = UUID()
+        manualRefreshTask?.cancel(); manualRefreshTask = nil
+        observationTask?.cancel(); observationTask = nil
+    }
 }
 
 @MainActor private final class WorkspaceTextAnnotationDraft: ObservableObject {
@@ -3147,6 +3196,7 @@ struct WorkspaceBrowser: View {
     @State private var diffText: String?
     @State private var expandedPreview = false
     @State private var collapsingPreview = false
+    @State private var addedAnnotationID: String?
     @State private var pdfSession = PDFPreviewSession()
     @State private var htmlSession = WorkspaceHTMLPreviewSession()
     @State private var modelSession: WorkspaceModelPreviewSession?
@@ -3171,6 +3221,13 @@ struct WorkspaceBrowser: View {
     private var previewName: String {
         selection?.name ?? documentSelection?.name ?? mediaSelection?.name ?? attachmentPhoto?.name ??
         attachmentSelection?.name ?? selectedDiff?.path ?? "Preview"
+    }
+    private var observationPoint: WorkspaceObservationPoint? {
+        model.snapshots[chat.id].map { WorkspaceObservationPoint(hostEpoch: $0.hostEpoch, sequence: $0.lastSequence) }
+    }
+    private var annotationAdded: Bool {
+        guard let addedAnnotationID else { return false }
+        return model.composers[chat.id]?.attachmentIDs.contains(addedAnnotationID) == true
     }
 
     var body: some View {
@@ -3291,6 +3348,11 @@ struct WorkspaceBrowser: View {
                         .accessibilityIdentifier("workspace-preview-collapse")
                         Spacer()
                         Text(previewName).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        if annotationAdded {
+                            Label("Added to message", systemImage: "checkmark")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("workspace-annotation-added")
+                        }
                     }
                     .padding(.horizontal, 12)
                     .frame(minHeight: 44)
@@ -3353,14 +3415,9 @@ struct WorkspaceBrowser: View {
                                       revision: previewRevision,
                                       refresh: revisionRefresh(for: item),
                                       onRevision: revisionNotice(for: item),
-                                      refreshSequence: model.snapshots[chat.id]?.lastSequence,
+                                      refreshPoint: observationPoint,
                                       initialNote: replacement?.note ?? "", onClose: closePreview) { annotation in
-                    try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
-                                              replacing: replacement?.id)
-                    if expandedPreview {
-                        pdfSession.capture()
-                        collapsingPreview = true; expandedPreview = false
-                    }
+                    try stagePreviewAnnotation(annotation, context: context, replacing: replacement?.id)
                 }
             } else {
                 PhotoViewer(model: model, chat: chat, name: item.name, mimeType: item.mimeType,
@@ -3379,7 +3436,7 @@ struct WorkspaceBrowser: View {
                                                 revision: previewRevision,
                                                 refresh: revisionRefresh(for: item),
                                                 onRevision: revisionNotice(for: item),
-                                                refreshSequence: model.snapshots[chat.id]?.lastSequence,
+                                                refreshPoint: observationPoint,
                                                 modelSession: modelSession,
                                                 origin: "workspace:\(model.assignmentScope):\(chat.id):\(item.id)",
                                                 onClose: closePreview)
@@ -3392,14 +3449,9 @@ struct WorkspaceBrowser: View {
                                          htmlSession: htmlSession,
                                          annotationContext: context, onAnnotation: { annotation in
                     guard let context else { throw FileFailure.integrity }
-                    try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
-                                              replacing: replacement?.id)
-                    if expandedPreview {
-                        pdfSession.capture()
-                        collapsingPreview = true; expandedPreview = false
-                    }
+                    try stagePreviewAnnotation(annotation, context: context, replacing: replacement?.id)
                 }, refresh: revisionRefresh(for: item), onRevision: revisionNotice(for: item),
-                                         refreshSequence: model.snapshots[chat.id]?.lastSequence,
+                                         refreshPoint: observationPoint,
                                          onClose: closePreview)
             }
         } else if let item = mediaSelection {
@@ -3439,6 +3491,20 @@ struct WorkspaceBrowser: View {
         selection = nil; documentSelection = nil; previewRevision = nil; mediaSelection = nil
         attachmentPhoto = nil; attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil
         diffRequestID = UUID(); selectedDiff = nil; diffText = nil
+        addedAnnotationID = nil
+    }
+
+    private func stagePreviewAnnotation(_ annotation: ArtifactAnnotation, context: ArtifactPreviewContext,
+                                        replacing oldID: String?) throws {
+        try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope, replacing: oldID)
+        addedAnnotationID = model.composers[chat.id]?.stagedFiles?.last?.id
+        if let offered = previewRevision?.offeredSha256 {
+            Task {
+                guard context.scope == model.assignmentScope else { return }
+                await model.noteWorkspaceRevision(chat, rootID: context.rootID, path: context.path,
+                                                  currentSha256: offered)
+            }
+        }
     }
 
     @ViewBuilder private var allFilesView: some View {
@@ -3573,6 +3639,7 @@ struct WorkspaceBrowser: View {
         fileRequestID = UUID()
         attachmentRequestID = UUID()
         textAnnotationDraft.reset()
+        addedAnnotationID = nil
         selectedDiff = nil; diffChoice = nil; diffText = nil
         selection = nil; documentSelection = nil; previewRevision = nil; mediaSelection = nil
         attachmentPhoto = nil; attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil
@@ -3729,6 +3796,7 @@ struct WorkspaceBrowser: View {
     @discardableResult private func loadWorkspaceFile(_ entry: WorkspaceEntry) async -> Bool {
         guard let root = selectedRoot else { return false }
         let captured = location
+        let startingPoint = observationPoint ?? WorkspaceObservationPoint(hostEpoch: "", sequence: 0)
         let requestID = UUID()
         fileRequestID = requestID
         let loadingID = beginLoading()
@@ -3753,10 +3821,13 @@ struct WorkspaceBrowser: View {
                 carriedNote = reanchor.note
             } else { carriedNote = "" }
             textAnnotationDraft.reset(note: carriedNote)
+            addedAnnotationID = nil
             modelSession?.close()
             modelSession = WorkspaceModelPreview.supports(entry.name) ? WorkspaceModelPreviewSession() : nil
             pdfSession = PDFPreviewSession()
-            previewRevision = WorkspaceRevisionState(data: data, sha256: sha256)
+            let revision = WorkspaceRevisionState(data: data, sha256: sha256)
+            revision.observedPoint = startingPoint
+            previewRevision = revision
             if PhotoViewerRouting.isImage(mimeType: entry.mimeType) { selection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "image/*", data: data, sha256: sha256, rootID: root.id, path: entry.path, scope: captured.scope) }
             else { attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil; selection = nil; selectedDiff = nil; diffText = nil; documentSelection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "application/octet-stream", data: data, sha256: sha256, rootID: root.id, path: entry.path, scope: captured.scope) }
             return true
@@ -3934,7 +4005,7 @@ private struct WorkspaceImagePreview: View {
     let context: ArtifactPreviewContext
     let refresh: (() async throws -> Data)?
     let onRevision: ((String) async -> Void)?
-    let refreshSequence: UInt64?
+    let refreshPoint: WorkspaceObservationPoint?
     let initialNote: String
     let onClose: () -> Void
     let onAnnotation: (ArtifactAnnotation) throws -> Void
@@ -3944,12 +4015,12 @@ private struct WorkspaceImagePreview: View {
     init(model: ConnectionModel, chat: ChatSummary, item: WorkspacePreviewSelection,
          context: ArtifactPreviewContext, revision: WorkspaceRevisionState,
          refresh: (() async throws -> Data)?,
-         onRevision: ((String) async -> Void)?, refreshSequence: UInt64?,
+         onRevision: ((String) async -> Void)?, refreshPoint: WorkspaceObservationPoint?,
          initialNote: String, onClose: @escaping () -> Void,
          onAnnotation: @escaping (ArtifactAnnotation) throws -> Void) {
         self.model = model; self.chat = chat; self.item = item; self.context = context
         self.revision = revision
-        self.refresh = refresh; self.onRevision = onRevision; self.refreshSequence = refreshSequence
+        self.refresh = refresh; self.onRevision = onRevision; self.refreshPoint = refreshPoint
         self.initialNote = initialNote
         self.onClose = onClose
         self.onAnnotation = onAnnotation
@@ -3999,9 +4070,9 @@ private struct WorkspaceImagePreview: View {
                 WorkspaceRegionEditor(name: item.name, source: revision.currentData, context: context,
                                       format: .image, onAnnotation: onAnnotation, initialNote: initialNote)
             }
-            .task(id: refreshSequence) {
-                guard let refreshSequence else { return }
-                await revision.observe(sequence: refreshSequence, refresh: refresh, onRevision: onRevision,
+            .task(id: refreshPoint) {
+                guard let refreshPoint else { return }
+                await revision.observe(point: refreshPoint, refresh: refresh, onRevision: onRevision,
                     failureMessage: "Could not check this image. Check your Mac or workspace access and try again.")
             }
     }
@@ -4368,7 +4439,7 @@ private struct WorkspaceVersionedBinaryPreview: View {
     @ObservedObject var revision: WorkspaceRevisionState
     let refresh: (() async throws -> Data)?
     let onRevision: ((String) async -> Void)?
-    let refreshSequence: UInt64?
+    let refreshPoint: WorkspaceObservationPoint?
     let modelSession: WorkspaceModelPreviewSession?
     let origin: String
     let onClose: () -> Void
@@ -4422,9 +4493,9 @@ private struct WorkspaceVersionedBinaryPreview: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .task(id: refreshSequence) {
-            guard let refreshSequence else { return }
-            await revision.observe(sequence: refreshSequence, refresh: refresh, onRevision: onRevision,
+        .task(id: refreshPoint) {
+            guard let refreshPoint else { return }
+            await revision.observe(point: refreshPoint, refresh: refresh, onRevision: onRevision,
                 failureMessage: "Could not check this file. Check your Mac or workspace access and try again.")
         }
     }
@@ -4439,7 +4510,7 @@ private struct WorkspaceDocumentPreview: View {
     let onAnnotation: ((ArtifactAnnotation) throws -> Void)?
     let refresh: (() async throws -> Data)?
     let onRevision: ((String) async -> Void)?
-    let refreshSequence: UInt64?
+    let refreshPoint: WorkspaceObservationPoint?
     let onClose: (() -> Void)?
     @ObservedObject var revision: WorkspaceRevisionState
     @ObservedObject var draft: WorkspaceTextAnnotationDraft
@@ -4451,14 +4522,14 @@ private struct WorkspaceDocumentPreview: View {
          onAnnotation: ((ArtifactAnnotation) throws -> Void)? = nil,
          refresh: (() async throws -> Data)? = nil,
          onRevision: ((String) async -> Void)? = nil,
-         refreshSequence: UInt64? = nil,
+         refreshPoint: WorkspaceObservationPoint? = nil,
          onClose: (() -> Void)? = nil) {
         self.name = name; self.mimeType = mimeType; self.pdfSession = pdfSession
         self.htmlSession = htmlSession
         self.revision = revision
         self.draft = draft
         self.annotationContext = annotationContext; self.onAnnotation = onAnnotation
-        self.refresh = refresh; self.onRevision = onRevision; self.refreshSequence = refreshSequence
+        self.refresh = refresh; self.onRevision = onRevision; self.refreshPoint = refreshPoint
         self.onClose = onClose
     }
     @Environment(\.dismiss) private var dismiss
@@ -4603,9 +4674,9 @@ private struct WorkspaceDocumentPreview: View {
                                           format: .pdf, onAnnotation: onAnnotation, initialNote: draft.note)
                 }
             }
-            .task(id: refreshSequence) {
-                guard let refreshSequence else { return }
-                await revision.observe(sequence: refreshSequence, refresh: refresh, onRevision: onRevision,
+            .task(id: refreshPoint) {
+                guard let refreshPoint else { return }
+                await revision.observe(point: refreshPoint, refresh: refresh, onRevision: onRevision,
                     failureMessage: "Could not check this file. Check your Mac or workspace access and try again.")
             }
             .task(id: revision.currentSha256) { await revision.prepareTextIfNeeded(mimeType: mimeType) }

@@ -10,36 +10,136 @@ import WonderPairing
 @testable import Wonder
 
 final class WonderDiagnosticsTests: XCTestCase {
-    @MainActor func testWorkspaceRevisionChecksLatestSequenceAfterPriorCheckIsCancelled() async throws {
+    @MainActor func testWorkspaceRevisionCoalescesRapidSequencesDuringSlowRead() async throws {
+        actor Counter {
+            private var value = 0
+            func next() -> Int { value += 1; return value }
+            func count() -> Int { value }
+        }
+        actor ReadGate {
+            private var opened = false
+            private var waiter: CheckedContinuation<Void, Never>?
+            func wait() async {
+                if opened { return }
+                await withCheckedContinuation { waiter = $0 }
+            }
+            func open() {
+                opened = true
+                waiter?.resume()
+                waiter = nil
+            }
+        }
         let original = Data("old".utf8)
         let updated = Data("new".utf8)
         let revision = WorkspaceRevisionState(data: original, sha256: ConversationFile.digest(original))
-        revision.observedSequence = 1
+        revision.observedPoint = WorkspaceObservationPoint(hostEpoch: "epoch-1", sequence: 1)
+        let reads = Counter()
+        let notices = Counter()
+        let gate = ReadGate()
         let firstStarted = expectation(description: "First revision read started")
-        let secondStarted = expectation(description: "Newest revision read started")
-        let first = Task { @MainActor in
-            await revision.observe(sequence: 2, refresh: {
+        let newestStarted = expectation(description: "Newest revision read started")
+        let refresh: () async throws -> Data = {
+            if await reads.next() == 1 {
                 firstStarted.fulfill()
-                try await Task.sleep(for: .seconds(5))
+                await gate.wait()
+                try Task.checkCancellation()
                 return original
-            }, onRevision: nil, failureMessage: "Read failed")
+            }
+            newestStarted.fulfill()
+            return updated
         }
+        let onRevision: (String) async -> Void = { _ in _ = await notices.next() }
+        await revision.observe(point: WorkspaceObservationPoint(hostEpoch: "epoch-1", sequence: 2),
+                               refresh: refresh, onRevision: onRevision, failureMessage: "Read failed")
         await fulfillment(of: [firstStarted], timeout: 2)
         XCTAssertTrue(revision.refreshing)
-        let second = Task { @MainActor in
-            await revision.observe(sequence: 3, refresh: {
-                secondStarted.fulfill()
-                return updated
-            }, onRevision: nil, failureMessage: "Read failed")
+        for sequence in 3...40 {
+            await revision.observe(point: WorkspaceObservationPoint(hostEpoch: "epoch-1", sequence: UInt64(sequence)), refresh: refresh,
+                                   onRevision: onRevision, failureMessage: "Read failed")
         }
-        await Task.yield()
-        first.cancel()
-        await first.value
-        await second.value
-        await fulfillment(of: [secondStarted], timeout: 2)
-        XCTAssertEqual(revision.observedSequence, 3)
+        let readsDuringStream = await reads.count()
+        XCTAssertEqual(readsDuringStream, 1, "Streaming updates should not restart an in-flight download")
+        await gate.open()
+        await fulfillment(of: [newestStarted], timeout: 3)
+        for _ in 0..<100 where revision.observedPoint?.sequence != 40 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(revision.observedPoint, WorkspaceObservationPoint(hostEpoch: "epoch-1", sequence: 40))
+        let finalReads = await reads.count()
+        XCTAssertEqual(finalReads, 2, "Only the latest pending sequence needs another read")
         XCTAssertEqual(revision.offeredData, updated)
         XCTAssertEqual(revision.offeredSha256, ConversationFile.digest(updated))
+        let firstNotices = await notices.count()
+        XCTAssertEqual(firstNotices, 2)
+
+        await revision.observe(point: WorkspaceObservationPoint(hostEpoch: "epoch-1", sequence: 41),
+                               refresh: { updated }, onRevision: onRevision,
+                               failureMessage: "Read failed")
+        for _ in 0..<100 where revision.observedPoint?.sequence != 41 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let finalNotices = await notices.count()
+        XCTAssertEqual(finalNotices, 3, "A new draft note needs stale reconciliation even for the same offered bytes")
+
+        await revision.observe(point: WorkspaceObservationPoint(hostEpoch: "epoch-2", sequence: 0),
+                               refresh: { updated }, onRevision: onRevision, failureMessage: "Read failed")
+        for _ in 0..<100 where revision.observedPoint?.hostEpoch != "epoch-2" {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(revision.observedPoint, WorkspaceObservationPoint(hostEpoch: "epoch-2", sequence: 0),
+                       "A restarted host with a lower sequence must still check the selected file")
+
+        let sustainedReads = Counter()
+        for sequence in 1...12 {
+            await revision.observe(point: WorkspaceObservationPoint(hostEpoch: "epoch-2", sequence: UInt64(sequence)),
+                                   refresh: { _ = await sustainedReads.next(); return updated },
+                                   onRevision: onRevision, failureMessage: "Read failed")
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        for _ in 0..<200 where revision.observedPoint?.sequence != 12 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(revision.observedPoint, WorkspaceObservationPoint(hostEpoch: "epoch-2", sequence: 12))
+        let sampledReads = await sustainedReads.count()
+        XCTAssertLessThanOrEqual(sampledReads, 3, "Sustained chat updates should bound full-file reads")
+
+        let revertedNotice = expectation(description: "Reverted source reconciles draft notes")
+        await revision.observe(point: WorkspaceObservationPoint(hostEpoch: "epoch-2", sequence: 13),
+                               refresh: { original }, onRevision: { sha256 in
+                                   if sha256 == ConversationFile.digest(original) { revertedNotice.fulfill() }
+                               }, failureMessage: "Read failed")
+        await fulfillment(of: [revertedNotice], timeout: 2)
+        XCTAssertNil(revision.offeredData, "A byte-for-byte revert should clear the pending revision offer")
+        revision.close()
+
+        let cancelledEpochGate = ReadGate()
+        let guardedEpoch = WorkspaceRevisionState(data: original, sha256: ConversationFile.digest(original))
+        guardedEpoch.observedPoint = WorkspaceObservationPoint(hostEpoch: "epoch-1", sequence: 10)
+        let lateOldEpoch = Task {
+            await cancelledEpochGate.wait()
+            await guardedEpoch.observe(point: WorkspaceObservationPoint(hostEpoch: "epoch-1", sequence: 11),
+                                       refresh: { original }, onRevision: nil, failureMessage: "Read failed")
+        }
+        lateOldEpoch.cancel()
+        await guardedEpoch.observe(point: WorkspaceObservationPoint(hostEpoch: "epoch-2", sequence: 0),
+                                   refresh: { updated }, onRevision: nil, failureMessage: "Read failed")
+        await cancelledEpochGate.open()
+        await lateOldEpoch.value
+        for _ in 0..<100 where guardedEpoch.observedPoint?.hostEpoch != "epoch-2" {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(guardedEpoch.observedPoint, WorkspaceObservationPoint(hostEpoch: "epoch-2", sequence: 0),
+                       "A cancelled observation from the old epoch must not replace the restart check")
+        guardedEpoch.close()
+
+        let openedBeforeSnapshot = WorkspaceRevisionState(data: original, sha256: ConversationFile.digest(original))
+        openedBeforeSnapshot.observedPoint = WorkspaceObservationPoint(hostEpoch: "", sequence: 0)
+        let firstSnapshotRead = expectation(description: "First snapshot after file open is checked")
+        await openedBeforeSnapshot.observe(point: WorkspaceObservationPoint(hostEpoch: "epoch-3", sequence: 1),
+                                           refresh: { firstSnapshotRead.fulfill(); return updated },
+                                           onRevision: nil, failureMessage: "Read failed")
+        await fulfillment(of: [firstSnapshotRead], timeout: 2)
+        openedBeforeSnapshot.close()
     }
 
     @MainActor func testPDFPreviewRetainsPageReadingPointAndZoomAcrossRevision() throws {

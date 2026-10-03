@@ -2801,6 +2801,24 @@ import UIKit
         XCTAssertTrue(app.descendants(matching: .any)["annotation-note"].waitForExistence(timeout: 5))
         XCTAssertFalse((app.descendants(matching: .any)["annotation-note"].value as? String)?
             .contains("Keep this draft") == true, "Cancel must discard the unsaved comment")
+
+        let freshNote = app.descendants(matching: .any)["annotation-note"]
+        freshNote.tap(); freshNote.typeText("Review this highlight")
+        app.buttons["workspace-preview-expand"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
+        app.buttons["annotation-add"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].exists,
+                      "Saving a comment should leave the full-screen preview open")
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-annotation-added"].waitForExistence(timeout: 5))
+        app.buttons["workspace-preview-collapse"].tap()
+        XCTAssertTrue(app.buttons["composer-annotation-edit"].waitForExistence(timeout: 5),
+                      "The saved highlight should be attached to the unsent composer")
+        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove preview note")).firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        remove.tap()
+        app.buttons["workspace-preview-expand"].tap()
+        XCTAssertFalse(app.descendants(matching: .any)["workspace-annotation-added"].exists,
+                       "The preview must not claim a removed note is still attached")
     }
 
     func testProjectImageRegionAnnotationUsesDraggedAreaWithoutSending() throws {
