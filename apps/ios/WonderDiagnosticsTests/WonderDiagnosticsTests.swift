@@ -1872,6 +1872,62 @@ final class WonderDiagnosticsTests: XCTestCase {
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/project-conversations/project-chat", body: projectDetail(pinned: false))
         try await model.projects.loadDetail("project-chat")
     }
+
+    // Contract: the composer warning reflects the newest checked source even
+    // when an older annotation download finishes afterward. The host still
+    // validates the source hash at send; this covers the client-visible state.
+    @MainActor func testAnnotationStaleWarningIgnoresOlderRevisionDownload() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        defer {
+            MessageRecoveryURLProtocol.releaseHeld()
+            model.projects.forgetCache()
+            try? FileManager.default.removeItem(at: root)
+        }
+        try await prepareProject(model)
+        let chat = model.projectChat(try XCTUnwrap(model.projects.details["project-chat"]))
+        let original = Data("Old source".utf8)
+        let annotation = try ArtifactAnnotation(projectId: "project", conversationId: chat.id,
+            rootId: "workspace", path: "README.md", source: original, mimeType: "text/plain",
+            startByte: 0, endByte: 3, note: "Check this")
+        let bytes = try annotation.stagedFile().data
+        let fileID = UUID().uuidString
+        let metadata: [String: Any] = ["id": fileID, "name": "README.md.annotation.json",
+            "mimeType": ArtifactAnnotation.mimeType, "byteSize": bytes.count,
+            "sha256": ConversationFile.digest(bytes), "state": "available", "updatedAt": "fixture"]
+        let file = try JSONDecoder().decode(ConversationFile.self,
+            from: JSONSerialization.data(withJSONObject: metadata))
+        model.files[chat.id] = [file]
+        var composer = ComposerIntent()
+        composer.draftAttachmentIds = [file.id]
+        model.composers[chat.id] = composer
+        let path = "/api/v1/conversations/\(chat.id)/files/\(file.id)"
+        MessageRecoveryURLProtocol.enqueue(path: path, body: bytes, contentType: ArtifactAnnotation.mimeType)
+        MessageRecoveryURLProtocol.enqueue(path: path, body: bytes, contentType: ArtifactAnnotation.mimeType)
+        MessageRecoveryURLProtocol.hold(path: path)
+
+        let older = Task { await model.noteWorkspaceRevision(chat, rootID: "workspace", path: "README.md",
+                                                             currentSha256: ConversationFile.digest(original)) }
+        for _ in 0..<100 where MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count < 1 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count, 1)
+        let newer = Task { await model.noteWorkspaceRevision(chat, rootID: "workspace", path: "README.md",
+                                                             currentSha256: ConversationFile.digest(Data("New source".utf8))) }
+        for _ in 0..<100 where MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count < 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count, 2)
+        MessageRecoveryURLProtocol.releaseNewestHeld()
+        await newer.value
+        XCTAssertTrue(model.isAnnotationStale(file.id, chat: chat.id))
+        MessageRecoveryURLProtocol.releaseHeld()
+        await older.value
+        XCTAssertTrue(model.isAnnotationStale(file.id, chat: chat.id),
+                      "An older matching source must not clear the newer stale warning")
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/conversations/\(chat.id)/messages").isEmpty)
+    }
     private func projectDetail(pinned: Bool, plan: Bool = false, unread: Bool = false) -> Data {
         Data(#"{"conversationId":"project-chat","projectId":"project","projectName":"Project","title":"Thread","family":"claude","model":"claude:sonnet","effort":"high","accessMode":"workspace","workingFolder":"/fixture","workingFolderName":"fixture","isPinned":\#(pinned),"hasUnread":\#(unread),"hasNativeSession":true,"folderInProject":true,"claudeApproval":"ask","planMode":\#(plan)}"#.utf8)
     }
@@ -3639,7 +3695,7 @@ private final class Release2RegressionURLProtocol: URLProtocol, @unchecked Senda
 /// Synthetic, scoped transport. Held requests are released explicitly by tests;
 /// no real host, credentials or model execution is involved.
 private final class MessageRecoveryURLProtocol: URLProtocol, @unchecked Sendable {
-    private enum Reply { case response(Int, Data), failure(URLError.Code) }
+    private enum Reply { case response(Int, Data, String), failure(URLError.Code) }
     private final class State: @unchecked Sendable {
         let lock = NSLock()
         var replies: [String: [Reply]] = [:]
@@ -3653,8 +3709,9 @@ private final class MessageRecoveryURLProtocol: URLProtocol, @unchecked Sendable
         releaseHeld()
         state.lock.withLock { state.replies = [:]; state.requests = []; state.heldPath = nil; state.heldMethod = nil }
     }
-    static func enqueue(path: String, method: String? = nil, status: Int = 200, body: Data = Data("{}".utf8)) {
-        state.lock.withLock { state.replies[method.map { $0 + " " + path } ?? path, default: []].append(.response(status, body)) }
+    static func enqueue(path: String, method: String? = nil, status: Int = 200, body: Data = Data("{}".utf8),
+                        contentType: String = "application/json") {
+        state.lock.withLock { state.replies[method.map { $0 + " " + path } ?? path, default: []].append(.response(status, body, contentType)) }
     }
     static func fail(path: String, error: URLError.Code) {
         state.lock.withLock { state.replies[path, default: []].append(.failure(error)) }
@@ -3666,6 +3723,10 @@ private final class MessageRecoveryURLProtocol: URLProtocol, @unchecked Sendable
     static func releaseHeld() {
         let work = state.lock.withLock { let work = state.held; state.held = []; state.heldPath = nil; state.heldMethod = nil; return work }
         work.forEach { $0() }
+    }
+    static func releaseNewestHeld() {
+        let work = state.lock.withLock { state.held.popLast() }
+        work?()
     }
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "camera-unit.invalid" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -3700,7 +3761,9 @@ private final class MessageRecoveryURLProtocol: URLProtocol, @unchecked Sendable
             return Self.state.replies[key]?.removeFirst()
         }
         if case .failure(let code) = reply { client?.urlProtocol(self, didFailWithError: URLError(code)); return }
-        if case .response(let status, let data) = reply { finish(status: status, body: data); return }
+        if case .response(let status, let data, let contentType) = reply {
+            finish(status: status, body: data, contentType: contentType); return
+        }
         if path == "/api/v1/group-chats/group/messages", let body,
            let sent = try? JSONDecoder().decode(SendRequest.self, from: body) {
             let value = ["clientMessageId": sent.clientMessageId, "wonderMessageId": "accepted",
@@ -3715,8 +3778,8 @@ private final class MessageRecoveryURLProtocol: URLProtocol, @unchecked Sendable
         }
         finish(status: 200, body: Data("[]".utf8))
     }
-    private func finish(status: Int, body: Data) {
-        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+    private func finish(status: Int, body: Data, contentType: String = "application/json") {
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": contentType])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)

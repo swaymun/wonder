@@ -19,7 +19,7 @@ Keep the Mac awake and online while using it remotely.
 | iPhone and iPad | Production Release 1.0 (82) is uploaded and Apple reports processing complete. Its signed archive includes the Project Widget and passed channel identity, APNs, App Group, Keychain and Diagnostics-exclusion checks. Tester availability and TestFlight installation remain unverified. |
 | Wonder Testing | The separate blue Release 1.0 (20) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed the same channel-specific checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
 | Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Replacement 1.0.108 is signed, notarized and installed locally and on a clean second Mac; publication waits for the remaining pairing, permission and draft-upgrade gates. |
-| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder); this release's internal source is `91022396`. Third-party components retain their own licenses. |
+| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). The current internal branch includes post-upload fixes that are absent from Testing 20, production 82 and Mac 1.0.108. Third-party components retain their own licenses. |
 
 A replacement Mac companion, 1.0.108, has been signed, notarized, stapled and
 installed over 1.0.107 on the owner's Mac. The same verified DMG installed and
@@ -77,11 +77,32 @@ tested iOS 26.5 simulators, so the existing dictation path remains in place.
 EPUB and read-only USDZ/OBJ/PLY/STL viewers passed focused checks, while
 repeated SceneKit conversion retained measurable memory; broader GLB support
 remains at a research gate. Configured small Widget presentation and new-chat
-taps now pass on both simulators with a team-signed Testing QA copy. Recent-chat
-Widget taps, paired mobile-to-Mac provider-send roundtrips, and TestFlight
-installation remain unverified. Paired read-only Files, PNG/PDF previews,
+taps, plus medium recent-chat presentation and taps, pass on both simulators
+with a team-signed Testing QA copy. The medium tap opened an existing Project
+conversation with its composer. Paired live-Project Widget routing,
+mobile-to-Mac provider-send roundtrips, and installation of this source
+through TestFlight remain unverified. Paired read-only Files, PNG/PDF previews,
 audio/video playback and seeking, and an unsent preview note passed on both
 simulators as described below.
+
+After the upload cap, the open Files list gained event-driven refresh with a
+bounded retry, a manual Refresh control and a fence for a workspace root that
+changes path under the same ID. The selected preview stays open through a
+message send. The latest signed Diagnostics UI runs passed 6/6 each on iPhone
+and iPad, including an accepted synthetic send, a failed-read retry, the
+replacement-root case, HTML reading-position retention and a script-blocked
+HTML preview. An out-of-order annotation download regression passed 1/1 on
+each simulator; the composer keeps the newest stale-source warning. These are
+synthetic checks of unshipped source. A paired live edit and provider send,
+narrow iPad window, current-source TestFlight installation and physical-device
+behavior remain open.
+
+A final review found that authorization or missing-resource responses during
+Files refresh could leave previously listed rows available. The browser now
+clears cached roots, directory and Git rows in those cases; transient failures
+retain rows with retry feedback. Synthetic revocation after the initial list
+loaded, transient retry and same-ID root replacement passed 5/5 focused UI
+checks on each simulator, with no skips. The fix remains unshipped.
 
 The post-release hardening review additionally corrected Bot and Project
 history/lifecycle waits that could delay update handoff. One ambiguous Bot

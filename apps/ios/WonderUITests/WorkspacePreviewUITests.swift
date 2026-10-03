@@ -9,12 +9,14 @@ import XCTest
         #endif
     }
 
-    private func launchProjectFiles(revision: Bool = false, html: Bool = false) -> XCUIApplication {
+    private func launchProjectFiles(revision: Bool = false, html: Bool = false,
+                                    hostileHTML: Bool = false) -> XCUIApplication {
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
                                "-project-files-conversation-preview", "-workspace-document-preview"]
         if revision { app.launchArguments.append("-artifact-revision-preview") }
         if html { app.launchArguments.append("-workspace-html-scroll-preview") }
+        if hostileHTML { app.launchArguments.append("-workspace-html-script-preview") }
         app.launch()
         XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 10))
         return app
@@ -248,5 +250,20 @@ import XCTest
         XCTAssertFalse(app.webViews.containing(.staticText, identifier: "Original reading page")
             .allElementsBoundByIndex.contains(where: { $0.isHittable }))
         capture(app, name: "Accepted HTML revision")
+    }
+
+    func testHTMLPreviewDoesNotRunEmbeddedScript() {
+        continueAfterFailure = false
+        let app = launchProjectFiles(hostileHTML: true)
+        open("reader.html", in: app)
+        let safe = app.webViews.staticTexts["Safe content remains"]
+        XCTAssertTrue(safe.waitForExistence(timeout: 10),
+                      "HTML content should remain readable with scripts disabled")
+        XCTAssertFalse(app.webViews.staticTexts["SCRIPT EXECUTED"].exists,
+                       "A workspace HTML preview must not execute source scripts")
+        app.buttons["workspace-preview-expand"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.webViews.staticTexts["Safe content remains"].exists)
+        XCTAssertFalse(app.webViews.staticTexts["SCRIPT EXECUTED"].exists)
     }
 }

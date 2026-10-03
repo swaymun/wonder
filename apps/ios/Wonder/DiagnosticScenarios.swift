@@ -277,6 +277,11 @@ enum DiagnosticSubagentFixture {
     static var projectSpeedFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-speed") }
     static var projectSubagentFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents") }
     static var projectFilesSendFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-send") }
+    static var projectFilesRefreshFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-refresh") }
+    static var projectFilesRootPathFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-root-path-changed") }
+    static var projectFilesRevokedAtRoots: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-revoked-roots") }
+    static var projectFilesRevokedAtDirectory: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-revoked-directory") }
+    static var projectFilesRevokedAtGit: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-revoked-git") }
     static var questionResolutionFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-question-resolution") }
     static var projectReadFixture: Bool { projectArchiveFixture || projectSpeedFixture || projectSubagentFixture || projectFilesSendFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
     static let hostID = "diagnostic-host"
@@ -379,7 +384,8 @@ enum DiagnosticSubagentFixture {
             "state": "completed", "codexTurnId": "layout-turn-\(index)", "codexThreadId": parentThreadID,
             "createdAt": String(index * 1000), "attachmentIds": []
         ] }
-        return ["conversationId": parentID, "hostEpoch": "fixture", "lastSequence": 1,
+        let sequence = projectFilesRefreshFixture && DiagnosticSubagentURLProtocol.state.lock.withLock({ DiagnosticSubagentURLProtocol.state.workspaceChanged }) ? 2 : 1
+        return ["conversationId": parentID, "hostEpoch": "fixture", "lastSequence": sequence,
                 "messages": messages, "assistantMessages": [],
                 "thread": ["threadId": parentThreadID, "hydrated": true, "turns": turns]]
     }
@@ -397,6 +403,8 @@ enum DiagnosticSubagentFixture {
             state.goalTokenBudget = 1_000
             state.goalTimeBudgetSeconds = 600
             state.questionResolved = false
+            state.workspaceChanged = false
+            state.workspaceRefreshFailures = 0
         }
     }
     static func updateChild(status: String) {
@@ -431,6 +439,8 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var projectServiceTier = "default"
         var archiveFailures = 1
         var questionResolved = false
+        var workspaceChanged = false
+        var workspaceRefreshFailures = 0
         var goalPresent = DiagnosticSubagentFixture.goalFixture
         var goalObjective = "Prepare a reliable beta launch with the Scout helper."
         var goalStatus = DiagnosticSubagentFixture.goalFixtureStatus
@@ -707,20 +717,53 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             "subagents": ProcessInfo.processInfo.arguments.contains("-diagnostics-history-replay") ? [] : [childSummary(), unavailableChildSummary()]
         ]))
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/workspace/roots" where DiagnosticSubagentFixture.projectFilesSendFixture && method == "GET":
+            if DiagnosticSubagentFixture.projectFilesRevokedAtRoots && Self.state.lock.withLock({ Self.state.workspaceChanged }) {
+                finish(status: 403, body: Data("{}".utf8)); return
+            }
+            if DiagnosticSubagentFixture.projectFilesRefreshFixture &&
+                ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-refresh-fail-once") {
+                let shouldFail = Self.state.lock.withLock { () -> Bool in
+                    guard Self.state.workspaceChanged, Self.state.workspaceRefreshFailures == 0 else { return false }
+                    Self.state.workspaceRefreshFailures = 1
+                    return true
+                }
+                if shouldFail { finish(status: 503, body: Data("{}".utf8)); return }
+            }
+            let moved = DiagnosticSubagentFixture.projectFilesRootPathFixture && Self.state.lock.withLock { Self.state.workspaceChanged }
             finish(status: 200, body: json(["available": true, "detail": NSNull(), "roots": [[
-                "id": "fixture-root", "label": "Workspace", "path": "/fixture", "isDirectory": true,
+                "id": "fixture-root", "label": moved ? "Replacement workspace" : "Workspace",
+                "path": moved ? "/fixture-replaced" : "/fixture", "isDirectory": true,
                 "kind": "workingDirectory", "readOnly": true
             ]], "attachments": []]))
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/workspace/directory" where DiagnosticSubagentFixture.projectFilesSendFixture && method == "GET":
+            if DiagnosticSubagentFixture.projectFilesRevokedAtDirectory && Self.state.lock.withLock({ Self.state.workspaceChanged }) {
+                finish(status: 403, body: Data("{}".utf8)); return
+            }
             let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
             guard query.first(where: { $0.name == "root" })?.value == "fixture-root",
                   query.first(where: { $0.name == "path" })?.value == "" else {
                 finish(status: 400, body: Data("{}".utf8)); return
             }
+            let changed = DiagnosticSubagentFixture.projectFilesRefreshFixture && Self.state.lock.withLock { Self.state.workspaceChanged }
+            let moved = changed && DiagnosticSubagentFixture.projectFilesRootPathFixture
+            if moved { Thread.sleep(forTimeInterval: 1.5) }
+            var entries: [[String: Any]] = moved ? [] : [["name": "README.md", "path": "README.md", "isDirectory": false,
+                                                        "byteSize": Data("Live workspace note.\n".utf8).count, "mimeType": "text/plain"]]
+            if changed { entries.append(["name": "Project update.md", "path": "Project update.md", "isDirectory": false,
+                                         "byteSize": 19, "mimeType": "text/plain"]) }
             finish(status: 200, body: json(["rootId": "fixture-root", "path": "", "parentPath": NSNull(),
-                "entries": [["name": "README.md", "path": "README.md", "isDirectory": false,
-                             "byteSize": Data("Live workspace note.\n".utf8).count, "mimeType": "text/plain"]],
+                "entries": entries,
                 "nextOffset": NSNull()]))
+        case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/workspace/git/status" where DiagnosticSubagentFixture.projectFilesRefreshFixture && method == "GET":
+            if DiagnosticSubagentFixture.projectFilesRevokedAtGit && Self.state.lock.withLock({ Self.state.workspaceChanged }) {
+                finish(status: 403, body: Data("{}".utf8)); return
+            }
+            let changed = Self.state.lock.withLock { Self.state.workspaceChanged }
+            let changes: [[String: Any]] = changed
+                ? [["path": "Project update.md", "state": "untracked", "indexStatus": "?", "worktreeStatus": "?"]]
+                : []
+            finish(status: 200, body: json(["available": true, "detail": NSNull(),
+                "repositoryPath": "/fixture", "changes": changes]))
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/workspace/file" where DiagnosticSubagentFixture.projectFilesSendFixture && method == "GET":
             let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
             guard query.first(where: { $0.name == "root" })?.value == "fixture-root",
@@ -732,6 +775,9 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             guard let body, let request = try? JSONDecoder().decode(SendRequest.self, from: body),
                   request.body == "Review this file while Files stays open.", request.attachmentIds.isEmpty else {
                 finish(status: 400, body: Data("{}".utf8)); return
+            }
+            if DiagnosticSubagentFixture.projectFilesRefreshFixture {
+                Self.state.lock.withLock { Self.state.workspaceChanged = true }
             }
             finish(status: 200, body: json(["clientMessageId": request.clientMessageId,
                 "wonderMessageId": "fixture-sent-message", "conversationId": DiagnosticSubagentFixture.parentID,

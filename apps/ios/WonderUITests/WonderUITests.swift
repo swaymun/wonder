@@ -10,6 +10,134 @@ import UIKit
         #endif
     }
     private var appDisplayName: String { appBundleIdentifier.hasSuffix(".testing") ? "Wonder Testing" : "Wonder" }
+
+    // Manual QA uses a team-signed Testing app/Widget and a disposable App
+    // Group snapshot. Ordinary UI suites do not alter the Home Screen.
+    private func requireRecentWidgetQA() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard appBundleIdentifier.hasSuffix(".testing"),
+              environment["WONDER_WIDGET_RECENT_QA"] == "1",
+              let ownedDevice = environment["WONDER_WIDGET_QA_DEVICE_NAME"],
+              !ownedDevice.isEmpty, ownedDevice == environment["SIMULATOR_DEVICE_NAME"] else {
+            throw XCTSkip("A signed Testing Widget, synthetic App Group snapshot, and explicit QA simulator name are required")
+        }
+    }
+
+    private func mediumProjectWidget(on springboard: XCUIApplication) -> XCUIElement? {
+        let widgets = springboard.icons.matching(NSPredicate(format: "identifier == %@ AND value CONTAINS %@",
+                                                             appDisplayName, "Widget"))
+        return widgets.allElementsBoundByIndex.first {
+            let frame = $0.frame
+            return frame.width > 240 && frame.height > 0 &&
+                (1.5...3.4).contains(frame.width / frame.height) && $0.isHittable
+        }
+    }
+
+    func testPlaceMediumProjectWidgetForRecentChatQA() throws {
+        try requireRecentWidgetQA()
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview", "-project-files-preview", "-project-files-conversation-preview"]
+        app.launch()
+        XCTAssertTrue(app.buttons["connection-picker"].waitForExistence(timeout: 15))
+        XCUIDevice.shared.press(.home)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCTAssertTrue(springboard.wait(for: .runningForeground, timeout: 10))
+        if mediumProjectWidget(on: springboard) == nil {
+            let edit = springboard.buttons["Edit"]
+            if !edit.exists { springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.68)).press(forDuration: 1.5) }
+            XCTAssertTrue(edit.waitForExistence(timeout: 5))
+            edit.tap()
+            let addWidgetButton = springboard.buttons["Add Widget"]
+            XCTAssertTrue(addWidgetButton.waitForExistence(timeout: 5))
+            addWidgetButton.tap()
+            let search = springboard.searchFields["Search Widgets"]
+            XCTAssertTrue(search.waitForExistence(timeout: 10))
+            search.tap()
+            search.typeText("Wonder")
+            let wonder = springboard.cells[appDisplayName]
+            XCTAssertTrue(wonder.waitForExistence(timeout: 10))
+            wonder.tap()
+            let card = springboard.buttons.matching(NSPredicate(format: "label == %@", "\(appDisplayName), Project")).firstMatch
+            XCTAssertTrue(card.waitForExistence(timeout: 10))
+            card.swipeLeft()
+            XCTAssertTrue((card.value as? String)?.contains("Medium") == true, "Choose the medium recent-chat layout")
+            let addSelected = springboard.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Add Widget")).firstMatch
+            XCTAssertTrue(addSelected.waitForExistence(timeout: 5))
+            addSelected.tap()
+            let done = springboard.buttons["Done"]
+            if done.exists { done.tap() }
+        }
+        guard let widget = mediumProjectWidget(on: springboard) else {
+            XCTFail("A visible medium Wonder Testing Widget was not placed")
+            return
+        }
+        widget.press(forDuration: 1.2)
+        let configure = springboard.buttons["Edit Widget"]
+        XCTAssertTrue(configure.waitForExistence(timeout: 10))
+        configure.tap()
+        let project = springboard.buttons["Project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let selected = springboard.buttons["Preview project"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 10))
+        selected.tap()
+        XCUIDevice.shared.press(.home)
+        let capture = XCTAttachment(screenshot: springboard.screenshot())
+        capture.name = "Configured medium Wonder Project Widget"
+        capture.lifetime = .keepAlways
+        add(capture)
+    }
+
+    func testConfiguredMediumProjectWidgetOpensRecentChat() throws {
+        try requireRecentWidgetQA()
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview", "-project-files-preview", "-project-files-conversation-preview"]
+        app.launch()
+        XCTAssertTrue(app.buttons["connection-picker"].waitForExistence(timeout: 15))
+        XCUIDevice.shared.press(.home)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCTAssertTrue(springboard.wait(for: .runningForeground, timeout: 10))
+        if mediumProjectWidget(on: springboard) == nil { springboard.swipeLeft() }
+        guard let widget = mediumProjectWidget(on: springboard) else {
+            XCTFail("A configured medium Wonder Testing Widget must be visible")
+            return
+        }
+        widget.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.58)).tap()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "The Widget tap must foreground Wonder")
+        let title = app.buttons["conversation-title-menu"]
+        XCTAssertTrue(title.waitForExistence(timeout: 15))
+        XCTAssertTrue(title.label.contains("Project notes"))
+        XCTAssertTrue(title.label.contains("Preview project"))
+        XCTAssertTrue(app.textViews["message-draft"].exists)
+        XCTAssertFalse(app.textViews["new-chat-draft"].exists)
+        let capture = XCTAttachment(screenshot: app.screenshot())
+        capture.name = "Recent-chat Widget destination"
+        capture.lifetime = .keepAlways
+        add(capture)
+    }
+
+    func testRemoveMediumProjectWidgetAfterRecentChatQA() throws {
+        try requireRecentWidgetQA()
+        continueAfterFailure = false
+        XCUIDevice.shared.press(.home)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCTAssertTrue(springboard.wait(for: .runningForeground, timeout: 10))
+        if mediumProjectWidget(on: springboard) == nil { springboard.swipeLeft() }
+        guard let widget = mediumProjectWidget(on: springboard) else {
+            XCTFail("The exact medium QA Widget must exist before cleanup")
+            return
+        }
+        widget.press(forDuration: 1.2)
+        let remove = springboard.buttons["Remove Widget"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 10))
+        remove.tap()
+        let confirm = springboard.buttons["Remove"]
+        if confirm.waitForExistence(timeout: 3) { confirm.tap() }
+        XCTAssertNil(mediumProjectWidget(on: springboard),
+                     "Cleanup must remove the medium QA Widget from this simulator")
+    }
     private func selectTextForPreviewComment(_ app: XCUIApplication) {
         let selectable = app.textViews["annotation-selectable-text"]
         XCTAssertTrue(selectable.waitForExistence(timeout: 10))
@@ -2663,6 +2791,143 @@ import UIKit
         app.buttons["workspace-close"].tap()
         XCTAssertTrue(app.images["Received by your Mac"].waitForExistence(timeout: 10),
                       "The synthetic host must acknowledge the exact message")
+    }
+
+    func testProjectFilesRefreshesAfterOfflineMessageWhileOpen() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved",
+                               "-diagnostics-project-files-send", "-diagnostics-project-files-refresh",
+                               "-diagnostics-usage-fixture"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let thread = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 15))
+        thread.tap()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].waitForExistence(timeout: 10))
+        let update = app.buttons["workspace-file-entry:Project update.md"]
+        XCTAssertFalse(update.exists)
+        let draft = app.textViews["message-draft"]
+        XCTAssertTrue(draft.isHittable)
+        draft.tap(); draft.typeText("Review this file while Files stays open.")
+        app.buttons["send-message"].tap()
+        XCTAssertTrue(update.waitForExistence(timeout: 20),
+                      "The acknowledged Project turn must refresh the open Files listing")
+        XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].exists)
+        XCTAssertFalse(anyElement(app, identifier: "conversation-scroll").exists)
+        app.buttons["Modified"].tap()
+        XCTAssertTrue(app.buttons["workspace-modified-entry:Project update.md"].waitForExistence(timeout: 10))
+        XCTAssertTrue(draft.isHittable)
+        retainMenuScreenshot(app, name: "Project Files refreshes after host receipt")
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(app.images["Received by your Mac"].waitForExistence(timeout: 10),
+                      "The host must accept the exact synthetic Project message")
+    }
+
+    func testProjectFilesRefreshRetriesAfterTransientFailure() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved",
+                               "-diagnostics-project-files-send", "-diagnostics-project-files-refresh",
+                               "-diagnostics-project-files-refresh-fail-once", "-diagnostics-usage-fixture"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let thread = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 15))
+        thread.tap()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].waitForExistence(timeout: 10))
+        let draft = app.textViews["message-draft"]
+        draft.tap(); draft.typeText("Review this file while Files stays open.")
+        app.buttons["send-message"].tap()
+        XCTAssertTrue(app.buttons["workspace-refresh-retry"].waitForExistence(timeout: 10),
+                      "A failed background read must leave the prior listing and show recovery")
+        XCTAssertTrue(app.buttons["workspace-file-entry:README.md"].exists)
+        XCTAssertTrue(app.buttons["workspace-file-entry:Project update.md"].waitForExistence(timeout: 15),
+                      "Files must retry after reconnection without another Project event or manual tap")
+        XCTAssertFalse(app.buttons["workspace-refresh-retry"].exists)
+        XCTAssertTrue(draft.isHittable)
+    }
+
+    func testProjectFilesClearRevokedRootsAfterInitialLoad() throws {
+        verifyProjectFilesRevocation(argument: "-diagnostics-project-files-revoked-roots", modified: false)
+    }
+
+    func testProjectFilesClearRevokedDirectoryAfterInitialLoad() throws {
+        verifyProjectFilesRevocation(argument: "-diagnostics-project-files-revoked-directory", modified: false)
+    }
+
+    func testProjectFilesClearRevokedGitAfterInitialLoad() throws {
+        verifyProjectFilesRevocation(argument: "-diagnostics-project-files-revoked-git", modified: true)
+    }
+
+    private func verifyProjectFilesRevocation(argument: String, modified: Bool) {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved",
+                               "-diagnostics-project-files-send", "-diagnostics-project-files-refresh",
+                               argument, "-diagnostics-usage-fixture"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let thread = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 15))
+        thread.tap()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let oldFile = app.buttons["workspace-file-entry:README.md"]
+        XCTAssertTrue(oldFile.waitForExistence(timeout: 10))
+        let draft = app.textViews["message-draft"]
+        draft.tap(); draft.typeText("Review this file while Files stays open.")
+        app.buttons["send-message"].tap()
+        if modified {
+            XCTAssertTrue(app.buttons["workspace-file-entry:Project update.md"].waitForExistence(timeout: 15),
+                          "The message must be accepted before Git access is revoked")
+            app.buttons["Modified"].tap()
+        }
+        let unavailable = anyElement(app, identifier: "workspace-unavailable")
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 15),
+                      "A denied workspace refresh must hide the previously authorized listing")
+        XCTAssertFalse(oldFile.exists)
+        XCTAssertFalse(app.staticTexts["No modified files"].exists)
+        app.buttons[modified ? "All files" : "Modified"].tap()
+        XCTAssertTrue(unavailable.exists, "Switching views must not resurrect revoked rows")
+        XCTAssertFalse(oldFile.exists)
+        app.buttons["workspace-close"].tap()
+        XCTAssertTrue(app.images["Received by your Mac"].waitForExistence(timeout: 10),
+                      "The fixture must revoke only after accepting the exact message")
+    }
+
+    func testProjectFilesClearsRowsWhenRootPathChangesUnderSameID() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-chat-layout", "-diagnostics-chat-layout-unsaved",
+                               "-diagnostics-project-files-send", "-diagnostics-project-files-refresh",
+                               "-diagnostics-project-files-root-path-changed", "-diagnostics-usage-fixture"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let thread = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 15))
+        thread.tap()
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let oldFile = app.buttons["workspace-file-entry:README.md"]
+        XCTAssertTrue(oldFile.waitForExistence(timeout: 10))
+        let draft = app.textViews["message-draft"]
+        draft.tap(); draft.typeText("Review this file while Files stays open.")
+        app.buttons["send-message"].tap()
+        XCTAssertTrue(app.staticTexts["Replacement workspace"].waitForExistence(timeout: 10))
+        XCTAssertFalse(oldFile.exists,
+                       "Old rows must not be tappable under a new path with the same root ID")
+        XCTAssertTrue(app.buttons["workspace-file-entry:Project update.md"].waitForExistence(timeout: 10))
+        XCTAssertFalse(oldFile.exists)
+        XCTAssertTrue(draft.isHittable)
     }
 
     func testProjectLargeTextPreviewKeepsFilesAndComposerResponsive() throws {

@@ -3191,6 +3191,7 @@ struct WorkspaceBrowserRequest: Identifiable {
                 let item = AVPlayerItem(asset: asset)
                 self?.player = AVPlayer(playerItem: item)
                 while !Task.isCancelled {
+                    guard self?.closed == false else { return }
                     if self?.reportFailureIfNeeded(for: item) == true { return }
                     try await Task.sleep(for: .milliseconds(500))
                 }
@@ -3225,7 +3226,10 @@ struct WorkspaceBrowserRequest: Identifiable {
         loader.cancelAll()
     }
 
-    deinit { loader.cancelAll() }
+    deinit {
+        monitor?.cancel()
+        loader.cancelAll()
+    }
 }
 
 struct WorkspaceBrowser: View {
@@ -3254,6 +3258,12 @@ struct WorkspaceBrowser: View {
     @State private var loadedRootsScope: String?
     @State private var directoryRequestID = UUID()
     @State private var gitRequestID = UUID()
+    @State private var listingRefreshTask: Task<Void, Never>?
+    @State private var listingRefreshID: UUID?
+    @State private var listedPoint: WorkspaceObservationPoint?
+    @State private var listingRefreshError: String?
+    @State private var listingRetryCount = 0
+    @State private var lastListingAttemptAt: TimeInterval?
     @State private var diffRequestID = UUID()
     @State private var fileRequestID = UUID()
     @State private var attachmentRequestID = UUID()
@@ -3287,7 +3297,9 @@ struct WorkspaceBrowser: View {
     // Hidden-file changes are explicitly reloaded by the action below. Keeping
     // this task identity scoped to navigation prevents one tap from starting
     // both the implicit task and the explicit refresh.
-    private var directoryTaskID: String { "\(model.assignmentScope):\(selectedRootID ?? ""):\(directoryPath)" }
+    private var directoryTaskID: String {
+        "\(model.assignmentScope):\(selectedRootID ?? ""):\(selectedRoot?.path ?? ""):\(directoryPath)"
+    }
     private var hasPreview: Bool {
         selection != nil || documentSelection != nil || mediaSelection != nil ||
         attachmentPhoto != nil || (attachmentSelection != nil && attachmentData != nil && attachmentDigest != nil) ||
@@ -3316,6 +3328,12 @@ struct WorkspaceBrowser: View {
                             HStack {
                                 Text("Files").font(.headline)
                                 Spacer()
+                                Button("Refresh files", systemImage: "arrow.clockwise") {
+                                    scheduleListingRefresh(immediate: true)
+                                }
+                                .labelStyle(.iconOnly)
+                                .frame(minWidth: 44, minHeight: 44)
+                                .accessibilityIdentifier("workspace-refresh")
                                 Button("Chat", systemImage: "xmark") { onClose?() }
                                     .frame(minWidth: 44, minHeight: 44)
                                     .accessibilityIdentifier("workspace-close")
@@ -3330,6 +3348,20 @@ struct WorkspaceBrowser: View {
                 .padding(.horizontal)
                 .padding(.top, 8)
                 .accessibilityIdentifier("workspace-view-picker")
+                if let listingRefreshError {
+                    HStack(spacing: 8) {
+                        Text(listingRefreshError)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        Button("Try again") {
+                            scheduleListingRefresh(immediate: true)
+                        }
+                        .font(.caption.weight(.semibold))
+                        .accessibilityIdentifier("workspace-refresh-retry")
+                    }
+                    .padding(.horizontal)
+                }
                 if let response, response.roots.count > 1 {
                     Menu {
                         ForEach(response.roots) { root in
@@ -3372,6 +3404,12 @@ struct WorkspaceBrowser: View {
                             ToolbarItem(placement: .cancellationAction) {
                                 WorkspaceBrowserDoneButton { dismiss() }
                             }
+                            ToolbarItem(placement: .primaryAction) {
+                                Button("Refresh files", systemImage: "arrow.clockwise") {
+                                    scheduleListingRefresh(immediate: true)
+                                }
+                                .accessibilityIdentifier("workspace-refresh")
+                            }
                         }
                     }
                 }
@@ -3382,11 +3420,14 @@ struct WorkspaceBrowser: View {
                 // Switching between the list and an inline preview can remount
                 // this task. Only a pairing change should reset the selection.
                 guard loadedRootsScope != scope || response == nil else { return }
+                let startingPoint = observationPoint
                 invalidateLocation()
                 response = nil; selectedRootID = nil; directoryPath = ""; directory = nil; git = nil
                 if await loadRoots() {
                     loadedRootsScope = scope
                     if viewMode == "modified" { await loadGit() }
+                    listedPoint = startingPoint
+                    scheduleListingRefresh()
                 }
             }
             .task(id: directoryTaskID) {
@@ -3398,11 +3439,21 @@ struct WorkspaceBrowser: View {
                 // The first roots request belongs to Files, not either tab.
                 // Keep it alive when Modified is selected before roots arrive.
                 invalidateLocation(preserveRoots: rootsLoadingID != nil)
-                failure = nil
+                if response != nil && !missingDirectory { failure = nil }
                 if next == "modified" { git = nil; Task { await loadGit() } }
                 else if selectedRoot?.isDirectory == true { Task { await loadDirectory(reset: true) } }
+                scheduleListingRefresh()
             }
+            .onChange(of: directoryTaskID) { _, _ in scheduleListingRefresh() }
+            .onChange(of: observationPoint) { _, _ in scheduleListingRefresh() }
+            .onChange(of: hasPreview) { _, preview in
+                if !preview { scheduleListingRefresh() }
+            }
+            .onAppear { scheduleListingRefresh() }
             .onDisappear {
+                listingRefreshTask?.cancel()
+                listingRefreshTask = nil
+                listingRefreshID = nil
                 // A full-screen cover temporarily hides the browser; closing
                 // Files or leaving the conversation must release its work.
                 if !expandedPreview {
@@ -3589,7 +3640,7 @@ struct WorkspaceBrowser: View {
         if loading && directory == nil && visibleAttachments.isEmpty { ProgressView("Loading files…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         else {
             List {
-                if loading && directory != nil {
+                if loading {
                     ProgressView("Loading files…")
                         .accessibilityIdentifier("workspace-refreshing")
                 }
@@ -3654,13 +3705,22 @@ struct WorkspaceBrowser: View {
     }
 
     @ViewBuilder private var modifiedView: some View {
-        if let git, !git.available {
+        if loading && git == nil {
+            ProgressView("Checking changes…").frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let git, !git.available {
             ContentUnavailableView("Modified unavailable", systemImage: "arrow.triangle.branch", description: Text(git.detail ?? "Git status is unavailable on this host."))
                 .accessibilityIdentifier("workspace-git-unavailable")
         } else if let git, git.changes.isEmpty {
-            ContentUnavailableView("No modified files", systemImage: "checkmark.circle", description: Text("This workspace has no staged, unstaged, or untracked changes."))
+            VStack(spacing: 12) {
+                if loading { ProgressView("Refreshing changes…").accessibilityIdentifier("workspace-refreshing") }
+                ContentUnavailableView("No modified files", systemImage: "checkmark.circle", description: Text("This workspace has no staged, unstaged, or untracked changes."))
+            }
         } else if let git {
             List {
+                if loading {
+                    ProgressView("Refreshing changes…")
+                        .accessibilityIdentifier("workspace-refreshing")
+                }
                 if selectedDiff != nil && diffText == nil {
                     ProgressView("Loading diff…")
                         .accessibilityIdentifier("workspace-diff-loading")
@@ -3701,6 +3761,114 @@ struct WorkspaceBrowser: View {
     }
     private func isCurrent(_ captured: Location) -> Bool {
         !Task.isCancelled && !model.accessEnded && captured == location
+    }
+    private func isUnavailableWorkspace(_ error: Error) -> Bool {
+        guard case PairingFailure.response(let code) = error else { return false }
+        return code == 401 || code == 403 || code == 404
+    }
+    private func clearUnavailableWorkspace(_ error: Error) {
+        listingRefreshTask?.cancel()
+        listingRefreshTask = nil
+        listingRefreshID = nil
+        invalidateLocation()
+        response = nil
+        selectedRootID = nil
+        directoryPath = ""
+        directory = nil
+        git = nil
+        listingRefreshError = nil
+        failure = workspaceBrowserError(error)
+    }
+    private func scheduleListingRefresh(immediate: Bool = false) {
+        guard response != nil, !hasPreview,
+              immediate || (observationPoint != nil && observationPoint != listedPoint) else { return }
+        if immediate {
+            listingRefreshTask?.cancel()
+            listingRefreshTask = nil
+            listingRefreshID = nil
+            listingRetryCount = 0
+        } else if listingRefreshTask != nil { return }
+        let requestID = UUID()
+        listingRefreshID = requestID
+        let minimumInterval = min(30.0, 2.0 * pow(2.0, Double(listingRetryCount)))
+        let elapsed = lastListingAttemptAt.map { ProcessInfo.processInfo.systemUptime - $0 } ?? minimumInterval
+        let delay = immediate ? 0 : max(0, minimumInterval - elapsed)
+        listingRefreshTask = Task {
+            if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+            guard listingRefreshID == requestID else { return }
+            if Task.isCancelled || hasPreview {
+                listingRefreshTask = nil
+                listingRefreshID = nil
+                return
+            }
+            if !immediate && observationPoint == listedPoint {
+                listingRefreshTask = nil
+                listingRefreshID = nil
+                return
+            }
+            lastListingAttemptAt = ProcessInfo.processInfo.systemUptime
+            let loaded = await refreshListing(point: observationPoint)
+            guard listingRefreshID == requestID else { return }
+            listingRefreshTask = nil
+            listingRefreshID = nil
+            guard !Task.isCancelled, !hasPreview else { return }
+            listingRetryCount = loaded ? 0 : min(listingRetryCount + 1, 4)
+            if failure == nil { scheduleListingRefresh() }
+        }
+    }
+    private func refreshListing(point: WorkspaceObservationPoint?) async -> Bool {
+        guard !hasPreview, response != nil else { return false }
+        let requestedPoint = point
+        let captured = location
+        let requestID = UUID()
+        rootsRequestID = requestID
+        let loadingID = beginLoading()
+        defer { loadingRequests.remove(loadingID) }
+        do {
+            let next = try await model.loadWorkspaceRoots(chat)
+            guard isCurrent(captured), requestID == rootsRequestID, !hasPreview else { return false }
+            let oldRoot = selectedRoot
+            let nextRoot = next.roots.first(where: { $0.id == selectedRootID })
+            let rootChanged = nextRoot == nil || oldRoot?.path != nextRoot?.path ||
+                oldRoot?.kind != nextRoot?.kind || oldRoot?.isDirectory != nextRoot?.isDirectory
+            if rootChanged {
+                invalidateLocation()
+                selectedRootID = nextRoot?.id ?? next.roots.first?.id
+                directoryPath = ""
+                directory = nil
+                git = nil
+            }
+            response = next
+            listingRefreshError = nil
+            guard selectedRoot != nil else {
+                failure = next.detail ?? "No verified workspace locations are available."
+                return false
+            }
+            // Changing roots remounts the directory task. Let that one load
+            // the new path, avoiding two requests that can cancel each other.
+            if rootChanged && viewMode == "all" {
+                listedPoint = requestedPoint
+                return true
+            }
+            let loaded: Bool
+            if viewMode == "modified" {
+                loaded = await loadGit(backgroundRefresh: true)
+            } else if selectedRoot?.isDirectory == true {
+                loaded = await loadDirectory(reset: true, preserveUntilLoaded: true,
+                                             backgroundRefresh: true)
+            } else { loaded = true }
+            guard loaded, !Task.isCancelled else { return false }
+            listedPoint = requestedPoint
+            return true
+        } catch {
+            guard isCurrent(captured), requestID == rootsRequestID, !hasPreview else { return false }
+            if isUnavailableWorkspace(error) {
+                clearUnavailableWorkspace(error)
+                return false
+            }
+            listingRefreshError = "Couldn’t refresh Files. Check your Mac connection and try again."
+            return false
+        }
     }
     private func beginLoading() -> UUID {
         let id = UUID()
@@ -3790,7 +3958,8 @@ struct WorkspaceBrowser: View {
         } catch {
             guard !Task.isCancelled, !model.accessEnded, scope == model.assignmentScope,
                   requestID == rootsRequestID else { return false }
-            failure = workspaceBrowserError(error)
+            if isUnavailableWorkspace(error) { clearUnavailableWorkspace(error) }
+            else { failure = workspaceBrowserError(error) }
             return false
         }
     }
@@ -3822,7 +3991,8 @@ struct WorkspaceBrowser: View {
         Task { await loadDirectory(reset: true, preserveUntilLoaded: true) }
     }
     @discardableResult private func loadDirectory(reset: Bool, offset: Int = 0,
-                                                   preserveUntilLoaded: Bool = false) async -> Bool {
+                                                   preserveUntilLoaded: Bool = false,
+                                                   backgroundRefresh: Bool = false) async -> Bool {
         guard let root = selectedRoot, root.isDirectory else { return false }
         let captured = location
         let requestID = UUID()
@@ -3835,6 +4005,7 @@ struct WorkspaceBrowser: View {
                                                               showHidden: captured.hidden, offset: offset)
             guard isCurrent(captured), requestID == directoryRequestID else { return false }
             failure = nil
+            listingRefreshError = nil
             missingDirectory = false
             if reset || directory == nil { directory = page }
             else if let current = directory { directory = WorkspaceDirectoryPage(rootId: page.rootId, path: page.path, parentPath: page.parentPath, entries: current.entries + page.entries, nextOffset: page.nextOffset) }
@@ -3843,13 +4014,18 @@ struct WorkspaceBrowser: View {
             guard isCurrent(captured), requestID == directoryRequestID else { return false }
             if case PairingFailure.response(404) = error, !captured.path.isEmpty {
                 missingDirectory = true
+                directory = nil
                 failure = "This folder moved or was deleted. Try again to return to the workspace root."
+            } else if isUnavailableWorkspace(error) {
+                clearUnavailableWorkspace(error)
+            } else if backgroundRefresh {
+                listingRefreshError = "Couldn’t refresh this folder. Try again."
             } else { failure = workspaceBrowserError(error) }
             return false
         }
     }
-    private func loadGit() async {
-        guard let root = selectedRoot else { return }
+    @discardableResult private func loadGit(backgroundRefresh: Bool = false) async -> Bool {
+        guard let root = selectedRoot else { return false }
         let captured = location
         let requestID = UUID()
         gitRequestID = requestID
@@ -3857,11 +4033,15 @@ struct WorkspaceBrowser: View {
         defer { loadingRequests.remove(loadingID) }
         do {
             let next = try await model.loadWorkspaceGitStatus(chat, root: root)
-            guard isCurrent(captured), requestID == gitRequestID else { return }
-            git = next; failure = nil
+            guard isCurrent(captured), requestID == gitRequestID else { return false }
+            git = next; failure = nil; listingRefreshError = nil
+            return true
         } catch {
-            guard isCurrent(captured), requestID == gitRequestID else { return }
-            failure = workspaceBrowserError(error)
+            guard isCurrent(captured), requestID == gitRequestID else { return false }
+            if isUnavailableWorkspace(error) { clearUnavailableWorkspace(error) }
+            else if backgroundRefresh { listingRefreshError = "Couldn’t refresh changes. Try again." }
+            else { failure = workspaceBrowserError(error) }
+            return false
         }
     }
     private func open(_ entry: WorkspaceEntry) { if entry.isDirectory { navigate(to: entry.path) } else { Task { await loadWorkspaceFile(entry) } } }
@@ -4037,6 +4217,7 @@ struct WorkspaceBrowser: View {
     private func workspaceBrowserError(_ error: Error) -> String {
         if case PairingFailure.response(let code) = error {
             switch code {
+            case 401: return "Your Mac connection expired. Reconnect, then try again."
             case 403: return "Access to this folder changed. Review the Project's folders on your Mac, then try again."
             case 404: return "This conversation or Project folder is unavailable. Check it on your Mac, or update Wonder there if Files is missing."
             case 409: return "These files changed while you were browsing. Close Files, then open it again."
@@ -5418,7 +5599,7 @@ struct ConstrainedHTML: UIViewRepresentable {
             contentSizeObservation = nil
             (view as? WorkspaceHTMLWebView)?.afterLayout = nil
             loadedHTML = html
-            let csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"
+            let csp = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"
             currentNavigation = view.loadHTMLString("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>body{font:-apple-system-body}button,input{font:inherit}</style><meta http-equiv=\"Content-Security-Policy\" content=\"\(csp)\">" + html, baseURL: nil)
         }
     }
@@ -5427,6 +5608,7 @@ struct ConstrainedHTML: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         let view = WorkspaceHTMLWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
         if let sourceID { session?.install(view, sourceID: sourceID) }

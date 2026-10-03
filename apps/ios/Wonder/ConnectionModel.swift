@@ -294,6 +294,13 @@ struct ManagedBotListMutationState {
     @Published var composers: [String: ComposerIntent] = [:]
     @Published private(set) var staleAnnotationIDs: [String: Set<String>] = [:]
     private var staleAnnotationScope: String?
+    private struct AnnotationRevisionKey: Hashable {
+        let scope: String
+        let chatID: String
+        let rootID: String
+        let path: String
+    }
+    private var annotationRevisionRequests: [AnnotationRevisionKey: UUID] = [:]
     @Published var composerErrors: [String: String] = [:]
     @Published var sending: Set<String> = []
     @Published private(set) var preparingSends: Set<String> = []
@@ -2066,6 +2073,12 @@ struct ManagedBotListMutationState {
     func noteWorkspaceRevision(_ chat: ChatSummary, rootID: String, path: String,
                                currentSha256: String) async {
         let scope = assignmentScope
+        let key = AnnotationRevisionKey(scope: scope, chatID: chat.id, rootID: rootID, path: path)
+        let requestID = UUID()
+        annotationRevisionRequests[key] = requestID
+        defer {
+            if annotationRevisionRequests[key] == requestID { annotationRevisionRequests.removeValue(forKey: key) }
+        }
         let intent = composers[chat.id] ?? ComposerIntent()
         var candidates: [(String, Data)] = (intent.stagedFiles ?? [])
             .filter { $0.mimeType == ArtifactAnnotation.mimeType }
@@ -2075,9 +2088,14 @@ struct ManagedBotListMutationState {
                   let data = try? await download(file, chat: chat) else { continue }
             candidates.append((id, data))
         }
-        guard !Task.isCancelled, scope == assignmentScope, !accessEnded else { return }
+        guard !Task.isCancelled, scope == assignmentScope, !accessEnded,
+              annotationRevisionRequests[key] == requestID else { return }
+        let currentIDs = Set((composers[chat.id]?.stagedFiles ?? []).map(\.id) +
+                             (composers[chat.id]?.draftAttachmentIds ?? []))
         var stale = staleAnnotationScope == scope ? (staleAnnotationIDs[chat.id] ?? []) : []
+        stale.formIntersection(currentIDs)
         for (id, data) in candidates {
+            guard currentIDs.contains(id) else { continue }
             guard let annotation = try? ArtifactAnnotation.read(data),
                   annotation.conversationId == chat.id,
                   annotation.projectId == projects.details[chat.id]?.projectId,
@@ -2303,7 +2321,8 @@ struct ManagedBotListMutationState {
             if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview") {
                 rootEntries += DiagnosticWorkspaceFileFixtures.entries
             }
-            if ProcessInfo.processInfo.arguments.contains("-workspace-html-scroll-preview") {
+            if ProcessInfo.processInfo.arguments.contains("-workspace-html-scroll-preview") ||
+               ProcessInfo.processInfo.arguments.contains("-workspace-html-script-preview") {
                 rootEntries.append(WorkspaceEntry(name: "reader.html", path: "reader.html", isDirectory: false,
                                                   byteSize: nil, mimeType: "text/html"))
             }
@@ -2323,6 +2342,9 @@ struct ManagedBotListMutationState {
         }
         if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview"),
            let data = DiagnosticWorkspaceFileFixtures.data(name: entry.name) { return data }
+        if ProcessInfo.processInfo.arguments.contains("-workspace-html-script-preview"), entry.name == "reader.html" {
+            return Data("<h1>Script safety page</h1><p id='result'>Safe content remains</p><script>document.getElementById('result').textContent='SCRIPT EXECUTED'</script>".utf8)
+        }
         if ProcessInfo.processInfo.arguments.contains("-workspace-html-scroll-preview"), entry.name == "reader.html" {
             let paragraphs = (1...30).map { "<p style='min-height:80px'>Reading section \($0)</p>" }.joined()
             return Data("<h1>Original reading page</h1>\(paragraphs)<p>End of original page</p>".utf8)
