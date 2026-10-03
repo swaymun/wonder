@@ -3122,6 +3122,7 @@ struct WorkspaceBrowser: View {
     @State private var rootsLoadingID: UUID?
     @State private var locationGeneration = UUID()
     @State private var rootsRequestID = UUID()
+    @State private var loadedRootsScope: String?
     @State private var directoryRequestID = UUID()
     @State private var gitRequestID = UUID()
     @State private var diffRequestID = UUID()
@@ -3141,6 +3142,8 @@ struct WorkspaceBrowser: View {
     @State private var diffText: String?
     @State private var expandedPreview = false
     @State private var collapsingPreview = false
+    @State private var pdfSession = PDFPreviewSession()
+    @State private var modelSession: WorkspaceModelPreviewSession?
     @StateObject private var textAnnotationDraft = WorkspaceTextAnnotationDraft()
 
     private var loading: Bool { !loadingRequests.isEmpty }
@@ -3237,9 +3240,16 @@ struct WorkspaceBrowser: View {
             }
         }
             .task(id: model.assignmentScope) {
+                let scope = model.assignmentScope
+                // Switching between the list and an inline preview can remount
+                // this task. Only a pairing change should reset the selection.
+                guard loadedRootsScope != scope || response == nil else { return }
                 invalidateLocation()
                 response = nil; selectedRootID = nil; directoryPath = ""; directory = nil; git = nil
-                if await loadRoots(), viewMode == "modified" { await loadGit() }
+                if await loadRoots() {
+                    loadedRootsScope = scope
+                    if viewMode == "modified" { await loadGit() }
+                }
             }
             .task(id: directoryTaskID) {
                 guard viewMode == "all", selectedRoot?.isDirectory == true else { return }
@@ -3260,12 +3270,14 @@ struct WorkspaceBrowser: View {
                 if !expandedPreview {
                     mediaSelection?.close()
                     previewRevision?.close()
+                    modelSession?.close()
                 }
             }
             .fullScreenCover(isPresented: $expandedPreview) {
                 VStack(spacing: 0) {
                     HStack {
                         Button("Show in chat", systemImage: "arrow.down.right.and.arrow.up.left") {
+                            pdfSession.capture()
                             collapsingPreview = true
                             expandedPreview = false
                         }
@@ -3284,6 +3296,7 @@ struct WorkspaceBrowser: View {
                     if !collapsingPreview {
                         mediaSelection?.close()
                         previewRevision?.close()
+                        modelSession?.close()
                     }
                     collapsingPreview = false
                 }
@@ -3309,6 +3322,7 @@ struct WorkspaceBrowser: View {
                 Text(previewName).font(.subheadline.weight(.semibold)).lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .center)
                 Button("Full screen", systemImage: "arrow.up.left.and.arrow.down.right") {
+                    pdfSession.capture()
                     expandedPreview = true
                 }
                 .labelStyle(.iconOnly)
@@ -3335,7 +3349,10 @@ struct WorkspaceBrowser: View {
                                       initialNote: replacement?.note ?? "", onClose: closePreview) { annotation in
                     try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
                                               replacing: replacement?.id)
-                    if expandedPreview { collapsingPreview = true; expandedPreview = false }
+                    if expandedPreview {
+                        pdfSession.capture()
+                        collapsingPreview = true; expandedPreview = false
+                    }
                 }
             } else {
                 PhotoViewer(model: model, chat: chat, name: item.name, mimeType: item.mimeType,
@@ -3349,6 +3366,7 @@ struct WorkspaceBrowser: View {
         } else if let item = documentSelection {
             if WorkspaceModelPreview.supports(item.name) {
                 WorkspaceModelPreview(name: item.name, data: item.data, revision: item.sha256,
+                                      session: modelSession,
                                       onClose: closePreview)
             } else if WorkspacePublicationPreview.supports(item.name) {
                 WorkspacePublicationPreview(name: item.name, data: item.data,
@@ -3359,11 +3377,15 @@ struct WorkspaceBrowser: View {
                 let replacement = reanchorDraft(for: item)
                 WorkspaceDocumentPreview(name: item.name, mimeType: item.mimeType,
                                          revision: previewRevision, draft: textAnnotationDraft,
+                                         pdfSession: pdfSession,
                                          annotationContext: context, onAnnotation: { annotation in
                     guard let context else { throw FileFailure.integrity }
                     try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope,
                                               replacing: replacement?.id)
-                    if expandedPreview { collapsingPreview = true; expandedPreview = false }
+                    if expandedPreview {
+                        pdfSession.capture()
+                        collapsingPreview = true; expandedPreview = false
+                    }
                 }, refresh: revisionRefresh(for: item), onRevision: revisionNotice(for: item),
                                          refreshSequence: model.snapshots[chat.id]?.lastSequence,
                                          onClose: closePreview)
@@ -3373,7 +3395,8 @@ struct WorkspaceBrowser: View {
         } else if let file = attachmentSelection, let data = attachmentData,
                   let digest = attachmentDigest {
             if WorkspaceModelPreview.supports(file.name) {
-                WorkspaceModelPreview(name: file.name, data: data, revision: digest, onClose: closePreview)
+                WorkspaceModelPreview(name: file.name, data: data, revision: digest,
+                                      session: modelSession, onClose: closePreview)
             } else if WorkspacePublicationPreview.supports(file.name) {
                 WorkspacePublicationPreview(name: file.name, data: data,
                                             origin: "attachment:\(model.assignmentScope):\(chat.id):\(file.id)",
@@ -3381,6 +3404,7 @@ struct WorkspaceBrowser: View {
             } else if let previewRevision {
                 WorkspaceDocumentPreview(name: file.name, mimeType: file.mimeType ?? "application/octet-stream",
                                          revision: previewRevision, draft: textAnnotationDraft,
+                                         pdfSession: pdfSession,
                                          onClose: closePreview)
             }
         } else if let change = selectedDiff, let diffText {
@@ -3392,6 +3416,9 @@ struct WorkspaceBrowser: View {
     private func closePreview() {
         mediaSelection?.close()
         previewRevision?.close()
+        modelSession?.close()
+        modelSession = nil
+        pdfSession = PDFPreviewSession()
         expandedPreview = false
         fileRequestID = UUID(); attachmentRequestID = UUID()
         textAnnotationDraft.reset()
@@ -3520,6 +3547,9 @@ struct WorkspaceBrowser: View {
         locationGeneration = UUID()
         mediaSelection?.close()
         previewRevision?.close()
+        modelSession?.close()
+        modelSession = nil
+        pdfSession = PDFPreviewSession()
         expandedPreview = false
         if preserveRoots, let rootsLoadingID { loadingRequests = [rootsLoadingID] }
         else { rootsRequestID = UUID(); rootsLoadingID = nil; loadingRequests.removeAll() }
@@ -3709,6 +3739,9 @@ struct WorkspaceBrowser: View {
                 carriedNote = reanchor.note
             } else { carriedNote = "" }
             textAnnotationDraft.reset(note: carriedNote)
+            modelSession?.close()
+            modelSession = WorkspaceModelPreview.supports(entry.name) ? WorkspaceModelPreviewSession() : nil
+            pdfSession = PDFPreviewSession()
             previewRevision = WorkspaceRevisionState(data: data, sha256: sha256)
             if PhotoViewerRouting.isImage(mimeType: entry.mimeType) { selection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "image/*", data: data, sha256: sha256, rootID: root.id, path: entry.path, scope: captured.scope) }
             else { attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil; selection = nil; selectedDiff = nil; diffText = nil; documentSelection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "application/octet-stream", data: data, sha256: sha256, rootID: root.id, path: entry.path, scope: captured.scope) }
@@ -3775,6 +3808,9 @@ struct WorkspaceBrowser: View {
             guard isCurrent(captured), requestID == attachmentRequestID,
                   visibleAttachments.contains(where: { $0.id == file.id }) else { return }
             textAnnotationDraft.reset()
+            modelSession?.close()
+            modelSession = WorkspaceModelPreview.supports(file.name) ? WorkspaceModelPreviewSession() : nil
+            pdfSession = PDFPreviewSession()
             previewRevision = WorkspaceRevisionState(data: data, sha256: digest)
             attachmentSelection = file; attachmentData = data; attachmentDigest = digest
         }
@@ -4217,6 +4253,12 @@ private struct SelectablePreviewText: UIViewRepresentable {
             for: .monospacedSystemFont(ofSize: 15, weight: .regular))
         view.text = text
         if let selectedRange { view.selectedRange = selectedRange }
+        if let selectedRange, selectedRange.length > 0,
+           NSMaxRange(selectedRange) <= view.textStorage.length {
+            view.textStorage.addAttribute(.backgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.35),
+                                          range: selectedRange)
+            context.coordinator.highlightedRange = selectedRange
+        }
         context.coordinator.isUpdating = false
         return view
     }
@@ -4239,6 +4281,19 @@ private struct SelectablePreviewText: UIViewRepresentable {
                   view.selectedRange != selectedRange {
             view.selectedRange = selectedRange
         }
+        let highlightedRange = selectedRange.flatMap { range in
+            range.length > 0 && NSMaxRange(range) <= view.textStorage.length ? range : nil
+        }
+        if context.coordinator.highlightedRange != highlightedRange {
+            if let previous = context.coordinator.highlightedRange {
+                view.textStorage.removeAttribute(.backgroundColor, range: previous)
+            }
+            if let highlightedRange {
+                view.textStorage.addAttribute(.backgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.35),
+                                              range: highlightedRange)
+            }
+            context.coordinator.highlightedRange = highlightedRange
+        }
         context.coordinator.isUpdating = false
     }
 
@@ -4247,6 +4302,7 @@ private struct SelectablePreviewText: UIViewRepresentable {
         var selectionResetID: UUID
         var selectionEventID = UUID()
         var pendingSelection: NSRange?
+        var highlightedRange: NSRange?
         var isUpdating = false
         init(selectedRange: Binding<NSRange?>, selectionResetID: UUID) {
             self.selectedRange = selectedRange
@@ -4273,6 +4329,7 @@ private struct SelectablePreviewText: UIViewRepresentable {
 private struct WorkspaceDocumentPreview: View {
     let name: String
     let mimeType: String
+    let pdfSession: PDFPreviewSession?
     let annotationContext: ArtifactPreviewContext?
     let onAnnotation: ((ArtifactAnnotation) throws -> Void)?
     let refresh: (() async throws -> Data)?
@@ -4283,13 +4340,14 @@ private struct WorkspaceDocumentPreview: View {
     @ObservedObject var draft: WorkspaceTextAnnotationDraft
     init(name: String, mimeType: String, revision: WorkspaceRevisionState,
          draft: WorkspaceTextAnnotationDraft,
+         pdfSession: PDFPreviewSession? = nil,
          annotationContext: ArtifactPreviewContext? = nil,
          onAnnotation: ((ArtifactAnnotation) throws -> Void)? = nil,
          refresh: (() async throws -> Data)? = nil,
          onRevision: ((String) async -> Void)? = nil,
          refreshSequence: UInt64? = nil,
          onClose: (() -> Void)? = nil) {
-        self.name = name; self.mimeType = mimeType
+        self.name = name; self.mimeType = mimeType; self.pdfSession = pdfSession
         self.revision = revision
         self.draft = draft
         self.annotationContext = annotationContext; self.onAnnotation = onAnnotation
@@ -4302,7 +4360,8 @@ private struct WorkspaceDocumentPreview: View {
         NavigationStack {
             Group {
                 if mimeType == "application/pdf" {
-                    PDFPreview(data: revision.currentData, revision: revision.currentSha256)
+                    PDFPreview(data: revision.currentData, revision: revision.currentSha256,
+                               session: pdfSession)
                         .ignoresSafeArea(edges: .bottom)
                         .accessibilityIdentifier("workspace-pdf-preview")
                 }
@@ -4417,8 +4476,10 @@ private struct WorkspaceDocumentPreview: View {
                         if let error = draft.error { Text(error).font(.footnote).foregroundStyle(.red) }
                     }
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.regularMaterial)
+                    .frame(maxWidth: 600, alignment: .leading)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 12).padding(.bottom, 4)
                 }
             }
             .fullScreenCover(isPresented: $showingPDFRegion) {
@@ -4694,24 +4755,114 @@ struct PreviewDeck: View {
         Task { defer { busy = false }; do { bytes = try await model.download(file, chat: chat) } catch { failure = "This file could not be verified or downloaded. Check your Mac and try again." } }
     }
 }
+/// A selected PDF retains its parsed document and viewport while SwiftUI
+/// replaces the inline PDFView with a full-screen PDFView or vice versa.
+@MainActor final class PDFPreviewSession {
+    private struct Viewport {
+        let pageIndex: Int
+        let point: CGPoint?
+        let scale: CGFloat
+    }
+    private(set) var document: PDFDocument?
+    private(set) var revision: String?
+    weak var activeView: PDFView?
+    private var viewport: Viewport?
+
+    func capture() {
+        guard let view = activeView, let document = view.document,
+              let page = view.currentDestination?.page ?? view.currentPage else { return }
+        let destination = view.currentDestination
+        let bounds = page.bounds(for: view.displayBox)
+        let point: CGPoint?
+        if let destination, bounds.width > 0, bounds.height > 0 {
+            point = CGPoint(x: (destination.point.x - bounds.minX) / bounds.width,
+                            y: (destination.point.y - bounds.minY) / bounds.height)
+        } else { point = nil }
+        viewport = Viewport(pageIndex: document.index(for: page), point: point,
+                            scale: view.scaleFactor)
+    }
+
+    fileprivate func install(_ view: PDFPreviewView, data: Data, revision: String) {
+        if self.revision != revision || document == nil {
+            document = PDFDocument(data: data)
+            self.revision = revision
+        }
+        view.autoScales = true
+        view.document = document
+        activeView = view
+        if viewport != nil {
+            view.restoreAfterLayout = { [weak self, weak view] in
+                guard let self, let view, self.activeView === view else { return }
+                self.restore(in: view)
+            }
+        }
+    }
+
+    func update(document: PDFDocument, revision: String, view: PDFView) {
+        self.document = document
+        self.revision = revision
+        activeView = view
+        capture()
+    }
+
+    private func restore(in view: PDFView) {
+        guard let viewport, let document = view.document, document.pageCount > 0,
+              let page = document.page(at: min(viewport.pageIndex, document.pageCount - 1)) else { return }
+        if viewport.scale.isFinite, viewport.scale > 0 {
+            view.scaleFactor = min(view.maxScaleFactor, max(view.minScaleFactor, viewport.scale))
+        }
+        guard let point = viewport.point else { view.go(to: page); return }
+        let bounds = page.bounds(for: view.displayBox)
+        let viewportHeight = view.convert(view.bounds, to: page).height
+        view.go(to: PDFDestination(page: page, at: CGPoint(
+            x: bounds.minX + point.x * bounds.width,
+            y: bounds.minY + point.y * bounds.height + viewportHeight)))
+    }
+}
+
+private final class PDFPreviewView: PDFView {
+    var restoreAfterLayout: (() -> Void)?
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let restore = restoreAfterLayout
+        restoreAfterLayout = nil
+        restore?()
+    }
+}
+
 struct PDFPreview: UIViewRepresentable {
     let data: Data
     var revision: String? = nil
+    var session: PDFPreviewSession? = nil
     final class Coordinator {
         var revision: String?
+        weak var session: PDFPreviewSession?
+        init(session: PDFPreviewSession?) { self.session = session }
     }
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(session: session) }
     func makeUIView(context: Context) -> PDFView {
-        let view = PDFView()
-        view.autoScales = true
-        view.document = PDFDocument(data: data)
-        context.coordinator.revision = revision ?? ConversationFile.digest(data)
+        let view = PDFPreviewView()
+        let current = revision ?? ConversationFile.digest(data)
+        if let session {
+            session.install(view, data: data, revision: current)
+        } else {
+            view.autoScales = true
+            view.document = PDFDocument(data: data)
+        }
+        context.coordinator.revision = current
         return view
+    }
+    static func dismantleUIView(_ view: PDFView, coordinator: Coordinator) {
+        guard let session = coordinator.session, session.activeView === view else { return }
+        session.capture()
+        session.activeView = nil
     }
     func updateUIView(_ view: PDFView, context: Context) {
         let nextRevision = revision ?? ConversationFile.digest(data)
         guard context.coordinator.revision != nextRevision,
               let document = PDFDocument(data: data) else { return }
+        session?.capture()
         let destination = view.currentDestination
         let oldPage = destination?.page ?? view.currentPage
         let pageIndex = oldPage.flatMap { view.document?.index(for: $0) } ?? 0
@@ -4738,6 +4889,7 @@ struct PDFPreview: UIViewRepresentable {
             } else { view.go(to: page) }
         }
         context.coordinator.revision = nextRevision
+        session?.update(document: document, revision: nextRevision, view: view)
     }
 }
 struct ConstrainedHTML: UIViewRepresentable {

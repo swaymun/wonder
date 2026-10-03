@@ -20,10 +20,32 @@ import XCTest
 
     private func open(_ name: String, in app: XCUIApplication) {
         app.buttons["conversation-files-pill"].tap()
+        let list = app.descendants(matching: .any)["workspace-file-list"]
+        XCTAssertTrue(list.waitForExistence(timeout: 10), "Files should replace the conversation")
         let file = app.buttons["workspace-file-entry:\(name)"]
-        for _ in 0..<10 where !file.isHittable { app.swipeUp() }
+        let composerTop = app.buttons["computer-status-pill"].frame.minY
+        let visibleTop = list.frame.minY + 8
+        let visibleBottom = min(list.frame.maxY, composerTop) - 8
+        func nudge(_ up: Bool) {
+            let start = list.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: list.frame.width / 2,
+                                     dy: (up ? visibleBottom - 24 : visibleTop + 24) - list.frame.minY))
+            let end = start.withOffset(CGVector(dx: 0, dy: up ? -110 : 110))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        for _ in 0..<15 {
+            if file.exists { break }
+            nudge(true)
+        }
         XCTAssertTrue(file.waitForExistence(timeout: 5), "Missing \(name) in Files")
+        for _ in 0..<10 {
+            if file.isHittable && file.frame.minY >= visibleTop && file.frame.maxY <= visibleBottom { break }
+            nudge(file.frame.maxY > visibleBottom)
+        }
         XCTAssertTrue(file.isHittable, "\(name) must be reachable on this device")
+        XCTAssertGreaterThanOrEqual(file.frame.minY, visibleTop)
+        XCTAssertLessThanOrEqual(file.frame.maxY, visibleBottom,
+                                 "\(name) must be visible above the composer before tapping")
         file.tap()
     }
 
@@ -48,15 +70,21 @@ import XCTest
         let secondPage = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS[c] %@", "second page remains here")).firstMatch
         XCTAssertTrue(secondPage.waitForExistence(timeout: 10), "Chapter navigation should reveal the second page")
-        app.buttons["workspace-epub-text-size"].tap()
+        let textSize = app.buttons["workspace-epub-text-size"]
+        if textSize.label == "Normal Text" { textSize.tap() }
+        XCTAssertEqual(textSize.label, "Large Text")
+        textSize.tap()
         XCTAssertTrue(app.buttons["Normal Text"].waitForExistence(timeout: 5))
         capture(app, name: "EPUB chapter and large text")
         app.buttons["workspace-preview-expand"].tap()
         XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "workspace-epub-content").count, 1,
                        "Full screen must not mount a second EPUB navigator")
+        XCTAssertEqual(app.buttons["workspace-epub-text-size"].label, "Normal Text",
+                       "Full screen should retain the selected text size")
         app.buttons["workspace-preview-collapse"].tap()
         XCTAssertTrue(secondPage.waitForExistence(timeout: 10), "Collapse should restore Chapter 2")
+        XCTAssertEqual(app.buttons["workspace-epub-text-size"].label, "Normal Text")
         app.buttons["workspace-preview-back"].tap()
         XCTAssertTrue(app.buttons["workspace-file-entry:workspace-reader.epub"].waitForExistence(timeout: 5))
         app.terminate()
@@ -66,7 +94,9 @@ import XCTest
         XCTAssertTrue(reopened.staticTexts.matching(
             NSPredicate(format: "label CONTAINS[c] %@", "second page remains here"))
             .firstMatch.waitForExistence(timeout: 10), "The same revision should reopen at Chapter 2")
+        XCTAssertEqual(reopened.buttons["workspace-epub-text-size"].label, "Normal Text")
         capture(reopened, name: "EPUB retained chapter")
+        reopened.buttons["workspace-epub-text-size"].tap()
         reopened.buttons["workspace-preview-back"].tap()
     }
 
@@ -84,6 +114,9 @@ import XCTest
             app.buttons["workspace-preview-back"].tap()
             XCTAssertTrue(app.buttons["workspace-file-entry:\(name)"].waitForExistence(timeout: 5))
             app.buttons["workspace-close"].tap()
+            let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
+                                                    object: app.buttons["workspace-close"])
+            XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 5), .completed)
             XCTAssertTrue(app.buttons["conversation-files-pill"].waitForExistence(timeout: 5))
         }
         for name in ["triangle-ascii.stl", "sidecar.obj"] {

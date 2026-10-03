@@ -15,7 +15,7 @@ struct WorkspacePublicationPreview: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var reader = WorkspacePublicationReader()
     @State private var failure: String?
-    @State private var largeText = false
+    @AppStorage("wonder.epub.largeText") private var largeText = false
 
     static func supports(_ name: String) -> Bool {
         URL(fileURLWithPath: name).pathExtension.lowercased() == "epub"
@@ -98,6 +98,9 @@ struct WorkspacePublicationPreview: View {
                 failure = (error as? LocalizedError)?.errorDescription ?? "This book could not be opened."
             }
         }
+        .onChange(of: largeText) { _, enabled in
+            reader.navigator?.submitPreferences(EPUBPreferences(fontSize: enabled ? 2 : 1))
+        }
         .onDisappear { reader.close() }
     }
 
@@ -112,7 +115,6 @@ struct WorkspacePublicationPreview: View {
         .accessibilityIdentifier("workspace-epub-chapters")
         Button(largeText ? "Normal Text" : "Large Text") {
             largeText.toggle()
-            navigator.submitPreferences(EPUBPreferences(fontSize: largeText ? 2 : 1))
         }
         .accessibilityIdentifier("workspace-epub-text-size")
     }

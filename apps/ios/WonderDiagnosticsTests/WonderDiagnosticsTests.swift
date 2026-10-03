@@ -59,7 +59,9 @@ final class WonderDiagnosticsTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousWindow = scene.keyWindow
         let window = UIWindow(windowScene: scene)
-        let host = UIHostingController(rootView: PDFPreview(data: document("Old"), revision: "old"))
+        let session = PDFPreviewSession()
+        let host = UIHostingController(rootView: AnyView(PDFPreview(
+            data: document("Old"), revision: "old", session: session)))
         window.rootViewController = host
         window.makeKeyAndVisible()
         defer {
@@ -78,7 +80,8 @@ final class WonderDiagnosticsTests: XCTestCase {
         let scale = viewer.scaleFactor
         XCTAssertEqual(original.index(for: try XCTUnwrap(before.page)), 1)
 
-        host.rootView = PDFPreview(data: document("Revised"), revision: "revised")
+        let revised = document("Revised")
+        host.rootView = AnyView(PDFPreview(data: revised, revision: "revised", session: session))
         host.view.layoutIfNeeded()
         let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             viewer.document !== original && viewer.currentPage.flatMap { viewer.document?.index(for: $0) } == 1
@@ -88,6 +91,25 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(viewer.document?.index(for: try XCTUnwrap(after.page)), 1)
         XCTAssertEqual(after.point.y, before.point.y, accuracy: 5)
         XCTAssertEqual(viewer.scaleFactor, scale, accuracy: 0.05)
+
+        host.rootView = AnyView(Color.clear)
+        host.view.layoutIfNeeded()
+        let unmounted = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            pdfView(in: host.view) == nil
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [unmounted], timeout: 5), .completed)
+        host.rootView = AnyView(PDFPreview(data: revised, revision: "revised", session: session))
+        host.view.layoutIfNeeded()
+        let remounted = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard let next = pdfView(in: host.view) else { return false }
+            return next !== viewer && next.currentPage.flatMap { next.document?.index(for: $0) } == 1
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [remounted], timeout: 5), .completed)
+        let nextViewer = try XCTUnwrap(pdfView(in: host.view))
+        let restored = try XCTUnwrap(nextViewer.currentDestination)
+        XCTAssertEqual(nextViewer.document?.index(for: try XCTUnwrap(restored.page)), 1)
+        XCTAssertEqual(restored.point.y, after.point.y, accuracy: 5)
+        XCTAssertEqual(nextViewer.scaleFactor, scale, accuracy: 0.05)
     }
     // Observe rendered opening frames inside the app process: an external
     // XCTest query waits for idleness and misses the brief wrong-position flash.

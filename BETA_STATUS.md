@@ -272,9 +272,10 @@ inline renderer now unmounts while the cover owns the selected preview. The
 focused iPhone Files/diff and PDF annotation checks passed 2/2, including
 returning to the composer. The new image check initially used the wrong
 accessibility element type; its corrected one-page assertion passed 1/1 on
-iPhone. Full-screen transitions still reset PDF page/zoom, HTML and diff
-scroll position, EPUB text size and 3D camera position. Those reading-state
-handoffs remain open before F1/F2 acceptance; the selected file and staged
+iPhone. A later source-only handoff keeps PDF page/reading point/zoom in a
+shared session and stores EPUB text size across preview remounts; focused
+diagnostic and simulator checks passed. HTML/diff scroll and 3D camera pose
+remain unverified across full-screen transitions. The selected file and staged
 annotation/revision state stay bound to the conversation.
 After the single-renderer change, five focused iPhone tests passed in a
 finalized result bundle (comment draft, revision, video, EPUB and 3D), and
@@ -285,6 +286,25 @@ evidence only. A 3D test emitted an XCTest quality-of-service inversion
 warning, so repeated model preview performance remains open. These checks
 used TestingDiagnostics on iOS 26.5 simulators; the source is still absent
 from the uploaded Release builds.
+
+The October 3 reader-state and annotation polish remains source-only. Repeated
+Files open/close through USDZ, OBJ, PLY, binary STL and unsupported inputs
+passed 1/1 on both iPhone and iPad TestingDiagnostics simulators. An earlier
+test tapped a file row under the composer; the corrected test scrolls the
+Files list until the row is visibly clear before tapping. Four focused PDF
+region, text note, video full-screen and EPUB checks passed 4/4 on each
+device. A separate text-selection/comment/full-screen/cancel pair passed 2/2
+on each after the selected text gained a persistent visual highlight and the
+iPad comment editor was narrowed; its screenshots were inspected. EPUB text
+size and chapter remain through full-screen changes and reopen. A direct
+PDFKit viewport handoff check passed 1/1; real PDF UI checks passed on both
+devices without the AttributeGraph warning seen in the direct test harness.
+No new 3D temporary directories remained after the completed repeated-open
+run; three older simulator test directories remain. Real send retention,
+paired-host revision timing, camera gesture pose, narrow iPad windows,
+TestFlight installation and repeated memory/performance sampling remain open.
+These changes are absent from Testing 20 and production 82 under the requested
+one-upload-per-channel cap; no model turn was sent.
 
 ## Earlier qualification
 

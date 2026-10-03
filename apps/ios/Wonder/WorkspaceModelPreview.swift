@@ -4,26 +4,106 @@ import SceneKit.ModelIO
 import SwiftUI
 import UIKit
 
+/// The selected model owns its parsed scene across inline and full-screen
+/// presentations. The browser closes this session when the file or pairing
+/// changes; a standalone preview owns and closes its own session.
+@MainActor final class WorkspaceModelPreviewSession: ObservableObject {
+    @Published fileprivate var prepared: PreparedModel?
+    @Published private(set) var failure: String?
+    private var revision: String?
+    private var name: String?
+    private var generation = UUID()
+    private var preparation: Task<Void, Never>?
+
+    func open(name: String, data: Data, revision: String) {
+        guard self.revision != revision || self.name != name else { return }
+        close()
+        self.revision = revision
+        self.name = name
+        let request = generation
+        preparation = Task { [weak self] in
+            let worker = Task.detached(priority: .userInitiated) {
+                try PreparedModel.open(name: name, data: data)
+            }
+            do {
+                let result = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: {
+                    worker.cancel()
+                }
+                guard let self, !Task.isCancelled, self.generation == request else {
+                    result.removeTemporaryFile()
+                    return
+                }
+                self.prepared = result
+                self.preparation = nil
+            } catch is CancellationError {
+                // PreparedModel.open removes its temporary directory on error.
+            } catch {
+                guard let self, !Task.isCancelled, self.generation == request else { return }
+                self.failure = (error as? LocalizedError)?.errorDescription ?? "This model could not be opened."
+                self.preparation = nil
+            }
+        }
+    }
+
+    func close() {
+        generation = UUID()
+        preparation?.cancel()
+        preparation = nil
+        prepared?.removeTemporaryFile()
+        prepared = nil
+        failure = nil
+        revision = nil
+        name = nil
+    }
+}
+
 /// A read-only preview of one authenticated, verified workspace file.
 struct WorkspaceModelPreview: View {
     let name: String
     let data: Data
     let revision: String
-    var onClose: (() -> Void)? = nil
+    let session: WorkspaceModelPreviewSession?
+    var onClose: (() -> Void)?
 
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var prepared: PreparedModel?
-    @State private var failure: String?
+    @StateObject private var ownedSession = WorkspaceModelPreviewSession()
+
+    init(name: String, data: Data, revision: String,
+         session: WorkspaceModelPreviewSession? = nil, onClose: (() -> Void)? = nil) {
+        self.name = name
+        self.data = data
+        self.revision = revision
+        self.session = session
+        self.onClose = onClose
+    }
 
     static func supports(_ name: String) -> Bool {
         ["usdz", "obj", "ply", "stl"].contains(URL(fileURLWithPath: name).pathExtension.lowercased())
     }
 
     var body: some View {
+        WorkspaceModelPreviewContent(name: name, data: data, revision: revision,
+                                     session: session ?? ownedSession, ownsSession: session == nil,
+                                     onClose: onClose)
+    }
+}
+
+private struct WorkspaceModelPreviewContent: View {
+    let name: String
+    let data: Data
+    let revision: String
+    @ObservedObject var session: WorkspaceModelPreviewSession
+    let ownsSession: Bool
+    let onClose: (() -> Void)?
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
         NavigationStack {
             Group {
-                if let prepared {
+                if let prepared = session.prepared {
                     VStack(spacing: 0) {
                         SceneView(scene: prepared.scene, options: [.allowsCameraControl, .autoenablesDefaultLighting])
                             .accessibilityLabel("3D preview of \(name)")
@@ -50,7 +130,7 @@ struct WorkspaceModelPreview: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                     }
-                } else if let failure {
+                } else if let failure = session.failure {
                     ContentUnavailableView("3D preview unavailable", systemImage: "cube.transparent",
                                            description: Text(failure))
                         .accessibilityIdentifier("workspace-model-error")
@@ -71,34 +151,9 @@ struct WorkspaceModelPreview: View {
                 }
             }
         }
-        .task(id: revision) {
-            prepared?.removeTemporaryFile()
-            prepared = nil
-            failure = nil
-            do {
-                let worker = Task.detached(priority: .userInitiated) { [name, data] in
-                    try PreparedModel.open(name: name, data: data)
-                }
-                let result = try await withTaskCancellationHandler {
-                    try await worker.value
-                } onCancel: {
-                    worker.cancel()
-                }
-                guard !Task.isCancelled else {
-                    result.removeTemporaryFile()
-                    return
-                }
-                prepared = result
-            } catch is CancellationError {
-                // The sheet was dismissed before decoding finished.
-            } catch {
-                guard !Task.isCancelled else { return }
-                failure = (error as? LocalizedError)?.errorDescription ?? "This model could not be opened."
-            }
-        }
+        .task(id: revision) { session.open(name: name, data: data, revision: revision) }
         .onDisappear {
-            prepared?.removeTemporaryFile()
-            prepared = nil
+            if ownsSession { session.close() }
         }
     }
 
@@ -119,7 +174,7 @@ struct WorkspaceModelPreview: View {
 }
 
 // SceneKit objects are fully constructed on the worker and then moved to the view.
-private struct PreparedModel: @unchecked Sendable {
+fileprivate struct PreparedModel: @unchecked Sendable {
     let scene: SCNScene
     let directory: URL
     let cameraOrbit: SCNNode
