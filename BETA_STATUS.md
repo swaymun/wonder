@@ -1,6 +1,6 @@
 # Wonder beta status
 
-The signed public Mac beta remains available. Wonder Testing 1.0 (22) was
+The signed public Mac beta remains available. Wonder Testing 1.0 (23) was
 uploaded on October 3, processed by Apple and independently confirmed available
 in the automatic Owner Beta internal group. It is the owner's latest checkpoint
 for both iPhone and iPad. Production Wonder remains at processed build 82;
@@ -17,14 +17,24 @@ Keep the Mac awake and online while using it remotely.
 | Component | Status |
 | --- | --- |
 | iPhone and iPad | Production Release 1.0 (82) is uploaded and Apple reports processing complete. Its signed archive includes the Project Widget and passed channel identity, APNs, App Group, Keychain and Diagnostics-exclusion checks. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | The separate blue Release 1.0 (22) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed channel-specific identity, entitlement, Widget, symbol and Diagnostics-exclusion checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Wonder Testing | The separate blue Release 1.0 (23) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed channel-specific identity, entitlement, Widget, symbol and Diagnostics-exclusion checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
 | Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Replacement 1.0.108 is signed, notarized and installed locally and on a clean second Mac; publication waits for the remaining pairing, permission and draft-upgrade gates. |
-| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Testing 22 was archived from a clean, pushed checkpoint; production 82 and Mac 1.0.108 predate the latest fixes. Third-party components retain their own licenses. |
+| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Testing 23 was archived from a clean, pushed checkpoint; production 82 and Mac 1.0.108 predate the latest fixes. Third-party components retain their own licenses. |
 
 The chronological qualification notes below describe whether a change was
 source-only when checked. The shipped iOS checkpoint source is now in
-Testing 22, but its installed TestFlight behavior has not yet been observed.
+Testing 23, but its installed TestFlight behavior has not yet been observed.
 Mac source changes after 1.0.108 remain uninstalled.
+
+Testing 23 clarifies the saved Project history shown when a desktop-owned task
+continues beyond Wonder's last recorded turn. An interrupted activity row now
+reads “Earlier response interrupted,” and its compaction marker reads “Context
+compaction interrupted.” The native checks passed 2/2; the visible Project
+fixture passed 1/1 on each iPhone and iPad simulator, with screenshots
+inspected. Codex desktop reported the exact task active while Wonder's separate
+App Server saw an older interrupted turn. These labels do not report live
+desktop Running. A supported, fresh status source is still needed. Production
+82 retains the older wording, and installed Testing 23 interaction is unverified.
 
 An October 3 follow-up addresses the owner's Files and helper
 screenshots. Project helper rows now distinguish unknown, waiting, failed and
@@ -307,14 +317,15 @@ Testing 21 checkpoint does not change the installed Mac.
 A live Project conversation showed “Stopped” while its task was active in
 Codex desktop. Read-only comparison confirmed that Codex desktop reported the
 thread active, while Wonder's separate App Server reported `notLoaded` and
-only an older interrupted turn. The draft client now labels that saved turn
+only an older interrupted turn. The earlier client labeled that saved turn
 “This response stopped” (and a failed turn “This response couldn’t finish”),
 without claiming to know the current desktop task state. The shared
 turn-label test passed, and the actual Project view passed a focused 1/1 UI
 check on each iPhone and iPad simulator; both screenshots were inspected.
-Production build 82 still has the old wording; Testing 21 includes the scoped
-label, but its installed view has not been checked. A truthful live Running indicator
-for desktop-owned turns needs a supported shared status source and remains open.
+Production build 82 still has the old wording; Testing 21 and 22 include the
+scoped label, while Testing 23 uses the clearer saved-history labels above. A
+truthful live Running indicator for desktop-owned turns needs a supported
+shared status source and remains open.
 
 The same Widget destination review exposed oversized New Chat picker icons
 overlapping labels at accessibility text sizes. Draft UI now stacks secondary
