@@ -126,11 +126,14 @@ public struct ProjectsResponse: Codable, Sendable {
     public let modesVersion: Int?
     /// 1 when the host supports provider-synchronized Codex archiving.
     public let archiveVersion: Int?
+    /// 1 when the host offers per-folder GitHub read consent and PR snapshots.
+    public let githubReviewVersion: Int?
     /// Pinned threads across included projects, most recent first; nil on older hosts.
     public let pinned: [PinnedProjectThread]?
-    public init(projects: [ProjectSummary], families: [ProjectFamilyAvailability], modesVersion: Int? = nil, pinned: [PinnedProjectThread]? = nil, archiveVersion: Int? = nil) {
+    public init(projects: [ProjectSummary], families: [ProjectFamilyAvailability], modesVersion: Int? = nil, pinned: [PinnedProjectThread]? = nil, archiveVersion: Int? = nil, githubReviewVersion: Int? = nil) {
         self.projects = projects; self.families = families; self.modesVersion = modesVersion; self.pinned = pinned
         self.archiveVersion = archiveVersion
+        self.githubReviewVersion = githubReviewVersion
     }
 }
 

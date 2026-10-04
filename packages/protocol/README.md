@@ -127,6 +127,14 @@ control-character boundary cases.
 
 ## Project GitHub review
 
+The Projects response advertises `githubReviewVersion: 1`. Clients treat an
+absent version as unsupported. Project workspace roots expose an optional
+`projectRootId` containing the durable folder ID, including the root whose
+browser alias is `workspace`. Use this explicit identity for review routes;
+never derive consent targets from browser aliases or filesystem paths.
+Non-Project workspace roots omit it. These fields convey identity and support,
+not remote access: connecting still requires the explicit signed consent below.
+
 The owner-only host routes under
 `/api/v1/projects/{projectId}/github-review/{rootId}` connect one included
 Project folder to a verified GitHub account and repository. They accept no

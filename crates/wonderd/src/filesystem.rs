@@ -291,6 +291,7 @@ fn list_directory(
 #[derive(Clone, Debug)]
 struct WorkspaceRoot {
     id: String,
+    project_root_id: Option<String>,
     label: String,
     path: PathBuf,
     is_directory: bool,
@@ -301,6 +302,8 @@ struct WorkspaceRoot {
 #[serde(rename_all = "camelCase")]
 struct WorkspaceRootResponse {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_root_id: Option<String>,
     label: String,
     path: String,
     is_directory: bool,
@@ -438,6 +441,7 @@ fn add_root(
         return Ok(());
     }
     roots.push(WorkspaceRoot {
+        project_root_id: None,
         id: id.into(),
         label: label.into(),
         path: canonical,
@@ -533,6 +537,7 @@ async fn project_workspace_roots(
         // canonicalization could otherwise switch to a different folder
         // if the selected path were replaced after validation.
         roots.push(WorkspaceRoot {
+            project_root_id: Some(root.id.clone()),
             id: if working {
                 "workspace".to_owned()
             } else {
@@ -1579,6 +1584,7 @@ pub(super) async fn workspace_roots(
                         .then(|| mime_for_path(&root.path))
                         .flatten();
                     WorkspaceRootResponse {
+                        project_root_id: root.project_root_id,
                         id: root.id,
                         label: root.label,
                         path: root.path.to_string_lossy().into_owned(),
@@ -2379,6 +2385,7 @@ mod tests {
         let _socket = UnixListener::bind(root_dir.path().join("socket")).unwrap();
         let root_path = root_dir.path().canonicalize().unwrap();
         let root = WorkspaceRoot {
+            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: root_path.clone(),
@@ -2452,6 +2459,7 @@ mod tests {
         let sibling = sibling_dir.path().to_path_buf();
         fs::write(sibling.join("private.txt"), b"private").unwrap();
         let sibling_root = WorkspaceRoot {
+            project_root_id: None,
             id: "sibling".into(),
             label: "Sibling".into(),
             path: sibling.canonicalize().unwrap(),
@@ -2480,6 +2488,7 @@ mod tests {
         }
         fs::write(folder.path().join(".hidden"), b"").unwrap();
         let root = WorkspaceRoot {
+            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: folder.path().canonicalize().unwrap(),
@@ -2567,6 +2576,7 @@ mod tests {
         let file = folder.path().join("notes.txt");
         fs::write(&file, b"read-only").unwrap();
         let root = WorkspaceRoot {
+            project_root_id: None,
             id: "grant-0".into(),
             label: "notes.txt".into(),
             path: file.canonicalize().unwrap(),
@@ -2596,6 +2606,7 @@ mod tests {
         fs::write(outside.path().join("file.txt"), b"outside").unwrap();
         let root_path = root_dir.path().canonicalize().unwrap();
         let root = WorkspaceRoot {
+            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: root_path.clone(),
@@ -2705,6 +2716,7 @@ mod tests {
         )
         .unwrap();
         let root = WorkspaceRoot {
+            project_root_id: None,
             id: "root".into(),
             label: "Root".into(),
             path: folder.path().canonicalize().unwrap(),
@@ -2830,7 +2842,13 @@ mod tests {
             String::from_utf8_lossy(&bytes)
         );
         let roots: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        crate::tests::validate_http_contract("workspaceRoots", &roots);
         assert_eq!(roots["roots"][0]["id"], "workspace");
+        assert!(roots["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|root| root.get("projectRootId").is_none()));
         assert_eq!(roots["roots"][0]["label"], "Workspace");
         assert_eq!(roots["roots"][0]["kind"], "workingDirectory");
         assert_eq!(roots["roots"][0]["readOnly"], true);
@@ -3177,8 +3195,16 @@ mod tests {
             String::from_utf8_lossy(&bytes)
         );
         let roots: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        crate::tests::validate_http_contract("workspaceRoots", &roots);
         assert_eq!(roots["roots"].as_array().unwrap().len(), 2);
         assert_eq!(roots["roots"][0]["id"], "workspace");
+        assert_eq!(roots["roots"][0]["projectRootId"], project.primary_root_id);
+        let other_root = project
+            .roots
+            .iter()
+            .find(|root| root.canonical_path == other_canonical)
+            .unwrap();
+        assert_eq!(roots["roots"][1]["projectRootId"], other_root.id);
         assert_eq!(roots["roots"][0]["path"], source_canonical);
         assert_eq!(roots["roots"][1]["kind"], "projectRoot");
         let other_id = roots["roots"][1]["id"].as_str().unwrap();
@@ -3360,6 +3386,7 @@ mod tests {
 
         // A denied rename source must not be exposed by status or used in a diff.
         let git_root = WorkspaceRoot {
+            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: source.canonicalize().unwrap(),
@@ -3504,6 +3531,7 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         let prior_root = WorkspaceRoot {
+            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: PathBuf::from(source_canonical),

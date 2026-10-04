@@ -1534,10 +1534,11 @@
       "required": ["id", "label", "path", "isDirectory", "kind", "readOnly"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
+        "projectRootId": { "type": "string", "minLength": 1 },
         "label": { "type": "string", "minLength": 1 },
         "path": { "type": "string", "minLength": 1 },
         "isDirectory": { "type": "boolean" },
-        "kind": { "enum": ["botWorkspace", "workingDirectory", "groupWorkspace", "childWorkingDirectory", "appliedGrant"] },
+        "kind": { "enum": ["botWorkspace", "workingDirectory", "groupWorkspace", "childWorkingDirectory", "appliedGrant", "projectRoot"] },
         "readOnly": { "const": true },
         "byteSize": { "type": ["integer", "null"], "minimum": 0 },
         "mimeType": { "type": ["string", "null"] }
@@ -2512,6 +2513,7 @@
         },
         "modesVersion": { "const": 1 },
         "archiveVersion": { "const": 1 },
+        "githubReviewVersion": { "const": 1 },
         "pinned": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/pinnedProjectThread" } }
       },
       "additionalProperties": false
