@@ -548,16 +548,6 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
         annotations = current
     }
 
-    public mutating func appendDictation(_ transcript: String, requestID: String) throws {
-        guard !isSubmitted else { throw SendFailure.pending }
-        guard lastDictationRequestID != requestID else { return }
-        var composer = ComposerIntent()
-        composer.draft = text
-        try composer.appendDictation(transcript, requestID: requestID)
-        text = composer.draft
-        lastDictationRequestID = composer.lastDictationRequestID
-    }
-
     /// Only a definitive rejection permits editing under a fresh request ID.
     public mutating func rejectSubmission() {
         submittedBody = nil; submittedDeviceID = nil; rootsRevision = nil

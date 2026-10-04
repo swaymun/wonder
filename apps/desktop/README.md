@@ -10,7 +10,7 @@ scripts/package-dev-app.sh /path/to/staging/Wonder.app
 ```
 
 Open Settings from Wonder’s menu bar. The companion keeps pairing, provider
-setup, permissions, dictation and service recovery available. Appearance offers
+setup, permissions and service recovery available. Appearance offers
 System, Light and Dark and persists the choice across launches.
 
 The separate Cargo workspace keeps graphics dependencies out of the daemon and

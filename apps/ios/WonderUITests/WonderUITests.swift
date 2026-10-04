@@ -4541,7 +4541,7 @@ import UIKit
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-composer-large-draft",
-                               "-diagnostics-progressive-dictation", "-diagnostics-dictation-delayed-catalog"]
+                               "-diagnostics-progressive-dictation", "-diagnostics-dictation-delayed-preparation"]
         app.launch()
         let editor = app.textViews["message-draft"]
         XCTAssertTrue(editor.waitForExistence(timeout: 10))
@@ -4584,7 +4584,7 @@ import UIKit
         app.terminate()
     }
 
-    func testDictationButtonStartsRealCaptureAndCancelsWithoutChangingDraft() throws {
+    func testDictationNativeAvailabilityPreservesDraft() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.resetAuthorizationStatus(for: .microphone)
@@ -4602,11 +4602,24 @@ import UIKit
                 XCTAssertTrue(alert.waitForExistence(timeout: 15))
                 alert.buttons["Allow"].tap()
             }
+            let available = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                mic.value as? String == "Recording" || app.staticTexts["Dictation unavailable"].exists
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [available], timeout: 30), .completed)
+            if app.staticTexts["Dictation unavailable"].exists {
+                XCTAssertEqual(editor.value as? String, original)
+                XCTAssertEqual(app.staticTexts["camera-draft-count"].label, "Draft attachments: 1")
+                XCTAssertFalse(app.buttons["Retry"].exists)
+                let evidence = XCTAttachment(string: "Native recognition unavailable in this simulator; no Mac fallback.")
+                evidence.lifetime = .keepAlways; add(evidence)
+                break
+            }
             let recording = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == 'Recording'"), object: mic)
             XCTAssertEqual(XCTWaiter.wait(for: [recording], timeout: 15), .completed)
             XCTAssertTrue(editor.isHittable, "The editor remains visible during recording")
+            XCTAssertFalse(app.staticTexts["Dictation unavailable"].exists, "A working recording fallback is not an unavailable feature")
             let path = app.staticTexts["dictation-capture-path"].label
-            XCTAssertTrue(["Native SpeechAnalyzer", "Paired-Mac recorder"].contains(path))
+            XCTAssertEqual(path, "Native SpeechAnalyzer")
             let evidence = XCTAttachment(string: "Actual simulator capture path: " + path)
             evidence.lifetime = .keepAlways; add(evidence)
             if cycle == 0 { retainMenuScreenshot(app, name: "Actual capture with visible composer") }

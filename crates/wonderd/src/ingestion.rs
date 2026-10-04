@@ -1414,9 +1414,6 @@ for line in sys.stdin:
             model: None,
             reasoning_effort: None,
             runtime_catalog: Arc::new(tokio::sync::RwLock::new(Default::default())),
-            asr_service: Arc::new(crate::asr::AsrService::default()),
-            asr_slots: Arc::new(tokio::sync::Semaphore::new(1)),
-            asr_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             computer_use_enabled: false,
             computer_use_bin: None,
             computer_supervisor: Arc::new(

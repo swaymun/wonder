@@ -149,7 +149,9 @@ resized to 1024 square for the app asset catalog. The orange source is unchanged
 ## Progressive dictation
 
 Wonder requires iOS/iPadOS 26 and uses Apple's `SpeechTranscriber` with
-`SpeechAnalyzer` and the progressive-transcription preset. The current keyboard
+`SpeechAnalyzer` and the progressive-transcription preset. Where that module is
+unavailable, Apple's `DictationTranscriber` uses its progressive-long-dictation
+preset on older supported hardware/locales. The current keyboard
 language selects the equivalent supported locale. Check `isAvailable`, locale
 support and `AssetInventory` on the running device; OS support alone does not
 establish hardware or model availability. Missing language assets are downloaded
@@ -170,14 +172,13 @@ the displayed words immediately. Cancel restores the original text and selection
 Pairing changes and external draft replacement discard the projection. New-chat
 commits flush before switching destinations. Sessions are bounded to ten minutes.
 
-Unsupported devices/locales and failed asset preparation use the paired-Mac
-recorder with automatic language detection. If recognition fails before any
-words, the same protected AAC recording continues for the Mac. Stopping with no
-recognized words retains a clip for explicit Mac retry; an error after words
-keeps them without appending a second full transcript. Existing expiry and
-cancellation rules still apply. Audio conversion uses iOS 26 AVAudioConverter;
-it does not depend on iOS 27 helper APIs. Recognition input is bounded and queue
-overflow fails explicitly rather than silently dropping words.
+Dictation runs entirely on the iPhone/iPad. The Mac model picker, runtime,
+recording upload and retry path have been removed. Unsupported devices/locales
+show an actionable native-unavailability message. Failures preserve the last
+visible words, and cancellation preserves the original draft. No new audio file
+is saved. Existing legacy recording files and database rows are not deleted.
+Audio conversion uses iOS 26 AVAudioConverter; recognition input is bounded and
+overflow stops explicitly without silently dropping words.
 
 `DictationTests` owns cumulative range/revision/deduplication and projection
 contracts. `WonderDiagnosticsTests` extends real UIKit selection, durable drafts,
@@ -185,8 +186,8 @@ manual edits, late results, cancellation, backgrounding, interruptions, revocati
 and finalization tests with multiple phrases. The progressive UI case in
 `WonderUITests` uses the production mic stop/cancel controls and isolated composer
 with an attachment on both iPhone and iPad. Real microphone permission/startup
-checks use a synthetic Mac catalog, never a live host or model request. The
-background-preparation case delays that catalog, backgrounds and reopens the app,
+checks reject all network requests, never using a live host or model request. The
+background-preparation case delays native preparation, backgrounds and reopens the app,
 then asserts that the late response cannot start recording or change the draft.
 App-level background notification retires preparation even after an inactive
 scene transition (which can also be caused by a permission sheet).

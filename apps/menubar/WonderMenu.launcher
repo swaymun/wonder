@@ -116,11 +116,7 @@ if [[ -z "${WONDER_ASR_DECODER_BIN:-}" ]]; then
   done
 fi
 
-if [[ -z "${WONDER_ASR_BIN:-}" && -x "$RESOURCES/nemo-speech-worker.py" ]]; then
-  export WONDER_ASR_BIN="$RESOURCES/nemo-speech-worker.py"
-  export WONDER_ASR_MODEL="${WONDER_ASR_MODEL:-$WONDER_DATA_DIR/NeMoSpeech/models/parakeet-tdt-0.6b-v3.q8_0.gguf}"
-  export WONDER_NEMO_SPEECH_BIN="${WONDER_NEMO_SPEECH_BIN:-$WONDER_DATA_DIR/NeMoSpeech/bin/nemo-speech}"
-fi
+
 
 # A plain helper executable, not a nested app: its privacy access is Wonder's.
 if [[ -z "${WONDER_COMPUTER_USE_BIN:-}" && -x "$APP_ROOT/Helpers/WonderComputerUse" ]]; then

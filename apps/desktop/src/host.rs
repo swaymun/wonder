@@ -1,7 +1,6 @@
 //! Bundled Mac host: menu bar, Settings and setup, without the Chats UI.
 #[allow(dead_code)]
 mod appearance;
-mod host_connection;
 mod mac_settings;
 mod menu_bar;
 use gpui_kit::{component::*, *};

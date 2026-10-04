@@ -23,8 +23,6 @@ licenses; Wonder's MIT license does not replace them.
 - `licenses/Sparkle-LICENSE.txt` covers the bundled Sparkle framework. Automatic
   updates are unavailable in this beta.
 - `WebRTC-LICENSE.md` in the app Resources covers the bundled WebRTC framework.
-- `ASR-LICENSES.md` in app Resources covers the optional speech runtime and model
-  sources. Model downloads have their own terms and are not part of the DMG.
 - `node/LICENSE` in app Resources contains Node.js and its bundled third-party
   notices. The bundled npm distribution retains its license files.
 - `claude-runtime/node_modules` retains the license files of the locked production

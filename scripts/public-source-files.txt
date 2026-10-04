@@ -23,11 +23,9 @@ apps/desktop/Cargo.toml
 apps/desktop/README.md
 apps/desktop/src/appearance.rs
 apps/desktop/src/host.rs
-apps/desktop/src/host_connection.rs
 apps/desktop/src/mac_settings.rs
 apps/desktop/src/mac_settings/permission_drag.rs
 apps/desktop/src/mac_settings/setup_window.rs
-apps/desktop/src/mac_settings/voice.rs
 apps/desktop/src/menu_bar.rs
 apps/ios/CONNECTOR_ICONS.md
 apps/ios/DIAGNOSTICS.md
@@ -191,7 +189,6 @@ apps/native/Tests/WonderPairingTests/ChatNameSearchTests.swift
 apps/native/Tests/WonderPairingTests/CommandSummaryTests.swift
 apps/native/Tests/WonderPairingTests/ComposerCompositionTests.swift
 apps/native/Tests/WonderPairingTests/DictationTests.swift
-apps/native/Tests/WonderPairingTests/DictationTransportTests.swift
 apps/native/Tests/WonderPairingTests/FileAccessManagementTests.swift
 apps/native/Tests/WonderPairingTests/FileChangeSummaryTests.swift
 apps/native/Tests/WonderPairingTests/FileTests.swift
@@ -266,8 +263,6 @@ crates/wonder-app-server/src/lib.rs
 crates/wonder-app-server/src/process.rs
 crates/wonder-app-server/src/runtime_home.rs
 crates/wonder-app-server/src/schema_compat.rs
-crates/wonder-asr/Cargo.toml
-crates/wonder-asr/src/lib.rs
 crates/wonder-harness/Cargo.toml
 crates/wonder-harness/src/instructions.rs
 crates/wonder-harness/src/lib.rs
@@ -365,7 +360,6 @@ crates/wonder-store/migrations/0084_project_service_tier.sql
 crates/wonder-store/migrations/0085_project_automation_targets.sql
 crates/wonder-store/migrations/0086_automation_revisions.sql
 crates/wonder-store/migrations/0087_project_github_review_bindings.sql
-crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs
 crates/wonder-store/src/bot_management.rs
@@ -394,8 +388,6 @@ crates/wonderd/Cargo.toml
 crates/wonderd/src/account_usage.rs
 crates/wonderd/src/approval_routing_tests.rs
 crates/wonderd/src/artifact_annotations.rs
-crates/wonderd/src/asr.rs
-crates/wonderd/src/asr_tests.rs
 crates/wonderd/src/automation_schedule.rs
 crates/wonderd/src/automation_tests.rs
 crates/wonderd/src/bot_management.rs
@@ -545,10 +537,8 @@ scripts/collect-dependency-notices.py
 scripts/export-public-source.py
 scripts/generate-sparkle-appcast.py
 scripts/install-dev-app.sh
-scripts/install-parakeet-model.sh
 scripts/install-signed-app.py
 scripts/manage-runtime.sh
-scripts/nemo-speech-worker.py
 scripts/package-claude-runtime.py
 scripts/package-dev-app.sh
 scripts/package-dev-pkg.sh
@@ -564,7 +554,6 @@ scripts/test-degraded-service.py
 scripts/test-export-public-source.py
 scripts/test-generate-sparkle-appcast.py
 scripts/test-install-handoff.py
-scripts/test-nemo-speech-worker.py
 scripts/test-package-release-gates.py
 scripts/test-replay-codex-thread.py
 scripts/test-runtime-interruption.py
@@ -630,5 +619,3 @@ tests/contracts/native/verify-signing.swift
 tests/fixtures/code-mode-host.py
 tests/live/README.md
 tests/live/native-http-smoke.mjs
-vendor/nemo-speech/ASR-LICENSES.md
-vendor/nemo-speech/README.md

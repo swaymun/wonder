@@ -31,7 +31,6 @@ uuid.workspace = true
 wonder-harness = { path = "../wonder-harness" }
 wonder-api = { path = "../wonder-api" }
 wonder-app-server = { path = "../wonder-app-server" }
-wonder-asr = { path = "../wonder-asr" }
 wonder-store = { path = "../wonder-store" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 wonder-relay = { path = "../wonder-relay", optional = true }

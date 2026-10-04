@@ -1610,39 +1610,6 @@ struct ManagedBotListMutationState {
         try prepareCreationMessage(chat, body: body, requestID: requestID)
     }
 
-    func savedDictationIntent() throws -> DictationIntent? {
-        guard let data = try store?.loadIntent(conversation: "dictation.current") else { return nil }
-        let intent = try JSONDecoder().decode(DictationIntent.self, from: data)
-        guard intent.hostID == connection?.credential.hostInstallationId,
-            intent.deviceID == connection?.credential.deviceId else { throw PairingFailure.wrongHost }
-        return intent
-    }
-    func persistDictationIntent(_ intent: DictationIntent) throws {
-        guard let store, intent.hostID == connection?.credential.hostInstallationId,
-            intent.deviceID == connection?.credential.deviceId else { throw PairingFailure.wrongHost }
-        try store.saveIntent(JSONEncoder().encode(intent), conversation: "dictation.current")
-    }
-    func clearDictationIntent() throws { try store?.removeIntent(conversation: "dictation.current") }
-    func insertDictation(job: TranscriptionJob, intent: DictationIntent) throws {
-        guard !intent.cancelled, intent.accepts(job), job.state == "completed", let text = job.transcriptText,
-            intent.hostID == connection?.credential.hostInstallationId,
-            intent.deviceID == connection?.credential.deviceId, !accessEnded else { throw PairingFailure.wrongHost }
-        if intent.conversationID.hasPrefix("new-chat:") {
-            try NewChatDraftStore.insertDictation(text, requestID: intent.requestID,
-                draftID: String(intent.conversationID.dropFirst("new-chat:".count)), host: intent.hostID)
-            NotificationCenter.default.post(name: .newChatDictationInserted, object: intent.hostID)
-            return
-        }
-        guard chats.contains(where: { $0.id == intent.conversationID }) || projectConversationIDs.contains(intent.conversationID) else { throw PairingFailure.wrongHost }
-        loadComposer(intent.conversationID)
-        guard !intentLoadFailures.contains(intent.conversationID) else { throw ReadFailure.resync }
-        guard !preparingSends.contains(intent.conversationID) else { throw SendFailure.pending }
-        var composer = composers[intent.conversationID] ?? ComposerIntent()
-        try composer.appendDictation(text, requestID: intent.requestID)
-        // Text and insertion receipt are one atomic write, including after reconnect.
-        try saveComposer(composer, chat: intent.conversationID)
-    }
-
     private func saveComposer(_ value: ComposerIntent, chat: String) throws {
         if previewMode { composers[chat] = value; return }
         guard let store else { throw ReadFailure.resync }

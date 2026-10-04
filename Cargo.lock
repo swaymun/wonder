@@ -3561,14 +3561,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wonder-asr"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "wonder-harness"
 version = "0.1.0"
 dependencies = [
@@ -3645,7 +3637,6 @@ dependencies = [
  "uuid",
  "wonder-api",
  "wonder-app-server",
- "wonder-asr",
  "wonder-harness",
  "wonder-relay",
  "wonder-store",

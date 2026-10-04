@@ -99,8 +99,8 @@ until it returns. Your choice stays saved when Wonder updates.
 
 ![Wonder’s Mac Access settings, cropped above the private folder list](assets/screenshots/mac-permissions.png)
 
-On-device dictation is optional and downloads its model separately. At the end of
-setup you can enable launch at login. The Mac still needs to stay awake and online.
+Dictation uses Apple speech on your iPhone or iPad; no Mac speech model or setup is
+needed. At the end of setup you can enable launch at login. The Mac still needs to stay awake and online.
 
 ## 5. Pair your phone
 

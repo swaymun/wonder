@@ -224,7 +224,6 @@ struct ConnectionDetail: View {
                 NavigationLink("Automations") { AutomationsView(model: model) }
                     .accessibilityIdentifier("connection-automations")
                 NavigationLink("Connected apps") { ConnectedAppsView(model: model) }
-                NavigationLink("Voice & Dictation") { VoiceSettingsView(model: model, controller: model.dictation) }
             }
             CodexUsageSection(model: model)
             ClaudeUsageSection(model: model)

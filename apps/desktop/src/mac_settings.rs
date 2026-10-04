@@ -13,7 +13,6 @@ use std::{
 
 mod permission_drag;
 mod setup_window;
-mod voice;
 
 actions!(
     wonder_settings,
@@ -21,7 +20,6 @@ actions!(
         StatusSettings,
         DeviceSettings,
         AccessSettings,
-        DictationSettings
     ]
 );
 
@@ -30,7 +28,6 @@ enum Page {
     Status,
     Devices,
     Access,
-    Dictation,
     About,
 }
 
@@ -272,7 +269,6 @@ pub struct MacSettings {
     permission_drag_id: String,
     permission_drag_window: Option<WindowHandle<Root>>,
     last_clock: Instant,
-    voice: voice::VoiceSettings,
 }
 impl MacSettings {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -280,7 +276,6 @@ impl MacSettings {
             KeyBinding::new("cmd-1", StatusSettings, Some("WonderSettings")),
             KeyBinding::new("cmd-2", DeviceSettings, Some("WonderSettings")),
             KeyBinding::new("cmd-3", AccessSettings, Some("WonderSettings")),
-            KeyBinding::new("cmd-4", DictationSettings, Some("WonderSettings")),
         ]);
         let (bridge, error) = match Bridge::start() {
             Ok(b) => (Some(b), None),
@@ -319,23 +314,16 @@ impl MacSettings {
             permission_drag_id: String::new(),
             permission_drag_window: None,
             last_clock: Instant::now(),
-            voice: voice::VoiceSettings::default(),
         }
     }
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
-        if page == Page::Dictation {
-            self.voice.refresh();
-        }
         self.revoke = None;
 
         cx.notify();
     }
     fn tick(&mut self, cx: &mut Context<Self>) {
-        let mut changed = self.voice.tick(
-            self.page == Page::Dictation
-                || (!self.flag("setupCompleted") && self.state["setupStep"] == 5),
-        );
+        let mut changed = false;
         while let Some(result) = self
             .bridge
             .as_ref()
@@ -1043,7 +1031,6 @@ impl MacSettings {
         let title = match step {
             0 => "Get this Mac ready",
             4 => "Connect with Tailscale",
-            5 => "On-device dictation",
             1 => "Choose what Wonder can do",
             6 => "Choose a screen to share",
             2 => "Connect your phone",
@@ -1057,8 +1044,8 @@ impl MacSettings {
                     .font_weight(FontWeight::SEMIBOLD),
             )
             .child(note(format!(
-                "Step {} of 7",
-                [0, 4, 1, 6, 5, 2, 3]
+                "Step {} of 6",
+                [0, 4, 1, 6, 2, 3]
                     .iter()
                     .position(|value| *value == step)
                     .unwrap_or(0)
@@ -1072,7 +1059,6 @@ impl MacSettings {
                     .child(note("Quit and reopen Wonder if setup stops responding."))
                     .child(self.action("setup-repair", "Set up agents", json!({"action":"repair"}), self.flag("serviceBusy"), cx))),
             4=>view.child(self.connection(cx)),
-            5=>view.child(self.voice_content(cx)),
             1=>view.child(self.mac_permissions(true, cx)),
             6=>view.child(self.shared_display_choice(cx)),
             2=>view.when(!self.flag("remoteReady"), |v| v.child(note("Connect Tailscale on both devices before pairing. You can finish setup and pair later.")).child(self.connection(cx)))
@@ -1087,7 +1073,7 @@ impl MacSettings {
     }
     fn setup_controls(&self, cx: &Context<Self>) -> Div {
         let step = self.state["setupStep"].as_u64().unwrap_or(0);
-        let steps = [0, 4, 1, 6, 5, 2, 3];
+        let steps = [0, 4, 1, 6, 2, 3];
         let position = steps.iter().position(|value| *value == step).unwrap_or(0);
         let mut controls = div().w_full().flex().justify_end().gap_2().pt_4();
         if position > 0 {
@@ -1105,8 +1091,6 @@ impl MacSettings {
                     "continue",
                     if step == 4 && !self.flag("remoteReady") {
                         "Set up later"
-                    } else if step == 5 {
-                        self.voice.setup_continue_label()
                     } else if step == 6 && text(&self.state, "preferredDisplayID").is_empty() {
                         "Use main display"
                     } else if step == 1
@@ -1150,7 +1134,6 @@ impl Render for MacSettings {
             (Page::Status, "General"),
             (Page::Devices, "Devices"),
             (Page::Access, "Access"),
-            (Page::Dictation, "Dictation"),
             (Page::About, "About"),
         ];
         let selected = pages
@@ -1191,9 +1174,7 @@ impl Render for MacSettings {
                     .justify_start()
                     .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
             }));
-        let content = if self.page == Page::Dictation {
-            self.voice_content(cx)
-        } else if !self.received {
+        let content = if !self.received {
             stack().child(note(if self.error.is_some() {
                 "Settings are unavailable."
             } else {
@@ -1204,7 +1185,6 @@ impl Render for MacSettings {
                 Page::Status => self.general(cx),
                 Page::Devices => self.devices(cx),
                 Page::Access => self.permissions(cx),
-                Page::Dictation => self.voice_content(cx),
                 Page::About => self.about(cx),
             }
         };
@@ -1221,9 +1201,6 @@ impl Render for MacSettings {
             .on_action(
                 cx.listener(|this, _: &AccessSettings, _, cx| this.select_page(Page::Access, cx)),
             )
-            .on_action(cx.listener(|this, _: &DictationSettings, _, cx| {
-                this.select_page(Page::Dictation, cx)
-            }))
             .size_full()
             .flex()
             .bg(cx.theme().background)

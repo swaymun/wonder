@@ -1581,17 +1581,6 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(active.text, "Group purpose")
         XCTAssertEqual(NewChatDraftStore.load(host: host)?.requestID, active.requestID)
         XCTAssertNotEqual(active.requestID, recovered.requestID)
-        // A late dictation result belongs to the original destination, is
-        // idempotent, and must not overwrite the currently selected draft.
-        try NewChatDraftStore.insertDictation("spoken words", requestID: "recording", draftID: recovered.requestID, host: host)
-        try NewChatDraftStore.insertDictation("spoken words", requestID: "recording", draftID: recovered.requestID, host: host)
-        XCTAssertEqual(NewChatDraftStore.load(host: host, destination: .newBot)?.text, "Bot purpose spoken words")
-        XCTAssertEqual(NewChatDraftStore.load(host: host)?.text, "Group purpose")
-        XCTAssertThrowsError(try NewChatDraftStore.insertDictation("wrong host", requestID: "other", draftID: recovered.requestID, host: otherHost))
-        var submitted = try XCTUnwrap(NewChatDraftStore.load(host: host, destination: .newBot))
-        submitted.freeze()
-        NewChatDraftStore.save(submitted, host: host)
-        XCTAssertThrowsError(try NewChatDraftStore.insertDictation("too late", requestID: "late", draftID: submitted.requestID, host: host))
         NewChatDraftStore.remove(host: host)
         XCTAssertNil(NewChatDraftStore.load(host: host, destination: .newBot))
         XCTAssertEqual(NewChatDraftStore.load(host: otherHost)?.text, "Group purpose")

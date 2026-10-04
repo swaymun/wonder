@@ -3,7 +3,7 @@ import Combine
 
 enum SetupStep: Int, CaseIterable {
     // Preserve persisted step values from the original four-step setup.
-    case welcome = 0, connection = 4, permissions = 1, display = 6, dictation = 5, phone = 2, finish = 3
+    case welcome = 0, connection = 4, permissions = 1, display = 6, phone = 2, finish = 3
     func canEnter(executionReady: Bool) -> Bool {
         self == .welcome || executionReady
     }
@@ -13,7 +13,6 @@ enum SetupStep: Int, CaseIterable {
         case .connection: "Connect with Tailscale"
         case .permissions: "Choose what Wonder can do"
         case .display: "Choose a screen to share"
-        case .dictation: "On-device dictation"
         case .phone: "Connect your phone"
         case .finish: "Wonder stays with you"
         }
@@ -28,7 +27,8 @@ final class SetupProgress: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        step = defaults.object(forKey: "setup.step") == nil ? .welcome : (SetupStep(rawValue: defaults.integer(forKey: "setup.step")) ?? .welcome)
+        // Retired dictation setup advances to pairing; persisted IDs stay stable.
+        step = defaults.integer(forKey: "setup.step") == 5 ? .phone : defaults.object(forKey: "setup.step") == nil ? .welcome : (SetupStep(rawValue: defaults.integer(forKey: "setup.step")) ?? .welcome)
         completed = defaults.bool(forKey: "setup.completed")
     }
 

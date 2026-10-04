@@ -1321,32 +1321,19 @@ private struct DiagnosticDictationPath: View {
     let fixtureRequestID: String?
     var body: some View {
         Text(controller.intent == nil ? "Idle" : (controller.intent?.requestID == fixtureRequestID
-             ? "Injected phrases" : (controller.intent?.modelID == "native" ? "Native SpeechAnalyzer" : "Paired-Mac recorder")))
+             ? "Injected phrases" : "Native SpeechAnalyzer"))
             .accessibilityIdentifier("dictation-capture-path")
     }
 }
 
 private final class DiagnosticDictationProtocol: URLProtocol, @unchecked Sendable {
-    private let replyLock = NSLock()
-    private var reply: DispatchWorkItem?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        if ProcessInfo.processInfo.arguments.contains("-diagnostics-dictation-delayed-catalog") {
-            let work = DispatchWorkItem { [weak self] in self?.respond() }
-            replyLock.withLock { reply = work }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 6, execute: work)
-        } else { respond() }
+        client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
     }
-    private func respond() {
-        let catalog = request.url?.path == "/api/v1/asr/models" && request.httpMethod == "GET"
-        let body = catalog ? #"{"ready":true,"selectedModelId":"fixture","languages":["auto"],"maxRecordingDurationMs":600000,"models":[]}"# : "{}"
-        let response = HTTPURLResponse(url: request.url!, statusCode: catalog ? 200 : 503, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(body.utf8))
-        client?.urlProtocolDidFinishLoading(self)
-    }
-    override func stopLoading() { replyLock.withLock { reply?.cancel(); reply = nil } }
+    override func stopLoading() {}
+
 }
 
 @MainActor private struct CameraDiagnosticFixtureView: View {

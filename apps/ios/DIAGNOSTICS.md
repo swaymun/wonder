@@ -357,18 +357,15 @@ cases also assert trailing pill placement, proximity, and a 44pt hit target.
 ### Speech startup regression
 
 `testDictationMicrophoneDenialPreservesDraft` and
-`testDictationButtonStartsRealCaptureAndCancelsWithoutChangingDraft` use the real
-microphone permission path and production mic control, with an isolated local
-draft and synthetic Mac model catalog. XCTest resets only the Testing app's
-microphone authorization. Run on both iPhone and iPad. The latter checks two
-start/cancel cycles, visible composer, retained draft and attachment, and no
-transfers. Record whether the actual SpeechTranscriber API or the paired-Mac
-capture fallback was available; these checks do not prove successful recognition.
-The old SFSpeechRecognizer permission callback fixture was removed with that API.
-Keep the synthetic multi-phrase tests for editing and stale-result coverage.
+`testDictationNativeAvailabilityPreservesDraft` use real microphone permission
+and the production mic control, with an isolated draft and rejected network
+requests. XCTest resets only Testing's microphone authorization. Run on both
+iPhone and iPad. The latter records whether native capture starts or reports
+unavailability, asserting unchanged draft/attachment and no Mac retry control.
+An unavailable simulator is not evidence that supported hardware cannot recognize.
+The synthetic multi-phrase tests cover editing, cancellation and stale results.
 
-`testDictationPreparationDoesNotRestartAfterBackground` delays the synthetic Mac
-catalog, leaves the app during preparation and reopens it. The mic must become
-idle and remain idle beyond the delayed response, preserving draft and attachment.
-This exercises the shared preparation lifetime on simulator; it does not claim
-physical asset-download qualification.
+`testDictationPreparationDoesNotRestartAfterBackground` delays native preparation,
+leaves the app and reopens it. The mic must remain idle beyond the delay, preserving
+the draft and attachment. This tests preparation ownership, not physical asset
+installation or recognition latency.

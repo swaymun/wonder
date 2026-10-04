@@ -3,7 +3,6 @@ resolver = "2"
 members = [
   "crates/wonder-api",
   "crates/wonder-app-server",
-  "crates/wonder-asr",
   "crates/wonder-harness",
   "crates/wonder-smoke",
   "crates/wonder-store",

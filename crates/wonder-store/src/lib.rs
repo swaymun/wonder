@@ -1,10 +1,8 @@
 //! SQLite persistence for Wonder-owned metadata and the durable event ledger.
 
-mod asr;
 mod automations;
 pub mod avatar;
 mod onboarding;
-pub use asr::{AsrJob, NewAsrJob};
 mod push;
 pub use push::{PushDelivery, PushPreview, PushRevocation};
 mod questions;
@@ -515,19 +513,6 @@ pub struct StoredAutomationRun {
     pub error: Option<String>,
     pub message_id: Option<String>,
     pub conversation_id: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct StoredTranscription {
-    pub id: String,
-    pub state: String,
-    pub source_device_id: String,
-    pub duration_ms: u64,
-    pub transcript_text: Option<String>,
-    pub word_timestamps_json: Option<String>,
-    pub confidence: Option<f32>,
-    pub retry_expires_at_ms: Option<u64>,
-    pub error_category: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1946,98 +1931,6 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(stored_automation_run).collect())
-    }
-
-    pub async fn insert_transcription(
-        &self,
-        id: &str,
-        source_device_id: &str,
-        duration_ms: u64,
-        now: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO transcriptions (id, state, source_device_id, duration_ms, created_at, updated_at) VALUES (?, 'queued', ?, ?, ?, ?)",
-        )
-        .bind(id)
-        .bind(source_device_id)
-        .bind(duration_ms as i64)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_transcription(
-        &self,
-        id: &str,
-        state: &str,
-        transcript_text: Option<&str>,
-        word_timestamps_json: Option<&str>,
-        confidence: Option<f32>,
-        retry_expires_at_ms: Option<u64>,
-        error_category: Option<&str>,
-        now: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "UPDATE transcriptions SET state = ?, transcript_text = ?, word_timestamps_json = ?, confidence = ?, retry_expires_at_ms = ?, error_category = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(state)
-        .bind(transcript_text)
-        .bind(word_timestamps_json)
-        .bind(confidence)
-        .bind(retry_expires_at_ms.map(|value| value as i64))
-        .bind(error_category)
-        .bind(now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn transcription_by_id(
-        &self,
-        id: &str,
-    ) -> Result<Option<StoredTranscription>, sqlx::Error> {
-        sqlx::query("SELECT id, state, source_device_id, duration_ms, transcript_text, word_timestamps_json, confidence, retry_expires_at_ms, error_category FROM transcriptions WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map(|row| row.map(|row| StoredTranscription {
-                id: row.get("id"),
-                state: row.get("state"),
-                source_device_id: row.get("source_device_id"),
-                duration_ms: row.get::<i64, _>("duration_ms") as u64,
-                transcript_text: row.get("transcript_text"),
-                word_timestamps_json: row.get("word_timestamps_json"),
-                confidence: row.get("confidence"),
-                retry_expires_at_ms: row.get::<Option<i64>, _>("retry_expires_at_ms").map(|value| value as u64),
-                error_category: row.get("error_category"),
-            }))
-    }
-
-    pub async fn transcription_by_id_for_device(
-        &self,
-        id: &str,
-        source_device_id: &str,
-    ) -> Result<Option<StoredTranscription>, sqlx::Error> {
-        sqlx::query("SELECT id, state, source_device_id, duration_ms, transcript_text, word_timestamps_json, confidence, retry_expires_at_ms, error_category FROM transcriptions WHERE id = ? AND source_device_id = ?")
-            .bind(id)
-            .bind(source_device_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map(|row| row.map(|row| StoredTranscription {
-                id: row.get("id"),
-                state: row.get("state"),
-                source_device_id: row.get("source_device_id"),
-                duration_ms: row.get::<i64, _>("duration_ms") as u64,
-                transcript_text: row.get("transcript_text"),
-                word_timestamps_json: row.get("word_timestamps_json"),
-                confidence: row.get("confidence"),
-                retry_expires_at_ms: row.get::<Option<i64>, _>("retry_expires_at_ms").map(|value| value as u64),
-                error_category: row.get("error_category"),
-            }))
     }
 
     pub async fn list_active_sessions(
@@ -4853,27 +4746,6 @@ mod tests {
                 .expect("lookup"),
             Some("thread-1".into())
         );
-    }
-
-    #[tokio::test]
-    async fn transcription_reads_are_device_scoped() {
-        let store = Store::connect("sqlite::memory:?cache=shared")
-            .await
-            .expect("in-memory store");
-        store
-            .insert_transcription("transcription-1", "device-1", 1_000, "now")
-            .await
-            .expect("transcription");
-        assert!(store
-            .transcription_by_id_for_device("transcription-1", "device-1")
-            .await
-            .expect("owner lookup")
-            .is_some());
-        assert!(store
-            .transcription_by_id_for_device("transcription-1", "device-2")
-            .await
-            .expect("other device lookup")
-            .is_none());
     }
 
     #[tokio::test]

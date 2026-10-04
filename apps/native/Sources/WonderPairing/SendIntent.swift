@@ -100,15 +100,6 @@ public struct ComposerIntent: Codable, Sendable {
         stagedFiles?.removeAll { $0.id == id }
         draftAttachmentIds?.removeAll { $0 == id }
     }
-    @discardableResult public mutating func appendDictation(_ text: String, requestID: String) throws -> Bool {
-        guard lastDictationRequestID != requestID else { return false }
-        let transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !transcript.isEmpty else { throw SendFailure.empty }
-        let result = draft + (draft.isEmpty || draft.last?.isWhitespace == true ? "" : " ") + transcript
-        guard result.utf8.count <= 65536 else { throw SendFailure.tooLarge }
-        draft = result; lastDictationRequestID = requestID
-        return true
-    }
     public mutating func begin(device: String, clientMessageID: String = UUID().uuidString, expectedTurnId: String? = nil, groupRouting: NewBotDefaults? = nil, modelSelectionRevision: Int? = nil) throws {
         guard pending == nil else { throw SendFailure.pending }
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(stagedFiles ?? []).isEmpty || !(draftAttachmentIds ?? []).isEmpty else { throw SendFailure.empty }

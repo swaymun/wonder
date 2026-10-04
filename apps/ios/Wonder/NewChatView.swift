@@ -83,17 +83,6 @@ enum NewChatDraftStore {
         }
         return next
     }
-    /// A recording remains bound to its original draft when the owner navigates.
-    static func insertDictation(_ text: String, requestID: String, draftID: String, host: String) throws {
-        let prefix = key(host)
-        let targets = UserDefaults.standard.dictionaryRepresentation().keys.filter { $0 == prefix || $0.hasPrefix(prefix + ".") }
-        guard var draft = targets.compactMap({ read($0) }).first(where: { $0.requestID == draftID }) else { throw ReadFailure.resync }
-        try draft.appendDictation(text, requestID: requestID)
-        let data = try JSONEncoder().encode(draft)
-        for target in targets where read(target)?.requestID == draftID {
-            try data.write(to: url(target), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        }
-    }
     private static func destinationKey(_ host: String, _ destination: ChatDestination?) -> String {
         let encoded = (try? JSONEncoder().encode(destination)) ?? Data()
         return key(host) + "." + encoded.base64EncodedString()
@@ -241,11 +230,6 @@ struct NewChatView: View {
             if let hostID { NewChatDraftStore.save(draft, host: hostID) }
             sendTask.cancel()
             sending = false
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .newChatDictationInserted)) { notification in
-            guard let hostID, notification.object as? String == hostID,
-                  let saved = NewChatDraftStore.load(host: hostID), saved.requestID == draft.requestID else { return }
-            draft = saved
         }
         .task { await Task.detached { NewChatDraftStore.pruneAttachments() }.value }
         .sheet(isPresented: $pairing) { PairComputerView(model: library.pairingModel()) }
@@ -1412,5 +1396,4 @@ struct PickerRow: View {
 }
 
 extension Notification.Name {
-    static let newChatDictationInserted = Notification.Name("wonder.newChatDictationInserted")
 }

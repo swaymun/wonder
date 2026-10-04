@@ -188,9 +188,18 @@ final class SetupTests: XCTestCase {
 
 
     @MainActor
+    func testRetiredDictationSetupAdvancesToPairing() {
+        let suite = "wonder-retired-dictation-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(5, forKey: "setup.step")
+        XCTAssertEqual(SetupProgress(defaults: defaults).step, .phone)
+    }
+
+    @MainActor
     func testSetupRequiresRuntimeButNoWonderAccount() {
         XCTAssertTrue(SetupStep.welcome.canEnter(executionReady: false))
-        for step in [SetupStep.connection, .permissions, .dictation, .phone, .finish] {
+        for step in [SetupStep.connection, .permissions, .phone, .finish] {
             XCTAssertFalse(step.canEnter(executionReady: false))
             XCTAssertTrue(step.canEnter(executionReady: true))
         }

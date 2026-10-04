@@ -1,10 +1,7 @@
 //! Wonder's authenticated loopback API boundary.
-pub mod asr;
 mod diagnostics;
 #[cfg(feature = "experimental-relay")]
 pub mod relay;
-#[cfg(test)]
-use asr::{canonical_audio_mime, sniff_audio_mime};
 mod automation_schedule;
 #[cfg(test)]
 mod automation_tests;
@@ -88,7 +85,6 @@ use wonder_api::{
 use wonder_app_server::{
     build_permission_override, require_named_profile_with_scope, AppServerClient, LaunchConfig,
 };
-use wonder_asr::MAX_RECORDING_BYTES;
 use wonder_store::{
     avatar, AgentFamily, ComputerControlLeaseCreate, ComputerLeaseAcquireResult,
     ComputerSessionCreate, ComputerSessionState, MessageInsert, NewChannelMessage, Store,
@@ -133,9 +129,6 @@ pub struct AppState {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub runtime_catalog: Arc<RwLock<RuntimeCatalog>>,
-    pub asr_service: Arc<asr::AsrService>,
-    pub asr_slots: Arc<tokio::sync::Semaphore>,
-    pub asr_rate_limits: Arc<tokio::sync::Mutex<HashMap<String, Vec<u64>>>>,
     pub computer_use_enabled: bool,
     pub computer_use_bin: Option<PathBuf>,
     pub computer_supervisor: Arc<computer_sessions::ComputerSessionSupervisor>,
@@ -1096,32 +1089,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/automations/{automation_id}/runs",
             get(list_automation_runs),
         )
-        .route(
-            "/api/v1/asr/transcriptions",
-            post(asr::create_transcription).layer(DefaultBodyLimit::max(MAX_RECORDING_BYTES)),
-        )
-        .route(
-            "/api/v1/asr/transcriptions/by-request/{request_id}",
-            delete(asr::cancel_transcription_request),
-        )
-        .route(
-            "/api/v1/asr/transcriptions/{transcription_id}",
-            get(asr::get_transcription).delete(asr::cancel_transcription),
-        )
-        .route(
-            "/api/v1/asr/transcriptions/{transcription_id}/retry",
-            post(asr::retry_transcription),
-        )
-        .route("/api/v1/asr/models", get(asr::models))
-        .route(
-            "/api/v1/asr/models/{model_id}/download",
-            post(asr::download_model).delete(asr::cancel_download),
-        )
-        .route(
-            "/api/v1/asr/models/{model_id}/select",
-            post(asr::select_model),
-        )
-        .route("/api/v1/asr/models/{model_id}", delete(asr::delete_model))
+
         .route("/api/v1/events", get(events_socket))
         .route("/api/v1/sync/checkpoint", get(sync::checkpoint))
         .route("/api/v1/events/challenge", get(event_challenge))
@@ -13061,7 +13029,7 @@ mod tests {
     use super::{
         app_server_notification_key, artifact_event_detail, artifact_mime_type, attachment_path,
         attachment_relative_path, automation_conversation_id, bot_handle, build_approval_response,
-        canonical_approval_body, canonical_audio_mime, computer_use_screenshot_url,
+        canonical_approval_body, computer_use_screenshot_url,
         conversation_thread_projection, conversation_thread_projection_with_items,
         decode_local_href, default_session_expiration, drain_pending_app_server_notifications,
         dynamic_tool_response, extract_text, find_client_message, host_readiness_state,
@@ -13071,7 +13039,7 @@ mod tests {
         resolve_channel_route, rollback_bot_artifacts, route_auth, router, run_computer_use,
         runtime_app_summary, runtime_mcp_server_summary, runtime_skill_summary,
         sanitize_ansi_and_secrets, sanitize_typed_item, sanitized_relative_path,
-        search_result_deep_link, should_execute_dynamic_tool, sniff_audio_mime,
+        search_result_deep_link, should_execute_dynamic_tool,
         steer_response_turn_id, steer_turn_params, turn_input, valid_attachment_ids,
         valid_attachment_mime_type, valid_attachment_name, valid_channel_description,
         valid_channel_member_count, valid_device_label, validate_bot_runtime_settings,
@@ -14861,9 +14829,6 @@ for line in sys.stdin:
                 permission_profiles_restricted: false,
                 auto_review_required_on_models: None,
             })),
-            asr_service: Arc::new(crate::asr::AsrService::default()),
-            asr_slots: Arc::new(tokio::sync::Semaphore::new(1)),
-            asr_rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             computer_use_enabled: false,
             computer_use_bin: None,
             computer_supervisor: Arc::new(
@@ -16295,24 +16260,6 @@ for line in sys.stdin:
         assert_eq!(saved.state, "accepted_by_codex");
         assert_eq!(saved.codex_turn_id.as_deref(), Some("accepted-turn"));
         state.app_server.lock().await.shutdown().await.unwrap();
-    }
-
-    #[test]
-    fn audio_boundary_canonicalizes_parameters_and_sniffs_containers() {
-        assert_eq!(
-            canonical_audio_mime("audio/webm;codecs=opus"),
-            Some("audio/webm")
-        );
-        assert_eq!(canonical_audio_mime("audio/x-wav"), Some("audio/wav"));
-        assert_eq!(canonical_audio_mime("audio/flac"), None);
-        assert_eq!(
-            sniff_audio_mime(&[0x1a, 0x45, 0xdf, 0xa3]),
-            Some("audio/webm")
-        );
-        assert_eq!(sniff_audio_mime(b"OggS\0\0\0\0"), Some("audio/ogg"));
-        assert_eq!(sniff_audio_mime(b"RIFF0000WAVEfmt "), Some("audio/wav"));
-        assert_eq!(sniff_audio_mime(b"xxxxftypisom"), Some("audio/mp4"));
-        assert_eq!(sniff_audio_mime(b"not audio"), None);
     }
 
     #[test]

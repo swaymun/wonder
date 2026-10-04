@@ -208,9 +208,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model: None,
         reasoning_effort: None,
         runtime_catalog: Arc::new(RwLock::new(runtime_catalog)),
-        asr_service: Arc::new(wonderd::asr::AsrService::default()),
-        asr_slots: Arc::new(tokio::sync::Semaphore::new(1)),
-        asr_rate_limits: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         computer_use_enabled: std::env::var("WONDER_COMPUTER_USE_ENABLED").as_deref() == Ok("1"),
         computer_use_bin: std::env::var_os("WONDER_COMPUTER_USE_BIN").map(PathBuf::from),
         computer_supervisor: Arc::new(
@@ -221,11 +218,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .computer_supervisor
         .retire_durable_sessions(&state)
         .await;
-    state
-        .asr_service
-        .initialize(&state.store)
-        .await
-        .map_err(|_| "ASR recovery failed")?;
     wonderd::bot_management::recover_deletions(&state).await;
     let notification_service = wonderd::ingestion::spawn(state.clone()).await;
     let scheduler_task = wonderd::spawn_automation_scheduler(state.clone());
