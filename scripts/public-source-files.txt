@@ -377,12 +377,14 @@ crates/wonder-store/migrations/0083_computer_video_quality_1080.sql
 crates/wonder-store/migrations/0084_project_service_tier.sql
 crates/wonder-store/migrations/0085_project_automation_targets.sql
 crates/wonder-store/migrations/0086_automation_revisions.sql
+crates/wonder-store/migrations/0087_project_github_review_bindings.sql
 crates/wonder-store/src/asr.rs
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs
 crates/wonder-store/src/bot_management.rs
 crates/wonder-store/src/computer_sessions.rs
 crates/wonder-store/src/file_access.rs
+crates/wonder-store/src/github_review_bindings.rs
 crates/wonder-store/src/goals.rs
 crates/wonder-store/src/group_collaboration.rs
 crates/wonder-store/src/groups.rs
