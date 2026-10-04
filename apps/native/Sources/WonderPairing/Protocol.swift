@@ -277,7 +277,9 @@ public final class PairingAPI: Sendable {
                let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                message.utf8.count <= 512,
                (message.hasPrefix("This annotation") || message.hasPrefix("Annotations require") ||
-                message.hasPrefix("This file changed since you annotated")) {
+                message.hasPrefix("This file changed since you annotated") ||
+                message.hasPrefix("Project folders changed. Reopen the annotation preview") ||
+                message.hasPrefix("An annotated Project folder changed. Reopen the preview")) {
                 throw PairingFailure.annotationRejected(status, message)
             }
             throw PairingFailure.response(status)

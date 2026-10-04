@@ -1311,7 +1311,7 @@ final class WonderDiagnosticsTests: XCTestCase {
 
     // Creation handoff owns one first-message identity across restart. A lost
     // creation response must not replace another saved composer or send twice.
-    @MainActor func testCreationMessageTransfersToDurableOutboxOnce() throws {
+    @MainActor func testCreationMessageTransfersToDurableOutboxOnce() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let chat = try Self.cameraChat(id: "creation-outbox")
@@ -1324,6 +1324,65 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(restarted.composers[chat.id]?.pending?.request.body, "Help with testing")
         XCTAssertThrowsError(try restarted.prepareCreationMessage(chat, body: "Different message", requestID: UUID().uuidString))
         XCTAssertEqual(restarted.composers[chat.id]?.pending?.request.body, "Help with testing")
+
+        // Delivery can reconcile before the New Chat draft is retired. Replay
+        // must leave the accepted composer empty and must not upload the note.
+        MessageRecoveryURLProtocol.reset()
+        let snapshot = try JSONDecoder().decode(ConversationSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: ["conversationId": chat.id,
+                "hostEpoch": "epoch", "lastSequence": 1,
+                "messages": [["messageId": "accepted", "clientMessageId": requestID,
+                    "body": "Help with testing", "state": "completed", "createdAt": "1700000000000",
+                    "attachmentIds": ["annotation-file"]]], "assistantMessages": [],
+                "thread": ["hydrated": true]]))
+        var reconciled = try XCTUnwrap(restarted.composers[chat.id])
+        reconciled.reconcile(snapshot)
+        try ReadStore(root: root, host: "camera-unit-host", device: "camera-unit-device")
+            .saveComposer(reconciled, conversation: chat.id)
+        let recovered = recoveryModel(root: root)
+        recovered.snapshots[chat.id] = snapshot
+        let note = try ArtifactAnnotation(projectId: "project", conversationId: chat.id,
+            rootId: "workspace", path: "README.md", source: Data("Source".utf8),
+            startLine: 1, endLine: 1, note: "Check this").stagedFile()
+        try await recovered.prepareCreation(chat, body: "Help with testing", requestID: requestID, files: [note])
+        XCTAssertEqual(recovered.composers[chat.id]?.draft, "")
+        XCTAssertEqual(recovered.composers[chat.id]?.attachmentCount, 0)
+        XCTAssertNil(recovered.composers[chat.id]?.pending)
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: "/api/v1/conversations/\(chat.id)/files", includingEmpty: true).isEmpty)
+        recovered.editDraft("Next question", chat: chat.id)
+        try await recovered.prepareCreation(chat, body: "Help with testing", requestID: requestID, files: [note])
+        XCTAssertEqual(recovered.composers[chat.id]?.draft, "Next question", "Replay must preserve a newer draft")
+    }
+
+    @MainActor func testAnnotationFolderRejectionRestoresEditableMessage() async throws {
+        for detail in ["Project folders changed. Reopen the annotation preview before sending.",
+                       "An annotated Project folder changed. Reopen the preview before sending."] {
+            MessageRecoveryURLProtocol.reset()
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let chat = try Self.cameraChat(id: "annotation-folder-recovery")
+            var intent = ComposerIntent()
+            intent.draft = "Review my note"
+            intent.draftAttachmentIds = ["annotation-file"]
+            try ReadStore(root: root, host: "camera-unit-host", device: "camera-unit-device")
+                .saveComposer(intent, conversation: chat.id)
+            let model = recoveryModel(root: root)
+            try model.prepareCreationMessage(chat, body: intent.draft, requestID: UUID().uuidString)
+            let path = "/api/v1/conversations/\(chat.id)/messages"
+            MessageRecoveryURLProtocol.enqueue(path: path, status: 409, body: Data(detail.utf8), contentType: "text/plain")
+            await model.deliver(chat)
+            XCTAssertNil(model.composers[chat.id]?.pending)
+            XCTAssertEqual(model.composers[chat.id]?.draft, intent.draft)
+            XCTAssertEqual(model.composers[chat.id]?.draftAttachmentIds, ["annotation-file"])
+            XCTAssertTrue(model.controlErrors[chat.id]?.contains(detail) == true)
+            let restored = try ReadStore(root: root, host: "camera-unit-host", device: "camera-unit-device")
+                .loadComposer(conversation: chat.id)
+            XCTAssertNil(restored.pending)
+            XCTAssertEqual(restored.draft, intent.draft)
+            await model.deliver(chat)
+            XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path).count, 1,
+                           "A rejected note must remain editable instead of retrying immutable bytes")
+        }
     }
 
     // Choosing another destination retains both drafts and any uncertain

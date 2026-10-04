@@ -378,6 +378,18 @@ private struct ConversationScroller<Content: View>: View {
     }
 }
 
+/// Custom preview bars share the scene with iPadOS window controls. Let the
+/// system reserve their actual region instead of assuming a fixed inset.
+private struct PreviewWindowControlsLayout: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(iOS 26.0, *), UIDevice.current.userInterfaceIdiom == .pad {
+            content.containerCornerOffset(.horizontal, sizeToFit: true)
+        } else {
+            content
+        }
+    }
+}
+
 // Native row insets provide the outer margin; wide layouts keep the readable
 // content centered in a bounded column.
 private struct ConversationColumn: ViewModifier {
@@ -3537,6 +3549,7 @@ struct WorkspaceBrowser: View {
                     }
                     .padding(.horizontal, 12)
                     .frame(minHeight: 44)
+                    .modifier(PreviewWindowControlsLayout())
                     previewContent
                 }
             }
@@ -3588,6 +3601,7 @@ struct WorkspaceBrowser: View {
                 }
             }
             .padding(.horizontal, 12)
+            .modifier(PreviewWindowControlsLayout())
             .background(Color(uiColor: .secondarySystemBackground))
             // The full-screen cover owns the preview while expanded. PDFKit,
             // WebKit and large text/diff layouts must not stay mounted twice.

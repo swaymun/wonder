@@ -1584,7 +1584,10 @@ struct ManagedBotListMutationState {
     func prepareCreation(_ chat: ChatSummary, body: String, requestID: String, files: [StagedFile]) async throws {
         loadComposer(chat.id)
         guard !intentLoadFailures.contains(chat.id) else { throw ReadFailure.resync }
-        if composers[chat.id]?.pending != nil {
+        // The first message may already be reconciled while its New Chat draft
+        // is still awaiting retirement. Do not restage accepted bytes on replay.
+        if composers[chat.id]?.pending != nil ||
+            snapshots[chat.id]?.messages.contains(where: { $0.clientMessageId == requestID }) == true {
             try prepareCreationMessage(chat, body: body, requestID: requestID)
             return
         }
