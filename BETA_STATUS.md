@@ -1,8 +1,8 @@
 # Wonder beta status
 
 The signed public Mac beta remains available. On October 4, Wonder Testing
-Release 1.0 (26) uploaded, processed and passed an independent read-only check
-for automatic Owner Beta availability. Production Release 1.0 (84) uploaded
+Release 1.0 (27) uploaded, processed and passed the read-only lane check
+for automatic Owner Beta availability. Production Release 1.0 (85) uploaded
 and processed successfully. TestFlight installation and production
 tester availability remain unverified. Mac 1.0.110 is signed, notarized and
 installed locally with the simplified Settings design and desktop Chats removed.
@@ -17,10 +17,22 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (84) uploaded and Apple reports processing complete. The signed archive/export passed production identity, APNs, App Group, Keychain and diagnostic-exclusion checks. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | Blue Release 1.0 (26) uploaded, processed and is available in automatic Owner Beta. Signed archive/export identity, entitlements, Widget, symbols and diagnostic exclusions passed. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| iPhone and iPad | Production Release 1.0 (85) uploaded and Apple reports processing complete. The signed archive/export passed production identity, APNs, App Group, Keychain and diagnostic-exclusion checks. Tester availability and TestFlight installation remain unverified. |
+| Wonder Testing | Blue Release 1.0 (27) uploaded, processed and is available in automatic Owner Beta. Signed archive/export identity, entitlements, Widget, symbols and diagnostic exclusions passed. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
 | Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.110 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed. Actual light/dark Settings, version, manual update feedback and read-only host checks passed. Current fresh-Mac pairing, private permissions and draft-upgrade acceptance remain open. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 632 selected public source files matched bytes and executable modes before release records were updated. Third-party components retain their own licenses. |
+
+Progressive dictation is included in Testing 27 and production 85, built from
+clean internal `95b8123f` and corresponding public source `d6c7709`. Supported
+on-device speech supplies provisional composer words for the keyboard language;
+unsupported native speech retains the paired-Mac fallback. Revisions stay outside
+the saved draft until finished. Cancel, manual edits, selection, navigation,
+interruption, destination changes and attachments have focused regression coverage.
+Seventeen shared tests and six focused checks on each iPhone 17/iPad A16 simulator
+passed. Both Release binaries exclude diagnostics and recognition fixtures.
+Actual speech accuracy, first-word latency, device/locale assets and physical
+microphone behavior remain unverified; the owner will check them using TestFlight.
+See [progressive dictation testing](apps/ios/TESTING.md#progressive-dictation).
 
 Completed responses now show their edited files below the answer, with added/removed
 line counts and selectable colored saved diffs. The composer remains available.
