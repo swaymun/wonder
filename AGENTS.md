@@ -83,6 +83,22 @@ forward rules for an older feature or workflow.
 
 ## Verification and diagnostics
 
+- Maintain the existing master feature test workbook. Its absolute path is stored
+  privately in `.local/testing/master-workbook-path.txt`; use the user's supplied
+  workbook path when that local pointer is unavailable. Do not commit the workbook
+  or its private path to public source.
+  For implemented or changed user-visible behavior, update its scenario in this
+  same document with a short plain-language test, the expected result, and an
+  embedded screenshot of the verified working behavior when capture is possible.
+  Capture the actual app; never substitute a mockup or treat an old screenshot as
+  current verification. Briefly label evidence as simulator, Mac, or physical device
+  and note any limitation. Keep original captures privately under `.local/`.
+  Preserve user notes and blank space for failure screenshots. Do not reintroduce
+  device/build forms or "What happened / Not tested" fields. Treat scenarios the
+  user deletes as accepted; do not restore them unless affected behavior changes.
+  Use the documents skill to edit and render-check the workbook. If the workbook
+  is unavailable or a screenshot cannot be captured, report the gap without
+  claiming verification; preserve available evidence for a later update.
 - **For now, physical iPhone/iPad testing is optional and runs only when explicitly
   requested.** Use relevant unit/model/contract checks and focused simulator UI
   checks by default. Physical sessions, mirroring and device availability must not
