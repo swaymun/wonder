@@ -3220,7 +3220,10 @@ import UIKit
         XCTAssertTrue(app.buttons["conversation-title-menu"].waitForExistence(timeout: 10))
         let activity = app.buttons["activity-group:fixture-turn/stopped-command"]
         XCTAssertTrue(activity.waitForExistence(timeout: 5))
-        XCTAssertEqual(activity.label, "This response stopped")
+        XCTAssertEqual(activity.label, "Earlier response interrupted")
+        let compaction = anyElement(app, identifier: "context-compaction:fixture-turn/compact-stopped")
+        XCTAssertTrue(compaction.exists)
+        XCTAssertEqual(compaction.label, "Context compaction interrupted")
         XCTAssertTrue(app.textViews["message-draft"].exists)
         retainMenuScreenshot(app, name: "Project response status")
     }

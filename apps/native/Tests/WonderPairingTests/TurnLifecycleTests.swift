@@ -246,7 +246,7 @@ final class TurnLifecycleTests: XCTestCase {
                                                     isProjectConversation: true), "This response couldn’t finish")
         XCTAssertEqual(ChatFeedEntry.lifecycleLabel(rows: [command], turn: turn("stopped", status: "interrupted"),
                                                     isLatestSegmentForTurn: true, isLatestActiveSegment: false,
-                                                    isProjectConversation: true), "This response stopped")
+                                                    isProjectConversation: true), "Earlier response interrupted")
 
         let unknown = turn("unknown", status: "unknown", startedAt: "0", completedAt: "1000")
         XCTAssertEqual(ChatFeedEntry.lifecycleLabel(rows: [], turn: unknown,

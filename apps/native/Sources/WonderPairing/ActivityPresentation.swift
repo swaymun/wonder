@@ -116,8 +116,9 @@ public struct ChatFeedEntry: Identifiable, Sendable {
         if isLatestSegmentForTurn, isProjectConversation {
             // A separate Codex desktop process may be running a newer turn
             // while Wonder can read only this saved turn's terminal outcome.
+            // Name the recorded response, not the conversation's live state.
             switch turn?.status {
-            case "interrupted": return "This response stopped"
+            case "interrupted": return "Earlier response interrupted"
             case "failed": return "This response couldn’t finish"
             default: break
             }
@@ -472,13 +473,16 @@ public struct ContextCompactionPresentation: Equatable, Sendable {
     public let symbol: String
     public let isRunning: Bool
 
-    public static func forState(_ state: String) -> Self {
+    public static func forState(_ state: String, isProjectConversation: Bool = false) -> Self {
         switch state.lowercased() {
         case "started", "streaming", "waiting":
             return Self(label: "Compacting context…", symbol: "arrow.triangle.2.circlepath", isRunning: true)
         case "completed":
             return Self(label: "Context compacted", symbol: "text.badge.checkmark", isRunning: false)
         case "interrupted":
+            if isProjectConversation {
+                return Self(label: "Context compaction interrupted", symbol: "exclamationmark.circle", isRunning: false)
+            }
             return Self(label: "Context compaction stopped", symbol: "stop.circle", isRunning: false)
         case "failed":
             return Self(label: "Context compaction failed", symbol: "exclamationmark.triangle", isRunning: false)

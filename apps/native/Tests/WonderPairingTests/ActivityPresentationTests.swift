@@ -85,6 +85,9 @@ final class ActivityPresentationTests: XCTestCase {
             XCTAssertTrue(value.activitySummary?.details.isEmpty == true)
             XCTAssertTrue(value.activity?.details.isEmpty == true)
         }
+        let recorded = ContextCompactionPresentation.forState("interrupted", isProjectConversation: true)
+        XCTAssertEqual(recorded.label, "Context compaction interrupted")
+        XCTAssertEqual(recorded.symbol, "exclamationmark.circle")
     }
 
     func testWaitShowsRequestedDurationWithoutConfusingInterruptionWithElapsedTime() throws {

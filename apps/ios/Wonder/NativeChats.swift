@@ -772,7 +772,7 @@ struct ConversationView: View {
                                 case .activity(let row):
                                     activityContent(row)
                                 case .compaction(let row):
-                                    ContextCompactionMarker(row: row)
+                                    ContextCompactionMarker(row: row, isProjectConversation: model.isProject(chat))
                                 case .file(let file): ToolFilePreview(model: model, chat: chat, file: file)
                                 case .entry(let entry):
                                 entryContent(
@@ -6180,9 +6180,11 @@ struct ActivityGroupView: View {
 
 struct ContextCompactionMarker: View {
     let row: ReadRow
+    let isProjectConversation: Bool
 
     private var presentation: ContextCompactionPresentation {
-        row.contextCompactionPresentation ?? .forState("unknown")
+        ContextCompactionPresentation.forState(row.item?.state ?? "unknown",
+                                               isProjectConversation: isProjectConversation)
     }
 
     var body: some View {

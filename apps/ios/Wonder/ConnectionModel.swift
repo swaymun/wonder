@@ -437,6 +437,9 @@ struct ManagedBotListMutationState {
                             "id": "fixture-turn", "status": "interrupted", "items": [[
                                 "id": "stopped-command", "type": "commandExecution", "state": "interrupted",
                                 "createdAt": "1700000001000", "payload": ["command": "swift test"]
+                            ], [
+                                "id": "compact-stopped", "type": "contextCompaction", "state": "interrupted",
+                                "createdAt": "1700000002000"
                             ]]
                         ]]]
                     }

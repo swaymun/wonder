@@ -1553,7 +1553,7 @@ struct DiagnosticSubagentFixtureView: View {
                         }
                     }
                 case .compaction(let row):
-                    ContextCompactionMarker(row: row)
+                    ContextCompactionMarker(row: row, isProjectConversation: false)
                 case .file:
                     EmptyView()
                 }
