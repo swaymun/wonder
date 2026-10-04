@@ -1,8 +1,8 @@
 # Wonder beta status
 
 The signed public Mac beta remains available. On October 4, Wonder Testing
-Release 1.0 (25) uploaded, processed and passed an independent read-only check
-for automatic Owner Beta availability. Production Release 1.0 (83) uploaded
+Release 1.0 (26) uploaded, processed and passed an independent read-only check
+for automatic Owner Beta availability. Production Release 1.0 (84) uploaded
 and processed successfully. TestFlight installation and production
 tester availability remain unverified. Mac 1.0.110 is signed, notarized and
 installed locally with the simplified Settings design and desktop Chats removed.
@@ -17,8 +17,8 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (83) uploaded and Apple reports processing complete. The signed archive/export passed production identity, APNs, App Group, Keychain and diagnostic-exclusion checks. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | Blue Release 1.0 (25) uploaded, processed and is available in automatic Owner Beta. Signed archive/export identity, entitlements, Widget, symbols and diagnostic exclusions passed. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| iPhone and iPad | Production Release 1.0 (84) uploaded and Apple reports processing complete. The signed archive/export passed production identity, APNs, App Group, Keychain and diagnostic-exclusion checks. Tester availability and TestFlight installation remain unverified. |
+| Wonder Testing | Blue Release 1.0 (26) uploaded, processed and is available in automatic Owner Beta. Signed archive/export identity, entitlements, Widget, symbols and diagnostic exclusions passed. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
 | Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.110 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed. Actual light/dark Settings, version, manual update feedback and read-only host checks passed. Current fresh-Mac pairing, private permissions and draft-upgrade acceptance remain open. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 632 selected public source files matched bytes and executable modes before release records were updated. Third-party components retain their own licenses. |
 
@@ -26,12 +26,14 @@ Completed responses now show their edited files below the answer, with added/rem
 line counts and selectable colored saved diffs. The composer remains available.
 Current workspace diffs identify staged versus unstaged changes. Eight native
 model checks and four focused iPhone/iPad simulator checks passed, including
-landscape and Accessibility XXXL. These changes are awaiting the next two
-Release uploads; the builds listed above retain their earlier release status.
+landscape and Accessibility XXXL. These changes are included in Testing 26 and production 84, both uploaded and
+processed from clean internal `1bdd5e1b` and matching public source `2f59da0`.
+Both exported Release apps exclude the edited-files diagnostic fixture.
+TestFlight-installed interaction remains unverified.
 
 The chronological qualification notes below retain the limits of earlier checks.
 The October 4 releases include the later Settings, native GitHub review and
-Project Apps recovery source. Simulator checks include iPhone/iPad landscape;
+Project Apps recovery and local edited-files source. Simulator checks include iPhone/iPad landscape;
 actual TestFlight-installed behavior remains unverified.
 
 Mac 1.0.110 keeps the native host, menu bar and Settings. Its Settings uses the
