@@ -15,23 +15,24 @@ import WonderPairing
     @Published private(set) var intent: DictationIntent?
     @Published private(set) var models: DictationModels?
     @Published private(set) var elapsed: TimeInterval = 0
-    @Published private(set) var audioLevels: [CGFloat] = []
     @Published private(set) var now = Date()
     @Published private(set) var modelsFailure: String?
     @Published private(set) var busy = false
     @Published private(set) var requiresResume = false
     @Published private(set) var failure: String?
     @Published private(set) var microphoneDenied = false
-    @Published private(set) var speechDenied = false
     @Published private(set) var nativeConversationID: String?
     private weak var editor: (any DictationEditor)?
     private var editorConversationID: String?
     private var nativeCapture: NativeSpeechCapture?
-    private var nativeRecognizer: SFSpeechRecognizer?
-    private var nativeTask: SFSpeechRecognitionTask?
-    private var nativeRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var nativeSession: NativeSpeechSession?
+    private var transcript = DictationTranscript()
+    @Published private(set) var preparingConversationID: String?
+    @Published private(set) var preparationStatus: String?
+    private var preparation: Task<Void, Never>?
     private var finalization: Task<Void, Never>?
-    @Published private var nativeWords = ""
+    private var draining: Task<Void, Never>?
+    private var nativeWords = ""
     private var nativeStartedAt: Date?
     private var nativeFailed = false
     private var nativeRecordingFailed = false
@@ -67,10 +68,11 @@ import WonderPairing
     func restore(force: Bool = false) {
         guard let model else { return }
         guard force || scope != model.assignmentScope else { return }
+        cancelPreparation()
         work?.cancel(); timer?.cancel(); interruptions?.cancel()
         discardNative()
         stopCapture()
-        scope = model.assignmentScope; models = nil; busy = false; failure = nil; audioLevels = []
+        scope = model.assignmentScope; models = nil; busy = false; failure = nil
         do { intent = try model.savedDictationIntent() }
         catch { intent = nil; failure = "Your saved recording could not be opened." }
         if intent?.phase == "recording" {
@@ -85,14 +87,19 @@ import WonderPairing
         startTimer()
     }
     func connectionChanged() {
-        captureGeneration += 1
+        cancelPreparation()
         discardNative()
         work?.cancel(); stopCapture()
         removeAudio()
-        timer?.cancel(); interruptions?.cancel(); scope = nil; intent = nil; models = nil; busy = false; requiresResume = false; audioLevels = []
+        timer?.cancel(); interruptions?.cancel(); scope = nil; intent = nil; models = nil; busy = false; requiresResume = false
     }
     func foreground(_ active: Bool) {
         if !active {
+            // A system permission sheet temporarily makes the scene inactive.
+            // Backgrounding still retires preparation; the post-await active
+            // check prevents capture from starting under a remaining sheet.
+            if preparingConversationID != nil, UIApplication.shared.applicationState != .background { return }
+            cancelPreparation()
             if nativeConversationID != nil { finishNativeImmediately() }
             else if recording { finishCapture(submit: false) }
             work?.cancel(); busy = false
@@ -109,7 +116,7 @@ import WonderPairing
         persist()
     }
     func captureControlsHidden(conversationID: String) {
-        captureGeneration += 1
+        if preparingConversationID == conversationID { cancelPreparation() }
         if nativeConversationID == conversationID { finishNativeImmediately() }
         else if recording, intent?.conversationID == conversationID { finishCapture(submit: false) }
     }
@@ -127,12 +134,35 @@ import WonderPairing
             return .failure(error)
         }
     }
-    func start(chat: ChatSummary) async {
-        guard let model, !model.previewMode, !busy, intent == nil, !model.accessEnded else { return }
-        restore(); guard intent == nil else { return }
+    func blocksSending(conversationID: String) -> Bool {
+        preparingConversationID == conversationID ||
+            (intent?.conversationID == conversationID && (recording || processing))
+    }
+    func begin(chat: ChatSummary) {
+        guard !busy, intent == nil else { return }
+        restore()
+        guard intent == nil else { return }
+        preparation = Task { [weak self] in await self?.start(chat: chat) }
+    }
+    private func cancelPreparation() {
+        captureGeneration += 1
+        preparation?.cancel(); preparation = nil
+        if preparingConversationID != nil {
+            preparingConversationID = nil; preparationStatus = nil; busy = false
+            let session = nativeSession; nativeSession = nil
+            Task { await session?.cancel() }
+        }
+    }
+    private func start(chat: ChatSummary) async {
+        guard let model, !model.previewMode, !busy, intent == nil, !model.accessEnded, !Task.isCancelled else { return }
         busy = true; failure = nil
+        preparingConversationID = chat.id; preparationStatus = "Preparing dictation…"
         let initialScope = model.assignmentScope, generation = captureGeneration
-        defer { if initialScope == model.assignmentScope { busy = false } }
+        defer {
+            if initialScope == model.assignmentScope, generation == captureGeneration {
+                busy = false; preparingConversationID = nil; preparationStatus = nil; preparation = nil
+            }
+        }
         if await startNative(chat: chat, scope: initialScope, generation: generation) { return }
         guard initialScope == model.assignmentScope, generation == captureGeneration, !Task.isCancelled else { return }
         let status = await loadModels()
@@ -149,6 +179,7 @@ import WonderPairing
         let granted = await withCheckedContinuation { continuation in
             AVAudioApplication.requestRecordPermission { @Sendable in continuation.resume(returning: $0) }
         }
+        guard initialScope == model.assignmentScope, generation == captureGeneration, !Task.isCancelled else { return }
         microphoneDenied = !granted
         guard granted else { failure = "Allow microphone access in Settings to dictate."; return }
         guard await Self.waitForPermissionDismissal() else { return }
@@ -168,13 +199,12 @@ import WonderPairing
             let capture = try AVAudioRecorder(url: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: AVAudioSession.sharedInstance().sampleRate, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64_000])
             capture.delegate = self
-            capture.isMeteringEnabled = true
             guard capture.prepareToRecord() else { throw DictationFailure(errorCategory: "no_audio") }
             try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
             maximum = Double(min(catalog.maxRecordingDurationMs, 600_000)) / 1000
             guard maximum >= 0.25, capture.record(forDuration: maximum) else { throw DictationFailure(errorCategory: "no_audio") }
             nativeRecordingFailed = false
-            recorder = capture; elapsed = 0; audioLevels = []; startTimer(); observeInterruptions()
+            recorder = capture; elapsed = 0; startTimer(); observeInterruptions()
         } catch {
             stopCapture()
             intent?.phase = "failed"; intent?.cancelled = true; persist(); removeAudio()
@@ -191,70 +221,67 @@ import WonderPairing
         failure = "Dictation stopped because the draft changed. Your current draft is kept."
     }
     private func startNative(chat: ChatSummary, scope: String, generation: Int) async -> Bool {
-        guard editorConversationID == chat.id, let editor,
-              let recognizer = SFSpeechRecognizer(locale: Locale(identifier: editor.dictationLocale)),
-              recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { return false }
-        let authorization = await Self.requestSpeechAuthorization()
-        guard let model, model.assignmentScope == scope, captureGeneration == generation,
-              !model.accessEnded, !Task.isCancelled else { return true }
-        speechDenied = authorization != .authorized
-        guard authorization == .authorized else {
-            failure = "Live words need Speech Recognition access in Settings. Your Mac can still transcribe recordings."
-            return false
+        guard editorConversationID == chat.id, let editor else { return false }
+        let session = NativeSpeechSession()
+        nativeSession = session
+        func ownsPreparation() -> Bool {
+            model?.assignmentScope == scope && captureGeneration == generation &&
+                model?.accessEnded == false && !Task.isCancelled && editorConversationID == chat.id && self.editor === editor
         }
-        let granted = await withCheckedContinuation { continuation in
-            AVAudioApplication.requestRecordPermission { @Sendable in continuation.resume(returning: $0) }
-        }
-        guard await Self.waitForPermissionDismissal() else { return true }
-        guard model.assignmentScope == scope, captureGeneration == generation,
-              !model.accessEnded, !Task.isCancelled, UIApplication.shared.applicationState == .active else { return true }
-        microphoneDenied = !granted
-        guard granted else { failure = "Allow microphone access in Settings to dictate."; return true }
-        guard editorConversationID == chat.id, self.editor === editor,
-              let saved = model.connection, let url = audioURL, editor.beginDictation() else { return false }
         do {
+            let supported = try await session.prepare(locale: Locale(identifier: editor.dictationLocale)) { [weak self] in
+                await MainActor.run {
+                    guard let self, self.captureGeneration == generation else { return }
+                    self.preparationStatus = "Downloading speech language…"
+                }
+            }
+            guard ownsPreparation() else { await session.cancel(); return true }
+            guard supported else {
+                await session.cancel(); nativeSession = nil
+                failure = "Live words are unavailable for this language or device. Your Mac will transcribe after you stop."
+                return false
+            }
+            let granted = await withCheckedContinuation { continuation in
+                AVAudioApplication.requestRecordPermission { @Sendable in continuation.resume(returning: $0) }
+            }
+            guard ownsPreparation() else { await session.cancel(); return true }
+            microphoneDenied = !granted
+            guard granted else {
+                await session.cancel(); nativeSession = nil
+                failure = "Allow microphone access in Settings to dictate."; return true
+            }
+            guard await Self.waitForPermissionDismissal(), ownsPreparation(),
+                  let model, let saved = model.connection, let url = audioURL else {
+                await session.cancel(); return true
+            }
             var directory = url.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             var values = URLResourceValues(); values.isExcludedFromBackup = true; try directory.setResourceValues(values)
-            let pending = DictationIntent(hostID: saved.credential.hostInstallationId, deviceID: saved.credential.deviceId,
-                conversationID: chat.id, conversationTitle: chat.title, modelID: "native")
-            try model.persistDictationIntent(pending)
-            intent = pending
             try AVAudioSession.sharedInstance().setCategory(.record, mode: .measurement)
             try AVAudioSession.sharedInstance().setActive(true); audioSessionActive = true
-            let request = SFSpeechAudioBufferRecognitionRequest()
-            request.shouldReportPartialResults = true
-            request.requiresOnDeviceRecognition = true
-            request.addsPunctuation = true
-            nativeRecognizer = recognizer
-            nativeRequest = request; nativeWords = ""; nativeFailed = false; nativeRecordingFailed = false
-            nativeConversationID = chat.id
-            let capture = try NativeSpeechCapture(url: url, request: request)
-            nativeCapture = capture
-            nativeTask = recognizer.recognitionTask(with: request) { @Sendable [weak self] result, error in
-                let words = result?.bestTranscription.formattedString
-                let final = result?.isFinal == true
-                let failed = error != nil
-                Task { @MainActor [weak self] in
-                    self?.receiveNative(words: words, final: final, failed: failed, pending: pending)
-                }
+            let pending = DictationIntent(hostID: saved.credential.hostInstallationId, deviceID: saved.credential.deviceId,
+                conversationID: chat.id, conversationTitle: chat.title, modelID: "native")
+            guard editor.beginDictation() else { throw CancellationError() }
+            try model.persistDictationIntent(pending)
+            intent = pending; nativeConversationID = chat.id
+            nativeWords = ""; transcript = DictationTranscript(); nativeFailed = false; nativeRecordingFailed = false
+            let capture = try await session.start(url: url) { [weak self] event in
+                await self?.receiveNative(event, pending: pending)
             }
-            try capture.start()
+            guard ownsPreparation(), matches(pending), nativeConversationID == chat.id else {
+                await session.cancel(); return true
+            }
+            nativeCapture = capture
             try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
-            nativeStartedAt = Date(); elapsed = 0; maximum = 60
+            nativeStartedAt = Date(); elapsed = 0; maximum = 600
             startTimer(); observeInterruptions()
             return true
         } catch {
-            discardNative(); stopCapture()
-            clear()
+            await session.cancel()
+            guard ownsPreparation() else { return true }
+            discardNative(); stopCapture(); clear()
+            failure = "Live speech could not start. Your Mac will transcribe after you stop."
             return false
-        }
-    }
-    static func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
-        await withCheckedContinuation { continuation in
-            // Speech calls this on a background queue, including when permission
-            // is already decided. Do not inherit the controller's MainActor.
-            SFSpeechRecognizer.requestAuthorization { @Sendable in continuation.resume(returning: $0) }
         }
     }
     private static func waitForPermissionDismissal() async -> Bool {
@@ -272,26 +299,29 @@ import WonderPairing
         }
         return false
     }
-    private func receiveNative(words: String?, final: Bool, failed: Bool, pending: DictationIntent) {
+    private func receiveNative(_ event: NativeSpeechEvent, pending: DictationIntent) {
         guard matches(pending), nativeConversationID == pending.conversationID else { return }
-        if let words, !words.isEmpty {
-            guard editor?.showDictation(words) == true else {
+        switch event {
+        case let .words(words, start, end, final):
+            guard transcript.update(words, start: start, end: end, isFinal: final) else { return }
+            let cumulative = transcript.text
+            guard editor?.showDictation(cumulative) == true else {
                 finishNativeImmediately()
                 failure = "Dictation stopped. The draft could not accept more text."
                 return
             }
-            nativeWords = words
+            nativeWords = cumulative
+        case .failed:
+            if nativeWords.isEmpty, nativeCapture != nil, recording {
+                // Retain the exact audio for the paired Mac if speech assets fail.
+                nativeConversationID = nil
+                nativeCapture?.stopRecognition()
+                let session = nativeSession; nativeSession = nil
+                Task { await session?.cancelRecognition() }
+                _ = editor?.endDictation(commitWords: false)
+                failure = "Live words are unavailable. Tap the mic to stop and transcribe on your Mac."
+            } else { nativeFailed = true; finishNativeImmediately() }
         }
-        if failed, nativeWords.isEmpty, nativeCapture != nil, recording {
-            // Asset initialization can fail despite capability flags. Continue
-            // recording the same audio for the Mac rather than losing the start.
-            nativeConversationID = nil
-            nativeCapture?.stopRecognition()
-            nativeTask?.cancel(); nativeTask = nil; nativeRequest = nil; nativeRecognizer = nil
-            _ = editor?.endDictation(commitWords: false)
-            failure = "Live words are unavailable. Finish recording to transcribe on your Mac."
-        } else if failed { nativeFailed = true; finishNativeImmediately() }
-        else if final { finishNativeImmediately() }
     }
     #if WONDER_DIAGNOSTICS
     /// Drives the real editor/session lifecycle without microphone or network.
@@ -300,20 +330,28 @@ import WonderPairing
               editor?.beginDictation() == true else { return nil }
         let pending = DictationIntent(hostID: saved.credential.hostInstallationId, deviceID: saved.credential.deviceId,
             conversationID: chat.id, conversationTitle: chat.title, modelID: "native")
-        intent = pending; nativeConversationID = chat.id; nativeWords = ""; nativeFailed = false
+        intent = pending; nativeConversationID = chat.id; nativeWords = ""; nativeFailed = false; transcript = DictationTranscript()
         observeInterruptions()
         return pending
     }
-    func receiveNativeFixture(_ words: String, pending: DictationIntent, final: Bool = false, failed: Bool = false) {
-        receiveNative(words: words, final: final, failed: failed, pending: pending)
+    func receiveNativeFixture(_ words: String, pending: DictationIntent, final: Bool = false, failed: Bool = false,
+                              start: Double = 0, end: Double = 1) {
+        receiveNative(.words(words, start: start, end: end, final: final), pending: pending)
+        if failed { receiveNative(.failed, pending: pending) }
     }
     #endif
     private func finishNative() {
         guard nativeConversationID != nil, finalization == nil else { return }
         stopNativeAudio()
         intent?.phase = "processing"
-        nativeRequest?.endAudio()
         let id = intent?.requestID
+        let session = nativeSession
+        draining = Task { [weak self] in
+            guard let session else { return }
+            await session.finish()
+            guard let self, self.intent?.requestID == id else { return }
+            self.finishNativeImmediately()
+        }
         finalization = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(2)) } catch { return }
             guard let self, self.intent?.requestID == id else { return }
@@ -327,7 +365,9 @@ import WonderPairing
         let failed = nativeFailed
         nativeConversationID = nil
         finalization?.cancel(); finalization = nil
-        nativeTask?.cancel(); nativeTask = nil; nativeRequest = nil; nativeRecognizer = nil
+        draining?.cancel(); draining = nil
+        let session = nativeSession; nativeSession = nil
+        Task { await session?.cancel() }
         stopCapture()
         if hasWords {
             guard editor?.endDictation(commitWords: true) == true else {
@@ -352,7 +392,7 @@ import WonderPairing
             guard !nativeRecordingFailed else { throw DictationFailure(errorCategory: "no_audio") }
             let audio = try AVAudioFile(forReading: url)
             let duration = UInt64(max(0, Double(audio.length) / audio.processingFormat.sampleRate * 1000))
-            pending.finishCapture(durationMs: try DictationIntent.captureDuration(milliseconds: duration, maximumMs: 60_000))
+            pending.finishCapture(durationMs: try DictationIntent.captureDuration(milliseconds: duration, maximumMs: 600_000))
             intent = pending; persist()
             failure = "Live words are unavailable for this language or device. Retry to transcribe the recording on your Mac."
         } catch {
@@ -362,7 +402,9 @@ import WonderPairing
     private func discardNative() {
         nativeConversationID = nil
         finalization?.cancel(); finalization = nil
-        nativeTask?.cancel(); nativeTask = nil; nativeRequest = nil; nativeRecognizer = nil
+        draining?.cancel(); draining = nil
+        let session = nativeSession; nativeSession = nil
+        Task { await session?.cancel() }
         _ = editor?.endDictation(commitWords: false)
         nativeWords = ""
     }
@@ -466,23 +508,17 @@ import WonderPairing
                 guard let self, self.intent != nil else { return }
                 if self.recording, let started = self.nativeStartedAt {
                     self.elapsed = Date().timeIntervalSince(started)
-                    if self.elapsed >= 55 { self.finishCapture() }
+                    if self.elapsed >= self.maximum { self.finishCapture() }
                 } else if self.recording, let recorder = self.recorder {
                     self.elapsed = recorder.currentTime
-                    recorder.updateMeters()
-                    let decibels = recorder.averagePower(forChannel: 0)
-                    // A bounded logarithmic display of actual recorder power. No
-                    // synthetic movement or speech is inferred from these samples.
-                    let level = decibels.isFinite ? CGFloat(max(0, min(1, (decibels + 60) / 60))) : 0
-                    self.audioLevels.append(level)
-                    if self.audioLevels.count > 48 { self.audioLevels.removeFirst(self.audioLevels.count - 48) }
+
                 }
                 else {
                     // Also refresh expiry-dependent controls while a failed clip is retained.
                     self.now = Date()
                     if let expires = self.intent?.audioExpiresAt, Date() >= expires { self.removeAudio() }
                 }
-                do { try await Task.sleep(for: .milliseconds(self.recording ? 100 : 1000)) } catch { return }
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
             }
         }
     }
@@ -571,6 +607,7 @@ import WonderPairing
         }
     }
     func cancel() {
+        cancelPreparation()
         // A recording has never been submitted, including a native session
         // retaining audio after speech assets fail. Cancellation is entirely local.
         if nativeConversationID != nil || (recording && intent?.jobID == nil) {
@@ -609,11 +646,11 @@ import WonderPairing
         }
     }
     func clear() {
-        removeAudio(); timer?.cancel(); interruptions?.cancel(); routeChanges?.cancel(); audioLevels = []
+        removeAudio(); timer?.cancel(); interruptions?.cancel(); routeChanges?.cancel()
         do { try model?.clearDictationIntent(); intent = nil; busy = false; requiresResume = false; failure = nil }
         catch { failure = "The saved recording could not be cleared. Try again." }
     }
-    func forget() { work?.cancel(); discardNative(); stopCapture(); clear() }
+    func forget() { cancelPreparation(); work?.cancel(); discardNative(); stopCapture(); clear() }
     private func stopNativeAudio() {
         if let capture = nativeCapture {
             capture.stop()
@@ -667,103 +704,15 @@ private actor DictationAudioReader {
     func read(_ url: URL) throws -> Data { try Data(contentsOf: url) }
 }
 
-/// The draft editor remains mounted while its own recording takes over the composer.
-struct DictationComposerSurface<Content: View>: View {
-    @ObservedObject var controller: DictationController
-    let conversationID: String
-    @ViewBuilder var content: () -> Content
-    @ScaledMetric(relativeTo: .body) private var overlayHeight: CGFloat = 52
-    private var active: Bool {
-        controller.intent?.conversationID == conversationID && (controller.recording || controller.processing)
-    }
-    var body: some View {
-        VStack(spacing: 0) {
-            content()
-                .opacity(active && controller.nativeConversationID == nil ? 0 : 1)
-                .disabled(active && controller.nativeConversationID == nil)
-                .allowsHitTesting(!active || controller.nativeConversationID != nil)
-                .accessibilityHidden(active && controller.nativeConversationID == nil)
-                .frame(height: active && controller.nativeConversationID == nil ? max(52, overlayHeight) : nil)
-                .clipped()
-            if active { DictationComposerOverlay(controller: controller) }
-        }
-        .onChange(of: active && controller.nativeConversationID == nil) { _, hidden in
-            if hidden { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
-        }
-    }
-}
-
-private struct DictationComposerOverlay: View {
-    @ObservedObject var controller: DictationController
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private var duration: String {
-        let seconds = Int(controller.recording ? controller.elapsed : Double(controller.intent?.durationMs ?? 0) / 1000)
-        return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
-    }
-    var body: some View {
-        HStack(spacing: 8) {
-            Button { controller.cancel() } label: {
-                Image(systemName: "xmark").font(.body.weight(.medium)).frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("Cancel dictation")
-            .accessibilityHint("Discards this recording and keeps your message draft.")
-            .accessibilityIdentifier("cancel-dictation")
-            VStack(alignment: .leading, spacing: 2) {
-                if controller.audioLevels.isEmpty {
-                    if controller.recording {
-                        Text("Listening…")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                    }
-                } else {
-                    AudioLevelWaveform(levels: reduceMotion ? Array(controller.audioLevels.suffix(1)) : controller.audioLevels)
-                        .frame(height: 26).accessibilityHidden(true)
-                }
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            Text(duration).font(.callout.monospacedDigit()).fixedSize()
-                .accessibilityLabel("Recorded duration \(duration)")
-            if controller.recording {
-                Button { controller.finishCapture() } label: {
-                    Image(systemName: "checkmark").font(.body.weight(.semibold))
-                        .frame(width: 44, height: 44)
-                        .foregroundStyle(Color(uiColor: .systemBackground))
-                        .background(Color.primary, in: Circle())
-                }
-                .accessibilityLabel("Finish dictation")
-                .accessibilityHint("Stops recording and transcribes into your draft without sending.")
-                .accessibilityIdentifier("finish-dictation")
-            } else {
-                ProgressView().frame(width: 44, height: 44).accessibilityLabel("Transcribing recording")
-            }
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.primary)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("dictation-composer-overlay")
-    }
-}
-
-private struct AudioLevelWaveform: View {
-    let levels: [CGFloat]
-    var body: some View {
-        Canvas { context, size in
-            let spacing: CGFloat = 4
-            let visible = Array(levels.suffix(max(1, Int(size.width / spacing))))
-            let start = max(0, size.width - CGFloat(visible.count) * spacing)
-            for (index, level) in visible.enumerated() {
-                let height = max(2, level * size.height)
-                let rect = CGRect(x: start + CGFloat(index) * spacing, y: (size.height - height) / 2, width: 2, height: height)
-                context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .foreground)
-            }
-        }
-    }
-}
-
 struct DictationControls: View {
     @ObservedObject var controller: DictationController
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if controller.preparingConversationID == chat.id, let status = controller.preparationStatus {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+            }
             if let intent = controller.intent, !(intent.conversationID == chat.id && (controller.recording || controller.processing)) {
                 HStack {
                     if controller.recording { Text("Recording · \(Int(controller.elapsed) / 60):\(String(format: "%02d", Int(controller.elapsed) % 60))").monospacedDigit() }
@@ -789,9 +738,34 @@ struct DictationControls: View {
             }
             #endif
             if let failure = controller.failure { FailureDetails("Dictation unavailable", message: failure) }
-            if controller.microphoneDenied || controller.speechDenied { Button("Open Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }.font(.caption) }
+            if controller.microphoneDenied { Button("Open Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }.font(.caption) }
         }
         .task(id: model.assignmentScope) { controller.restore() }
+    }
+}
+
+struct DictationPlaceholder: View {
+    @ObservedObject var controller: DictationController
+    let conversationID: String
+    let text: String
+    let isEmpty: Bool
+    var body: some View {
+        if isEmpty && controller.nativeConversationID != conversationID {
+            Text(text).foregroundStyle(.secondary)
+                .padding(.top, 12).padding(.leading, 5)
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }
+    }
+}
+
+/// Only sending controls need to redraw when capture ownership changes.
+/// Their content also re-evaluates the normal Send/Guide eligibility and styling.
+struct DictationSendControls<Content: View>: View {
+    @ObservedObject var controller: DictationController
+    let conversationID: String
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        content().disabled(controller.blocksSending(conversationID: conversationID))
     }
 }
 
@@ -800,15 +774,37 @@ struct DictationButton: View {
     let chat: ChatSummary
     let unavailable: Bool
     var prepare: () -> Bool = { true }
+    private var ownsCapture: Bool { controller.intent?.conversationID == chat.id && controller.recording }
+    private var preparing: Bool { controller.preparingConversationID == chat.id }
+    private var finishing: Bool { controller.intent?.conversationID == chat.id && controller.processing }
     var body: some View {
         Button {
-            guard prepare() else { return }
-            Task { await controller.start(chat: chat) }
+            if preparing { controller.cancel() }
+            else if ownsCapture { controller.finishCapture() }
+            else if finishing { controller.cancel() }
+            else if prepare() { controller.begin(chat: chat) }
         } label: {
-            if controller.busy && controller.intent == nil { ProgressView().frame(width: 44, height: 44) }
-            else { Image(systemName: "mic").font(.system(size: 20)).frame(width: 44, height: 44) }
-        }.accessibilityLabel("Dictate message").accessibilityIdentifier("dictate-message")
-            .disabled(unavailable || controller.busy || controller.intent != nil)
+            if preparing || finishing { ProgressView().frame(width: 44, height: 44) }
+            else {
+                Image(systemName: ownsCapture ? "mic.fill" : "mic")
+                    .font(.system(size: 20)).frame(width: 44, height: 44)
+                    .foregroundStyle(ownsCapture ? Color.blue : Color.primary)
+            }
+        }
+        .accessibilityLabel(preparing ? "Cancel dictation preparation" : (ownsCapture ? "Stop dictation" : (finishing ? "Cancel dictation" : "Dictate message")))
+        .accessibilityValue(ownsCapture ? "Recording" : (finishing ? "Finishing" : "Idle"))
+        .accessibilityIdentifier("dictate-message")
+        .accessibilityAddTraits(ownsCapture ? .isSelected : [])
+        .disabled(!ownsCapture && !preparing && !finishing && (unavailable || controller.busy || controller.intent != nil))
+        .contextMenu {
+            if ownsCapture || preparing || finishing {
+                Button("Cancel dictation", role: .destructive) { controller.cancel() }
+                    .accessibilityIdentifier("cancel-dictation")
+            }
+        }
+        .accessibilityAction(named: "Cancel dictation") {
+            if ownsCapture || preparing || finishing { controller.cancel() }
+        }
     }
 }
 
@@ -831,38 +827,154 @@ struct VoiceSettingsView: View {
     }
 }
 
-/// Audio rendering never calls the main actor. The file and recognition request
-/// are owned by this capture and released only after removing the engine tap.
+
+private enum NativeSpeechEvent: Sendable {
+    case words(String, start: Double, end: Double, final: Bool)
+    case failed
+}
+
+/// Asset loading, engine setup and result consumption stay off the main actor.
+private actor NativeSpeechSession {
+    private var analyzer: SpeechAnalyzer?
+    private var transcriber: SpeechTranscriber?
+    private var results: Task<Void, Never>?
+    private var installation: AssetInstallationRequest?
+    private var capture: NativeSpeechCapture?
+    private var cancelled = false
+
+    func prepare(locale: Locale, downloading: @Sendable () async -> Void) async throws -> Bool {
+        guard SpeechTranscriber.isAvailable,
+              let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else { return false }
+        try checkCancellation()
+        let module = SpeechTranscriber(locale: supported, preset: .progressiveTranscription)
+        let status = await AssetInventory.status(forModules: [module])
+        try checkCancellation()
+        guard status != .unsupported else { return false }
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [module]) {
+            try checkCancellation()
+            installation = request
+            await downloading()
+            try await request.downloadAndInstall()
+            installation = nil
+        }
+        try checkCancellation()
+        transcriber = module
+        analyzer = SpeechAnalyzer(modules: [module])
+        return true
+    }
+    func start(url: URL, receive: @escaping @Sendable (NativeSpeechEvent) async -> Void) async throws -> NativeSpeechCapture {
+        try checkCancellation()
+        guard let analyzer, let transcriber,
+              let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            throw DictationFailure(errorCategory: "no_audio")
+        }
+        try checkCancellation()
+        try await analyzer.prepareToAnalyze(in: format)
+        try checkCancellation()
+        let (stream, continuation) = AsyncThrowingStream<AnalyzerInput, Error>.makeStream(bufferingPolicy: .bufferingOldest(64))
+        let capture = try NativeSpeechCapture(url: url, format: format, input: continuation)
+        self.capture = capture
+        results = Task {
+            do {
+                for try await result in transcriber.results {
+                    try Task.checkCancellation()
+                    await receive(.words(String(result.text.characters), start: result.range.start.seconds,
+                                         end: result.range.end.seconds, final: result.isFinal))
+                }
+            } catch { if !Task.isCancelled { await receive(.failed) } }
+        }
+        try await analyzer.start(inputSequence: stream)
+        try checkCancellation()
+        try capture.start()
+        return capture
+    }
+    func finish() async {
+        capture?.stop()
+        do { try await analyzer?.finalizeAndFinishThroughEndOfInput() }
+        catch { /* The controller commits the last visible words on timeout/error. */ }
+        await results?.value
+    }
+    func cancelRecognition() async {
+        results?.cancel(); results = nil
+        await analyzer?.cancelAndFinishNow()
+        analyzer = nil; transcriber = nil
+    }
+    func cancel() async {
+        cancelled = true
+        installation?.progress.cancel(); installation = nil
+        capture?.stop(); capture = nil
+        await cancelRecognition()
+    }
+    private func checkCancellation() throws {
+        try Task.checkCancellation()
+        if cancelled { throw CancellationError() }
+    }
+}
+
+/// The tap owns conversion and disk writes. The analyzer receives newly allocated
+/// buffers, never engine-owned buffers reused after the callback. Queue overflow
+/// fails recognition explicitly while retaining the full recording for the Mac.
 private final class NativeSpeechCapture: @unchecked Sendable {
     private let engine = AVAudioEngine()
-    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var input: AsyncThrowingStream<AnalyzerInput, Error>.Continuation?
+    private let converter: AVAudioConverter
+    private let analysisFormat: AVAudioFormat
     private var file: AVAudioFile?
     private var tapped = false
     private let fileLock = NSLock()
+    private let engineLock = NSLock()
     private var failed = false
     var recordingFailed: Bool { fileLock.lock(); defer { fileLock.unlock() }; return failed }
-    init(url: URL, request: SFSpeechAudioBufferRecognitionRequest) throws {
-        self.request = request
-        let format = engine.inputNode.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationFailure(errorCategory: "no_audio") }
+    init(url: URL, format: AVAudioFormat, input: AsyncThrowingStream<AnalyzerInput, Error>.Continuation) throws {
+        self.input = input; analysisFormat = format
+        let source = engine.inputNode.outputFormat(forBus: 0)
+        guard source.sampleRate > 0, source.channelCount > 0,
+              let converter = AVAudioConverter(from: source, to: format) else { throw DictationFailure(errorCategory: "no_audio") }
+        self.converter = converter
+        // Avoid priming latency and preserve the first spoken samples.
+        converter.primeMethod = .none
         file = try AVAudioFile(forWriting: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: format.sampleRate, AVNumberOfChannelsKey: format.channelCount, AVEncoderBitRateKey: 64_000],
-            commonFormat: format.commonFormat, interleaved: format.isInterleaved)
-        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self else { return }
-            self.fileLock.lock()
-            self.request?.append(buffer)
-            do { try self.file?.write(from: buffer) } catch { self.failed = true }
-            self.fileLock.unlock()
+            AVSampleRateKey: source.sampleRate, AVNumberOfChannelsKey: source.channelCount, AVEncoderBitRateKey: 64_000],
+            commonFormat: source.commonFormat, interleaved: source.isInterleaved)
+        engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: source) { [weak self] buffer, _ in
+            self?.consume(buffer)
         }
         tapped = true
     }
-    func start() throws { engine.prepare(); try engine.start() }
-    func stopRecognition() { fileLock.lock(); request = nil; fileLock.unlock() }
+    private func consume(_ buffer: AVAudioPCMBuffer) {
+        fileLock.lock(); defer { fileLock.unlock() }
+        do { try file?.write(from: buffer) } catch { failed = true }
+        guard let input else { return }
+        let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * analysisFormat.sampleRate / buffer.format.sampleRate)) + 32
+        guard let output = AVAudioPCMBuffer(pcmFormat: analysisFormat, frameCapacity: capacity) else {
+            input.finish(throwing: DictationFailure(errorCategory: "no_audio")); self.input = nil; return
+        }
+        var supplied = false
+        var error: NSError?
+        let status = converter.convert(to: output, error: &error) { _, state in
+            if supplied { state.pointee = .noDataNow; return nil }
+            supplied = true; state.pointee = .haveData; return buffer
+        }
+        if status == .error || error != nil {
+            input.finish(throwing: error ?? DictationFailure(errorCategory: "no_audio") as NSError); self.input = nil
+        } else if output.frameLength > 0, case .dropped = input.yield(AnalyzerInput(buffer: output)) {
+            input.finish(throwing: DictationFailure(errorCategory: "interrupted")); self.input = nil
+        }
+    }
+    func start() throws {
+        engineLock.lock(); defer { engineLock.unlock() }
+        guard tapped else { throw CancellationError() }
+        engine.prepare(); try engine.start()
+    }
+    func stopRecognition() {
+        fileLock.lock(); defer { fileLock.unlock() }
+        input?.finish(); input = nil
+    }
     func stop() {
+        engineLock.lock(); defer { engineLock.unlock() }
         engine.stop()
         if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
-        fileLock.lock(); file = nil; fileLock.unlock()
+        fileLock.lock(); file = nil; input?.finish(); input = nil; fileLock.unlock()
     }
     deinit { stop() }
 }

@@ -591,7 +591,7 @@ private struct NewChatContent: View {
     }
     private var placeholder: String { "Message \(project?.name ?? "project")" }
     private var canSend: Bool {
-        if model.dictation.nativeConversationID == draftChat.id { return false }
+        if model.dictation.blocksSending(conversationID: draftChat.id) { return false }
         guard !sending, model.connection != nil, !model.accessEnded, model.macConnected == true else { return false }
         let text = (draft.submittedBody ?? draft.text).trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!text.isEmpty || draft.attachmentCount > 0), draft.attachmentCount <= 4,
@@ -742,8 +742,10 @@ private struct NewChatContent: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("new-chat-pending-notice")
                     HStack {
-                        Button(action: startSend) { Text("Retry message").frame(minHeight: 44) }
-                            .disabled(!canSend || model.dictation.nativeConversationID == draftChat.id).accessibilityIdentifier("new-chat-retry")
+                        DictationSendControls(controller: model.dictation, conversationID: draftChat.id) {
+                            Button(action: startSend) { Text("Retry message").frame(minHeight: 44) }
+                                .disabled(!canSend).accessibilityIdentifier("new-chat-retry")
+                        }
                         Button(action: startNewDraft) { Text("New draft").frame(minHeight: 44) }
                             .accessibilityIdentifier("new-chat-start-new-draft")
                     }.buttonStyle(.plain).font(.subheadline)
@@ -770,7 +772,7 @@ private struct NewChatContent: View {
                 Text("Update Wonder on \(model.macName) to use Projects.").font(.caption).foregroundStyle(.secondary)
             }
             pickers
-            DictationComposerSurface(controller: model.dictation, conversationID: draftChat.id) {
+            Group {
             VStack(spacing: 0) {
                 if !displayedAttachments.isEmpty {
                     ComposerAttachmentStrip(attachments: displayedAttachments, imagePreviews: model.imagePreviews,
@@ -809,10 +811,8 @@ private struct NewChatContent: View {
                     canPasteImages: canAttach, pasteImages: pasteImages)
                     .frame(maxWidth: .infinity)
                     .overlay(alignment: .topLeading) {
-                        if (draft.submittedBody ?? draft.text).isEmpty && model.dictation.nativeConversationID != draftChat.id {
-                            Text(placeholder).foregroundStyle(.secondary).padding(.top, 12).padding(.leading, 5)
-                                .allowsHitTesting(false).accessibilityHidden(true)
-                        }
+                        DictationPlaceholder(controller: model.dictation, conversationID: draftChat.id,
+                            text: placeholder, isEmpty: (draft.submittedBody ?? draft.text).isEmpty)
                     }
                     .accessibilityLabel(placeholder)
                     .accessibilityIdentifier("new-chat-draft")
@@ -843,6 +843,7 @@ private struct NewChatContent: View {
                             return true
                         })
                     if project != nil { projectSettings } else { Spacer(minLength: 0) }
+                    DictationSendControls(controller: model.dictation, conversationID: draftChat.id) {
                     Button(action: startSend) {
                         if sending { ProgressView().frame(width: 44, height: 44) }
                         else { Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44) }
@@ -853,6 +854,7 @@ private struct NewChatContent: View {
                     .keyboardShortcut(.return, modifiers: .command)
                     .accessibilityLabel(draft.isSubmitted ? "Send again" : "Send")
                     .accessibilityIdentifier("new-chat-send")
+                    }
                 }
             }
             }

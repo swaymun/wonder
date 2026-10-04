@@ -148,52 +148,55 @@ resized to 1024 square for the app asset catalog. The orange source is unchanged
 
 ## Progressive dictation
 
-The composer first tries Apple's on-device `SFSpeechRecognizer` for the current
-keyboard language (preferred system language when the keyboard has no language).
-This API covers the iOS 17 deployment target. Both recognizer availability and
-on-device support must pass; the request always requires on-device recognition.
-Speech Recognition permission is separate from microphone permission. Denied
-speech permission or unsupported locales use the existing paired-Mac recorder.
-The Mac retains automatic language detection and its existing model settings.
+Wonder requires iOS/iPadOS 26 and uses Apple's `SpeechTranscriber` with
+`SpeechAnalyzer` and the progressive-transcription preset. The current keyboard
+language selects the equivalent supported locale. Check `isAvailable`, locale
+support and `AssetInventory` on the running device; OS support alone does not
+establish hardware or model availability. Missing language assets are downloaded
+through Apple's asset manager before capture starts. Preparation is visible and
+can be cancelled with the mic. Only microphone permission is requested.
 
-Partial results replace a volatile UTF-16 selection projection in the UIKit
-editor; they are not written into the saved draft. Finish waits up to two seconds
-for a final result, then accepts the displayed words once. Typing, cursor movement,
-navigation, backgrounding and audio interruption finish the displayed words
-immediately. Cancel restores the original text and selection. Pairing changes
-and external draft replacement discard the volatile projection. Attachments are
-never rebuilt by dictation. New-chat commits flush before changing destinations.
-Native sessions finish at 55 seconds to stay below the legacy recognizer's
-short-session limit; tap the microphone again to continue.
+The mic turns blue while recording; tap it again to stop. The composer and
+attachments stay visible. Long-press the mic (or use its accessibility action)
+to cancel without accepting words. Send/Guide are disabled during preparation,
+recording and finalization. Dictation never sends a message.
 
-Availability flags do not prove speech assets can load. If initialization fails
-before any words, recording continues into the same protected AAC file; Finish
-uses the Mac path. An interrupted/finished clip with no native words offers an
-explicit Mac retry. A failure after words keeps the displayed words without
-appending a second full Mac transcript. Recordings retain the existing expiry
-and cancellation policy. No Apple-server recognition or automatic asset download
-is enabled.
+Finalized speech ranges accumulate once; revisions replace only the current
+provisional phrase. The entire session remains a volatile UTF-16 projection in
+the UIKit editor, separate from the saved draft. Stop ends audio input, drains
+final results and accepts the displayed words once, with a two-second timeout.
+Typing, cursor movement, navigation, backgrounding and audio interruptions keep
+the displayed words immediately. Cancel restores the original text and selection.
+Pairing changes and external draft replacement discard the projection. New-chat
+commits flush before switching destinations. Sessions are bounded to ten minutes.
 
-`WonderDiagnosticsTests` owns real UIKit selection/projection, durable draft,
-new-chat destination flush, manual edit, late callback, cancellation, background,
-revocation and finalization-timeout regressions. The progressive UI case in
-`WonderUITests` extends the isolated large-attachment composer fixture and uses
-the production composer surface/Finish/Cancel controls on iPhone and iPad.
-Injected recognition events test application behavior only; they cannot establish
-recognition accuracy, first-word latency, microphone behavior or speech-asset
-availability. Keep those measurements separate from simulator UI timings.
+Unsupported devices/locales and failed asset preparation use the paired-Mac
+recorder with automatic language detection. If recognition fails before any
+words, the same protected AAC recording continues for the Mac. Stopping with no
+recognized words retains a clip for explicit Mac retry; an error after words
+keeps them without appending a second full transcript. Existing expiry and
+cancellation rules still apply. Audio conversion uses iOS 26 AVAudioConverter;
+it does not depend on iOS 27 helper APIs. Recognition input is bounded and queue
+overflow fails explicitly rather than silently dropping words.
 
-For an owner-run TestFlight check, select the intended keyboard language, insert
-speech in the middle of an existing draft, finish/cancel, then try typing and
-changing conversations during speech. Repeat with an attachment and in New chat.
-Do not send. Check Speech Recognition denied, microphone denied, interruptions,
-and a language without native assets. Record device/OS/locale and first-word time
-from speech onset for at least five utterances where actual recognition works.
+`DictationTests` owns cumulative range/revision/deduplication and projection
+contracts. `WonderDiagnosticsTests` extends real UIKit selection, durable drafts,
+manual edits, late results, cancellation, backgrounding, interruptions, revocation
+and finalization tests with multiple phrases. The progressive UI case in
+`WonderUITests` uses the production mic stop/cancel controls and isolated composer
+with an attachment on both iPhone and iPad. Real microphone permission/startup
+checks use a synthetic Mac catalog, never a live host or model request.
 
-API references: [Apple recognition requests](https://developer.apple.com/documentation/speech/sfspeechrecognitionrequest),
-[recognizer capabilities](https://developer.apple.com/documentation/speech/sfspeechrecognizer),
-and [SpeechAnalyzer introduction](https://developer.apple.com/videos/play/wwdc2025/277/).
-SpeechAnalyzer/SpeechTranscriber and DictationTranscriber require iOS 26 and add
-separate model/asset availability and installation handling. They are candidates
-for longer sessions after device qualification; they are not required for the
-initial iOS 17-compatible path.
+Injected words establish application behavior only. Simulator capability,
+recording and UI checks do not establish device recognition quality or latency.
+For the owner-run TestFlight check, insert multiple spoken phrases in the middle
+of an existing draft, pause between phrases, then stop, cancel, type, move the
+cursor and change conversations. Repeat with an attachment and in New chat.
+Do not send. Test microphone denial, interruptions, unavailable language assets
+and cancelling preparation. Record device/OS/locale and first-word time from
+speech onset for at least five utterances where actual recognition works.
+
+References: [Apple SpeechAnalyzer introduction](https://developer.apple.com/videos/play/wwdc2025/277/),
+[asset management](https://developer.apple.com/documentation/speech/assetinventory),
+and [Claude's documented start/stop dictation UX](https://support.claude.com/en/articles/12626668-use-quick-entry-with-claude-desktop-on-mac).
+Claude's public instructions establish behavior, not its private speech model or implementation.

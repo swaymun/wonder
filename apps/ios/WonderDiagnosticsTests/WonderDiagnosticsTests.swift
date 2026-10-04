@@ -84,7 +84,14 @@ final class WonderDiagnosticsTests: XCTestCase {
         for terminal in ["timeout", "background", "error", "selection", "interruption", "route"] {
             model.editDraft("", chat: chat.id); view.text = ""; coordinator.lastSynchronizedText = ""
             let pending = try XCTUnwrap(controller.beginNativeFixture(chat: chat))
-            controller.receiveNativeFixture("words", pending: pending)
+            controller.receiveNativeFixture("First", pending: pending, final: true)
+            XCTAssertTrue(controller.recording, "A finalized phrase must not stop listening")
+            XCTAssertTrue(controller.blocksSending(conversationID: chat.id))
+            XCTAssertFalse(controller.blocksSending(conversationID: "another-chat"))
+            controller.receiveNativeFixture(" second", pending: pending, start: 1, end: 2)
+            controller.receiveNativeFixture(" words", pending: pending, start: 1, end: 2)
+            XCTAssertEqual(view.text, "First words")
+            XCTAssertEqual(model.composers[chat.id]?.draft, "")
             switch terminal {
             case "timeout":
                 controller.finishCapture()
@@ -106,8 +113,9 @@ final class WonderDiagnosticsTests: XCTestCase {
             }
             controller.receiveNativeFixture("late words", pending: pending, final: true)
             model.reloadCameraFixtureDraft(chat.id)
-            XCTAssertEqual(model.composers[chat.id]?.draft, "words", terminal)
+            XCTAssertEqual(model.composers[chat.id]?.draft, "First words", terminal)
             XCTAssertNil(controller.nativeConversationID, terminal)
+            XCTAssertFalse(controller.blocksSending(conversationID: chat.id))
             XCTAssertNil(model.composers[chat.id]?.pending)
         }
     }

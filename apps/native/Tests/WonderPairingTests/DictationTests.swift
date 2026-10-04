@@ -2,6 +2,23 @@ import XCTest
 @testable import WonderPairing
 
 final class DictationTests: XCTestCase {
+    func testFinalPhrasesAccumulateAndVolatilePhrasesReplaceWithoutDuplicates() {
+        var transcript = DictationTranscript()
+        for (words, start, end, final, expected) in [
+            ("A blue", 0.0, 1.0, false, "A blue"),
+            ("A green card.", 0, 2, true, "A green card."),
+            (" A new", 2, 3, false, "A green card. A new"),
+            (" Another phrase.", 2, 4, true, "A green card. Another phrase."),
+            (" Another phrase.", 2, 4, true, "A green card. Another phrase."),
+            ("stale", 0, 1, false, "A green card. Another phrase."),
+            (" 最後", 4, 5, false, "A green card. Another phrase. 最後"),
+            (" 最後。", 4, 6, true, "A green card. Another phrase. 最後。")
+        ] {
+            transcript.update(words, start: start, end: end, isFinal: final)
+            XCTAssertEqual(transcript.text, expected)
+        }
+    }
+
     func testProgressiveRevisionsReplaceOnlySelectedSpanWithoutChangingBase() {
         var projection = DictationProjection(base: "Hello old friend 👋", selection: NSRange(location: 6, length: 3))
         XCTAssertTrue(projection.update("blue"))

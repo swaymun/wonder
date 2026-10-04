@@ -62,7 +62,7 @@ current Projects-first shell. They contain no personal conversations. [Screensho
 
 You need an **Apple Silicon Mac**, an **iPhone or iPad**, a supported **ChatGPT
 Desktop runtime**, and **Tailscale on both devices**. Wonder’s deployment targets
-are macOS 14 and iOS/iPadOS 17; see the [supported configuration](INSTALL.md#requirements)
+are macOS 14 and iOS/iPadOS 26; see the [supported configuration](INSTALL.md#requirements)
 for the tested combinations and exact runtime requirement.
 
 1. Install the supported runtime and sign in to your model provider.

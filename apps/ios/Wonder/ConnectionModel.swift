@@ -1669,7 +1669,7 @@ struct ManagedBotListMutationState {
         return snapshots[chat]?.thread.turns?.first(where: { $0.id == turnID })
     }
     func canGuide(_ chat: ChatSummary) -> Bool {
-        dictation.nativeConversationID != chat.id && agentFamily(chat) == .codex && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id) && chat.botId != nil && activeTurn(chat.id) != nil && connection != nil && !accessEnded
+        !dictation.blocksSending(conversationID: chat.id) && agentFamily(chat) == .codex && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id) && chat.botId != nil && activeTurn(chat.id) != nil && connection != nil && !accessEnded
             && !isSubagent(chat) && usageLimitMessage(chat) == nil
             && !sending.contains(chat.id)
             && composers[chat.id]?.pending == nil && composerErrors[chat.id] == nil
@@ -1749,7 +1749,7 @@ struct ManagedBotListMutationState {
 
     func canSend(_ chat: ChatSummary) -> Bool {
         let draft = composers[chat.id]?.draft ?? ""
-        return dictation.nativeConversationID != chat.id && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && (chat.botId != nil || groups[chat.id] != nil || isProject(chat)) && connection != nil && !accessEnded
+        return !dictation.blocksSending(conversationID: chat.id) && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && (chat.botId != nil || groups[chat.id] != nil || isProject(chat)) && connection != nil && !accessEnded
             && !isSubagent(chat) && usageLimitMessage(chat) == nil
             // Both direct and Group sends have durable host-side acceptance.
             // Replay invalidation does not revoke permission to submit intent.

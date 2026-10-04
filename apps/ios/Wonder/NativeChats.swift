@@ -1212,7 +1212,7 @@ struct ConversationView: View {
                             }
                         }
                         .frame(maxWidth: .infinity)
-                    DictationComposerSurface(controller: model.dictation, conversationID: chat.id) {
+                    Group {
                     VStack(spacing: 0) {
                     if !attachments.isEmpty {
                         ComposerAttachmentStrip(
@@ -1291,6 +1291,7 @@ struct ConversationView: View {
                             }.accessibilityLabel("Stop response")
                                 .disabled(model.stopping.contains(chat.id) || model.accessEnded || model.previewMode)
                         }
+                        DictationSendControls(controller: model.dictation, conversationID: chat.id) {
                         if chat.botId == nil || model.agentFamily(chat) == .claude {
                             Button { Task { await model.send(chat) } } label: {
                                 Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44)
@@ -1319,6 +1320,7 @@ struct ConversationView: View {
                         .accessibilityHint("Touch and hold for message actions.")
                         .keyboardShortcut(.return, modifiers: .command)
                         .disabled(!model.canSend(chat) && !model.previewMode)
+                        }
                         }
                     }
                     }
@@ -1407,11 +1409,8 @@ struct ConversationView: View {
             })
             .frame(maxWidth: .infinity)
             .overlay(alignment: .topLeading) {
-                if (model.composers[chat.id]?.draft ?? "").isEmpty && model.dictation.nativeConversationID != chat.id {
-                    Text("Message \(chat.title)").foregroundStyle(.secondary)
-                        .padding(.top, 12).padding(.leading, 5)
-                        .allowsHitTesting(false).accessibilityHidden(true)
-                }
+                DictationPlaceholder(controller: model.dictation, conversationID: chat.id,
+                    text: "Message \(chat.title)", isEmpty: (model.composers[chat.id]?.draft ?? "").isEmpty)
             }
             .accessibilityLabel("Message \(chat.title)")
             .accessibilityIdentifier("message-draft")

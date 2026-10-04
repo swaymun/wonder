@@ -135,3 +135,24 @@ public struct DictationProjection: Sendable {
         return NSRange(location: start, length: max(0, end - start))
     }
 }
+
+/// SpeechAnalyzer finalizes phrases, not the whole recording. Keep finalized
+/// ranges once and replace only the current volatile range. None is a saved draft.
+public struct DictationTranscript: Sendable {
+    private var finalized = ""
+    private var provisional = ""
+    private var finalizedEnd = -Double.infinity
+    public init() {}
+    public var text: String { finalized + provisional }
+    @discardableResult public mutating func update(_ words: String, start: Double, end: Double, isFinal: Bool) -> Bool {
+        guard start.isFinite, end.isFinite, end > start, start >= finalizedEnd else { return false }
+        // Preserve the recognizer's spacing and punctuation, including languages
+        // that do not put spaces between words or phrase boundaries.
+        if isFinal {
+            finalized += words
+            finalizedEnd = end
+            provisional = ""
+        } else { provisional = words }
+        return true
+    }
+}

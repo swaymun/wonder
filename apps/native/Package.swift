@@ -2,7 +2,7 @@
 import PackageDescription
 let package = Package(
     name: "WonderPairing",
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    platforms: [.macOS(.v14), .iOS("26.0")],
     products: [
         .library(name: "WonderPairing", targets: ["WonderPairing"]),
         .library(name: "WonderComputerView", targets: ["WonderComputerView"]),

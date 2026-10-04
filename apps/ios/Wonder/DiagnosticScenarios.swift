@@ -1316,11 +1316,34 @@ struct DiagnosticSubagentFixtureView: View {
     }
 }
 
+private struct DiagnosticDictationPath: View {
+    @ObservedObject var controller: DictationController
+    let fixtureRequestID: String?
+    var body: some View {
+        Text(controller.intent == nil ? "Idle" : (controller.intent?.requestID == fixtureRequestID
+             ? "Injected phrases" : (controller.intent?.modelID == "native" ? "Native SpeechAnalyzer" : "Paired-Mac recorder")))
+            .accessibilityIdentifier("dictation-capture-path")
+    }
+}
+
+private final class DiagnosticDictationProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let catalog = request.url?.path == "/api/v1/asr/models" && request.httpMethod == "GET"
+        let body = catalog ? #"{"ready":true,"selectedModelId":"fixture","languages":["auto"],"maxRecordingDurationMs":600000,"models":[]}"# : "{}"
+        let response = HTTPURLResponse(url: request.url!, statusCode: catalog ? 200 : 503, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 @MainActor private struct CameraDiagnosticFixtureView: View {
     @StateObject private var model: ConnectionModel
     @State private var pasteTask: Task<Void, Never>?
     @State private var dictationFixtureIntent: DictationIntent?
-    @State private var speechPermissionResult = "Not requested"
     @State private var showingCamera = false
     @State private var didLaunch = false
     private let chat: ChatSummary
@@ -1361,7 +1384,13 @@ struct DiagnosticSubagentFixtureView: View {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("wonder-camera-fixture-\(UUID().uuidString)", isDirectory: true)
         self.chat = chat
         self.scope = saved.credential.hostInstallationId + ":" + saved.credential.deviceId
-        _model = StateObject(wrappedValue: ConnectionModel(cameraFixtureStoreRoot: root, saved: saved, chat: chat, initialIntent: initial))
+        var api: PairingAPI?
+        if arguments.contains("-diagnostics-progressive-dictation") {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [DiagnosticDictationProtocol.self]
+            api = PairingAPI(configuration: configuration)
+        }
+        _model = StateObject(wrappedValue: ConnectionModel(cameraFixtureStoreRoot: root, saved: saved, chat: chat, initialIntent: initial, api: api))
     }
 
     var body: some View {
@@ -1385,16 +1414,9 @@ struct DiagnosticSubagentFixtureView: View {
                 .frame(minHeight: 44)
                 .accessibilityIdentifier("camera-reload-draft")
             if ProcessInfo.processInfo.arguments.contains("-diagnostics-progressive-dictation") {
-                HStack {
-                    Button("Request speech permission") {
-                        speechPermissionResult = "Requesting"
-                        Task {
-                            speechPermissionResult = await DictationController.requestSpeechAuthorization() == .authorized ? "Allowed" : "Denied"
-                        }
-                    }.accessibilityIdentifier("dictation-speech-permission")
-                    DictationButton(controller: model.dictation, chat: chat, unavailable: false)
-                }
-                Text(speechPermissionResult).accessibilityIdentifier("dictation-speech-permission-result")
+                DictationButton(controller: model.dictation, chat: chat, unavailable: false)
+                DictationControls(controller: model.dictation, model: model, chat: chat)
+                DiagnosticDictationPath(controller: model.dictation, fixtureRequestID: dictationFixtureIntent?.requestID)
                 HStack {
                     Button("Partial words") {
                         if model.dictation.intent == nil { dictationFixtureIntent = model.dictation.beginNativeFixture(chat: chat) }
@@ -1403,6 +1425,12 @@ struct DiagnosticSubagentFixtureView: View {
                     Button("Revise words") {
                         if let pending = dictationFixtureIntent { model.dictation.receiveNativeFixture("green card", pending: pending) }
                     }.accessibilityIdentifier("dictation-fixture-revision")
+                    Button("Next phrase") {
+                        if let pending = dictationFixtureIntent {
+                            model.dictation.receiveNativeFixture("green card.", pending: pending, final: true)
+                            model.dictation.receiveNativeFixture(" Next phrase.", pending: pending, start: 1, end: 2)
+                        }
+                    }.accessibilityIdentifier("dictation-fixture-next")
                 }
                 Text(model.composers[chat.id]?.draft ?? "").accessibilityIdentifier("dictation-saved-draft")
             }
@@ -1413,7 +1441,7 @@ struct DiagnosticSubagentFixtureView: View {
                     Button("Copy text") { UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: " Pasted text."]], options: [.localOnly: true]) }
                         .accessibilityIdentifier("fixture-copy-text")
                 }
-                DictationComposerSurface(controller: model.dictation, conversationID: chat.id) {
+                Group {
                 BoundedComposerEditor(text: Binding(
                     get: { model.composers[chat.id]?.draft ?? "" },
                     set: { model.editDraft($0, chat: chat.id) }),

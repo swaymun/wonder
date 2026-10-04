@@ -16,7 +16,7 @@ Developers can also use the [source-build instructions](DEVELOPMENT.md).
 | You need | Details |
 | --- | --- |
 | Mac | Apple Silicon; macOS 14 or later is the deployment target. |
-| iPhone or iPad | iOS/iPadOS 17 or later is the deployment target. |
+| iPhone or iPad | iOS/iPadOS 26 or later is the deployment target. |
 | ChatGPT Desktop | Mac 1.0.92 passed verification against the official ChatGPT Desktop 26.924.22138 (11645) installer. Wonder validates the installed runtime and checks changed schemas locally for additive protocol compatibility. Breaking protocol changes still require a Wonder update. |
 | Model access | Sign in to your model provider using the supported runtime. Its access limits and billing still apply. |
 | Tailscale | Install on both devices, join the same tailnet, and allow access between them. MagicDNS and tailnet HTTPS must be enabled. |

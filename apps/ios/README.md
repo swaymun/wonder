@@ -1,6 +1,6 @@
 # Wonder native enrollment
 
-Open `Wonder.xcodeproj` in Xcode. The Wonder scheme targets iPhone and iPad, iOS 17+. Its local Swift package is `../native`.
+Open `Wonder.xcodeproj` in Xcode. The Wonder scheme targets iPhone and iPad, iOS 26+. Its local Swift package is `../native`.
 
 ```sh
 swift test --package-path apps/native

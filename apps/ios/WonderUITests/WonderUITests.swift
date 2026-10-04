@@ -4537,64 +4537,54 @@ import UIKit
         XCTAssertEqual(app.staticTexts["camera-draft-transfers"].label, "Local draft only")
     }
 
-    func testDictationSpeechPermissionReturnsWithoutCrashing() throws {
-        try checkDictationSpeechPermission(allowed: true)
-    }
-
-    func testDictationSpeechPermissionDenialReturnsWithoutCrashing() throws {
-        try checkDictationSpeechPermission(allowed: false)
-    }
-
-    private func checkDictationSpeechPermission(allowed: Bool) throws {
-        // Exercise Apple's actual background permission callback, which the
-        // synthetic recognition fixtures do not enter. Preserve the local draft.
+    func testDictationMicrophoneDenialPreservesDraft() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        app.resetAuthorizationStatus(for: .microphone)
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-composer-large-draft", "-diagnostics-progressive-dictation"]
-        // Reset this test app's simulator privacy permissions before each test.
-        // XCTest has no speech-recognition reset resource.
         app.launch()
         let editor = app.textViews["message-draft"]
         XCTAssertTrue(editor.waitForExistence(timeout: 10))
         let original = try XCTUnwrap(editor.value as? String)
-        let result = app.staticTexts["dictation-speech-permission-result"]
-        let expected = allowed ? "Allowed" : "Denied"
-        for request in 0..<2 {
-            app.buttons["dictation-speech-permission"].tap()
-            if request == 0 {
-                let alert = springboard.alerts.firstMatch
-                XCTAssertTrue(alert.waitForExistence(timeout: 10))
-                alert.buttons[allowed ? "Allow" : "Don’t Allow"].tap()
-            }
-            let completed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", expected), object: result)
-            XCTAssertEqual(XCTWaiter.wait(for: [completed], timeout: 10), .completed)
-            XCTAssertEqual(editor.value as? String, original)
-            XCTAssertEqual(app.staticTexts["camera-draft-count"].label, "Draft attachments: 1")
-        }
+        app.buttons["dictate-message"].tap()
+        let alert = XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: 15))
+        alert.buttons["Don’t Allow"].tap()
+        XCTAssertTrue(app.buttons["Open Settings"].waitForExistence(timeout: 10))
+        XCTAssertEqual(editor.value as? String, original)
+        XCTAssertEqual(app.staticTexts["camera-draft-count"].label, "Draft attachments: 1")
         app.terminate()
     }
 
     func testDictationButtonStartsRealCaptureAndCancelsWithoutChangingDraft() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.resetAuthorizationStatus(for: .microphone)
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-composer-large-draft", "-diagnostics-progressive-dictation"]
         app.launch()
         let editor = app.textViews["message-draft"]
         XCTAssertTrue(editor.waitForExistence(timeout: 10))
         let original = try XCTUnwrap(editor.value as? String)
-        for _ in 0..<2 {
-            app.buttons["dictate-message"].tap()
-            // Fresh permission prompts and already-authorized startup share the
-            // production button, speech task and audio engine. No synthetic words.
-            for _ in 0..<2 {
+        let mic = app.buttons["dictate-message"]
+        for cycle in 0..<2 {
+            mic.tap()
+            if cycle == 0 {
                 let alert = springboard.alerts.firstMatch
-                if alert.waitForExistence(timeout: 2) { alert.buttons["Allow"].tap() }
+                XCTAssertTrue(alert.waitForExistence(timeout: 15))
+                alert.buttons["Allow"].tap()
             }
+            let recording = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == 'Recording'"), object: mic)
+            XCTAssertEqual(XCTWaiter.wait(for: [recording], timeout: 15), .completed)
+            XCTAssertTrue(editor.isHittable, "The editor remains visible during recording")
+            let path = app.staticTexts["dictation-capture-path"].label
+            XCTAssertTrue(["Native SpeechAnalyzer", "Paired-Mac recorder"].contains(path))
+            let evidence = XCTAttachment(string: "Actual simulator capture path: " + path)
+            evidence.lifetime = .keepAlways; add(evidence)
+            if cycle == 0 { retainMenuScreenshot(app, name: "Actual capture with visible composer") }
+            mic.press(forDuration: 1)
             let cancel = app.buttons["cancel-dictation"]
-            XCTAssertTrue(cancel.waitForExistence(timeout: 10))
-            XCTAssertTrue(cancel.isHittable)
+            XCTAssertTrue(cancel.waitForExistence(timeout: 5))
             cancel.tap()
             XCTAssertEqual(editor.value as? String, original)
             app.buttons["camera-reload-draft"].tap()
@@ -4620,14 +4610,22 @@ import UIKit
         XCTAssertTrue((editor.value as? String)?.contains("green card") == true)
         XCTAssertFalse((editor.value as? String)?.contains("blue card") == true)
         retainMenuScreenshot(app, name: "Provisional dictation with attachment")
-        XCTAssertTrue(app.buttons["cancel-dictation"].isHittable)
+        let mic = app.buttons["dictate-message"]
+        XCTAssertEqual(mic.value as? String, "Recording")
+        mic.press(forDuration: 1)
+        XCTAssertTrue(app.buttons["cancel-dictation"].waitForExistence(timeout: 5))
         app.buttons["cancel-dictation"].tap()
         XCTAssertEqual(editor.value as? String, original)
         app.buttons["dictation-fixture-partial"].tap()
         app.buttons["dictation-fixture-revision"].tap()
-        XCTAssertTrue(app.buttons["finish-dictation"].isHittable)
-        app.buttons["finish-dictation"].tap()
-        XCTAssertTrue(app.buttons["finish-dictation"].waitForNonExistence(timeout: 5))
+        app.buttons["dictation-fixture-next"].tap()
+        XCTAssertTrue((editor.value as? String)?.contains("green card. Next phrase.") == true)
+        XCTAssertEqual(app.staticTexts["dictation-saved-draft"].label, original)
+        retainMenuScreenshot(app, name: "Blue mic with cumulative provisional phrases")
+        XCTAssertTrue(mic.isHittable)
+        mic.tap()
+        let stopped = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == 'Idle'"), object: mic)
+        XCTAssertEqual(XCTWaiter.wait(for: [stopped], timeout: 5), .completed)
         let finished = try XCTUnwrap(editor.value as? String)
         XCTAssertTrue(finished.contains("green card"))
         app.buttons["camera-reload-draft"].tap()
