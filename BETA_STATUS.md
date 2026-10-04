@@ -1,6 +1,6 @@
 # Wonder beta status
 
-The signed public Mac beta remains available. Wonder Testing 1.0 (23) was
+The signed public Mac beta remains available. Wonder Testing 1.0 (24) was
 uploaded on October 3, processed by Apple and independently confirmed available
 in the automatic Owner Beta internal group. It is the owner's latest checkpoint
 for both iPhone and iPad. Production Wonder remains at processed build 82;
@@ -17,14 +17,29 @@ Keep the Mac awake and online while using it remotely.
 | Component | Status |
 | --- | --- |
 | iPhone and iPad | Production Release 1.0 (82) is uploaded and Apple reports processing complete. Its signed archive includes the Project Widget and passed channel identity, APNs, App Group, Keychain and Diagnostics-exclusion checks. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | The separate blue Release 1.0 (23) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed channel-specific identity, entitlement, Widget, symbol and Diagnostics-exclusion checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Wonder Testing | The separate blue Release 1.0 (24) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed channel-specific identity, entitlement, Widget, symbol and Diagnostics-exclusion checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
 | Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Replacement 1.0.108 is signed, notarized and installed locally and on a clean second Mac; publication waits for the remaining pairing, permission and draft-upgrade gates. |
-| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Testing 23 was archived from a clean, pushed checkpoint; production 82 and Mac 1.0.108 predate the latest fixes. Third-party components retain their own licenses. |
+| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Testing 24 was archived from a clean, pushed checkpoint; production 82 and Mac 1.0.108 predate the latest fixes. Third-party components retain their own licenses. |
 
 The chronological qualification notes below describe whether a change was
 source-only when checked. The shipped iOS checkpoint source is now in
-Testing 23, but its installed TestFlight behavior has not yet been observed.
+Testing 24, but its installed TestFlight behavior has not yet been observed.
 Mac source changes after 1.0.108 remain uninstalled.
+
+Testing 24 adds New Chat preview notes to the unsent composer and binds them
+to the first Project message after prepare-only thread creation. Notes can be
+edited or removed, survive relaunch, and warn before a folder switch removes
+them. Native Projects and Files checks passed 2/2 and 8/8; the offline
+annotation flow passed 1/1 on iPhone 17 and iPad Pro 13-inch M5 simulators,
+with screenshots inspected. The signed Release archive came from clean
+internal commit `016cea22` and corresponding public source `c99c7c0`.
+Apple processed build 24, and the upload lane plus an independent read-only
+check confirmed automatic Owner Beta availability. The archive, upload and
+matching dSYM evidence is under
+`.local/testflight-testing-24-20261004T025633Z-98abdb/`.
+No live provider first send or TestFlight-installed interaction was tested;
+the artifact annotation acceptance gate remains open. Production remains 82
+under the owner's Testing-only checkpoint request.
 
 Testing 23 clarifies the saved Project history shown when a desktop-owned task
 continues beyond Wonder's last recorded turn. An interrupted activity row now
