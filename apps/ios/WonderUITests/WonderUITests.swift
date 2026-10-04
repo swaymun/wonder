@@ -4537,6 +4537,34 @@ import UIKit
         XCTAssertEqual(app.staticTexts["camera-draft-transfers"].label, "Local draft only")
     }
 
+    func testDictationPreparationDoesNotRestartAfterBackground() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-composer-large-draft",
+                               "-diagnostics-progressive-dictation", "-diagnostics-dictation-delayed-catalog"]
+        app.launch()
+        let editor = app.textViews["message-draft"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        let original = try XCTUnwrap(editor.value as? String)
+        let mic = app.buttons["dictate-message"]
+        mic.tap()
+        let preparing = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'Cancel dictation preparation'"), object: mic)
+        XCTAssertEqual(XCTWaiter.wait(for: [preparing], timeout: 2), .completed)
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
+        app.activate()
+        let idle = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'Dictate message' AND enabled == true"), object: mic)
+        XCTAssertEqual(XCTWaiter.wait(for: [idle], timeout: 5), .completed)
+        // The delayed preparation response cannot restart recording after return.
+        let restarted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == 'Recording'"), object: mic)
+        restarted.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [restarted], timeout: 7), .completed)
+        XCTAssertEqual(editor.value as? String, original)
+        XCTAssertEqual(app.staticTexts["camera-draft-count"].label, "Draft attachments: 1")
+        XCTAssertEqual(app.staticTexts["camera-draft-transfers"].label, "Local draft only")
+        app.terminate()
+    }
+
     func testDictationMicrophoneDenialPreservesDraft() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

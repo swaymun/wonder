@@ -185,7 +185,11 @@ manual edits, late results, cancellation, backgrounding, interruptions, revocati
 and finalization tests with multiple phrases. The progressive UI case in
 `WonderUITests` uses the production mic stop/cancel controls and isolated composer
 with an attachment on both iPhone and iPad. Real microphone permission/startup
-checks use a synthetic Mac catalog, never a live host or model request.
+checks use a synthetic Mac catalog, never a live host or model request. The
+background-preparation case delays that catalog, backgrounds and reopens the app,
+then asserts that the late response cannot start recording or change the draft.
+App-level background notification retires preparation even after an inactive
+scene transition (which can also be caused by a permission sheet).
 
 Injected words establish application behavior only. Simulator capability,
 recording and UI checks do not establish device recognition quality or latency.

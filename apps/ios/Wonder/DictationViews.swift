@@ -741,6 +741,11 @@ struct DictationControls: View {
             if controller.microphoneDenied { Button("Open Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }.font(.caption) }
         }
         .task(id: model.assignmentScope) { controller.restore() }
+        // Permission sheets also make scenes inactive. The app-level background
+        // notification retires preparation even if scene activity was already false.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            controller.foreground(false)
+        }
     }
 }
 

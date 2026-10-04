@@ -366,3 +366,9 @@ transfers. Record whether the actual SpeechTranscriber API or the paired-Mac
 capture fallback was available; these checks do not prove successful recognition.
 The old SFSpeechRecognizer permission callback fixture was removed with that API.
 Keep the synthetic multi-phrase tests for editing and stale-result coverage.
+
+`testDictationPreparationDoesNotRestartAfterBackground` delays the synthetic Mac
+catalog, leaves the app during preparation and reopens it. The mic must become
+idle and remain idle beyond the delayed response, preserving draft and attachment.
+This exercises the shared preparation lifetime on simulator; it does not claim
+physical asset-download qualification.

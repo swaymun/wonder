@@ -1327,9 +1327,18 @@ private struct DiagnosticDictationPath: View {
 }
 
 private final class DiagnosticDictationProtocol: URLProtocol, @unchecked Sendable {
+    private let replyLock = NSLock()
+    private var reply: DispatchWorkItem?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        if ProcessInfo.processInfo.arguments.contains("-diagnostics-dictation-delayed-catalog") {
+            let work = DispatchWorkItem { [weak self] in self?.respond() }
+            replyLock.withLock { reply = work }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 6, execute: work)
+        } else { respond() }
+    }
+    private func respond() {
         let catalog = request.url?.path == "/api/v1/asr/models" && request.httpMethod == "GET"
         let body = catalog ? #"{"ready":true,"selectedModelId":"fixture","languages":["auto"],"maxRecordingDurationMs":600000,"models":[]}"# : "{}"
         let response = HTTPURLResponse(url: request.url!, statusCode: catalog ? 200 : 503, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
@@ -1337,7 +1346,7 @@ private final class DiagnosticDictationProtocol: URLProtocol, @unchecked Sendabl
         client?.urlProtocol(self, didLoad: Data(body.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
-    override func stopLoading() {}
+    override func stopLoading() { replyLock.withLock { reply?.cancel(); reply = nil } }
 }
 
 @MainActor private struct CameraDiagnosticFixtureView: View {
