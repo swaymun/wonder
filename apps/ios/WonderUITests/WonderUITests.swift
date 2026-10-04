@@ -2831,7 +2831,7 @@ import UIKit
                       "A slow diff should show that Files is opening it")
         renamed.tap()
         XCTAssertTrue(workspacePreviewClose(app, legacyID: "workspace-diff-close").waitForExistence(timeout: 5))
-        let diffText = app.staticTexts["workspace-diff-text"]
+        let diffText = anyElement(app, identifier: "workspace-diff-text")
         XCTAssertTrue(diffText.waitForExistence(timeout: 5))
         XCTAssertTrue((diffText.label).contains("new-name.md"))
         Thread.sleep(forTimeInterval: 3.5)
@@ -3006,7 +3006,7 @@ import UIKit
         XCTAssertTrue(workspacePreviewClose(app, legacyID: "workspace-diff-close").waitForExistence(timeout: 5))
         app.buttons["workspace-preview-expand"].tap()
         XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.staticTexts.matching(identifier: "workspace-diff-text").count, 1,
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "workspace-diff-text").count, 1,
                        "Full screen should keep one diff layout")
         app.buttons["workspace-preview-collapse"].tap()
         workspacePreviewClose(app, legacyID: "workspace-diff-close").tap()
@@ -4198,6 +4198,51 @@ import UIKit
             }
             app.terminate()
         }
+    }
+
+    func testResponseEditedFilesBelowAnswerAndDiffKeepComposerInLandscape() throws {
+        try checkResponseEditedFiles(landscape: true, large: false)
+    }
+
+    func testResponseEditedFilesAtAccessibilitySize() throws {
+        try checkResponseEditedFiles(landscape: false, large: true)
+    }
+
+    private func checkResponseEditedFiles(landscape: Bool, large: Bool) throws {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = landscape ? .landscapeLeft : .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-activity-preview", "-response-edits-preview"]
+        app.launchArguments += ["-UIPreferredContentSizeCategoryName", large ? "UICTContentSizeCategoryAccessibilityXXXL" : "UICTContentSizeCategoryL"]
+        app.launch()
+        XCUIDevice.shared.orientation = landscape ? .landscapeLeft : .portrait
+        if landscape { XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5)); XCTAssertGreaterThan(app.frame.width, app.frame.height) }
+        let footer = anyElement(app, identifier: "response-edits:turn")
+        let first = app.buttons["response-edited-file:turn:Sources/ChatView.swift"]
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        revealGitHubControl(first, in: anyElement(app, identifier: "conversation-scroll"))
+        let answer = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "The tests passed. I updated the chat labels")).firstMatch
+        XCTAssertTrue(answer.exists)
+        XCTAssertGreaterThanOrEqual(footer.frame.minY, answer.frame.maxY - 1)
+        retainMenuScreenshot(app, name: large ? "Edited files below answer at large text" : "Edited files below answer in landscape", fullScreen: true)
+        first.tap()
+        let diff = anyElement(app, identifier: "workspace-diff-text")
+        XCTAssertTrue(diff.waitForExistence(timeout: 10))
+        XCTAssertTrue(diff.label.contains("+let label = \"Edited files\""))
+        XCTAssertTrue(app.textViews["message-draft"].isHittable)
+        retainMenuScreenshot(app, name: large ? "Saved file diff at large text" : "Saved file diff in landscape", fullScreen: true)
+        app.buttons["response-edits-back"].tap()
+        let last = app.buttons["response-edited-file:turn:Sources/Long folder name/Accessible layout.swift"]
+        revealGitHubControl(last, in: app.collectionViews.firstMatch)
+        XCTAssertTrue(last.waitForExistence(timeout: 5))
+        last.tap()
+        XCTAssertTrue(diff.waitForExistence(timeout: 5))
+        XCTAssertTrue(diff.label.contains("Accessible layout.swift"))
+        app.buttons["response-edits-back"].tap()
+        app.buttons["response-edits-back"].tap()
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textViews["message-draft"].isHittable)
     }
 
     func testDiagnosticsCommandSummaryKeepsDurationOnlyWhenTheFullCommandFits() throws {

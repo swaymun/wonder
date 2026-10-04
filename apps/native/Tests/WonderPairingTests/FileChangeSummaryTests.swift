@@ -61,4 +61,46 @@ final class FileChangeSummaryTests: XCTestCase {
         XCTAssertEqual(row.fileChangeSummary?.path, "Sources/Authentication.swift")
         XCTAssertEqual(row.activity?.details.first?.filePath, "Sources/Authentication.swift")
     }
+
+    func testResponseFooterFollowsFinalAnswerAndKeepsSeparateFilesAndRepeatedEdits() throws {
+        func edit(_ id: String, _ path: String, _ patch: String, state: String = "completed") -> ReadRow {
+            let value = ReadItem(id: id, type: "fileChange", state: state, text: nil, createdAt: "1000",
+                payload: ["diffs": .array([.object(["path": .string(path), "diff": .string(patch)])])])
+            return ReadRow(id: id, author: "Bot", text: "", isUser: false, timestamp: "1000", turnId: "turn", item: value)
+        }
+        let reply = ReadRow(id: "reply", author: "Bot", text: "Done", isUser: false, timestamp: "2000", turnId: "turn")
+        let progress = ReadRow(id: "progress", author: "Bot", text: "One file is ready", isUser: false, timestamp: "1500", turnId: "turn")
+        let rows = [edit("a", "A/File.swift", "-old\n+new"), progress, edit("b", "B/File.swift", "+another"),
+                    edit("c", "A/File.swift", "-new\n+final"), edit("failed", "Failed.swift", "+failed", state: "failed"), reply]
+        let entries = ChatFeedEntry.grouping(rows)
+        let footers = ResponseEditedFiles.footers(entries: entries, activeTurnIDs: [])
+        XCTAssertEqual(Set(footers.keys), ["reply"])
+        let files = try XCTUnwrap(footers["reply"]).files
+        XCTAssertEqual(files.map(\.path), ["A/File.swift", "B/File.swift"])
+        XCTAssertEqual(files[0].additions, 2)
+        XCTAssertEqual(files[0].deletions, 2)
+        XCTAssertEqual(files[0].patches, ["-old\n+new", "-new\n+final"])
+        XCTAssertTrue(ResponseEditedFiles.footers(entries: entries, activeTurnIDs: ["turn"]).isEmpty)
+    }
+
+    func testResponseFooterDoesNotInventDiffsOrCountsForLegacyHistory() throws {
+        let value = item(["paths": .array([.string("Known.swift")])])
+        let row = ReadRow(id: "saved", author: "Bot", text: "", isUser: false, timestamp: "1000", turnId: "turn", item: value)
+        let files = try XCTUnwrap(ResponseEditedFiles.footers(entries: ChatFeedEntry.grouping([row]), activeTurnIDs: [])["saved"]).files
+        XCTAssertEqual(files.map(\.path), ["Known.swift"])
+        XCTAssertNil(files[0].additions)
+        XCTAssertNil(files[0].deletions)
+        XCTAssertTrue(files[0].patches.isEmpty)
+    }
+
+    func testResponseFooterReadsMultiplePatchPathsWhenLegacyPathsAreEmpty() throws {
+        let value = item(["paths": .array([]), "diffs": .array([
+            .object(["path": .string("A.swift"), "diff": .string("--- a/A.swift\n+++ b/A.swift\n-old\n+new")]),
+            .object(["path": .string("B.swift"), "diff": .string("+one\n+two")])])])
+        let row = ReadRow(id: "saved", author: "Bot", text: "", isUser: false, timestamp: "1000", turnId: "turn", item: value)
+        let files = try XCTUnwrap(ResponseEditedFiles.footers(entries: ChatFeedEntry.grouping([row]), activeTurnIDs: [])["saved"]).files
+        XCTAssertEqual(files.map(\.path), ["A.swift", "B.swift"])
+        XCTAssertEqual(files.map(\.additions), [1, 2])
+        XCTAssertEqual(files.map(\.deletions), [1, 0])
+    }
 }

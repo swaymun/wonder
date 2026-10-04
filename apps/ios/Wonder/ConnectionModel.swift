@@ -680,6 +680,14 @@ struct ManagedBotListMutationState {
                 if commandFailed {
                     items[1] = ["id":"command", "type":"commandExecution", "state":"failed", "createdAt":"2000", "payload":["command":"swift test", "cwd":"project", "output":"The test command could not complete.", "exitCode":1]]
                 }
+                if ProcessInfo.processInfo.arguments.contains("-response-edits-preview") {
+                    let paths = ["Sources/ChatView.swift", "Tests/ChatViewTests.swift", "Documentation/Changes.md", "Sources/Long folder name/Accessible layout.swift"]
+                    let diffs = paths.map { path in
+                        ["path": path, "kind": "update", "additions": 2, "deletions": 1,
+                         "diff": "diff --git a/\(path) b/\(path)\n--- a/\(path)\n+++ b/\(path)\n@@ -12,2 +12,3 @@\n let title = \"Wonder\"\n-let label = \"Files\"\n+let label = \"Edited files\"\n+let accessible = true\n"] as [String: Any]
+                    }
+                    items[3]["payload"] = ["paths": paths, "diffs": diffs]
+                }
                 if mixed {
                     items.insert(["id":"z-commentary", "type":"agentMessage", "state":"completed", "text":"I’ll check the project files and notes.", "createdAt":"1500", "payload":["phase":"commentary"]], at: 1)
                 }
@@ -3334,11 +3342,13 @@ struct ConversationTimeline {
     let retainedTurnIDs: Set<String>
     let attachmentIDs: [String]
     let turns: [String: ReadTurn]
+    let editedFiles: [String: ResponseEditedFiles]
 
     init(chatID: String, rows: [ReadRow], activeTurnIDs: Set<String>, activeTurnID: String?, focusedRowID: String?, turns: [ReadTurn]?) {
         self.rows = rows
         previous = Dictionary(zip(rows.dropFirst(), rows).map { ($0.0.id, $0.1) }, uniquingKeysWith: { first, _ in first })
         entries = ChatFeedEntry.grouping(rows, activeTurnIDs: activeTurnIDs, focusedRowID: focusedRowID)
+        editedFiles = ResponseEditedFiles.footers(entries: entries, activeTurnIDs: activeTurnIDs)
         latestActivityEntryIDs = ChatFeedEntry.latestActivityEntryIDs(entries)
         latestActiveActivityEntryID = ChatFeedEntry.latestActivityEntryID(entries, turnID: activeTurnID)
         var byID: [String: ReadTurn] = [:]

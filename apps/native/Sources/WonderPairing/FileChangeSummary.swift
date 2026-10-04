@@ -57,3 +57,78 @@ public struct FileChangeSummary: Equatable, Sendable {
                     accessibilityLabel: ([title] + counts).joined(separator: ", "))
     }
 }
+
+/// Saved edits from one response, distinct from the workspace's current Git status.
+/// Patch strings stay inert and are assembled only when their file is opened.
+public struct ResponseEditedFile: Identifiable, Sendable {
+    public let path: String
+    public var additions: Int?
+    public var deletions: Int?
+    public var patches: [String]
+    public var id: String { path }
+    public var name: String { FileChangeSummary.filename(path) }
+}
+
+public struct ResponseEditedFiles: Sendable {
+    public let turnID: String
+    public let files: [ResponseEditedFile]
+
+    /// Attach once, after the turn's last visible entry, even when commentary
+    /// splits its activity into several groups. Failed/pending edits are not receipts.
+    public static func footers(entries: [ChatFeedEntry], activeTurnIDs: Set<String>) -> [String: Self] {
+        var lastEntry: [String: String] = [:]
+        var files: [String: [ResponseEditedFile]] = [:]
+        var indices: [String: [String: Int]] = [:]
+        for entry in entries {
+            for row in entry.rows {
+                guard !row.isUser, let turn = row.turnId, !activeTurnIDs.contains(turn) else { continue }
+                lastEntry[turn] = entry.id
+                guard let item = row.item, item.type == "fileChange", item.state == "completed" else { continue }
+                let payload = item.payload ?? [:]
+                let diffs = (payload["diffs"]?.array ?? []).compactMap { value -> [String: ThreadValue]? in
+                    if case .object(let fields) = value { return fields }; return nil
+                }
+                let savedPaths = payload["paths"]?.array?.compactMap(\.string) ?? []
+                let paths = savedPaths.isEmpty ? diffs.compactMap { $0["path"]?.string } : savedPaths
+                let byPath = Dictionary(grouping: diffs, by: { $0["path"]?.string ?? "" })
+                var seen = Set<String>()
+                for path in paths where !path.isEmpty && seen.insert(path).inserted {
+                    let matching = byPath[path] ?? []
+                    func count(_ key: String) -> Int? {
+                        if paths.count == 1 {
+                            return key == "additions" ? row.fileChangeSummary?.additions : row.fileChangeSummary?.deletions
+                        }
+                        let values = matching.compactMap { $0[key]?.number }
+                        if !matching.isEmpty, values.count == matching.count,
+                           values.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= Double(Int32.max) }) {
+                            return values.reduce(0) { $0 + Int($1) }
+                        }
+                        guard !matching.isEmpty, matching.allSatisfy({ $0["diff"]?.string != nil }) else { return nil }
+                        let marker = key == "additions" ? "+" : "-"
+                        return matching.reduce(0) { total, fields in
+                            total + (fields["diff"]?.string?.split(separator: "\n").filter {
+                                $0.hasPrefix(marker) && !$0.hasPrefix(String(repeating: marker, count: 3))
+                            }.count ?? 0)
+                        }
+                    }
+                    let added = count("additions"), removed = count("deletions")
+                    let patches = matching.compactMap { $0["diff"]?.string }.filter { !$0.isEmpty }
+                    if let index = indices[turn]?[path] {
+                        var file = files[turn]![index]
+                        file.additions = file.additions.flatMap { prior in added.map { prior + $0 } }
+                        file.deletions = file.deletions.flatMap { prior in removed.map { prior + $0 } }
+                        file.patches += patches
+                        files[turn]![index] = file
+                    } else {
+                        indices[turn, default: [:]][path] = files[turn, default: []].count
+                        files[turn, default: []].append(ResponseEditedFile(path: path, additions: added, deletions: removed, patches: patches))
+                    }
+                }
+            }
+        }
+        return Dictionary(files.compactMap { turn, files in
+            guard !files.isEmpty, let entry = lastEntry[turn] else { return nil }
+            return (entry, Self(turnID: turn, files: files))
+        }, uniquingKeysWith: { first, _ in first })
+    }
+}

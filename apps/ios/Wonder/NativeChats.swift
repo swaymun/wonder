@@ -444,6 +444,7 @@ struct ConversationView: View {
     @State private var cameraScope: String?
     @State private var importScope: String?
     @State private var workspaceRequest: WorkspaceBrowserRequest?
+    @State private var editedFilesReview: EditedFilesReviewRequest?
     @State private var showingApps = false
     @State private var showingDetails = false
     @State private var showingUsage = false
@@ -760,7 +761,10 @@ struct ConversationView: View {
         #endif
         VStack(spacing: 0) {
             Group {
-            if let request = workspaceRequest {
+            if let review = editedFilesReview, review.scope == model.assignmentScope {
+                ResponseEditedFilesReview(request: review) { editedFilesReview = nil }
+                    .id(review.summary.turnID)
+            } else if let request = workspaceRequest {
                 WorkspaceBrowser(model: model, chat: chat, attachmentIDs: request.attachmentIDs,
                                  initialFilePath: request.initialFilePath, preferredRootID: request.preferredRootID,
                                  reanchor: request.reanchor, replacingAnnotationID: request.replacingAnnotationID)
@@ -799,6 +803,11 @@ struct ConversationView: View {
                                     implementablePlanID: implementablePlanID
                                 )
                                 groupWork(for: entry.rows.first)
+                                if let edits = prepared.editedFiles[entry.id] {
+                                    ResponseEditedFilesFooter(summary: edits) { file in
+                                        editedFilesReview = EditedFilesReviewRequest(summary: edits, selectedPath: file?.path, scope: model.assignmentScope)
+                                    }
+                                }
                                 ForEach(readOnly ? [] : settledQuestions(for: entry, timeline: timeline)) { question in
                                     AsyncQuestionRow(model: model, chat: chat, question: question)
                                 }
@@ -1039,6 +1048,7 @@ struct ConversationView: View {
         }
         .onChange(of: model.assignmentScope) { _, next in
             if cameraScope != nil, cameraScope != next { showingCamera = false; cameraScope = nil }
+            if editedFilesReview?.scope != next { editedFilesReview = nil }
         }
         .onReceive(model.projects.$details) { details in
             let on = details[chat.id]?.planMode == true
@@ -3318,6 +3328,7 @@ struct WorkspaceBrowser: View {
     @State private var attachmentData: Data?
     @State private var attachmentDigest: String?
     @State private var selectedDiff: WorkspaceGitChange?
+    @State private var selectedDiffStaged = false
     @State private var diffChoice: WorkspaceGitChange?
     @State private var diffText: String?
     @State private var expandedPreview = false
@@ -3707,7 +3718,7 @@ struct WorkspaceBrowser: View {
                                          onClose: closePreview)
             }
         } else if let change = selectedDiff, let diffText {
-            WorkspaceDiffPreview(path: change.path, state: change.state, diff: diffText,
+            WorkspaceDiffPreview(path: change.path, state: selectedDiffStaged ? "Staged changes" : "Unstaged changes", diff: diffText,
                                  onClose: closePreview)
         }
     }
@@ -4305,6 +4316,7 @@ struct WorkspaceBrowser: View {
                 let response = try await model.loadWorkspaceGitDiff(chat, root: root, path: change.path, staged: staged)
                 guard isCurrent(captured), requestID == diffRequestID,
                       selectedDiff?.id == change.id else { return }
+                selectedDiffStaged = response.staged
                 diffText = response.diff
             } catch {
                 guard isCurrent(captured), requestID == diffRequestID,
@@ -5273,15 +5285,157 @@ private struct ArtifactNoteEditor: View {
     }
 }
 
+private struct EditedFilesReviewRequest {
+    let summary: ResponseEditedFiles
+    let selectedPath: String?
+    let scope: String
+}
+
+private struct ResponseEditedFilesFooter: View {
+    let summary: ResponseEditedFiles
+    let open: (ResponseEditedFile?) -> Void
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.dynamicTypeSize) private var typeSize
+    private var previewCount: Int { verticalSizeClass == .compact || typeSize.isAccessibilitySize ? 1 : 3 }
+    private var remaining: Int { max(0, summary.files.count - previewCount) }
+    private var title: some View {
+        Label(summary.files.count == 1 ? "Edited a file" : "Edited \(summary.files.count) files", systemImage: "doc.text")
+            .font(.subheadline.weight(.medium))
+    }
+    private var viewChanges: some View {
+        Button("View changes") { open(nil) }.font(.subheadline).frame(minHeight: 44)
+            .accessibilityIdentifier("response-edits-open:" + summary.turnID)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 4) { title; viewChanges }
+            } else {
+                HStack { title; Spacer(minLength: 8); viewChanges }
+            }
+            ForEach(Array(summary.files.prefix(previewCount))) { file in
+                Button { open(file) } label: {
+                    EditedFileLabel(file: file)
+                }.buttonStyle(.plain).frame(minHeight: 44)
+                    .accessibilityIdentifier("response-edited-file:" + summary.turnID + ":" + file.path)
+            }
+            if remaining > 0 {
+                Button(remaining == 1 ? "Show 1 more file" : "Show \(remaining) more files") { open(nil) }
+                    .font(.subheadline).frame(minHeight: 44)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.top, 4)
+        .frame(maxWidth: 640, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("response-edits:" + summary.turnID)
+    }
+}
+
+private struct EditedFileLabel: View {
+    let file: ResponseEditedFile
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.dynamicTypeSize) private var typeSize
+    private var name: some View {
+        Text(FileChangeSummary.relativePath(file.path) != nil ? file.path : file.name)
+            .font(.subheadline).lineLimit(2).truncationMode(.middle)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    private var counts: some View {
+        HStack(spacing: 8) {
+            if let added = file.additions { Text("+\(added)").foregroundStyle(scheme == .dark ? Color.green : Color(red: 0.1, green: 0.42, blue: 0.2)) }
+            if let removed = file.deletions { Text("−\(removed)").foregroundStyle(scheme == .dark ? Color.red : Color(red: 0.75, green: 0.12, blue: 0.16)) }
+        }.font(.caption.monospacedDigit()).fixedSize()
+    }
+    var body: some View {
+        Group {
+            if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 4) { name; counts }
+            } else {
+                HStack(spacing: 12) { name; counts }
+            }
+        }.fixedSize(horizontal: false, vertical: true).padding(.vertical, 6).contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(([file.path] + [file.additions.map { "\($0) added lines" }, file.deletions.map { "\($0) removed lines" }].compactMap { $0 }).joined(separator: ", "))
+            .accessibilityHint("View the changes saved with this response")
+    }
+}
+
+private struct ResponseEditedFilesReview: View {
+    let request: EditedFilesReviewRequest
+    let close: () -> Void
+    @State private var selectedPath: String?
+    @State private var patch: String?
+    @State private var oversized = false
+    @State private var patchPath: String?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    init(request: EditedFilesReviewRequest, close: @escaping () -> Void) {
+        self.request = request; self.close = close
+        _selectedPath = State(initialValue: request.selectedPath)
+    }
+    private var selected: ResponseEditedFile? { request.summary.files.first { $0.path == selectedPath } }
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button {
+                    if selectedPath != nil { selectedPath = nil } else { close() }
+                } label: {
+                    if dynamicTypeSize.isAccessibilitySize {
+                        Image(systemName: "chevron.left").accessibilityLabel(selectedPath == nil ? "Chat" : "Edited files")
+                    } else { Label(selectedPath == nil ? "Chat" : "Edited files", systemImage: "chevron.left") }
+                }
+                    .frame(minHeight: 44).accessibilityIdentifier("response-edits-back")
+                Spacer(minLength: 0)
+                if let selected { Text(selected.name).font(.headline).lineLimit(1).truncationMode(.middle) }
+                else { Text("Edited files").font(.headline).lineLimit(1) }
+            }.padding(.horizontal, 16)
+            if let selected {
+                if selected.patches.isEmpty {
+                    ContentUnavailableView("Diff unavailable", systemImage: "doc.text", description: Text("This response saved the filename but no text diff."))
+                } else if oversized, patchPath == selected.path {
+                    ContentUnavailableView("Diff too large to preview", systemImage: "doc.text", description: Text("Review these saved changes on your Mac."))
+                } else if let patch, patchPath == selected.path {
+                    WorkspaceDiffPreview(path: selected.path, state: "Saved changes from this response", diff: patch, showState: false, onClose: close)
+                } else { ProgressView("Loading diff…").frame(maxWidth: .infinity, maxHeight: .infinity) }
+            } else {
+                List(request.summary.files) { file in
+                    Button { selectedPath = file.path } label: { EditedFileLabel(file: file) }
+                        .accessibilityIdentifier("response-edited-file:" + request.summary.turnID + ":" + file.path)
+                }.listStyle(.plain)
+            }
+        }
+        .task(id: selectedPath) {
+            patch = nil
+            oversized = false
+            patchPath = nil
+            guard let selected, !selected.patches.isEmpty else { return }
+            let value = await Task.detached(priority: .userInitiated) {
+                guard selected.patches.reduce(0, { $0 + $1.utf8.count }) <= 512 * 1024 else { return Optional<String>.none }
+                return selected.patches.enumerated().map { index, text in
+                    selected.patches.count == 1 ? text : "Edit \(index + 1)\n" + text
+                }.joined(separator: "\n\n")
+            }.value
+            guard !Task.isCancelled, selectedPath == selected.path else { return }
+            patch = value
+            oversized = value == nil
+            patchPath = selected.path
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("response-edits-review")
+    }
+}
+
 struct WorkspaceDiffPreview: View {
     let path: String
     let state: String
     let diff: String
+    var showState = true
     var onClose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
-            ScrollView { Text(diff.isEmpty ? "No textual diff is available for this change." : diff).font(.system(.footnote, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding().accessibilityIdentifier("workspace-diff-text") }
+            ToolTextView(text: diff.isEmpty ? "No textual diff is available for this change." : diff, diff: true, accessible: true)
+                .accessibilityIdentifier("workspace-diff-text")
                 .navigationTitle(path).navigationBarTitleDisplayMode(.inline)
                 .toolbar(onClose == nil ? .visible : .hidden, for: .navigationBar)
                 .toolbar {
@@ -5292,7 +5446,9 @@ struct WorkspaceDiffPreview: View {
                         }
                     }
                 }
-                .safeAreaInset(edge: .bottom) { Text(state.capitalized).font(.caption).foregroundStyle(.secondary).padding(.bottom, 8) }
+                .safeAreaInset(edge: .bottom) {
+                    if showState { Text(state).font(.caption).foregroundStyle(.secondary).padding(.bottom, 8) }
+                }
         }
     }
 }
@@ -6607,24 +6763,26 @@ struct ToolTextPanel: View {
 private struct ToolTextView: UIViewRepresentable {
     let text: String
     let diff: Bool
+    var accessible = false
     func makeUIView(context: Context) -> UITextView {
         let view=UITextView(usingTextLayoutManager: false)
         view.isEditable=false; view.isSelectable=true; view.backgroundColor = .clear
         view.textContainerInset=UIEdgeInsets(top:10,left:10,bottom:10,right:10)
         view.font = .monospacedSystemFont(ofSize:16,weight:.regular)
         view.adjustsFontForContentSizeCategory=true
-        view.isAccessibilityElement=false
-        view.accessibilityElementsHidden=true
+        view.isAccessibilityElement=accessible
+        view.accessibilityElementsHidden = !accessible
         return view
     }
     func updateUIView(_ view: UITextView, context: Context) {
         guard context.coordinator.text != text || context.coordinator.diff != diff else { return }
         context.coordinator.text=text; context.coordinator.diff=diff
+        if accessible { view.accessibilityLabel = text }
         let output=NSMutableAttributedString(string:text,attributes:[.font:UIFontMetrics(forTextStyle:.callout).scaledFont(for:.monospacedSystemFont(ofSize:16,weight:.regular)),.foregroundColor:UIColor.label])
         if diff {
             let source=text as NSString
             source.enumerateSubstrings(in:NSRange(location:0,length:source.length),options:.byLines) { line, range, _, _ in
-                if let line, line.hasPrefix("+") || line.hasPrefix("-") {
+                if let line, (line.hasPrefix("+") && !line.hasPrefix("+++")) || (line.hasPrefix("-") && !line.hasPrefix("---")) {
                     output.addAttribute(.backgroundColor,value:(line.hasPrefix("+") ? UIColor.systemGreen : UIColor.systemRed).withAlphaComponent(0.14),range:range)
                 }
             }

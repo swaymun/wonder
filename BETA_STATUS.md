@@ -4,7 +4,7 @@ The signed public Mac beta remains available. On October 4, Wonder Testing
 Release 1.0 (25) uploaded, processed and passed an independent read-only check
 for automatic Owner Beta availability. Production Release 1.0 (83) uploaded
 and processed successfully. TestFlight installation and production
-tester availability remain unverified. Mac 1.0.109 is signed, notarized and
+tester availability remain unverified. Mac 1.0.110 is signed, notarized and
 installed locally with the simplified Settings design and desktop Chats removed.
 No external beta review, public enrollment or new public Mac release was requested.
 
@@ -19,26 +19,37 @@ Keep the Mac awake and online while using it remotely.
 | --- | --- |
 | iPhone and iPad | Production Release 1.0 (83) uploaded and Apple reports processing complete. The signed archive/export passed production identity, APNs, App Group, Keychain and diagnostic-exclusion checks. Tester availability and TestFlight installation remain unverified. |
 | Wonder Testing | Blue Release 1.0 (25) uploaded, processed and is available in automatic Owner Beta. Signed archive/export identity, entitlements, Widget, symbols and diagnostic exclusions passed. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.109 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed. Actual light/dark Settings, version, manual update feedback and read-only host checks passed. Current fresh-Mac pairing, private permissions and draft-upgrade acceptance remain open. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.110 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed. Actual light/dark Settings, version, manual update feedback and read-only host checks passed. Current fresh-Mac pairing, private permissions and draft-upgrade acceptance remain open. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 632 selected public source files matched bytes and executable modes before release records were updated. Third-party components retain their own licenses. |
+
+Completed responses now show their edited files below the answer, with added/removed
+line counts and selectable colored saved diffs. The composer remains available.
+Current workspace diffs identify staged versus unstaged changes. Eight native
+model checks and four focused iPhone/iPad simulator checks passed, including
+landscape and Accessibility XXXL. These changes are awaiting the next two
+Release uploads; the builds listed above retain their earlier release status.
 
 The chronological qualification notes below retain the limits of earlier checks.
 The October 4 releases include the later Settings, native GitHub review and
 Project Apps recovery source. Simulator checks include iPhone/iPad landscape;
 actual TestFlight-installed behavior remains unverified.
 
-Mac 1.0.109 keeps the native host, menu bar and Settings. Its Settings uses the
+Mac 1.0.110 keeps the native host, menu bar and Settings. Its Settings uses the
 original sun icon, a restrained yellow/apricot sidebar and warm light/dark colors,
 shorter readiness and Access copy, and one automatic-update policy in About.
 The redundant provider-check and restart controls and desktop Chats are removed.
 The installed host is ready, preserves Project IDs and advertises GitHub review
 support. Global Codex Usage/Apps and scoped Project Files reads pass; unloaded
 Project Apps now returns the specific unavailable response. Manual update checking
-completes with “No newer compatible update is available.” Remote reachability is
-currently unavailable with Tailscale recovery shown; no new privacy grant or live
+completes with “No newer compatible update is available.” The disconnected Tailscale check showed reconnect recovery; a later read-only
+check found Tailscale Running and Settings Ready. No new privacy grant or live
 model turn was made. The new DMG remains local:
-SHA-256 `ccfe3524ed0ee2cf426c5bf388698b139a85aedaaffaa0651f91c79a5c16549b`.
+SHA-256 `20e02c529729729f4d9ae1fce075dc5b4bdac6fb7e2508d9d350ad4cf68c363c`.
 Notarization was accepted, and staple, Gatekeeper and payload checks passed.
+The installed 1.0.110 helper now distinguishes disconnected Tailscale from a
+sign-in requirement; actual Stopped state shows reconnect recovery with no
+advertised origin. Installed health/readiness checks passed and Project IDs
+were preserved.
 
 Testing 24 adds New Chat preview notes to the unsent composer and binds them
 to the first Project message after prepare-only thread creation. Notes can be
