@@ -1234,6 +1234,9 @@ for line in sys.stdin:
         continue
     elif method == 'account/rateLimits/read' and os.path.exists(root + '/usage-fixture.json'):
         result = json.load(open(root + '/usage-fixture.json'))
+    elif method == 'app/installed' and os.path.exists(root + '/apps-error.json'):
+        print(json.dumps({'id':r['id'],'error':json.load(open(root + '/apps-error.json'))}),flush=True)
+        continue
     elif method == 'app/installed' and os.path.exists(root + '/apps-fixture.json'):
         result = json.load(open(root + '/apps-fixture.json'))
     elif method == 'app/read' and os.path.exists(root + '/apps-fixture.json'):

@@ -441,6 +441,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var projectServiceTier = "default"
         var archiveFailures = 1
         var questionResolved = false
+        var connectedAppsUnavailable = false
         var workspaceChanged = false
         var workspaceRefreshFailures = 0
         var goalPresent = DiagnosticSubagentFixture.goalFixture
@@ -462,6 +463,14 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         let path = url.path
         if path == "/api/v1/connected-apps" {
             let arguments = ProcessInfo.processInfo.arguments
+            let refresh = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "refresh" && $0.value == "true" } == true
+            let unavailable = Self.state.lock.withLock {
+                if arguments.contains("-diagnostics-connected-apps-unloaded-after-refresh"), refresh { Self.state.connectedAppsUnavailable = true }
+                return Self.state.connectedAppsUnavailable
+            }
+            if unavailable || arguments.contains("-diagnostics-connected-apps-unloaded") {
+                finish(status: 424, body: Data("{}".utf8)); return
+            }
             if arguments.contains("-diagnostics-connected-apps-stale") {
                 finish(status: 409, body: Data("{}".utf8)); return
             }
@@ -902,10 +911,17 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
 
 struct DiagnosticConnectedAppsFixtureView: View {
     @StateObject private var model = DiagnosticSubagentFixture.model()
+    @State private var presentation = 0
     var body: some View {
         NavigationStack { ConnectedAppsView(model: model,
             conversationId: ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps-project")
-                ? DiagnosticSubagentFixture.parentID : nil) }
+                ? DiagnosticSubagentFixture.parentID : nil)
+            .id(presentation)
+            .toolbar {
+                if ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps-unloaded-after-refresh") {
+                    Button("Reopen") { presentation += 1 }.accessibilityIdentifier("connected-apps-reopen-fixture").accessibilityValue(String(presentation))
+                }
+            } }
             .preferredColorScheme(ProcessInfo.processInfo.arguments.contains("-diagnostics-connected-apps-dark") ? .dark : .light)
     }
 }

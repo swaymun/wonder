@@ -98,6 +98,27 @@ pub(super) async fn list(
             json!({"threadId":thread,"forceRefresh":query.refresh}),
         )
         .await;
+    // Effective app access requires a loaded provider thread. Keep an unloaded
+    // Project distinct from authentication/transport failure; never resume it
+    // or substitute the account-wide app permissions as conversation authority.
+    if project_conversation.is_some()
+        && family == AgentFamily::Codex
+        && result
+            .as_ref()
+            .ok()
+            .and_then(|response| response.error.as_ref())
+            .is_some_and(|error| {
+                error.code == -32600
+                    && thread
+                        .as_ref()
+                        .is_some_and(|id| error.message == format!("thread not found: {id}"))
+            })
+    {
+        return (
+            StatusCode::FAILED_DEPENDENCY,
+            "This conversation’s app access isn’t available right now. Check account-wide apps in Settings.",
+        ).into_response();
+    }
     if result
         .as_ref()
         .ok()
@@ -463,6 +484,69 @@ mod tests {
         assert!(requests
             .iter()
             .any(|r| r["scope"] == "owner" && r["method"] == "account/rateLimits/read"));
+
+        // Observed 0.160.0 unloaded-thread error: only the exact Project thread
+        // receives the specific unavailable state. Other failures retain their
+        // real recovery class, including global-account requests.
+        for (code, message, conversation, expected) in [
+            (
+                -32600,
+                "thread not found: project-thread",
+                Some("project-chat"),
+                StatusCode::FAILED_DEPENDENCY,
+            ),
+            (
+                -32600,
+                "thread not found: other-thread",
+                Some("project-chat"),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                -32600,
+                "invalid request",
+                Some("project-chat"),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                -32601,
+                "Method not found",
+                Some("project-chat"),
+                StatusCode::NOT_IMPLEMENTED,
+            ),
+            (
+                -32600,
+                "thread not found: project-thread",
+                None,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            fs::write(
+                dir.path().join("apps-error.json"),
+                json!({"code":code,"message":message}).to_string(),
+            )
+            .unwrap();
+            let response = list(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Query(AppQuery {
+                    cursor: None,
+                    agent_family: Some(AgentFamily::Codex),
+                    conversation_id: conversation.map(str::to_owned),
+                    refresh: false,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), expected);
+        }
+        fs::remove_file(dir.path().join("apps-error.json")).unwrap();
+        let requests = fs::read_to_string(dir.path().join("routing-requests-jsonl")).unwrap();
+        assert!(requests
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .all(|request| !matches!(
+                request["method"].as_str(),
+                Some("thread/resume" | "turn/start")
+            )));
 
         // A provider read failure is retryable; 409 is reserved for a stale
         // conversation binding or changed pagination snapshot.

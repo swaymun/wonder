@@ -5732,6 +5732,8 @@ import UIKit
 
     func testProjectConnectedAppsUseConversationScopeAndExplainRecovery() throws {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-connected-apps", "-diagnostics-connected-apps-project"]
         app.launch()
@@ -5739,7 +5741,7 @@ import UIKit
         XCTAssertTrue(app.staticTexts["Available"].exists)
         XCTAssertFalse(app.segmentedControls.buttons["Claude"].exists,
                        "Conversation access must stay scoped to its Project provider")
-        retainMenuScreenshot(app, name: "Project connected apps")
+        retainMenuScreenshot(app, name: "Project connected apps", fullScreen: true)
         app.terminate()
 
         app.launchArguments = ["-diagnostics-connected-apps", "-diagnostics-connected-apps-project",
@@ -5747,6 +5749,30 @@ import UIKit
         app.launch()
         XCTAssertTrue(app.staticTexts["Start this conversation or reopen it, then check its app access again."].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["connected-apps-retry"].exists)
+        XCTAssertFalse(app.staticTexts["Available"].exists)
+        app.terminate()
+
+        app.launchArguments = ["-diagnostics-connected-apps", "-diagnostics-connected-apps-project",
+                               "-diagnostics-connected-apps-unloaded"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["This conversation’s app access isn’t available right now. Check account-wide apps in Settings."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["connected-apps-retry"].exists)
+        XCTAssertFalse(app.staticTexts["Available"].exists)
+        retainMenuScreenshot(app, name: "Unloaded Project app access", fullScreen: true)
+        app.terminate()
+
+        app.launchArguments = ["-diagnostics-connected-apps", "-diagnostics-connected-apps-project",
+                               "-diagnostics-connected-apps-unloaded-after-refresh"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Available"].waitForExistence(timeout: 10))
+        app.buttons["Refresh"].tap()
+        let unavailable = app.staticTexts["This conversation’s app access isn’t available right now. Check account-wide apps in Settings."]
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 10))
+        let reopen = app.buttons["connected-apps-reopen-fixture"]
+        reopen.tap()
+        let remounted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "1"), object: reopen)
+        XCTAssertEqual(XCTWaiter.wait(for: [remounted], timeout: 10), .completed)
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 10))
         XCTAssertFalse(app.staticTexts["Available"].exists)
         app.terminate()
     }

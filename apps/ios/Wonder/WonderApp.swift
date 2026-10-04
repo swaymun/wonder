@@ -656,7 +656,11 @@ struct ConnectedAppsView: View {
             if let next = cursor, !visited.insert(next).inserted { cursor = nil; warning = "More apps could not be loaded. Refresh to try again." }
         } catch {
             guard savedScope == scope, !model.accessEnded else { return }
-            if conversationId != nil, case PairingFailure.response(409) = error {
+            if conversationId != nil, case PairingFailure.response(424) = error {
+                model.connectedAppsCache = model.connectedAppsCache.filter { !$0.key.hasPrefix(savedScope + ":") }
+                cursor = nil; visited = []
+                failure = "This conversation’s app access isn’t available right now. Check account-wide apps in Settings."
+            } else if conversationId != nil, case PairingFailure.response(409) = error {
                 failure = "Start this conversation or reopen it, then check its app access again."
             } else if case PairingFailure.response(501) = error {
                 failure = "This provider doesn't offer Connected Apps in Wonder yet."
