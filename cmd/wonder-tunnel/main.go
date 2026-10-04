@@ -113,8 +113,11 @@ func inspect(run runner, port string, configure bool) status {
 	if json.Unmarshal(raw, &node) != nil {
 		return status{State: "error", Error: "Tailscale status could not be read. Update Tailscale and retry."}
 	}
-	if node.BackendState != "Running" || node.Self == nil {
+	if node.BackendState == "NeedsLogin" {
 		return status{State: "auth_required", Error: "Open Tailscale and sign in. Connect your Mac and phone to the same tailnet."}
+	}
+	if node.BackendState != "Running" || node.Self == nil {
+		return status{State: "unavailable", Error: "Open Tailscale and connect this Mac, then retry."}
 	}
 	host := strings.TrimSuffix(node.Self.DNSName, ".")
 	if !strings.HasSuffix(host, ".ts.net") || strings.ContainsAny(host, "/:@ ") {

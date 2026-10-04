@@ -57,11 +57,27 @@ func TestOnlyExplicitSetupMutatesAndVerifiesServe(t *testing.T) {
 		}
 	}
 }
-func TestLoginNeverAdvertisesAnOriginOrChangesServe(t *testing.T) {
-	calls := 0
-	result := inspect(func(args ...string) ([]byte, error) { calls++; return []byte(`{"BackendState":"NeedsLogin"}`), nil }, "8443", true)
-	encoded, _ := json.Marshal(result)
-	if calls != 1 || strings.Contains(string(encoded), "origin") || result.State != "auth_required" {
-		t.Fatal(result, calls)
+func TestDisconnectedStateNeverAdvertisesAnOriginOrChangesServe(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw, state string
+		signIn           bool
+	}{
+		{"signed out", `{"BackendState":"NeedsLogin"}`, "auth_required", true},
+		{"disconnected account", `{"BackendState":"Stopped","Self":{"DNSName":"mac.tail.ts.net."}}`, "unavailable", false},
+		{"starting", `{"BackendState":"Starting","Self":{"DNSName":"mac.tail.ts.net."}}`, "unavailable", false},
+		{"missing identity", `{"BackendState":"Running"}`, "unavailable", false},
+		{"unknown state", `{"BackendState":"Unknown"}`, "unavailable", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			result := inspect(func(args ...string) ([]byte, error) {
+				calls++
+				return []byte(tc.raw), nil
+			}, "8443", true)
+			encoded, _ := json.Marshal(result)
+			if calls != 1 || strings.Contains(string(encoded), "origin") || result.State != tc.state || strings.Contains(result.Error, "sign in") != tc.signIn {
+				t.Fatal(result, calls)
+			}
+		})
 	}
 }
