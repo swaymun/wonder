@@ -3167,6 +3167,17 @@ struct ArtifactPreviewContext {
     let scope: String
 }
 
+/// New Chat has a Project workspace but no provider conversation yet. Its
+/// preview notes are kept in the local draft until creation supplies one.
+struct WorkspaceDraftAnnotationActions {
+    let projectID: String
+    let draftID: String
+    let unavailableReason: String?
+    let stage: (ArtifactAnnotation) throws -> String
+    let contains: (String) -> Bool
+    let noteRevision: (String, String, String) -> Void
+}
+
 /// Keep the destination with the sheet's identity so its first presentation
 /// cannot capture a filename or attachment filter from an earlier render.
 struct WorkspaceBrowserRequest: Identifiable {
@@ -3259,6 +3270,7 @@ struct WorkspaceBrowser: View {
     var preferredRootID: String? = nil
     var reanchor: ArtifactAnnotation? = nil
     var replacingAnnotationID: String? = nil
+    var draftAnnotationActions: WorkspaceDraftAnnotationActions? = nil
     @State private var openedInitialFile = false
     @State private var response: WorkspaceRootsResponse?
     @State private var selectedRootID: String?
@@ -3331,6 +3343,7 @@ struct WorkspaceBrowser: View {
     }
     private var annotationAdded: Bool {
         guard let addedAnnotationID else { return false }
+        if let draftAnnotationActions { return draftAnnotationActions.contains(addedAnnotationID) }
         return model.composers[chat.id]?.attachmentIDs.contains(addedAnnotationID) == true
     }
 
@@ -3698,6 +3711,17 @@ struct WorkspaceBrowser: View {
 
     private func stagePreviewAnnotation(_ annotation: ArtifactAnnotation, context: ArtifactPreviewContext,
                                         replacing oldID: String?) throws {
+        if let draftAnnotationActions {
+            guard draftAnnotationActions.unavailableReason == nil,
+                  context.projectID == draftAnnotationActions.projectID,
+                  context.conversationID == "new-chat:" + draftAnnotationActions.draftID,
+                  context.scope == model.assignmentScope else { throw FileFailure.integrity }
+            addedAnnotationID = try draftAnnotationActions.stage(annotation)
+            if let offered = previewRevision?.offeredSha256 {
+                draftAnnotationActions.noteRevision(context.rootID, context.path, offered)
+            }
+            return
+        }
         try model.stageAnnotation(annotation, chat: chat, expectedScope: context.scope, replacing: oldID)
         addedAnnotationID = model.composers[chat.id]?.stagedFiles?.last?.id
         if let offered = previewRevision?.offeredSha256 {
@@ -4152,12 +4176,18 @@ struct WorkspaceBrowser: View {
     }
     private func annotationContext(for item: WorkspacePreviewSelection) -> ArtifactPreviewContext? {
         guard let rootID = item.rootID, let path = item.path, !path.isEmpty,
-              let scope = item.scope, scope == model.assignmentScope,
-              let projectID = model.projects.details[chat.id]?.projectId else { return nil }
+              let scope = item.scope, scope == model.assignmentScope else { return nil }
+        if let draftAnnotationActions {
+            return ArtifactPreviewContext(projectID: draftAnnotationActions.projectID,
+                                          conversationID: "new-chat:" + draftAnnotationActions.draftID,
+                                          rootID: rootID, path: path, scope: scope)
+        }
+        guard let projectID = model.projects.details[chat.id]?.projectId else { return nil }
         return ArtifactPreviewContext(projectID: projectID, conversationID: chat.id,
                                       rootID: rootID, path: path, scope: scope)
     }
     private func annotationUnavailableReason(for item: WorkspacePreviewSelection) -> String? {
+        if let draftAnnotationActions { return draftAnnotationActions.unavailableReason }
         guard !model.canAnnotate(chat, replacing: reanchorDraft(for: item)?.id) else { return nil }
         if chat.isArchived || model.projects.details[chat.id]?.isArchived == true {
             return "Unarchive this chat to add a note."
@@ -4199,6 +4229,12 @@ struct WorkspaceBrowser: View {
     }
     private func revisionNotice(for item: WorkspacePreviewSelection) -> ((String) async -> Void)? {
         guard let rootID = item.rootID, let path = item.path, let scope = item.scope else { return nil }
+        if let draftAnnotationActions {
+            return { sha256 in
+                guard scope == model.assignmentScope else { return }
+                draftAnnotationActions.noteRevision(rootID, path, sha256)
+            }
+        }
         return { sha256 in
             guard scope == model.assignmentScope else { return }
             await model.noteWorkspaceRevision(chat, rootID: rootID, path: path, currentSha256: sha256)

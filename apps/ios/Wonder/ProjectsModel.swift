@@ -69,9 +69,13 @@ import WonderPairing
             ProcessInfo.processInfo.arguments.contains("-project-files-conversation-preview")) {
             // A read-only new-chat destination for the Files UI fixture.
             supportsProjects = true
-            projects = [ProjectSummary(id: "preview-project", name: "Preview project", folders: [
-                ProjectFolder(id: "preview-folder", path: "/preview", name: "Preview", isPrimary: true, isAvailable: true)
-            ])]
+            var folders = [ProjectFolder(id: "preview-folder", path: "/preview", name: "Preview",
+                                         isPrimary: true, isAvailable: true)]
+            if ProcessInfo.processInfo.arguments.contains("-project-files-multiple-folders-preview") {
+                folders.append(ProjectFolder(id: "second-folder", path: "/second", name: "Second",
+                                             isPrimary: false, isAvailable: true))
+            }
+            projects = [ProjectSummary(id: "preview-project", name: "Preview project", folders: folders)]
         }
         if let previewFilesDetail {
             details[previewFilesDetail.conversationId] = previewFilesDetail

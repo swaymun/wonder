@@ -5,9 +5,9 @@ public enum FileFailure: Error { case tooLarge, integrity, stale, unsupported, n
 
 /// A note about exact preview bytes. The host validates the Project, path,
 /// source hash and selected region again before accepting the attachment.
-public struct ArtifactAnnotation: Codable, Sendable, Equatable {
+public struct ArtifactAnnotation: Codable, Sendable, Hashable {
     public static let mimeType = "application/vnd.wonder.artifact-annotation+json"
-    public enum Anchor: Codable, Sendable, Equatable {
+    public enum Anchor: Codable, Sendable, Hashable {
         case textLines(startLine: Int, endLine: Int)
         /// UTF-8 byte offsets into the pinned source, with an exclusive end.
         case textRange(startByte: Int, endByte: Int)
@@ -170,10 +170,29 @@ public struct ArtifactAnnotation: Codable, Sendable, Equatable {
         return copy
     }
 
+    /// A New Chat preview can validate its anchor before a conversation exists.
+    /// Bind those same source bytes and note only after prepare-only creation.
+    public func bound(to conversationID: String) throws -> Self {
+        let copy = Self(version: version, projectId: projectId, conversationId: conversationID,
+                        rootId: rootId, path: path, sourceSha256: sourceSha256,
+                        anchor: anchor, note: note)
+        try copy.validate()
+        return copy
+    }
+
+    private init(version: Int, projectId: String, conversationId: String, rootId: String,
+                 path: String, sourceSha256: String, anchor: Anchor, note: String) {
+        self.version = version; self.projectId = projectId; self.conversationId = conversationId
+        self.rootId = rootId; self.path = path; self.sourceSha256 = sourceSha256
+        self.anchor = anchor; self.note = note
+    }
+
     public func stagedFile() throws -> StagedFile {
         try validate()
         let name = String((path.split(separator: "/").last ?? "File").prefix(48)) + ".annotation.json"
-        return try StagedFile(name: name, mimeType: Self.mimeType, data: JSONEncoder().encode(self))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return try StagedFile(name: name, mimeType: Self.mimeType, data: encoder.encode(self))
     }
 }
 

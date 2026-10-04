@@ -3825,6 +3825,63 @@ import UIKit
         }
     }
 
+    func testNewProjectChatPreviewNotePersistsWithoutSending() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-connections-preview", "-project-files-preview", "-files-preview",
+                               "-artifact-annotation-preview", "-project-files-multiple-folders-preview",
+                               "-reset-new-chat-annotations-preview"]
+        app.launch()
+        let files = app.buttons["new-chat-files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10))
+        files.tap()
+        let file = app.buttons["workspace-file-entry:README.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        file.tap()
+        selectTextForPreviewComment(app)
+        let note = app.descendants(matching: .any)["annotation-note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        note.tap(); note.typeText("Check this before creating the chat")
+        app.buttons["annotation-add"].tap()
+        XCTAssertTrue(app.buttons["workspace-preview-expand"].exists)
+        let chip = app.descendants(matching: .any)["composer-attachments"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5), "The note must enter the New Chat composer")
+        app.buttons["project-agent-picker"].tap()
+        app.buttons["Second"].tap()
+        XCTAssertTrue(app.buttons["Switch and remove preview notes"].waitForExistence(timeout: 5),
+                      "Changing folders must ask before removing saved notes")
+        app.buttons["Keep current folder"].tap()
+        app.buttons["Done"].tap()
+        XCTAssertTrue(chip.exists)
+        let edit = app.buttons["composer-annotation-edit"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5))
+        edit.tap()
+        let editor = app.textViews["annotation-edit-note"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap(); editor.typeText(" again")
+        app.buttons["annotation-edit-save"].tap()
+        retainMenuScreenshot(app, name: "New Project chat preview note before send")
+        app.terminate()
+
+        app.launchArguments = ["-connections-preview", "-project-files-preview", "-files-preview",
+                               "-artifact-annotation-preview", "-project-files-multiple-folders-preview"]
+        app.launch()
+        XCTAssertTrue(app.descendants(matching: .any)["composer-attachments"].waitForExistence(timeout: 10),
+                      "The unsent note must survive relaunch")
+        app.buttons["composer-annotation-edit"].tap()
+        let restoredNote = app.textViews["annotation-edit-note"]
+        XCTAssertTrue(restoredNote.waitForExistence(timeout: 5))
+        let restoredText = restoredNote.value as? String ?? ""
+        XCTAssertTrue(restoredText.contains("Check") && restoredText.contains("again"),
+                      "The edited comment must survive relaunch: \(restoredText)")
+        app.buttons["Cancel"].tap()
+        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove preview note")).firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        remove.tap()
+        XCTAssertFalse(app.descendants(matching: .any)["composer-attachments"].exists)
+        XCTAssertTrue(app.buttons["new-chat-files"].exists)
+    }
+
     func testNewProjectFilesExplainRevokedAndMissingFolders() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

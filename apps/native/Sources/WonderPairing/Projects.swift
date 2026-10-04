@@ -411,6 +411,9 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
     /// Local bytes live in the draft store, never in preferences or a Mac's
     /// remote attachment references.
     public var attachments: [NewChatAttachment]?
+    /// Preview notes stay local until prepare-only creation returns a real
+    /// conversation ID. They are bound to this Project and selected folder.
+    public var annotations: [PendingNewChatAnnotation]?
     public var lastDictationRequestID: String?
 
     public init(destination: ChatDestination? = nil, text: String = "", family: AgentFamily? = nil,
@@ -429,6 +432,7 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
         guard !isSubmitted else { return }
         if self.destination != destination {
             folderId = nil
+            annotations = nil
             if case .project = destination {
                 let preferred = project?.lastFamily ?? family ?? .codex
                 if family != preferred { family = preferred; model = nil; effort = nil; serviceTier = nil; claudeApproval = nil }
@@ -493,6 +497,54 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
         if submittedBody == nil { submittedBody = text }
     }
 
+    public var attachmentCount: Int { (attachments?.count ?? 0) + (annotations?.count ?? 0) }
+
+    public mutating func addAttachments(_ items: [NewChatAttachment]) throws {
+        guard !isSubmitted, attachmentCount + items.count <= 4 else { throw FileFailure.tooLarge }
+        attachments = (attachments ?? []) + items
+    }
+
+    public mutating func addAnnotation(_ pending: PendingNewChatAnnotation) throws {
+        guard !isSubmitted, case .project(let projectID) = destination,
+              projectID == pending.annotation.projectId,
+              folderId == nil || folderId == pending.folderID,
+              pending.draftID == (annotations?.first?.draftID ?? requestID),
+              annotations?.first?.rootsRevision == nil || annotations?.first?.rootsRevision == pending.rootsRevision,
+              attachmentCount < 4 else { throw FileFailure.integrity }
+        folderId = pending.folderID
+        annotations = (annotations ?? []) + [pending]
+    }
+
+    public mutating func removeAnnotation(id: String) {
+        guard !isSubmitted else { return }
+        annotations?.removeAll { $0.id == id }
+    }
+
+    public mutating func updateAnnotation(id: String, note: String) throws {
+        guard !isSubmitted, var current = annotations,
+              let index = current.firstIndex(where: { $0.id == id }) else { throw FileFailure.integrity }
+        current[index].annotation = try current[index].annotation.replacingNote(note)
+        annotations = current
+    }
+
+    public mutating func chooseFolder(_ id: String) {
+        guard !isSubmitted, folderId != id else { return }
+        folderId = id
+        annotations = nil
+    }
+
+    public mutating func noteWorkspaceRevision(folderID: String, draftID: String,
+                                               rootID: String, path: String, sha256: String) {
+        guard !isSubmitted, var current = annotations else { return }
+        for index in current.indices {
+            guard current[index].folderID == folderID, current[index].draftID == draftID,
+                  current[index].annotation.rootId == rootID,
+                  current[index].annotation.path == path else { continue }
+            current[index].sourceChanged = current[index].sourceChanged || current[index].annotation.sourceSha256 != sha256
+        }
+        annotations = current
+    }
+
     public mutating func appendDictation(_ transcript: String, requestID: String) throws {
         guard !isSubmitted else { throw SendFailure.pending }
         guard lastDictationRequestID != requestID else { return }
@@ -511,13 +563,13 @@ public struct NewChatDraft: Codable, Hashable, Sendable {
 
     /// After a confirmed creation, start a fresh draft for the same place.
     public mutating func completeSubmission() {
-        text = ""; attachments = nil; rejectSubmission()
+        text = ""; attachments = nil; annotations = nil; rejectSubmission()
     }
 
     /// Carry typed text to another Mac without its destinations or settings.
     /// A saved draft on the new Mac wins; its text is never overwritten.
     public static func switching(from current: NewChatDraft, toSaved saved: NewChatDraft?) -> NewChatDraft {
-        if let saved, !saved.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || saved.isSubmitted || !(saved.attachments ?? []).isEmpty { return saved }
+        if let saved, !saved.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || saved.isSubmitted || saved.attachmentCount > 0 { return saved }
         var next = saved ?? NewChatDraft()
         if !current.isSubmitted { next.text = current.text; next.attachments = current.attachments }
         return next
@@ -574,6 +626,40 @@ public struct NewChatAttachment: Codable, Hashable, Identifiable, Sendable {
     public init(_ file: StagedFile) {
         id = file.id; name = file.name; mimeType = file.mimeType
         byteSize = file.data.count; sha256 = ConversationFile.digest(file.data)
+    }
+}
+
+/// A preview note in a New Chat draft has no provider conversation yet. The
+/// immutable source binding and stable upload ID survive creation retries.
+public struct PendingNewChatAnnotation: Codable, Hashable, Identifiable, Sendable {
+    public let id: String
+    public let draftID: String
+    public let folderID: String
+    public let rootsRevision: Int
+    public var annotation: ArtifactAnnotation
+    public var sourceChanged: Bool
+
+    public init(annotation: ArtifactAnnotation, draftID: String, folderID: String,
+                rootsRevision: Int) throws {
+        try annotation.validate()
+        guard !draftID.isEmpty, !folderID.isEmpty, rootsRevision > 0,
+              annotation.conversationId == "new-chat:" + draftID else { throw FileFailure.integrity }
+        id = UUID().uuidString
+        self.draftID = draftID; self.folderID = folderID; self.rootsRevision = rootsRevision
+        self.annotation = annotation; sourceChanged = false
+    }
+
+    public func file(conversationID: String, projectID: String, folderID: String,
+                     draftID: String, rootsRevision: Int) throws -> StagedFile {
+        guard UUID(uuidString: id) != nil, !sourceChanged,
+              self.draftID == draftID, self.folderID == folderID,
+              self.rootsRevision == rootsRevision,
+              annotation.projectId == projectID,
+              annotation.conversationId == "new-chat:" + draftID,
+              !conversationID.hasPrefix("new-chat:") else { throw FileFailure.integrity }
+        let bound = try annotation.bound(to: conversationID)
+        let file = try bound.stagedFile()
+        return try StagedFile(id: id, name: file.name, mimeType: file.mimeType, data: file.data)
     }
 }
 

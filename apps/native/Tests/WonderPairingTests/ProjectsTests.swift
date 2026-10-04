@@ -154,6 +154,87 @@ final class ProjectsTests: XCTestCase {
         XCTAssertEqual(draft.text, "Rejected request")
     }
 
+    // Contract: a New Chat note survives a draft restart and creation retry,
+    // then binds to exactly the prepared conversation without crossing Project,
+    // folder or Mac boundaries.
+    func testNewChatPreviewNoteBindsOnlyAfterPreparedConversation() throws {
+        var draft = NewChatDraft(destination: .project(id: "project"))
+        let originalRequest = draft.requestID
+        let source = Data("one\ntwo\n".utf8)
+        let annotation = try ArtifactAnnotation(projectId: "project",
+            conversationId: "new-chat:" + originalRequest, rootId: "workspace",
+            path: "notes.md", source: source, startLine: 2, endLine: 2,
+            note: "Check this line")
+        let pending = try PendingNewChatAnnotation(annotation: annotation,
+                                                   draftID: originalRequest, folderID: "folder", rootsRevision: 7)
+        try draft.addAnnotation(pending)
+        XCTAssertEqual(draft.folderId, "folder")
+        XCTAssertEqual(draft.attachmentCount, 1)
+        let restored = try JSONDecoder().decode(NewChatDraft.self, from: JSONEncoder().encode(draft))
+        XCTAssertEqual(restored.annotations, [pending])
+        XCTAssertNil(NewChatDraft.switching(from: restored, toSaved: nil).annotations)
+        try draft.updateAnnotation(id: pending.id, note: "Check this line again")
+        XCTAssertEqual(draft.annotations?.first?.id, pending.id,
+                       "Editing the comment must keep its stable upload identity")
+
+        draft.freeze()
+        XCTAssertThrowsError(try draft.addAnnotation(pending))
+        draft.rejectSubmission()
+        XCTAssertNotEqual(draft.requestID, originalRequest)
+        let file = try XCTUnwrap(draft.annotations?.first).file(
+            conversationID: "real-conversation", projectID: "project",
+            folderID: "folder", draftID: originalRequest, rootsRevision: 7)
+        XCTAssertEqual(file.id, pending.id)
+        XCTAssertEqual(file.data, try XCTUnwrap(draft.annotations?.first).file(
+            conversationID: "real-conversation", projectID: "project",
+            folderID: "folder", draftID: originalRequest, rootsRevision: 7).data,
+            "A retry must upload the same note bytes under its stable ID")
+        let bound = try ArtifactAnnotation.read(file.data)
+        XCTAssertEqual(bound.conversationId, "real-conversation")
+        XCTAssertEqual(bound.sourceSha256, ConversationFile.digest(source))
+        XCTAssertEqual(bound.anchor, annotation.anchor)
+        XCTAssertEqual(bound.note, "Check this line again")
+        XCTAssertThrowsError(try pending.file(conversationID: "real-conversation",
+            projectID: "other", folderID: "folder", draftID: originalRequest, rootsRevision: 7))
+        XCTAssertThrowsError(try pending.file(conversationID: "real-conversation",
+            projectID: "project", folderID: "other", draftID: originalRequest, rootsRevision: 7))
+        XCTAssertThrowsError(try pending.file(conversationID: "real-conversation",
+            projectID: "project", folderID: "folder", draftID: originalRequest, rootsRevision: 8),
+            "Repointing the same folder ID with identical file bytes must not rebind the note")
+        XCTAssertThrowsError(try pending.file(conversationID: "new-chat:placeholder",
+            projectID: "project", folderID: "folder", draftID: originalRequest, rootsRevision: 7))
+        draft.noteWorkspaceRevision(folderID: "other", draftID: originalRequest,
+                                    rootID: "workspace", path: "notes.md", sha256: "changed")
+        XCTAssertFalse(try XCTUnwrap(draft.annotations?.first).sourceChanged,
+                       "A late refresh from another folder cannot change this note")
+        draft.noteWorkspaceRevision(folderID: "folder", draftID: originalRequest,
+                                    rootID: "workspace", path: "notes.md", sha256: "changed")
+        XCTAssertTrue(try XCTUnwrap(draft.annotations?.first).sourceChanged)
+        XCTAssertThrowsError(try XCTUnwrap(draft.annotations?.first).file(
+            conversationID: "real-conversation", projectID: "project",
+            folderID: "folder", draftID: originalRequest, rootsRevision: 7))
+        draft.chooseFolder("other")
+        XCTAssertNil(draft.annotations)
+    }
+
+    // Contract: an import completing after a note was saved cannot exceed the
+    // same four-slot cap that applies to adding a note after an import.
+    func testNewChatAttachmentAndNoteInterleavingKeepsFourSlotLimit() throws {
+        var draft = NewChatDraft(destination: .project(id: "project"))
+        let attachments = try (1...4).map { number in
+            NewChatAttachment(try StagedFile(name: "\(number).txt", mimeType: "text/plain",
+                                             data: Data("\(number)".utf8)))
+        }
+        try draft.addAttachments(Array(attachments.prefix(3)))
+        let annotation = try ArtifactAnnotation(projectId: "project",
+            conversationId: "new-chat:" + draft.requestID, rootId: "workspace",
+            path: "notes.md", source: Data("one\n".utf8), startLine: 1, endLine: 1, note: "Check")
+        try draft.addAnnotation(PendingNewChatAnnotation(annotation: annotation,
+            draftID: draft.requestID, folderID: "folder", rootsRevision: 1))
+        XCTAssertThrowsError(try draft.addAttachments([attachments[3]]))
+        XCTAssertEqual(draft.attachmentCount, 4)
+    }
+
     // Contract: the tree is one flat list with stable IDs; paging appends
     // without reordering, pinned threads leave the project list, and
     // collapsed projects load nothing.

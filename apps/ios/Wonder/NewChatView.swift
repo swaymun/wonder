@@ -111,7 +111,8 @@ enum NewChatDraftStore {
     static func selecting(_ destination: ChatDestination, from draft: NewChatDraft, host: String, project: ProjectSummary? = nil) -> NewChatDraft {
         guard !draft.isSubmitted, draft.destination != destination else { return draft }
         var next = load(host: host, destination: destination) ?? NewChatDraft()
-        if case .project = destination, !next.isSubmitted, next.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, (next.attachments ?? []).isEmpty {
+        if case .project = destination, !next.isSubmitted, next.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           (next.attachments ?? []).isEmpty, (next.annotations ?? []).isEmpty {
             next.text = draft.text; next.attachments = draft.attachments
         }
         guard save(draft, host: host) else { return draft }
@@ -232,7 +233,7 @@ struct NewChatView: View {
         .task(id: PersistenceKey(host: hostID, draft: draft)) {
             let savedDraft = draft, host = hostID
             do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
-            guard let host else { return }
+            guard let host, !Task.isCancelled, host == hostID, savedDraft == draft else { return }
             let saved = NewChatDraftStore.save(savedDraft, host: host)
             if !saved, !Task.isCancelled { failure = "Your draft could not be saved. Free some storage before leaving this chat." }
         }
@@ -322,6 +323,9 @@ struct NewChatView: View {
 
     private func restore() {
         #if WONDER_DIAGNOSTICS
+        if ProcessInfo.processInfo.arguments.contains("-reset-new-chat-annotations-preview") {
+            NewChatDraftStore.remove(host: "studio")
+        }
         if ProcessInfo.processInfo.arguments.contains("-reset-new-chat-pending-preview") {
             // Owned offline fixture; no real pairing, messages or model work.
             NewChatDraftStore.remove(host: "studio")
@@ -500,6 +504,9 @@ private struct NewChatContent: View {
     @State private var showingConnectionPicker = false
     @State private var pairAfterConnectionPicker = false
     @State private var savedMessages: [NewChatDraft] = []
+    @State private var pendingFolderSelection: ProjectFolder?
+    @State private var showingFolderChangeConfirmation = false
+    @State private var editingAnnotation: PendingNewChatAnnotation?
 
     private var draftChat: ChatSummary {
         ChatSummary(conversationId: "new-chat:" + draft.requestID, botId: nil, title: "New chat",
@@ -514,7 +521,7 @@ private struct NewChatContent: View {
     }
 
     private var canAttach: Bool {
-        !sending && !draft.isSubmitted && !loadingAttachment && (draft.attachments ?? []).count < 4
+        !sending && !draft.isSubmitted && !loadingAttachment && draft.attachmentCount < 4
     }
 
     private var project: ProjectSummary? {
@@ -527,6 +534,50 @@ private struct NewChatContent: View {
         return ChatSummary(conversationId: "project-files:\(project.id):\(folder.id)", botId: nil,
             title: project.name, lastMessagePreview: nil, lastMessageAt: nil, messageCount: 0,
             deliveryState: nil, hasUnread: false, isArchived: false, isPinned: false)
+    }
+    private var draftAnnotationActions: WorkspaceDraftAnnotationActions? {
+        guard projectFilesChat != nil, let project,
+              let folderID = project.folders.first(where: { $0.id == (draft.folderId ?? project.primaryFolder?.id) })?.id,
+              let hostID else { return nil }
+        let draftID = draft.annotations?.first?.draftID ?? draft.requestID
+        let scope = model.assignmentScope
+        let reason: String? = sending || draft.isSubmitted ? "Wait for this message before adding a note."
+            : loadingAttachment ? "Wait for the file to finish attaching."
+            : draft.attachmentCount >= 4 ? "Remove an attachment to add a note."
+            : model.macConnected != true ? "Reconnect to your Mac to add a note."
+            : nil
+        return WorkspaceDraftAnnotationActions(projectID: project.id, draftID: draftID,
+            unavailableReason: reason, stage: { annotation in
+                guard scope == model.assignmentScope, self.hostID == hostID,
+                      !sending, !draft.isSubmitted, !loadingAttachment, draft.attachmentCount < 4,
+                      draft.destination == .project(id: project.id),
+                      annotation.projectId == project.id,
+                      annotation.conversationId == "new-chat:" + draftID else { throw FileFailure.integrity }
+                let pending = try PendingNewChatAnnotation(annotation: annotation, draftID: draftID,
+                                                           folderID: folderID, rootsRevision: project.rootsRevision)
+                var next = draft
+                try next.addAnnotation(pending)
+                guard NewChatDraftStore.save(next, host: hostID) else { throw FileFailure.integrity }
+                draft = next
+                return pending.id
+            }, contains: { id in draft.annotations?.contains(where: { $0.id == id }) == true },
+            noteRevision: { rootID, path, sha256 in
+                guard scope == model.assignmentScope, self.hostID == hostID,
+                      draft.destination == .project(id: project.id),
+                      (draft.folderId ?? project.primaryFolder?.id) == folderID,
+                      (draft.annotations?.first?.draftID ?? draft.requestID) == draftID else { return }
+                var next = draft
+                next.noteWorkspaceRevision(folderID: folderID, draftID: draftID,
+                                           rootID: rootID, path: path, sha256: sha256)
+                if next != draft, NewChatDraftStore.save(next, host: hostID) { draft = next }
+            })
+    }
+    private var displayedAttachments: [ComposerAttachment] {
+        attachmentPresentation + (draft.annotations ?? []).map { pending in
+            ComposerAttachment(id: pending.id, name: String(pending.annotation.path.split(separator: "/").last ?? "File"),
+                mimeType: ArtifactAnnotation.mimeType, data: nil, remoteFile: nil,
+                sha256: nil, byteSize: nil, state: "available", updatedAt: "")
+        }
     }
     private var familyModels: [BotOptions.Model] {
         (projects.options?.models ?? []).filter { !$0.hidden && $0.family == draft.family }
@@ -542,18 +593,20 @@ private struct NewChatContent: View {
     private var canSend: Bool {
         guard !sending, model.connection != nil, !model.accessEnded, model.macConnected == true else { return false }
         let text = (draft.submittedBody ?? draft.text).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (!text.isEmpty || !(draft.attachments ?? []).isEmpty), text.utf8.count <= 65536, !loadingAttachment else { return false }
+        guard (!text.isEmpty || draft.attachmentCount > 0), draft.attachmentCount <= 4,
+              text.utf8.count <= 65536, !loadingAttachment else { return false }
         guard case .project = draft.destination else { return false }
         return project != nil && draft.family != nil && draft.model != nil && projects.isAvailable(draft.family ?? .codex)
     }
 
     private var optionsLoadKey: String { model.assignmentScope + (model.macConnected == true ? ":ready" : ":waiting") }
 
-    var body: some View {
+    private var baseContent: some View {
         VStack(spacing: 0) {
             Group {
                 if showingFiles, let projectFilesChat {
-                    WorkspaceBrowser(model: model, chat: projectFilesChat, attachmentIDs: nil)
+                    WorkspaceBrowser(model: model, chat: projectFilesChat, attachmentIDs: nil,
+                                     draftAnnotationActions: draftAnnotationActions)
                 } else {
                     Color.clear
                         .contentShape(Rectangle())
@@ -579,7 +632,10 @@ private struct NewChatContent: View {
         .task(id: model.assignmentScope + ":" + draft.requestID) {
             if let hostID { savedMessages = NewChatDraftStore.savedMessages(host: hostID).filter { $0.requestID != draft.requestID } }
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
+    }
+
+    private var attachmentContent: some View {
+        baseContent.fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
             guard importingFor == draft.requestID, canAttach else { return }
             if case .success(let url) = result {
                 importAttachment {
@@ -606,13 +662,23 @@ private struct NewChatContent: View {
                             let file = try await ConnectionModel.prepareImageAttachment(data)
                             let item = try await Task.detached { try NewChatDraftStore.stage(file) }.value
                             guard !Task.isCancelled, cameraScope == model.assignmentScope, request == draft.requestID, canAttach else { return .cancelled }
-                            draft.attachments = (draft.attachments ?? []) + [item]
+                            try draft.addAttachments([item])
                             return .attached
                         } catch { return .failed }
                     })
             }
         }
         .sheet(isPresented: $showingModel) { modelSheet }
+        .sheet(item: $editingAnnotation) { pending in
+            NewChatAnnotationEditor(pending: pending) { note in
+                guard let hostID, !sending, !draft.isSubmitted,
+                      draft.annotations?.contains(where: { $0.id == pending.id }) == true else { throw FileFailure.integrity }
+                var next = draft
+                try next.updateAnnotation(id: pending.id, note: note)
+                guard NewChatDraftStore.save(next, host: hostID) else { throw FileFailure.integrity }
+                draft = next
+            }
+        }
         .fullScreenCover(isPresented: $showingComputer) {
             NavigationStack { ComputerSessionView(model: model, chat: hostViewChat) }
         }
@@ -630,7 +696,7 @@ private struct NewChatContent: View {
                 let file = try await ConnectionModel.prepareImageAttachment(data)
                 let item = try await Task.detached { try NewChatDraftStore.stage(file) }.value
                 guard request == draft.requestID, !Task.isCancelled else { return }
-                draft.attachments = (draft.attachments ?? []) + [item]
+                try draft.addAttachments([item])
             } catch { failure = "Could not attach this photo. Use files up to 8 MB and try again." }
         }
         .task(id: draft.attachments) {
@@ -646,7 +712,10 @@ private struct NewChatContent: View {
                 failure = "A saved attachment is unavailable. Remove it and attach the file again."
             }
         }
-        .fullScreenCover(item: $previewAttachment) { attachment in
+    }
+
+    var body: some View {
+        attachmentContent.fullScreenCover(item: $previewAttachment) { attachment in
             PhotoViewer(model: model, chat: ChatSummary(conversationId: draft.requestID, botId: nil, title: "New chat",
                 lastMessagePreview: nil, lastMessageAt: nil, messageCount: 0, deliveryState: nil, hasUnread: false, isArchived: false, isPinned: false),
                 name: attachment.name, mimeType: attachment.mimeType, sourceID: attachment.id,
@@ -702,12 +771,23 @@ private struct NewChatContent: View {
             pickers
             DictationComposerSurface(controller: model.dictation, conversationID: draftChat.id) {
             VStack(spacing: 0) {
-                if !attachmentPresentation.isEmpty {
-                    ComposerAttachmentStrip(attachments: attachmentPresentation, imagePreviews: model.imagePreviews,
+                if !displayedAttachments.isEmpty {
+                    ComposerAttachmentStrip(attachments: displayedAttachments, imagePreviews: model.imagePreviews,
                         imagePreviewScope: model.imagePreviewScope, chatID: draft.requestID,
+                        staleAnnotationIDs: Set((draft.annotations ?? []).filter(\.sourceChanged).map(\.id)),
                         removalDisabled: sending || draft.isSubmitted,
                         loadRemoteData: { _ in throw FileFailure.notUploaded }, openPhoto: { previewAttachment = $0 },
-                        remove: { id in draft.attachments?.removeAll { $0.id == id } })
+                        remove: { id in
+                            if draft.annotations?.contains(where: { $0.id == id }) == true {
+                                guard let hostID else { return }
+                                var next = draft
+                                next.removeAnnotation(id: id)
+                                if NewChatDraftStore.save(next, host: hostID) { draft = next }
+                                else { failure = "Could not save this change. Free some storage and try again." }
+                            } else { draft.attachments?.removeAll { $0.id == id } }
+                        }, editAnnotation: { item in
+                            editingAnnotation = draft.annotations?.first(where: { $0.id == item.id })
+                        })
                 }
                 if projects.supportsModes, draft.planMode == true {
                     HStack(spacing: 0) {
@@ -998,7 +1078,11 @@ private struct NewChatContent: View {
                 if let project, project.folders.count > 1 {
                     Section("Working folder") {
                         ForEach(project.folders) { folder in
-                            Button { draft.folderId = folder.id } label: {
+                            Button {
+                                guard folder.id != (draft.folderId ?? project.primaryFolder?.id) else { return }
+                                if (draft.annotations ?? []).isEmpty { chooseFolder(folder) }
+                                else { pendingFolderSelection = folder; showingFolderChangeConfirmation = true }
+                            } label: {
                                 HStack {
                                     Text(folder.name); Spacer()
                                     if folder.id == (draft.folderId ?? project.primaryFolder?.id) { Image(systemName: "checkmark") }
@@ -1012,13 +1096,29 @@ private struct NewChatContent: View {
             .disabled(sending || draft.isSubmitted)
             .navigationTitle("Model").navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Done") { showingModel = false } }
-        }.presentationDetents([.large]).presentationDragIndicator(.visible)
+        }
+        .alert("Switch working folder?", isPresented: $showingFolderChangeConfirmation,
+               presenting: pendingFolderSelection) { folder in
+            Button("Keep current folder", role: .cancel) {}
+            Button("Switch and remove preview notes", role: .destructive) { chooseFolder(folder) }
+        } message: { _ in
+            Text("The saved preview notes belong to this folder. Switching removes them from this draft.")
+        }
+        .presentationDetents([.large]).presentationDragIndicator(.visible)
     }
 
     /// The next thread with this provider starts from the choice just made.
     private func remember() {
         guard let family = draft.family, let model = draft.model else { return }
         RememberedModels.save(family, model: model, effort: draft.effort)
+    }
+
+    private func chooseFolder(_ folder: ProjectFolder) {
+        guard !sending, !draft.isSubmitted, let hostID else { return }
+        var next = draft
+        next.chooseFolder(folder.id)
+        if NewChatDraftStore.save(next, host: hostID) { draft = next; showingFiles = false }
+        else { failure = "Could not save the working folder. Free some storage and try again." }
     }
 
     /// A draft with no destination, a Bot, or a project that is gone belongs in
@@ -1045,7 +1145,7 @@ private struct NewChatContent: View {
     private func importAttachment(_ load: @escaping @MainActor () async throws -> [StagedFile]) {
         guard canAttach else { return }
         let request = draft.requestID, scope = model.assignmentScope
-        let remaining = 4 - (draft.attachments ?? []).count
+        let remaining = 4 - draft.attachmentCount
         loadingAttachment = true
         attachmentTask = Task {
             defer { loadingAttachment = false }
@@ -1058,7 +1158,7 @@ private struct NewChatContent: View {
                 }
                 let items = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
                 guard !Task.isCancelled, request == draft.requestID, scope == model.assignmentScope else { return }
-                draft.attachments = (draft.attachments ?? []) + items
+                try draft.addAttachments(items)
             } catch is CancellationError {
             } catch { failure = "Could not attach these files. Use up to four files, each no larger than 8 MB." }
         }
@@ -1094,6 +1194,23 @@ private struct NewChatContent: View {
               case .project(let projectID) = draft.destination, let hostID,
               let device = model.connection?.credential.deviceId else { return }
         sending = true; failure = nil
+        guard !(draft.annotations ?? []).contains(where: \.sourceChanged) else {
+            failure = "A noted file changed. Remove its note and select the current content before sending."
+            return
+        }
+        let noteDraftID = draft.annotations?.first?.draftID ?? draft.requestID
+        let folderID = draft.folderId ?? project?.primaryFolder?.id ?? ""
+        let rootsRevision = draft.preparedConversationID == nil ? project?.rootsRevision : draft.rootsRevision
+        do {
+            for pending in draft.annotations ?? [] {
+                _ = try pending.file(conversationID: "pending-validation", projectID: projectID,
+                                     folderID: folderID, draftID: noteDraftID,
+                                     rootsRevision: rootsRevision ?? -1)
+            }
+        } catch {
+            failure = "A preview note no longer matches this Project folder. Remove it and select the current file before sending."
+            return
+        }
         let scope = model.assignmentScope
         guard draft.submittedDeviceID == nil || draft.submittedDeviceID == device else {
             failure = "This request belongs to the previous pairing. Its delivery must be checked on your Mac before sending again."
@@ -1112,7 +1229,7 @@ private struct NewChatContent: View {
         let request = draft.requestID
         let attempt = NewChatSendAttempt(scope: scope, hostID: hostID, requestID: request)
         let descriptors = draft.attachments ?? []
-        let files: [StagedFile]
+        var files: [StagedFile]
         do { files = try await Task.detached { try NewChatDraftStore.files(descriptors) }.value }
         catch {
             guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
@@ -1131,6 +1248,11 @@ private struct NewChatContent: View {
                 conversation = created
                 draft.preparedConversationID = created
                 NewChatDraftStore.save(draft, host: hostID)
+            }
+            for pending in draft.annotations ?? [] {
+                files.append(try pending.file(conversationID: conversation, projectID: projectID,
+                                              folderID: draft.folderId ?? "", draftID: noteDraftID,
+                                              rootsRevision: draft.rootsRevision ?? -1))
             }
             let detail = try await projects.loadDetail(conversation)
             guard attempt.applies(to: model, hostID: self.hostID, draft: draft) else { return }
@@ -1193,7 +1315,7 @@ private struct NewChatContent: View {
             failure = "Your draft could not be saved. Free some storage before reviewing this message."
             return
         }
-        if !draft.text.isEmpty || !(draft.attachments ?? []).isEmpty {
+        if !draft.text.isEmpty || draft.attachmentCount > 0 {
             guard NewChatDraftStore.save(draft, host: hostID, separately: true) else {
                 failure = "Your draft could not be saved. Free some storage before reviewing this message."
                 return
@@ -1205,6 +1327,52 @@ private struct NewChatContent: View {
         }
         model.dictation.captureControlsHidden(conversationID: draftChat.id)
         draft = pending; failure = nil
+    }
+}
+
+private struct NewChatAnnotationEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    let pending: PendingNewChatAnnotation
+    let onSave: (String) throws -> Void
+    @State private var note: String
+    @State private var failure: String?
+
+    init(pending: PendingNewChatAnnotation, onSave: @escaping (String) throws -> Void) {
+        self.pending = pending; self.onSave = onSave
+        _note = State(initialValue: pending.annotation.note)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("\(pending.annotation.path) · Preview note") {
+                    TextEditor(text: $note)
+                        .frame(minHeight: 110)
+                        .accessibilityIdentifier("annotation-edit-note")
+                    if pending.sourceChanged {
+                        Text("This file changed. Remove this note and select the current text before sending.")
+                            .foregroundStyle(.orange)
+                    }
+                    if note.utf8.count > 4096 {
+                        Text("Keep the note under 4,096 bytes.").foregroundStyle(.red)
+                    }
+                }
+                if let failure { Text(failure).foregroundStyle(.red) }
+            }
+            .navigationTitle("Preview note")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        do { try onSave(note); dismiss() }
+                        catch { failure = "Could not save this note. Check its text and available storage." }
+                    }
+                    .disabled(note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
+                    .accessibilityIdentifier("annotation-edit-save")
+                }
+            }
+        }
     }
 }
 
