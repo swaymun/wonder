@@ -184,6 +184,7 @@ apps/native/Sources/WonderPairing/ComputerSession.swift
 apps/native/Sources/WonderPairing/Dictation.swift
 apps/native/Sources/WonderPairing/FileChangeSummary.swift
 apps/native/Sources/WonderPairing/Files.swift
+apps/native/Sources/WonderPairing/GitHubReview.swift
 apps/native/Sources/WonderPairing/Management.swift
 apps/native/Sources/WonderPairing/Projects.swift
 apps/native/Sources/WonderPairing/Protocol.swift
@@ -209,6 +210,7 @@ apps/native/Tests/WonderPairingTests/DictationTransportTests.swift
 apps/native/Tests/WonderPairingTests/FileAccessManagementTests.swift
 apps/native/Tests/WonderPairingTests/FileChangeSummaryTests.swift
 apps/native/Tests/WonderPairingTests/FileTests.swift
+apps/native/Tests/WonderPairingTests/GitHubReviewTests.swift
 apps/native/Tests/WonderPairingTests/GroupTests.swift
 apps/native/Tests/WonderPairingTests/GuideTests.swift
 apps/native/Tests/WonderPairingTests/IdentityRecoveryTests.swift

@@ -166,6 +166,17 @@ expiry, device revocation, changed folders or disconnect during the read reject
 it. Final stored authority checks and response assembly share the short owner
 lock with grant/revoke commits; Git, disk and GitHub reads stay outside that lock.
 
+The read response is an envelope containing `hostInstallationId`,
+`authorizationRevision` and `snapshot`. Native clients validate both envelope
+identities against their current connection status before displaying the inner
+snapshot. The shared Swift `GitHubReviewClient` pins one immutable pairing and
+folder scope, signs consent using the existing identity without enrolling or
+rotating keys, and streams bounded responses through the redirect-free paired
+transport. Its synchronous `matches` check includes the actual origin, session,
+CSRF token, device, host and folder revision. UI owners must apply it immediately
+before publishing results and cancel requests on navigation/background; a
+library identity check alone does not establish visible lifecycle acceptance.
+
 The snapshot distinguishes unavailable, partial, oversized, empty and supplied
 patches. Supplied hunk/count consistency is not cryptographic verification of
 both file versions. Missing patches are not inferred to be binary or empty.

@@ -242,6 +242,48 @@ public final class PairingAPI: Sendable {
         return 15
     }
 
+    /// Only the typed Project GitHub client calls this transport. Keep large PR
+    /// replies bounded while streaming, using the existing redirect-free session.
+    func githubReviewRequest<T: Decodable & Sendable>(_ path: String, connection: SavedConnection,
+        method: String = "GET", body: Data? = nil, snapshot: Bool = false) async throws -> T {
+        try Task.checkCancellation()
+        guard path.hasPrefix("/api/v1/projects/"), path.contains("/github-review/"),
+              let url = URL(string: try PairingLink.origin(connection.origin) + path) else {
+            throw PairingFailure.invalidLink
+        }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
+                                 timeoutInterval: 90)
+        request.httpMethod = method; request.httpBody = body; request.httpShouldHandleCookies = false
+        request.setValue(connection.origin, forHTTPHeaderField: "Origin")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("__Host-wonder_session=\(connection.credential.sessionToken)", forHTTPHeaderField: "Cookie")
+        request.setValue(connection.credential.csrfToken, forHTTPHeaderField: "x-wonder-csrf")
+        let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard let http = response as? HTTPURLResponse else { throw GitHubReviewFailure.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else { throw GitHubReviewFailure.response(http.statusCode) }
+        guard http.statusCode == (method == "PUT" || method == "DELETE" ? 204 : 200) else {
+            throw GitHubReviewFailure.invalidResponse
+        }
+        let limit = snapshot ? 16 * 1024 * 1024 : 64 * 1024
+        guard response.expectedContentLength <= limit else { throw GitHubReviewFailure.oversized }
+        var data = Data()
+        try await withTaskCancellationHandler {
+            for try await byte in bytes {
+                guard data.count < limit else { throw GitHubReviewFailure.oversized }
+                data.append(byte)
+            }
+        } onCancel: {
+            bytes.task.cancel()
+        }
+        try Task.checkCancellation()
+        let value: T
+        do { value = try JSONDecoder().decode(T.self, from: data.isEmpty ? Data("{}".utf8) : data) }
+        catch { throw GitHubReviewFailure.invalidResponse }
+        try Task.checkCancellation()
+        return value
+    }
+
     public func request<T: Decodable & Sendable>(_ path: String, origin: String, body: Data? = nil,
                                                   credential: Credential? = nil, method: String? = nil,
                                                   decodingStatuses: Set<Int> = [], bearerToken: String? = nil) async throws -> T {
