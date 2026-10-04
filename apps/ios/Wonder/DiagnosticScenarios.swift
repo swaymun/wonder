@@ -1320,6 +1320,7 @@ struct DiagnosticSubagentFixtureView: View {
     @StateObject private var model: ConnectionModel
     @State private var pasteTask: Task<Void, Never>?
     @State private var dictationFixtureIntent: DictationIntent?
+    @State private var speechPermissionResult = "Not requested"
     @State private var showingCamera = false
     @State private var didLaunch = false
     private let chat: ChatSummary
@@ -1384,6 +1385,16 @@ struct DiagnosticSubagentFixtureView: View {
                 .frame(minHeight: 44)
                 .accessibilityIdentifier("camera-reload-draft")
             if ProcessInfo.processInfo.arguments.contains("-diagnostics-progressive-dictation") {
+                HStack {
+                    Button("Request speech permission") {
+                        speechPermissionResult = "Requesting"
+                        Task {
+                            speechPermissionResult = await DictationController.requestSpeechAuthorization() == .authorized ? "Allowed" : "Denied"
+                        }
+                    }.accessibilityIdentifier("dictation-speech-permission")
+                    DictationButton(controller: model.dictation, chat: chat, unavailable: false)
+                }
+                Text(speechPermissionResult).accessibilityIdentifier("dictation-speech-permission-result")
                 HStack {
                     Button("Partial words") {
                         if model.dictation.intent == nil { dictationFixtureIntent = model.dictation.beginNativeFixture(chat: chat) }

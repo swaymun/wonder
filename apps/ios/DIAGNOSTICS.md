@@ -353,3 +353,21 @@ responses, successful readback after a timeout, host replacement, and queued
 revision conflicts. The rendered avatar catalog includes all seven grouped
 marks at their actual 28pt size in light and dark. The existing helper sheet
 cases also assert trailing pill placement, proximity, and a 44pt hit target.
+
+### Speech startup regression
+
+The composer fixture's `testDictationSpeechPermissionReturnsWithoutCrashing`
+and `testDictationSpeechPermissionDenialReturnsWithoutCrashing` exercise Apple's
+real TCC callback, including a repeated request after the choice is saved.
+Run these individually on an owned simulator, resetting only the Testing app's
+permissions with `xcrun simctl privacy UDID reset all com.swaymun.wonder.testing`
+before **each** method. XCTest has no speech-recognition reset resource. A missing
+prompt or callback is a failure, not permission evidence.
+
+After granting permission, run
+`testDictationButtonStartsRealCaptureAndCancelsWithoutChangingDraft`. It uses the
+production button, native recognizer and audio engine with an isolated local
+draft; two start/cancel cycles must retain text and the attachment without any
+transfer. Run on both iPhone and iPad. These checks establish permission/startup
+and cancellation behavior, not successful recognition or first-word latency.
+Keep the synthetic progressive-word tests for editing and stale-result coverage.

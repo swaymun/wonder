@@ -4537,6 +4537,74 @@ import UIKit
         XCTAssertEqual(app.staticTexts["camera-draft-transfers"].label, "Local draft only")
     }
 
+    func testDictationSpeechPermissionReturnsWithoutCrashing() throws {
+        try checkDictationSpeechPermission(allowed: true)
+    }
+
+    func testDictationSpeechPermissionDenialReturnsWithoutCrashing() throws {
+        try checkDictationSpeechPermission(allowed: false)
+    }
+
+    private func checkDictationSpeechPermission(allowed: Bool) throws {
+        // Exercise Apple's actual background permission callback, which the
+        // synthetic recognition fixtures do not enter. Preserve the local draft.
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-composer-large-draft", "-diagnostics-progressive-dictation"]
+        // Reset this test app's simulator privacy permissions before each test.
+        // XCTest has no speech-recognition reset resource.
+        app.launch()
+        let editor = app.textViews["message-draft"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        let original = try XCTUnwrap(editor.value as? String)
+        let result = app.staticTexts["dictation-speech-permission-result"]
+        let expected = allowed ? "Allowed" : "Denied"
+        for request in 0..<2 {
+            app.buttons["dictation-speech-permission"].tap()
+            if request == 0 {
+                let alert = springboard.alerts.firstMatch
+                XCTAssertTrue(alert.waitForExistence(timeout: 10))
+                alert.buttons[allowed ? "Allow" : "Don’t Allow"].tap()
+            }
+            let completed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", expected), object: result)
+            XCTAssertEqual(XCTWaiter.wait(for: [completed], timeout: 10), .completed)
+            XCTAssertEqual(editor.value as? String, original)
+            XCTAssertEqual(app.staticTexts["camera-draft-count"].label, "Draft attachments: 1")
+        }
+        app.terminate()
+    }
+
+    func testDictationButtonStartsRealCaptureAndCancelsWithoutChangingDraft() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-composer-large-draft", "-diagnostics-progressive-dictation"]
+        app.launch()
+        let editor = app.textViews["message-draft"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        let original = try XCTUnwrap(editor.value as? String)
+        for _ in 0..<2 {
+            app.buttons["dictate-message"].tap()
+            // Fresh permission prompts and already-authorized startup share the
+            // production button, speech task and audio engine. No synthetic words.
+            for _ in 0..<2 {
+                let alert = springboard.alerts.firstMatch
+                if alert.waitForExistence(timeout: 2) { alert.buttons["Allow"].tap() }
+            }
+            let cancel = app.buttons["cancel-dictation"]
+            XCTAssertTrue(cancel.waitForExistence(timeout: 10))
+            XCTAssertTrue(cancel.isHittable)
+            cancel.tap()
+            XCTAssertEqual(editor.value as? String, original)
+            app.buttons["camera-reload-draft"].tap()
+            XCTAssertEqual(editor.value as? String, original)
+            XCTAssertEqual(app.staticTexts["camera-draft-count"].label, "Draft attachments: 1")
+            XCTAssertEqual(app.staticTexts["camera-draft-transfers"].label, "Local draft only")
+        }
+        app.terminate()
+    }
+
     func testProgressiveDictationRevisesCancelsAndSavesWithAttachment() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

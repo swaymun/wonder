@@ -147,10 +147,11 @@ import WonderPairing
         }
         let host = saved.credential.hostInstallationId, device = saved.credential.deviceId
         let granted = await withCheckedContinuation { continuation in
-            AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) }
+            AVAudioApplication.requestRecordPermission { @Sendable in continuation.resume(returning: $0) }
         }
         microphoneDenied = !granted
         guard granted else { failure = "Allow microphone access in Settings to dictate."; return }
+        guard await Self.waitForPermissionDismissal() else { return }
         guard initialScope == model.assignmentScope, generation == captureGeneration,
             model.connection?.credential.hostInstallationId == host, model.connection?.credential.deviceId == device,
             !model.accessEnded, UIApplication.shared.applicationState == .active, let url = audioURL else { return }
@@ -193,9 +194,7 @@ import WonderPairing
         guard editorConversationID == chat.id, let editor,
               let recognizer = SFSpeechRecognizer(locale: Locale(identifier: editor.dictationLocale)),
               recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { return false }
-        let authorization = await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
-        }
+        let authorization = await Self.requestSpeechAuthorization()
         guard let model, model.assignmentScope == scope, captureGeneration == generation,
               !model.accessEnded, !Task.isCancelled else { return true }
         speechDenied = authorization != .authorized
@@ -204,8 +203,9 @@ import WonderPairing
             return false
         }
         let granted = await withCheckedContinuation { continuation in
-            AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) }
+            AVAudioApplication.requestRecordPermission { @Sendable in continuation.resume(returning: $0) }
         }
+        guard await Self.waitForPermissionDismissal() else { return true }
         guard model.assignmentScope == scope, captureGeneration == generation,
               !model.accessEnded, !Task.isCancelled, UIApplication.shared.applicationState == .active else { return true }
         microphoneDenied = !granted
@@ -231,7 +231,7 @@ import WonderPairing
             nativeConversationID = chat.id
             let capture = try NativeSpeechCapture(url: url, request: request)
             nativeCapture = capture
-            nativeTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            nativeTask = recognizer.recognitionTask(with: request) { @Sendable [weak self] result, error in
                 let words = result?.bestTranscription.formattedString
                 let final = result?.isFinal == true
                 let failed = error != nil
@@ -249,6 +249,28 @@ import WonderPairing
             clear()
             return false
         }
+    }
+    static func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
+        await withCheckedContinuation { continuation in
+            // Speech calls this on a background queue, including when permission
+            // is already decided. Do not inherit the controller's MainActor.
+            SFSpeechRecognizer.requestAuthorization { @Sendable in continuation.resume(returning: $0) }
+        }
+    }
+    private static func waitForPermissionDismissal() async -> Bool {
+        // TCC may return before its dialog restores the active state. Wait only
+        // for that short transition; never resume recording from the background.
+        for _ in 0..<20 {
+            guard !Task.isCancelled else { return false }
+            switch UIApplication.shared.applicationState {
+            case .active: return true
+            case .background: return false
+            default: break
+            }
+            do { try await Task.sleep(for: .milliseconds(100)) }
+            catch { return false }
+        }
+        return false
     }
     private func receiveNative(words: String?, final: Bool, failed: Bool, pending: DictationIntent) {
         guard matches(pending), nativeConversationID == pending.conversationID else { return }
@@ -549,7 +571,9 @@ import WonderPairing
         }
     }
     func cancel() {
-        if nativeConversationID != nil {
+        // A recording has never been submitted, including a native session
+        // retaining audio after speech assets fail. Cancellation is entirely local.
+        if nativeConversationID != nil || (recording && intent?.jobID == nil) {
             discardNative(); stopCapture(); clear(); return
         }
         guard var pending = intent else { return }
