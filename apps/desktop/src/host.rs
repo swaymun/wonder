@@ -1,10 +1,7 @@
 //! Bundled Mac host: menu bar, Settings and setup, without the Chats UI.
 #[allow(dead_code)]
 mod appearance;
-#[allow(dead_code)]
-mod client;
-#[allow(dead_code)]
-mod forms;
+mod host_connection;
 mod mac_settings;
 mod menu_bar;
 use gpui_kit::{component::*, *};
@@ -13,9 +10,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 actions!(wonder, [OpenSettings]);
 
-const CHAT_CLIENT: bool = false;
 struct DesktopShell {
-    open_chats: Option<fn(&mut App)>,
     #[cfg(target_os = "macos")]
     _menu: menu_bar::MenuBar,
     #[cfg(target_os = "macos")]
@@ -70,7 +65,6 @@ fn main() {
         #[cfg(target_os = "macos")]
         let settings_model = cx.new(mac_settings::MacSettings::new);
         cx.set_global(DesktopShell {
-            open_chats: None,
             #[cfg(target_os = "macos")]
             _menu: menu_bar::MenuBar::new(),
             #[cfg(target_os = "macos")]

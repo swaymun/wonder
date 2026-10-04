@@ -38,7 +38,7 @@ enum Page {
 enum ReadinessAction {
     Retry,
     Repair,
-    Restart,
+    Reopen,
     ConnectMac,
     OpenTailscale,
     PairDevice,
@@ -72,8 +72,8 @@ impl ReadinessSummary {
         if state["serviceRunning"] != true {
             return summary(
                 "Wonder is offline",
-                "The local service is not responding. Your saved chats remain on this Mac.".into(),
-                ReadinessAction::Restart,
+                "Quit and reopen Wonder.".into(),
+                ReadinessAction::Reopen,
             );
         }
         if state["ready"] != true {
@@ -103,13 +103,13 @@ impl ReadinessSummary {
             if state["remoteChecking"] == true {
                 return summary(
                     "Ready on this Mac",
-                    "Local chats work. Wonder is checking access from paired devices.".into(),
+                    "Checking access from paired devices.".into(),
                     ReadinessAction::None,
                 );
             }
             return summary(
                 "Ready on this Mac",
-                "Local chats work. Paired devices cannot reach this Mac until remote access reconnects.".into(),
+                "Paired devices cannot reach this Mac until remote access reconnects.".into(),
                 if state["canConnect"] == true {
                     ReadinessAction::ConnectMac
                 } else {
@@ -174,7 +174,7 @@ impl ReadinessSummary {
             );
         }
         Self {
-            title: "Mac is ready for remote chats",
+            title: "Ready",
             detail: "Wonder's private address responds from this Mac, and a device is paired."
                 .into(),
             action: ReadinessAction::None,
@@ -265,10 +265,10 @@ pub struct MacSettings {
     connected: bool,
     qr_id: String,
     qr: Option<Arc<Image>>,
+    brand_icon: Arc<Image>,
     revoke: Option<(String, String)>,
     revoked_expanded: bool,
     device_details: Option<String>,
-    connection_details: bool,
     permission_drag_id: String,
     permission_drag_window: Option<WindowHandle<Root>>,
     last_clock: Instant,
@@ -308,10 +308,14 @@ impl MacSettings {
             connected: false,
             qr_id: String::new(),
             qr: None,
+            brand_icon: Arc::new(Image::from_bytes(
+                ImageFormat::Png,
+                include_bytes!("../../ios/Wonder/Assets.xcassets/AppIcon.appiconset/AppIcon.png")
+                    .to_vec(),
+            )),
             revoke: None,
             revoked_expanded: false,
             device_details: None,
-            connection_details: false,
             permission_drag_id: String::new(),
             permission_drag_window: None,
             last_clock: Instant::now(),
@@ -532,22 +536,15 @@ impl MacSettings {
                     .child(
                         note(summary.title)
                             .role(Role::Heading)
-                            .text_xl()
+                            .text_base()
                             .font_weight(FontWeight::SEMIBOLD),
                     ),
             )
             .child(note(text(&self.state, "hostName")).text_color(cx.theme().muted_foreground))
-            .child(note(summary.detail));
+            .when(!summary.fully_ready, |view| {
+                view.child(note(summary.detail))
+            });
         let mut actions = div().flex().gap_2().pt_2();
-        if self.flag("serviceRunning") {
-            if let Some(open_chats) = cx.global::<crate::DesktopShell>().open_chats {
-                actions = actions.child(
-                    Button::new("open-wonder")
-                        .label("Open Wonder")
-                        .on_click(move |_, _, cx| open_chats(cx)),
-                );
-            }
-        }
         actions = match summary.action {
             ReadinessAction::Retry => actions.child(
                 Button::new("retry-readiness")
@@ -558,23 +555,14 @@ impl MacSettings {
             ReadinessAction::Repair => actions.child(
                 self.action(
                     "repair-runtime",
-                    "Check installed runtime",
+                    "Set up agents",
                     json!({"action":"repair"}),
                     self.flag("serviceBusy"),
                     cx,
                 )
                 .primary(),
             ),
-            ReadinessAction::Restart => actions.child(
-                self.action(
-                    "restart",
-                    "Restart services",
-                    json!({"action":"restart"}),
-                    self.flag("serviceBusy"),
-                    cx,
-                )
-                .primary(),
-            ),
+            ReadinessAction::Reopen => actions,
             ReadinessAction::ConnectMac => actions.child(
                 self.action(
                     "connect-mac",
@@ -609,72 +597,18 @@ impl MacSettings {
             ),
             ReadinessAction::None => actions,
         };
-        status = status.child(actions).child(
-            Button::new("connection-details")
-                .label(if self.connection_details {
-                    "Hide connection details"
-                } else {
-                    "Connection details"
-                })
-                .ghost()
-                .self_start()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.connection_details = !this.connection_details;
-                    cx.notify();
-                })),
-        );
-        if self.connection_details {
-            status = status.child(row("Remote access", remote_label(&self.state)));
-            if !text(&self.state, "remoteOrigin").is_empty() {
-                status = status.child(row("Address", text(&self.state, "remoteOrigin")));
-            }
-            if !self.flag("remoteReady") {
-                status = status.child(self.connection(cx));
-            }
-            status = status.child(row(
-                "Claude",
-                if self.flag("claudeAuthRequired") {
-                    "Sign-in needed"
-                } else {
-                    "Check account access"
-                },
-            ));
+        status = status.child(actions);
+        if self.flag("claudeAuthRequired") {
             status = status.child(self.action(
-                "claude-check",
-                "Check Claude access",
-                json!({"action":"claude-check"}),
-                self.flag("serviceBusy"),
-                cx,
-            ));
-            if self.flag("claudeAuthRequired") {
-                status = status.child(self.action(
-                    "claude-sign-in",
-                    "Sign in to Claude",
-                    json!({"action":"claude-sign-in"}),
-                    self.flag("serviceBusy"),
-                    cx,
-                ));
-            }
-            status = status.child(self.action(
-                "restart-details",
-                "Restart services",
-                json!({"action":"restart"}),
+                "claude-sign-in",
+                "Sign in to Claude",
+                json!({"action":"claude-sign-in"}),
                 self.flag("serviceBusy"),
                 cx,
             ));
         }
-        status = messages(
-            status
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_lg()
-                .p_4(),
-            &self.state,
-            &["serviceMessage"],
-            cx,
-        );
         let startup = messages(
-            stack().child(self.toggle("login", "Launch Wonder at login", "login", "login", cx)),
+            stack().child(self.toggle("login", "Launch at login", "login", "login", cx)),
             &self.state,
             &["loginMessage"],
             cx,
@@ -688,83 +622,73 @@ impl MacSettings {
                 cx,
             ))
         });
-        let updates = if self.flag("updatesAvailable") {
-            stack()
-                .child(self.toggle(
-                    "updates",
-                    "Check for updates automatically",
-                    "automaticUpdates",
-                    "automatic-updates",
+        stack().gap_5().child(status).child(startup).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(note("Appearance"))
+                .child(self.appearance(cx)),
+        )
+    }
+    fn appearance(&self, cx: &Context<Self>) -> tab::TabBar {
+        tab::TabBar::new("appearance")
+            .segmented()
+            .children(["System", "Light", "Dark"])
+            .selected_index(
+                crate::appearance::Preference::ALL
+                    .iter()
+                    .position(|p| p == cx.global::<crate::appearance::Preference>())
+                    .unwrap_or(0),
+            )
+            .on_click(cx.listener(|this, index: &usize, window, cx| {
+                this.error = crate::appearance::select(
+                    crate::appearance::Preference::ALL[*index],
+                    window,
                     cx,
-                ))
-                .child(
-                    self.toggle(
-                        "update-downloads",
-                        "Download and install updates when idle",
-                        "automaticUpdateDownloads",
-                        "automatic-update-downloads",
-                        cx,
-                    )
-                    .disabled(self.disabled() || !self.flag("automaticUpdates")),
                 )
+                .err();
+                cx.notify();
+            }))
+    }
+    fn about(&self, cx: &Context<Self>) -> Div {
+        let mut view = stack()
+            .gap_4()
+            .child(row("Version", text(&self.state, "version")));
+        if self.flag("updatesAvailable") {
+            view = view
                 .child(self.action(
                     "check-updates",
-                    "Check for updates…",
+                    "Check for Updates…",
                     json!({"action":"check-updates"}),
                     !self.flag("canCheckUpdates"),
                     cx,
                 ))
-                .when(!text(&self.state, "updateVersion").is_empty(), |v| {
-                    v.child(self.action(
-                        "download-update",
-                        "Open signed releases",
-                        json!({"action":"download-update"}),
-                        false,
-                        cx,
-                    ))
-                })
-        } else {
-            stack()
-                .gap_1()
-                .child(note("Install beta updates from signed downloads."))
-                .child(self.action(
-                    "download-update",
-                    "Open releases",
-                    json!({"action":"download-update"}),
-                    false,
-                    cx,
-                ))
                 .child(
-                    note("Automatic updates unavailable").text_color(cx.theme().muted_foreground),
-                )
-        };
-        stack()
-            .gap_4()
-            .child(status)
-            .child(settings_section("Startup", startup, cx))
-            .child(settings_section("Updates", updates, cx))
-            .when(!text(&self.state, "updatesMessage").is_empty(), |v| {
-                v.child(note(text(&self.state, "updatesMessage")))
-            })
-            .child(self.action(
-                "setup-review",
-                "Review setup…",
-                json!({"action":"setup-review"}),
+                    Checkbox::new("automatic-update-policy")
+                        .label("Install updates automatically")
+                        .checked(
+                            self.flag("automaticUpdates") && self.flag("automaticUpdateDownloads"),
+                        )
+                        .disabled(self.disabled())
+                        .on_click(cx.listener(|this, checked, _, cx| {
+                            this.send(
+                                json!({"action":"automatic-update-policy","enabled":checked}),
+                                cx,
+                            );
+                        })),
+                );
+        } else {
+            view = view.child(self.action(
+                "download-update",
+                "Download Latest Version…",
+                json!({"action":"download-update"}),
                 false,
                 cx,
-            ))
-    }
-    fn about(&self, _cx: &Context<Self>) -> Div {
-        stack()
-            .gap_4()
-            .child(
-                note("About Wonder")
-                    .role(Role::Heading)
-                    .text_xl()
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
-            .child(note("A local-first messenger for chats and Projects."))
-            .child(row("Version", text(&self.state, "version")))
+            ));
+        }
+        messages(view, &self.state, &["updatesMessage"], cx)
     }
     fn connection(&self, cx: &Context<Self>) -> Div {
         stack()
@@ -791,10 +715,7 @@ impl MacSettings {
     fn devices(&self, cx: &Context<Self>) -> Div {
         let mut view = stack().gap_4().child(first_section(
             "This Mac",
-            stack()
-                .gap_1()
-                .child(note(text(&self.state, "hostName")))
-                .child(note("This device").text_color(cx.theme().muted_foreground)),
+            stack().gap_1().child(note(text(&self.state, "hostName"))),
             cx,
         ));
         view = messages(view, &self.state, &["pairingError", "pairingMessage"], cx);
@@ -1059,7 +980,7 @@ impl MacSettings {
                     cx,
                 ))
                 .child(note(
-                    "Once enabled, authenticated paired devices can start control later without another Mac approval. Turning this off or unpairing a device removes that authorization; Stop releases the current session.",
+                    "Paired devices can control this Mac without another approval. Turn this off or unpair a device to revoke access; Stop ends the current session.",
                 )),
             &self.state,
             &["controlPreferencesMessage"],
@@ -1109,7 +1030,7 @@ impl MacSettings {
             );
         }
         first_section("Screen to share", choices, cx)
-            .child(note("Choose a screen for live viewing from your phone. If you skip this, Wonder uses the Mac's main display. You can change it later in Access."))
+            .child(note("If your chosen screen is unavailable, Wonder uses the main display."))
             .when(!saved.is_empty() && !saved_connected, |view| {
                 view.child(note("The saved screen is disconnected, so Wonder will use the main display until it returns."))
             })
@@ -1148,8 +1069,8 @@ impl MacSettings {
                 .child(row("This Mac", text(&self.state,"hostName")))
                 .child(row("Wonder", if self.flag("ready") { "Ready to set up" } else { "Getting ready…" }))
                 .when(!self.flag("ready") && self.flag("needsRepair"), |v| v.child(note("Wonder needs attention before setup can continue."))
-                    .child(self.action("setup-restart", "Restart services", json!({"action":"restart"}), self.flag("serviceBusy"), cx))
-                    .child(self.action("setup-repair", "Check installed runtime", json!({"action":"repair"}), self.flag("serviceBusy"), cx))),
+                    .child(note("Quit and reopen Wonder if setup stops responding."))
+                    .child(self.action("setup-repair", "Set up agents", json!({"action":"repair"}), self.flag("serviceBusy"), cx))),
             4=>view.child(self.connection(cx)),
             5=>view.child(self.voice_content(cx)),
             1=>view.child(self.mac_permissions(true, cx)),
@@ -1157,7 +1078,7 @@ impl MacSettings {
             2=>view.when(!self.flag("remoteReady"), |v| v.child(note("Connect Tailscale on both devices before pairing. You can finish setup and pair later.")).child(self.connection(cx)))
                 .child(self.devices(cx)),
             _=>view.child(note("Wonder stays in your menu bar so your chats and Projects remain available."))
-                .child(self.toggle("setup-login","Launch Wonder at login","login","login",cx))
+                .child(self.toggle("setup-login","Launch at login","login","login",cx))
                 .child(note(text(&self.state,"loginMessage")))
                 .when(self.flag("loginApproval"), |v| v.child(self.action("setup-login-settings","Open Login Settings…",json!({"action":"login-settings"}),false,cx)))
                 .child(note("Remote access needs this Mac to be awake and online. Closing setup keeps Wonder running; Quit Wonder stops active agent work and remote access.")),
@@ -1226,7 +1147,7 @@ impl MacSettings {
 impl Render for MacSettings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pages = [
-            (Page::Status, "Status"),
+            (Page::Status, "General"),
             (Page::Devices, "Devices"),
             (Page::Access, "Access"),
             (Page::Dictation, "Dictation"),
@@ -1236,40 +1157,39 @@ impl Render for MacSettings {
             .iter()
             .position(|(page, _)| *page == self.page)
             .unwrap_or(0);
-        let nav = tab::TabBar::new("settings-tabs")
-            .segmented()
-            .children(pages.iter().map(|(_, label)| *label))
-            .selected_index(selected)
-            .on_click(cx.listener(move |this, index: &usize, _, cx| {
-                this.select_page(pages[*index].0, cx);
-            }));
-        let appearance = tab::TabBar::new("appearance")
-            .segmented()
-            .children([
-                tab::Tab::new()
-                    .label("System")
-                    .aria_label("Use system appearance"),
-                tab::Tab::new()
-                    .icon(IconName::Sun)
-                    .aria_label("Light appearance"),
-                tab::Tab::new()
-                    .icon(IconName::Moon)
-                    .aria_label("Dark appearance"),
-            ])
-            .selected_index(
-                crate::appearance::Preference::ALL
-                    .iter()
-                    .position(|p| p == cx.global::<crate::appearance::Preference>())
-                    .unwrap_or(0),
+        let (sunrise, sunset) = if cx.theme().is_dark() {
+            (rgb(0x382b1d), rgb(0x4b3020))
+        } else {
+            (rgb(0xfff3c5), rgb(0xffd6a3))
+        };
+        let nav = stack()
+            .gap_1()
+            .w(px(154.))
+            .h_full()
+            .p_3()
+            .bg(linear_gradient(
+                160.,
+                linear_color_stop(sunrise, 0.),
+                linear_color_stop(sunset, 1.),
+            ))
+            .child(
+                stack()
+                    .gap_2()
+                    .px_2()
+                    .pt_2()
+                    .pb_5()
+                    .child(img(self.brand_icon.clone()).size(px(44.)).rounded(px(10.)))
+                    .child(note("Wonder").text_lg().font_weight(FontWeight::SEMIBOLD)),
             )
-            .on_click(cx.listener(|this, index: &usize, window, cx| {
-                this.error = crate::appearance::select(
-                    crate::appearance::Preference::ALL[*index],
-                    window,
-                    cx,
-                )
-                .err();
-                cx.notify();
+            .children(pages.iter().enumerate().map(|(index, (page, label))| {
+                let page = *page;
+                Button::new(SharedString::from(format!("settings-page-{index}")))
+                    .ghost()
+                    .label(*label)
+                    .selected(self.page == page)
+                    .w_full()
+                    .justify_start()
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
             }));
         let content = if self.page == Page::Dictation {
             self.voice_content(cx)
@@ -1308,71 +1228,60 @@ impl Render for MacSettings {
             .flex()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .child(nav)
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_4()
-                            .p_4()
-                            .child(nav)
-                            .child(appearance),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("settings-scroll-{selected}")))
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .px_6()
-                            .pt_4()
-                            .pb_6()
-                            .child(
-                                stack()
-                                    .when(self.error.is_some(), |v| {
-                                        v.child(
-                                            note(self.error.as_deref().unwrap_or(""))
-                                                .text_color(cx.theme().danger),
-                                        )
-                                    })
-                                    .when(!text(&self.state, "error").is_empty(), |v| {
-                                        v.child(
-                                            note(text(&self.state, "error"))
-                                                .text_color(cx.theme().danger),
-                                        )
-                                    })
-                                    .when(
-                                        self.pending.is_some()
-                                            || self.flag("serviceBusy")
-                                            || self.flag("pairingBusy"),
-                                        |v| v.child(note("Updating…")),
+                div().flex_1().min_w_0().h_full().flex().flex_col().child(
+                    div()
+                        .id(SharedString::from(format!("settings-scroll-{selected}")))
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px_6()
+                        .pt_4()
+                        .pb_6()
+                        .child(
+                            stack()
+                                .child(
+                                    note(pages[selected].1)
+                                        .role(Role::Heading)
+                                        .text_lg()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .pb_3(),
+                                )
+                                .when(self.error.is_some(), |v| {
+                                    v.child(
+                                        note(self.error.as_deref().unwrap_or(""))
+                                            .text_color(cx.theme().danger),
                                     )
-                                    .when(
-                                        self.error.is_some()
-                                            || !text(&self.state, "error").is_empty(),
-                                        |v| {
-                                            v.child(
-                                                Button::new("retry-settings")
-                                                    .label("Try again")
-                                                    .disabled(self.pending.is_some())
-                                                    .on_click(
-                                                        cx.listener(|this, _, _, cx| {
-                                                            this.retry(cx)
-                                                        }),
-                                                    ),
-                                            )
-                                        },
+                                })
+                                .when(!text(&self.state, "error").is_empty(), |v| {
+                                    v.child(
+                                        note(text(&self.state, "error"))
+                                            .text_color(cx.theme().danger),
                                     )
-                                    .child(content),
-                            ),
-                    ),
+                                })
+                                .when(
+                                    self.pending.is_some()
+                                        || self.flag("serviceBusy")
+                                        || self.flag("pairingBusy"),
+                                    |v| v.child(note("Updating…")),
+                                )
+                                .when(
+                                    self.error.is_some() || !text(&self.state, "error").is_empty(),
+                                    |v| {
+                                        v.child(
+                                            Button::new("retry-settings")
+                                                .label("Try again")
+                                                .disabled(self.pending.is_some())
+                                                .on_click(
+                                                    cx.listener(|this, _, _, cx| this.retry(cx)),
+                                                ),
+                                        )
+                                    },
+                                )
+                                .child(content),
+                        ),
+                ),
             )
     }
 }
@@ -1504,15 +1413,6 @@ fn date_label(raw: &str) -> String {
         })
         .unwrap_or_else(|| "Not available".into())
 }
-fn remote_label(state: &Value) -> &'static str {
-    if state["remoteReady"] == true {
-        "Available"
-    } else if state["remoteChecking"] == true {
-        "Connecting…"
-    } else {
-        "Unavailable"
-    }
-}
 fn last_seen(phone: &Value) -> String {
     if phone["revoked"] == true {
         return "Access revoked".into();
@@ -1564,14 +1464,14 @@ mod tests {
     }
 
     #[test]
-    fn readiness_summary_preserves_local_work_and_selects_real_recovery() {
+    fn readiness_summary_preserves_readiness_and_selects_real_recovery() {
         let healthy = json!({
             "serviceRunning":true, "ready":true, "remoteReady":true,
             "pairingFresh":true, "devices":[{"revoked":false}],
             "screen":"Enabled", "input":"Enabled"
         });
         let summary = ReadinessSummary::from_snapshot(&healthy, true);
-        assert_eq!(summary.title, "Mac is ready for remote chats");
+        assert_eq!(summary.title, "Ready");
         assert!(summary.fully_ready);
         assert_eq!(summary.action, ReadinessAction::None);
 
@@ -1579,7 +1479,7 @@ mod tests {
         state["remoteReady"] = json!(false);
         let summary = ReadinessSummary::from_snapshot(&state, true);
         assert_eq!(summary.title, "Ready on this Mac");
-        assert!(summary.detail.contains("Local chats work"));
+        assert!(!summary.fully_ready);
         assert_eq!(summary.action, ReadinessAction::OpenTailscale);
         state["canConnect"] = json!(true);
         assert_eq!(
@@ -1605,7 +1505,7 @@ mod tests {
         state["serviceRunning"] = json!(false);
         assert_eq!(
             ReadinessSummary::from_snapshot(&state, true).action,
-            ReadinessAction::Restart
+            ReadinessAction::Reopen
         );
         assert_eq!(
             ReadinessSummary::from_snapshot(&healthy, false).action,

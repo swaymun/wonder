@@ -1,5 +1,5 @@
 use super::*;
-use crate::client::Connection;
+use crate::host_connection::Connection;
 
 type Response = Result<(Value, String), String>;
 
@@ -137,9 +137,9 @@ impl MacSettings {
             }))
     }
     pub(super) fn voice_content(&self, cx: &Context<Self>) -> Div {
-        let mut view = stack().gap_4()
-            .when(self.state["setupCompleted"] == true || self.state["setupStep"] != 5, |v| v.child(note("On-device dictation").role(Role::Heading).text_xl().font_weight(FontWeight::SEMIBOLD)))
-            .child(note("Record up to five minutes from a paired iPhone or iPad. Audio is transcribed locally on this Mac."));
+        let mut view = stack().gap_4().child(note(
+            "Dictation runs on this Mac. Record up to five minutes from a paired iPhone or iPad.",
+        ));
         if let Some(error) = &self.voice.error {
             view = view
                 .child(note(error.clone()).text_color(cx.theme().danger))

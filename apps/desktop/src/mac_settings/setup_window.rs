@@ -42,7 +42,7 @@ struct SetupWindow {
     _subscription: Subscription,
 }
 impl Render for SetupWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.model.update(cx, |this, cx| {
             let mut content = this.setup(cx);
             if let Some(error) = &this.error {

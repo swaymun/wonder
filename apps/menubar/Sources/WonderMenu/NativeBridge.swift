@@ -132,11 +132,9 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
         case "tailscale-configure": await service.configureTailscale()
         case "download-update": NSWorkspace.shared.open(URL(string: "https://github.com/swaymun/wonder/releases")!)
         case "refresh": refresh(); await pairing.refresh()
-        case "restart": service.restart()
         case "repair": service.repair()
         case "sign-in": service.repair(signIn: true)
         case "claude-sign-in": service.repair(signIn: true, claude: true)
-        case "claude-check": service.repair(claude: true)
         case "login":
             guard let enabled = command.enabled else { return }
             service.setLaunchAtLogin(enabled)
@@ -153,11 +151,9 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             if !sharedDisplay.setPreferredIdentifier(identifier.isEmpty ? nil : identifier) {
                 commandError = "The screen choice could not be saved. Try again."
             }
-        case "automatic-updates":
+        case "automatic-update-policy":
             guard let enabled = command.enabled, updates.available else { return }
             updates.setAutomaticChecks(enabled)
-        case "automatic-update-downloads":
-            guard let enabled = command.enabled, updates.available else { return }
             updates.setAutomaticDownloads(enabled)
         case "check-updates":
             // A foreground Sparkle check may keep its caller in a modal run loop.

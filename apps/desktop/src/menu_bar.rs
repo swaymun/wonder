@@ -10,7 +10,6 @@ use objc::{
 };
 use std::sync::atomic::{AtomicU8, Ordering};
 static ACTIONS: AtomicU8 = AtomicU8::new(0);
-pub const OPEN: u8 = 1;
 pub const SETTINGS: u8 = 2;
 pub const QUIT: u8 = 4;
 const STOP_CONTROL: u8 = 8;
@@ -23,7 +22,8 @@ extern "C" fn selected(_: &Object, _: Sel, sender: *mut Object) {
         // Only revokes the helper's current lease; it never changes the saved
         // paired-device permission or starts another control session.
         unsafe {
-            let center: *mut Object = msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
+            let center: *mut Object =
+                msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
             let _: () = msg_send![center,
                 postNotificationName:*string("com.wonder.stop-control")
                 object:std::ptr::null_mut::<Object>()
@@ -117,13 +117,11 @@ impl MenuBar {
             let _: () = msg_send![*item, setVisible:true];
             let menu = StrongPtr::new(msg_send![class!(NSMenu), new]);
             let _: () = msg_send![*menu, setAutoenablesItems:false];
-            let mut entries = vec![];
-            if crate::CHAT_CLIENT {
-                entries.push(("Open Wonder", OPEN));
-            }
-            entries.push(("Settings…", SETTINGS));
-            entries.push(("Stop Control", STOP_CONTROL));
-            entries.push(("Quit Wonder", QUIT));
+            let entries = [
+                ("Settings…", SETTINGS),
+                ("Stop Control", STOP_CONTROL),
+                ("Quit Wonder", QUIT),
+            ];
             for (label, tag) in entries {
                 if tag == QUIT {
                     let separator: *mut Object = msg_send![class!(NSMenuItem), separatorItem];
