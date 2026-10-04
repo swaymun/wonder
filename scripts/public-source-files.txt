@@ -425,6 +425,7 @@ crates/wonderd/src/dispatch.rs
 crates/wonderd/src/enrollment_tests.rs
 crates/wonderd/src/file_access.rs
 crates/wonderd/src/filesystem.rs
+crates/wonderd/src/github_review.rs
 crates/wonderd/src/goals.rs
 crates/wonderd/src/group_attachments.rs
 crates/wonderd/src/group_collaboration.rs

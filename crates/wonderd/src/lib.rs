@@ -31,6 +31,7 @@ mod connected_apps;
 pub mod dispatch;
 pub mod file_access;
 mod filesystem;
+pub mod github_review;
 mod goals;
 mod group_attachments;
 mod group_collaboration;
