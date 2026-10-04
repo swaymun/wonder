@@ -1,12 +1,12 @@
 # Wonder beta status
 
 The signed public Mac beta remains available. On October 4, Wonder Testing
-Release 1.0 (28) uploaded, processed and passed the read-only lane check
-for automatic Owner Beta availability. Production Release 1.0 (86) uploaded
-and processed successfully. TestFlight installation and production
-tester availability remain unverified. Mac 1.0.110 is signed, notarized and
-installed locally with the simplified Settings design and desktop Chats removed.
-No external beta review, public enrollment or new public Mac release was requested.
+Release 1.0 (31) uploaded, processed and passed the read-only lane check
+for automatic Owner Beta availability. Production Release 1.0 (88) uploaded
+and processed successfully. TestFlight installation and production tester
+availability remain unverified. Mac 1.0.111 is signed, notarized and installed
+locally with Mac dictation removed. No external beta review, public enrollment
+or new public Mac binary release was requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -17,28 +17,34 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (86) uploaded and Apple reports processing complete. The signed archive/export passed production identity, APNs, App Group, Keychain and diagnostic-exclusion checks. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | Blue Release 1.0 (28) uploaded, processed and is available in automatic Owner Beta. Signed archive/export identity, entitlements, Widget, symbols and diagnostic exclusions passed. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.110 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed. Actual light/dark Settings, version, manual update feedback and read-only host checks passed. Current fresh-Mac pairing, private permissions and draft-upgrade acceptance remain open. |
-| Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 632 selected public source files matched bytes and executable modes before release records were updated. Third-party components retain their own licenses. |
+| iPhone and iPad | Production Release 1.0 (88) uploaded and Apple reports processing complete. The signed archive/export passed production identity, APNs, App Group, Keychain and diagnostic-exclusion checks. Tester availability and TestFlight installation remain unverified. |
+| Wonder Testing | Blue Release 1.0 (31) uploaded, processed and is available in automatic Owner Beta. Signed archive/export identity, entitlements, Widget, symbols and diagnostic exclusions passed. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.111 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed. Version, the simplified Settings sidebar and read-only readiness checks passed. Current fresh-Mac pairing, private permissions and draft-upgrade acceptance remain open. |
+| Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 619 selected public source files matched bytes and executable modes before release records were updated. Third-party components retain their own licenses. |
 
-Progressive dictation is included in Testing 28 and production 86, built from
-clean internal `f56a0e20` and corresponding public source `8c85197`. These replace
-the initial Testing 27/production 85 implementation: a physical Testing 27 crash
-identified a Swift actor assertion in Apple's background speech-permission
-callback. Permission and recognition callbacks now explicitly cross that boundary
-safely. Recording also waits for permission-dialog dismissal, and cancelling an
-unsubmitted recording clears it locally so another recording can start.
+Native-only progressive dictation is included in Testing 31 and production 88,
+built from clean internal `0980b910` and corresponding public source `11ccabb`.
+Wonder requires iOS/iPadOS 26. It uses SpeechTranscriber where supported and
+Apple's DictationTranscriber for older supported devices/locales, both through
+SpeechAnalyzer. The mic turns blue while listening; tapping again stops and keeps
+all accumulated phrases. The composer and attachments remain visible. Provisional
+words stay separate from the saved draft until committed.
 
-Eight focused checks passed on each iPhone 17/iPad A16 simulator, including real
-Allow/Deny callbacks, repeated native audio capture and cancellation, and draft,
-selection, attachment and stale-result preservation. Synthetic word revisions
-remain separate from actual recognition evidence. Both Release binaries exclude
-diagnostics and recognition fixtures. Supported on-device speech supplies
-provisional words for the keyboard language; unavailable native speech retains
-the paired-Mac fallback. Actual speech accuracy, first-word latency, device/locale
-assets and replacement-build physical behavior remain unverified; the owner will
-check them using TestFlight. See [progressive dictation testing](apps/ios/TESTING.md#progressive-dictation)
+The paired-Mac recorder/upload/retry path, model picker, Mac setup step, speech
+worker and installer are removed. Existing drafts, attachments, database history
+and legacy recordings are preserved. No new recording files are saved. Unsupported
+native speech offers keyboard-microphone recovery instead of a Mac setup choice.
+Mac 1.0.111 also removes the retired speech worker and model installer from its package.
+
+Nine focused checks passed on each iPhone 17/iPad A16 simulator. Eight shared
+speech/composition cases, 355 host cases, 158 storage cases, four desktop cases
+and 11 setup cases passed; one host test remains ignored. Both simulators reported
+native recognition unavailable. Injected multi-phrase results verify composer,
+selection, cancellation, manual edits, attachment and stale-result behavior; they
+do not establish hardware speech accuracy or first-word latency. Physical native
+recognition and language-asset behavior remain for owner-run TestFlight acceptance.
+Both signed Release exports include both Apple transcribers and exclude diagnostic
+fixtures and the removed ASR upload path. See [progressive dictation testing](apps/ios/TESTING.md#progressive-dictation)
 and [speech startup regression](apps/ios/DIAGNOSTICS.md#speech-startup-regression).
 
 Completed responses now show their edited files below the answer, with added/removed
@@ -55,7 +61,7 @@ The October 4 releases include the later Settings, native GitHub review and
 Project Apps recovery and local edited-files source. Simulator checks include iPhone/iPad landscape;
 actual TestFlight-installed behavior remains unverified.
 
-Mac 1.0.110 keeps the native host, menu bar and Settings. Its Settings uses the
+The earlier Mac 1.0.110 qualification kept the native host, menu bar and Settings. Its Settings uses the
 original sun icon, a restrained yellow/apricot sidebar and warm light/dark colors,
 shorter readiness and Access copy, and one automatic-update policy in About.
 The redundant provider-check and restart controls and desktop Chats are removed.
@@ -64,7 +70,7 @@ support. Global Codex Usage/Apps and scoped Project Files reads pass; unloaded
 Project Apps now returns the specific unavailable response. Manual update checking
 completes with “No newer compatible update is available.” The disconnected Tailscale check showed reconnect recovery; a later read-only
 check found Tailscale Running and Settings Ready. No new privacy grant or live
-model turn was made. The new DMG remains local:
+model turn was made. The previous 1.0.110 DMG remains local:
 SHA-256 `20e02c529729729f4d9ae1fce075dc5b4bdac6fb7e2508d9d350ad4cf68c363c`.
 Notarization was accepted, and staple, Gatekeeper and payload checks passed.
 The installed 1.0.110 helper now distinguishes disconnected Tailscale from a
