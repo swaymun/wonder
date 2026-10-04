@@ -51,7 +51,7 @@ public struct DictationIntent: Codable, Sendable {
     public let deviceID: String
     public let conversationID: String
     public let conversationTitle: String
-    public let modelID: String
+    public var modelID: String
     public let language: String
     public var durationMs: UInt64 = 0
     public var audioExpiresAt: Date?
@@ -90,5 +90,48 @@ public struct DictationIntent: Codable, Sendable {
     public func canRetryAudio(now: Date = Date()) -> Bool { !cancelled && audioExpiresAt.map { now < $0 } == true }
     public func accepts(_ job: TranscriptionJob) -> Bool {
         !cancelled && job.sourceDeviceId == deviceID && job.modelId == modelID && job.language == language && job.processingSource == "paired_mac" && (jobID == nil || jobID == job.id)
+    }
+}
+
+/// A volatile replacement in UTF-16 coordinates, matching UITextView selection.
+/// The saved draft remains `base` until the user finishes or starts editing.
+public struct DictationProjection: Sendable {
+    public let base: String
+    public let range: NSRange
+    public private(set) var transcript = ""
+    public init(base: String, selection: NSRange) {
+        self.base = base
+        let length = (base as NSString).length
+        let location = min(max(0, selection.location), length)
+        range = NSRange(location: location, length: min(max(0, selection.length), length - location))
+    }
+    public var text: String {
+        guard !transcript.isEmpty else { return base }
+        return (base as NSString).replacingCharacters(in: range, with: insertion)
+    }
+    public var insertion: String {
+        guard !transcript.isEmpty else { return "" }
+        let before = (base as NSString).substring(to: range.location)
+        let after = (base as NSString).substring(from: NSMaxRange(range))
+        let left = before.last.map { !$0.isWhitespace } == true ? " " : ""
+        let right = after.first.map { !$0.isWhitespace && !$0.isPunctuation } == true ? " " : ""
+        return left + transcript + right
+    }
+    @discardableResult public mutating func update(_ words: String) -> Bool {
+        let previous = transcript
+        transcript = words.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.utf8.count <= 65536 else { transcript = previous; return false }
+        return true
+    }
+    public func selection(afterReplacing previous: Self, selection: NSRange) -> NSRange {
+        let oldEnd = previous.transcript.isEmpty ? NSMaxRange(range) : range.location + (previous.insertion as NSString).length
+        let newEnd = transcript.isEmpty ? NSMaxRange(range) : range.location + (insertion as NSString).length
+        func move(_ offset: Int) -> Int {
+            if offset < range.location { return offset }
+            if offset <= oldEnd { return newEnd }
+            return offset + newEnd - oldEnd
+        }
+        let start = move(selection.location), end = move(NSMaxRange(selection))
+        return NSRange(location: start, length: max(0, end - start))
     }
 }

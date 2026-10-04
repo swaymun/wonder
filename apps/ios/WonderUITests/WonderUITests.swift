@@ -4537,6 +4537,38 @@ import UIKit
         XCTAssertEqual(app.staticTexts["camera-draft-transfers"].label, "Local draft only")
     }
 
+    func testProgressiveDictationRevisesCancelsAndSavesWithAttachment() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-fixtures", "-diagnostics-composer-large-draft", "-diagnostics-progressive-dictation"]
+        app.launch()
+        let editor = app.textViews["message-draft"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        let original = try XCTUnwrap(editor.value as? String)
+        app.buttons["dictation-fixture-partial"].tap()
+        XCTAssertTrue((editor.value as? String)?.contains("blue card") == true)
+        XCTAssertEqual(app.staticTexts["dictation-saved-draft"].label, original)
+        app.buttons["dictation-fixture-revision"].tap()
+        XCTAssertTrue((editor.value as? String)?.contains("green card") == true)
+        XCTAssertFalse((editor.value as? String)?.contains("blue card") == true)
+        retainMenuScreenshot(app, name: "Provisional dictation with attachment")
+        XCTAssertTrue(app.buttons["cancel-dictation"].isHittable)
+        app.buttons["cancel-dictation"].tap()
+        XCTAssertEqual(editor.value as? String, original)
+        app.buttons["dictation-fixture-partial"].tap()
+        app.buttons["dictation-fixture-revision"].tap()
+        XCTAssertTrue(app.buttons["finish-dictation"].isHittable)
+        app.buttons["finish-dictation"].tap()
+        XCTAssertTrue(app.buttons["finish-dictation"].waitForNonExistence(timeout: 5))
+        let finished = try XCTUnwrap(editor.value as? String)
+        XCTAssertTrue(finished.contains("green card"))
+        app.buttons["camera-reload-draft"].tap()
+        XCTAssertEqual(editor.value as? String, finished)
+        XCTAssertEqual(app.staticTexts["camera-draft-count"].label, "Draft attachments: 1")
+        XCTAssertEqual(app.staticTexts["camera-pending-send"].label, "No pending send")
+        XCTAssertEqual(app.staticTexts["camera-draft-transfers"].label, "Local draft only")
+    }
+
     func testComposerEditWithLargeAttachmentSurvivesDurableReload() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

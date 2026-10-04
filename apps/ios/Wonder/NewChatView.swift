@@ -591,6 +591,7 @@ private struct NewChatContent: View {
     }
     private var placeholder: String { "Message \(project?.name ?? "project")" }
     private var canSend: Bool {
+        if model.dictation.nativeConversationID == draftChat.id { return false }
         guard !sending, model.connection != nil, !model.accessEnded, model.macConnected == true else { return false }
         let text = (draft.submittedBody ?? draft.text).trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!text.isEmpty || draft.attachmentCount > 0), draft.attachmentCount <= 4,
@@ -742,7 +743,7 @@ private struct NewChatContent: View {
                         .accessibilityIdentifier("new-chat-pending-notice")
                     HStack {
                         Button(action: startSend) { Text("Retry message").frame(minHeight: 44) }
-                            .disabled(!canSend).accessibilityIdentifier("new-chat-retry")
+                            .disabled(!canSend || model.dictation.nativeConversationID == draftChat.id).accessibilityIdentifier("new-chat-retry")
                         Button(action: startNewDraft) { Text("New draft").frame(minHeight: 44) }
                             .accessibilityIdentifier("new-chat-start-new-draft")
                     }.buttonStyle(.plain).font(.subheadline)
@@ -799,10 +800,16 @@ private struct NewChatContent: View {
                     text: Binding(get: { draft.submittedBody ?? draft.text }, set: { if !draft.isSubmitted { draft.text = $0 } }),
                     maximumLines: typeSize >= .accessibility3 ? 1 : typeSize.isAccessibilitySize ? 2 : 6,
                     label: placeholder, editable: !sending && !draft.isSubmitted,
+                    dictation: model.dictation, conversationID: draftChat.id,
+                    didCommitDictation: {
+                        if let hostID, !NewChatDraftStore.save(draft, host: hostID) {
+                            failure = "Your draft could not be saved. Free some storage before leaving this chat."
+                        }
+                    },
                     canPasteImages: canAttach, pasteImages: pasteImages)
                     .frame(maxWidth: .infinity)
                     .overlay(alignment: .topLeading) {
-                        if (draft.submittedBody ?? draft.text).isEmpty {
+                        if (draft.submittedBody ?? draft.text).isEmpty && model.dictation.nativeConversationID != draftChat.id {
                             Text(placeholder).foregroundStyle(.secondary).padding(.top, 12).padding(.leading, 5)
                                 .allowsHitTesting(false).accessibilityHidden(true)
                         }
@@ -991,13 +998,13 @@ private struct NewChatContent: View {
 
     private func choose(host: String) {
         guard host != hostID else { return }
+        model.dictation.captureControlsHidden(conversationID: draftChat.id)
         guard sendTask.cancelAfterSaving(draft, hostID: hostID) else {
             failure = "Your draft could not be saved. Free some storage and try again."
             return
         }
         sending = false
         linkedProjectID = nil
-        model.dictation.captureControlsHidden(conversationID: draftChat.id)
         draft = NewChatDraft.switching(from: draft, toSaved: NewChatDraftStore.load(host: host))
         hostID = host
         NewChatDraftStore.lastHost = host
@@ -1299,11 +1306,11 @@ private struct NewChatContent: View {
 
     private func startNewDraft() {
         guard !sending, let hostID else { return }
+        model.dictation.captureControlsHidden(conversationID: draftChat.id)
         guard let next = NewChatDraftStore.startNew(from: draft, host: hostID) else {
             failure = "Your pending message could not be saved. Free some storage before starting a new draft."
             return
         }
-        model.dictation.captureControlsHidden(conversationID: draftChat.id)
         draft = next; failure = nil
         savedMessages = NewChatDraftStore.savedMessages(host: hostID).filter { $0.requestID != draft.requestID }
         settleDestination(); ensureModel()
@@ -1311,6 +1318,7 @@ private struct NewChatContent: View {
 
     private func review(_ pending: NewChatDraft) {
         guard !sending, let hostID else { return }
+        model.dictation.captureControlsHidden(conversationID: draftChat.id)
         guard NewChatDraftStore.save(draft, host: hostID) else {
             failure = "Your draft could not be saved. Free some storage before reviewing this message."
             return
@@ -1325,7 +1333,6 @@ private struct NewChatContent: View {
             failure = "Your draft could not be saved. Free some storage before reviewing this message."
             return
         }
-        model.dictation.captureControlsHidden(conversationID: draftChat.id)
         draft = pending; failure = nil
     }
 }

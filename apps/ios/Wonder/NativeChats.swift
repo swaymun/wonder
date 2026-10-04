@@ -1398,6 +1398,7 @@ struct ConversationView: View {
             set: { model.editDraft($0, chat: chat.id) }),
             maximumLines: typeSize.isAccessibilitySize ? 2 : 6,
             label: "Message \(chat.title)", editable: !model.preparingSends.contains(chat.id) && !model.uploading.contains(chat.id),
+            dictation: model.dictation, conversationID: chat.id,
             canPasteImages: model.canAttach(chat) && !model.loadingPhotos.contains(chat.id),
             pasteImages: { providers in
                 let scope = model.assignmentScope
@@ -1406,7 +1407,7 @@ struct ConversationView: View {
             })
             .frame(maxWidth: .infinity)
             .overlay(alignment: .topLeading) {
-                if (model.composers[chat.id]?.draft ?? "").isEmpty {
+                if (model.composers[chat.id]?.draft ?? "").isEmpty && model.dictation.nativeConversationID != chat.id {
                     Text("Message \(chat.title)").foregroundStyle(.secondary)
                         .padding(.top, 12).padding(.leading, 5)
                         .allowsHitTesting(false).accessibilityHidden(true)
@@ -1657,6 +1658,9 @@ struct BoundedComposerEditor: UIViewRepresentable {
     let maximumLines: Int
     let label: String
     let editable: Bool
+    var dictation: DictationController?
+    var conversationID: String?
+    var didCommitDictation: (() -> Void)?
     var canPasteImages = false
     var pasteImages: (([NSItemProvider]) -> Void)?
 
@@ -1664,6 +1668,7 @@ struct BoundedComposerEditor: UIViewRepresentable {
         // TextKit 1 avoids the TextKit 2 re-layout path seen in the hang sample.
         let view = ComposerTextView(usingTextLayoutManager: false)
         view.delegate = context.coordinator
+        context.coordinator.view = view
         view.backgroundColor = .clear
         view.textColor = .label
         view.accessibilityIdentifier = "message-draft"
@@ -1675,7 +1680,11 @@ struct BoundedComposerEditor: UIViewRepresentable {
     }
 
     func updateUIView(_ view: ComposerTextView, context: Context) {
+        if context.coordinator.parent.conversationID != conversationID {
+            context.coordinator.parent.dictation?.captureControlsHidden(conversationID: context.coordinator.parent.conversationID ?? "")
+        }
         context.coordinator.parent = self
+        if let conversationID { dictation?.attachEditor(context.coordinator, conversationID: conversationID) }
         view.canPasteImages = canPasteImages
         view.pasteImages = pasteImages
         let font = UIFont.preferredFont(forTextStyle: .body)
@@ -1692,6 +1701,14 @@ struct BoundedComposerEditor: UIViewRepresentable {
             context.coordinator.scheduleCommit(view)
             return
         }
+        if let projection = context.coordinator.projection {
+            if projection.base == text { return }
+            // A send, restoration or external edit replaced the owning draft.
+            let controller = dictation, conversation = conversationID
+            DispatchQueue.main.async {
+                if controller?.nativeConversationID == conversation { controller?.cancelNativeForExternalEdit() }
+            }
+        }
         context.coordinator.replaceText(text, in: view)
         context.coordinator.lastSynchronizedText = text
     }
@@ -1705,8 +1722,60 @@ struct BoundedComposerEditor: UIViewRepresentable {
         return CGSize(width: width, height: min(maximum, max(44, ceil(measured.height))))
     }
 
+    static func dismantleUIView(_ view: ComposerTextView, coordinator: Coordinator) {
+        coordinator.parent.dictation?.captureControlsHidden(conversationID: coordinator.parent.conversationID ?? "")
+    }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-    final class Coordinator: NSObject, UITextViewDelegate {
+    final class Coordinator: NSObject, UITextViewDelegate, DictationEditor {
+        weak var view: UITextView?
+        var projection: DictationProjection?
+        var dictationLocale: String { view?.textInputMode?.primaryLanguage ?? Locale.preferredLanguages.first ?? Locale.current.identifier }
+        func beginDictation() -> Bool {
+            guard let view, parent.editable, view.markedTextRange == nil, pendingCommit == nil,
+                  compositionBase == nil, view.text == parent.text else { return false }
+            projection = DictationProjection(base: parent.text, selection: view.selectedRange)
+            return true
+        }
+        func showDictation(_ words: String) -> Bool {
+            guard let view, var next = projection, next.base == parent.text, view.markedTextRange == nil else { return false }
+            let previous = next
+            guard next.update(words) else { return false }
+            let selection = next.selection(afterReplacing: previous, selection: view.selectedRange)
+            projection = next
+            replaceText(next.text, in: view)
+            isCommitting = true
+            view.selectedRange = selection
+            isCommitting = false
+            return true
+        }
+        func endDictation(commitWords: Bool) -> Bool {
+            guard let view, let projection else { return false }
+            guard projection.base == parent.text else {
+                self.projection = nil
+                replaceText(parent.text, in: view)
+                return false
+            }
+            let selection = view.selectedRange
+            if commitWords {
+                parent.text = projection.text
+                guard parent.text == projection.text else { return false }
+                parent.didCommitDictation?()
+            }
+            self.projection = nil
+            lastSynchronizedText = parent.text
+            replaceText(parent.text, in: view)
+            if !commitWords {
+                let original = DictationProjection(base: projection.base, selection: projection.range)
+                let dictatedEnd = projection.range.location + (projection.insertion as NSString).length
+                view.selectedRange = !projection.transcript.isEmpty && selection == NSRange(location: dictatedEnd, length: 0)
+                    ? projection.range : (projection.transcript.isEmpty ? selection : original.selection(afterReplacing: projection, selection: selection))
+            }
+            return true
+        }
+        func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+            if projection != nil { parent.dictation?.finishNativeImmediately() }
+            return projection == nil
+        }
         var parent: BoundedComposerEditor
         var lastSynchronizedText: String
         var compositionBase: String?
@@ -1717,6 +1786,7 @@ struct BoundedComposerEditor: UIViewRepresentable {
         func beginComposition() { if compositionBase == nil { compositionBase = lastSynchronizedText } }
         func textViewDidChange(_ textView: UITextView) { commit(textView) }
         func textViewDidChangeSelection(_ textView: UITextView) {
+            if projection != nil, !isCommitting { parent.dictation?.finishNativeImmediately() }
             if compositionBase != nil, textView.markedTextRange == nil { commit(textView) }
         }
         func textViewDidEndEditing(_ textView: UITextView) {
@@ -1734,7 +1804,7 @@ struct BoundedComposerEditor: UIViewRepresentable {
             }
         }
         private func commit(_ textView: UITextView) {
-            guard !isCommitting else { return }
+            guard !isCommitting, projection == nil else { return }
             guard textView.markedTextRange == nil else { beginComposition(); return }
             let committed = textView.text ?? ""
             let pending = pendingCommit?.replacingCommittedText(committed) ?? ComposerComposition.PendingCommit(

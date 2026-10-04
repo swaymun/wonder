@@ -145,3 +145,55 @@ orange app icon. Prompt: change only the palette to sky/cobalt blue, a pale icy-
 background and navy facial features; preserve the smiling half-sun, five rays,
 composition and texture; no text, badge or outer mask. The generated artwork was
 resized to 1024 square for the app asset catalog. The orange source is unchanged.
+
+## Progressive dictation
+
+The composer first tries Apple's on-device `SFSpeechRecognizer` for the current
+keyboard language (preferred system language when the keyboard has no language).
+This API covers the iOS 17 deployment target. Both recognizer availability and
+on-device support must pass; the request always requires on-device recognition.
+Speech Recognition permission is separate from microphone permission. Denied
+speech permission or unsupported locales use the existing paired-Mac recorder.
+The Mac retains automatic language detection and its existing model settings.
+
+Partial results replace a volatile UTF-16 selection projection in the UIKit
+editor; they are not written into the saved draft. Finish waits up to two seconds
+for a final result, then accepts the displayed words once. Typing, cursor movement,
+navigation, backgrounding and audio interruption finish the displayed words
+immediately. Cancel restores the original text and selection. Pairing changes
+and external draft replacement discard the volatile projection. Attachments are
+never rebuilt by dictation. New-chat commits flush before changing destinations.
+Native sessions finish at 55 seconds to stay below the legacy recognizer's
+short-session limit; tap the microphone again to continue.
+
+Availability flags do not prove speech assets can load. If initialization fails
+before any words, recording continues into the same protected AAC file; Finish
+uses the Mac path. An interrupted/finished clip with no native words offers an
+explicit Mac retry. A failure after words keeps the displayed words without
+appending a second full Mac transcript. Recordings retain the existing expiry
+and cancellation policy. No Apple-server recognition or automatic asset download
+is enabled.
+
+`WonderDiagnosticsTests` owns real UIKit selection/projection, durable draft,
+new-chat destination flush, manual edit, late callback, cancellation, background,
+revocation and finalization-timeout regressions. The progressive UI case in
+`WonderUITests` extends the isolated large-attachment composer fixture and uses
+the production composer surface/Finish/Cancel controls on iPhone and iPad.
+Injected recognition events test application behavior only; they cannot establish
+recognition accuracy, first-word latency, microphone behavior or speech-asset
+availability. Keep those measurements separate from simulator UI timings.
+
+For an owner-run TestFlight check, select the intended keyboard language, insert
+speech in the middle of an existing draft, finish/cancel, then try typing and
+changing conversations during speech. Repeat with an attachment and in New chat.
+Do not send. Check Speech Recognition denied, microphone denied, interruptions,
+and a language without native assets. Record device/OS/locale and first-word time
+from speech onset for at least five utterances where actual recognition works.
+
+API references: [Apple recognition requests](https://developer.apple.com/documentation/speech/sfspeechrecognitionrequest),
+[recognizer capabilities](https://developer.apple.com/documentation/speech/sfspeechrecognizer),
+and [SpeechAnalyzer introduction](https://developer.apple.com/videos/play/wwdc2025/277/).
+SpeechAnalyzer/SpeechTranscriber and DictationTranscriber require iOS 26 and add
+separate model/asset availability and installation handling. They are candidates
+for longer sessions after device qualification; they are not required for the
+initial iOS 17-compatible path.

@@ -1,6 +1,7 @@
 import XCTest
 import CryptoKit
 import UIKit
+import AVFoundation
 import SwiftUI
 import ImageIO
 import UniformTypeIdentifiers
@@ -10,6 +11,143 @@ import WonderPairing
 @testable import Wonder
 
 final class WonderDiagnosticsTests: XCTestCase {
+    @MainActor func testProgressiveDictationOwnsOnlyVolatileSelectionAndRejectsLateResults() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let chat = try Self.cameraChat(id: "dictation-editor")
+        var initial = ComposerIntent(); initial.draft = "Hello old friend 👋"
+        initial.stagedFiles = [try StagedFile(id: "attachment", name: "note.txt", mimeType: "text/plain", data: Data("keep".utf8))]
+        let model = ConnectionModel(cameraFixtureStoreRoot: root, saved: Self.cameraSavedConnection(), chat: chat, initialIntent: initial)
+        let controller = model.dictation
+        let editor = BoundedComposerEditor(text: Binding(get: { model.composers[chat.id]?.draft ?? "" },
+            set: { model.editDraft($0, chat: chat.id) }), maximumLines: 6, label: "Message", editable: true,
+            dictation: controller, conversationID: chat.id)
+        let coordinator = editor.makeCoordinator()
+        let view = UITextView(); view.text = initial.draft; view.delegate = coordinator; coordinator.view = view
+        controller.attachEditor(coordinator, conversationID: chat.id)
+        view.selectedRange = NSRange(location: 6, length: 3)
+        let first = try XCTUnwrap(controller.beginNativeFixture(chat: chat))
+        controller.receiveNativeFixture("blue", pending: first)
+        controller.receiveNativeFixture("green card", pending: first)
+        XCTAssertEqual(view.text, "Hello green card friend 👋")
+        model.reloadCameraFixtureDraft(chat.id)
+        XCTAssertEqual(model.composers[chat.id]?.draft, initial.draft, "Provisional words must never be persisted")
+        XCTAssertEqual(view.selectedRange.location, 16)
+        controller.cancel()
+        XCTAssertEqual(view.text, initial.draft)
+        XCTAssertEqual(view.selectedRange, NSRange(location: 6, length: 3))
+        controller.receiveNativeFixture("late cancellation", pending: first, final: true)
+        XCTAssertEqual(view.text, initial.draft)
+
+        view.selectedRange = NSRange(location: 6, length: 3)
+        let second = try XCTUnwrap(controller.beginNativeFixture(chat: chat))
+        controller.receiveNativeFixture("new", pending: second)
+        let range = view.selectedRange
+        XCTAssertTrue(coordinator.textView(view, shouldChangeTextIn: range, replacementText: " manual"))
+        view.text = (view.text as NSString).replacingCharacters(in: range, with: " manual")
+        coordinator.textViewDidChange(view)
+        controller.receiveNativeFixture("late revision", pending: second, final: true)
+        model.reloadCameraFixtureDraft(chat.id)
+        XCTAssertEqual(model.composers[chat.id]?.draft, "Hello new manual friend 👋")
+        XCTAssertEqual(model.composers[chat.id]?.attachmentIDs, ["attachment"])
+        XCTAssertNil(model.composers[chat.id]?.pending)
+
+        view.selectedRange = NSRange(location: (view.text as NSString).length, length: 0)
+        let third = try XCTUnwrap(controller.beginNativeFixture(chat: chat))
+        controller.receiveNativeFixture("navigation", pending: third)
+        controller.captureControlsHidden(conversationID: chat.id)
+        controller.receiveNativeFixture("wrong conversation", pending: third, final: true)
+        model.reloadCameraFixtureDraft(chat.id)
+        XCTAssertEqual(model.composers[chat.id]?.draft, "Hello new manual friend 👋 navigation")
+        XCTAssertNil(controller.nativeConversationID)
+
+        let fourth = try XCTUnwrap(controller.beginNativeFixture(chat: chat))
+        controller.receiveNativeFixture("discard on revocation", pending: fourth)
+        controller.connectionChanged()
+        controller.receiveNativeFixture("late revocation", pending: fourth, final: true)
+        XCTAssertEqual(view.text, "Hello new manual friend 👋 navigation")
+        XCTAssertEqual(model.composers[chat.id]?.attachmentIDs, ["attachment"])
+    }
+
+    @MainActor func testProgressiveDictationStopTimeoutAndBackgroundKeepWordsOnce() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let chat = try Self.cameraChat(id: "dictation-stop")
+        let model = ConnectionModel(cameraFixtureStoreRoot: root, saved: Self.cameraSavedConnection(), chat: chat)
+        let controller = model.dictation
+        let editor = BoundedComposerEditor(text: Binding(get: { model.composers[chat.id]?.draft ?? "" },
+            set: { model.editDraft($0, chat: chat.id) }), maximumLines: 6, label: "Message", editable: true,
+            dictation: controller, conversationID: chat.id)
+        let coordinator = editor.makeCoordinator(), view = UITextView()
+        coordinator.view = view; view.delegate = coordinator; view.text = ""
+        controller.attachEditor(coordinator, conversationID: chat.id)
+        for terminal in ["timeout", "background", "error", "selection", "interruption", "route"] {
+            model.editDraft("", chat: chat.id); view.text = ""; coordinator.lastSynchronizedText = ""
+            let pending = try XCTUnwrap(controller.beginNativeFixture(chat: chat))
+            controller.receiveNativeFixture("words", pending: pending)
+            switch terminal {
+            case "timeout":
+                controller.finishCapture()
+                XCTAssertEqual(model.composers[chat.id]?.draft, "")
+                try await Task.sleep(for: .milliseconds(2200))
+            case "background": controller.foreground(false)
+            case "error": controller.receiveNativeFixture("words", pending: pending, failed: true)
+            case "interruption", "route":
+                try await Task.sleep(for: .milliseconds(50))
+                if terminal == "route" {
+                    NotificationCenter.default.post(name: AVAudioSession.routeChangeNotification, object: nil,
+                        userInfo: [AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue])
+                } else { NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: nil) }
+                try await Task.sleep(for: .milliseconds(50))
+            default:
+                view.selectedRange = NSRange(location: 0, length: 0)
+                coordinator.textViewDidChangeSelection(view)
+                XCTAssertEqual(view.selectedRange.location, 0)
+            }
+            controller.receiveNativeFixture("late words", pending: pending, final: true)
+            model.reloadCameraFixtureDraft(chat.id)
+            XCTAssertEqual(model.composers[chat.id]?.draft, "words", terminal)
+            XCTAssertNil(controller.nativeConversationID, terminal)
+            XCTAssertNil(model.composers[chat.id]?.pending)
+        }
+    }
+
+    @MainActor func testProgressiveNewChatDictationFlushesBeforeDestinationChanges() throws {
+        let host = "dictation-new-chat-" + UUID().uuidString
+        defer { NewChatDraftStore.remove(host: host) }
+        var other = NewChatDraft(); other.destination = .project(id: "second"); other.text = "Independent destination"
+        XCTAssertTrue(NewChatDraftStore.save(other, host: host))
+        var draft = NewChatDraft(); draft.destination = .project(id: "first"); draft.text = "Before after"
+        XCTAssertTrue(NewChatDraftStore.save(draft, host: host))
+        let editor = BoundedComposerEditor(text: Binding(get: { draft.text }, set: { draft.text = $0 }),
+            maximumLines: 6, label: "Message", editable: true,
+            didCommitDictation: { XCTAssertTrue(NewChatDraftStore.save(draft, host: host)) })
+        let coordinator = editor.makeCoordinator(), view = UITextView()
+        view.text = draft.text; view.selectedRange = NSRange(location: 7, length: 0); coordinator.view = view
+        XCTAssertTrue(coordinator.beginDictation())
+        XCTAssertTrue(coordinator.showDictation("spoken"))
+        XCTAssertEqual(NewChatDraftStore.load(host: host)?.text, "Before after")
+        XCTAssertTrue(coordinator.endDictation(commitWords: true))
+        draft = NewChatDraftStore.selecting(.project(id: "second"), from: draft, host: host)
+        XCTAssertEqual(NewChatDraftStore.load(host: host, destination: .project(id: "first"))?.text, "Before spoken after")
+        XCTAssertFalse(coordinator.showDictation("late result"))
+        XCTAssertEqual(draft.text, "Independent destination")
+    }
+
+    @MainActor func testProgressiveDictationDoesNotOverwriteAnExternalDraftChange() throws {
+        var saved = "original"
+        let editor = BoundedComposerEditor(text: Binding(get: { saved }, set: { saved = $0 }),
+            maximumLines: 6, label: "Message", editable: true)
+        let coordinator = editor.makeCoordinator(), view = UITextView()
+        view.text = saved; coordinator.view = view
+        XCTAssertTrue(coordinator.beginDictation())
+        XCTAssertTrue(coordinator.showDictation("spoken"))
+        saved = "restored draft"
+        XCTAssertFalse(coordinator.endDictation(commitWords: true))
+        XCTAssertEqual(saved, "restored draft")
+        XCTAssertEqual(view.text, "restored draft")
+    }
+
     @MainActor func testWorkspaceRevisionCoalescesRapidSequencesDuringSlowRead() async throws {
         actor Counter {
             private var value = 0

@@ -1319,6 +1319,7 @@ struct DiagnosticSubagentFixtureView: View {
 @MainActor private struct CameraDiagnosticFixtureView: View {
     @StateObject private var model: ConnectionModel
     @State private var pasteTask: Task<Void, Never>?
+    @State private var dictationFixtureIntent: DictationIntent?
     @State private var showingCamera = false
     @State private var didLaunch = false
     private let chat: ChatSummary
@@ -1382,6 +1383,18 @@ struct DiagnosticSubagentFixtureView: View {
             Button("Reload saved draft") { model.reloadCameraFixtureDraft(chat.id) }
                 .frame(minHeight: 44)
                 .accessibilityIdentifier("camera-reload-draft")
+            if ProcessInfo.processInfo.arguments.contains("-diagnostics-progressive-dictation") {
+                HStack {
+                    Button("Partial words") {
+                        if model.dictation.intent == nil { dictationFixtureIntent = model.dictation.beginNativeFixture(chat: chat) }
+                        if let pending = dictationFixtureIntent { model.dictation.receiveNativeFixture("blue card", pending: pending) }
+                    }.accessibilityIdentifier("dictation-fixture-partial")
+                    Button("Revise words") {
+                        if let pending = dictationFixtureIntent { model.dictation.receiveNativeFixture("green card", pending: pending) }
+                    }.accessibilityIdentifier("dictation-fixture-revision")
+                }
+                Text(model.composers[chat.id]?.draft ?? "").accessibilityIdentifier("dictation-saved-draft")
+            }
             if pasteFixture {
                 HStack {
                     Button("Copy image") { UIPasteboard.general.setItems([[UTType.png.identifier: UIImage(data: Self.fixtureImageData())!.pngData()!]], options: [.localOnly: true]) }
@@ -1389,15 +1402,18 @@ struct DiagnosticSubagentFixtureView: View {
                     Button("Copy text") { UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: " Pasted text."]], options: [.localOnly: true]) }
                         .accessibilityIdentifier("fixture-copy-text")
                 }
+                DictationComposerSurface(controller: model.dictation, conversationID: chat.id) {
                 BoundedComposerEditor(text: Binding(
                     get: { model.composers[chat.id]?.draft ?? "" },
                     set: { model.editDraft($0, chat: chat.id) }),
                     maximumLines: 3, label: "Message", editable: true,
+                    dictation: model.dictation, conversationID: chat.id,
                     canPasteImages: model.canAttach(chat) && !model.loadingPhotos.contains(chat.id),
                     pasteImages: { providers in
                         pasteTask?.cancel()
                         pasteTask = Task { await model.stagePastedImages(providers, chat: chat, scope: scope) }
                     })
+                }
                 if model.loadingPhotos.contains(chat.id) { ProgressView("Loading photo…") }
                 if let error = model.controlErrors[chat.id] { Text(error) }
             }
