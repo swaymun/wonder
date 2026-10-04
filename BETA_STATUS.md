@@ -1,8 +1,8 @@
 # Wonder beta status
 
-The signed public Mac beta remains available. Wonder Testing 1.0 (21) was
-uploaded on October 3, processed by Apple and confirmed available in the
-automatic Owner Beta internal group. It is the owner's requested checkpoint
+The signed public Mac beta remains available. Wonder Testing 1.0 (22) was
+uploaded on October 3, processed by Apple and independently confirmed available
+in the automatic Owner Beta internal group. It is the owner's latest checkpoint
 for both iPhone and iPad. Production Wonder remains at processed build 82;
 its tester availability and TestFlight installation have not been verified.
 No external beta review or public enrollment was requested.
@@ -17,16 +17,16 @@ Keep the Mac awake and online while using it remotely.
 | Component | Status |
 | --- | --- |
 | iPhone and iPad | Production Release 1.0 (82) is uploaded and Apple reports processing complete. Its signed archive includes the Project Widget and passed channel identity, APNs, App Group, Keychain and Diagnostics-exclusion checks. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | The separate blue Release 1.0 (21) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed channel-specific identity, entitlement, Widget, symbol and Diagnostics-exclusion checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Wonder Testing | The separate blue Release 1.0 (22) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed channel-specific identity, entitlement, Widget, symbol and Diagnostics-exclusion checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
 | Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Replacement 1.0.108 is signed, notarized and installed locally and on a clean second Mac; publication waits for the remaining pairing, permission and draft-upgrade gates. |
-| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Testing 21 was archived from a clean checkpoint; production 82 and Mac 1.0.108 predate the post-upload fixes. Third-party components retain their own licenses. |
+| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Testing 22 was archived from a clean, pushed checkpoint; production 82 and Mac 1.0.108 predate the latest fixes. Third-party components retain their own licenses. |
 
 The chronological qualification notes below describe whether a change was
 source-only when checked. The shipped iOS checkpoint source is now in
-Testing 21, but its installed TestFlight behavior has not yet been observed.
+Testing 22, but its installed TestFlight behavior has not yet been observed.
 Mac source changes after 1.0.108 remain uninstalled.
 
-An October 3 source-only follow-up addresses the owner's Files and helper
+An October 3 follow-up addresses the owner's Files and helper
 screenshots. Project helper rows now distinguish unknown, waiting, failed and
 last-known states; focused host/native tests and a stale-roster UI check passed
 on both simulators. Files uses the conversation area and bottom toggle in both
@@ -36,8 +36,8 @@ paginated refresh checks passed on iPhone and iPad, including an overlap where
 the user taps Load more during a delayed refresh. iPhone 17 Pro Max also kept
 the Project draft and Chats sidebar through portrait-landscape-portrait. The
 Wonder Testing Release simulator build and testing-lane validation passed. The
-current Testing 21 installation still has older UI and historical “Stopped”
-labels; the scoped response wording and these changes have not been uploaded.
+Testing 22 includes these source changes, including the scoped “This response
+stopped” wording; its installed behavior has not yet been observed.
 A truthful live status for a Codex desktop-owned turn needs a supported shared
 status source. New Chat preview notes, genuine iPad two-app Split View and
 iPhone Duo pose testing remain open.
@@ -46,10 +46,11 @@ An additional host-only helper fix follows up to ten provider list pages when
 checking a verified Project task's archive state. A focused test passed for a
 child on page two and for a repeated cursor returning unavailable. The visible
 roster still stops at 100 tasks. This source is not installed in Mac 1.0.108;
-Testing 21 and production 82 remain unchanged. Another Device Hub attempt did
+Testing 22 includes the iOS client, while production 82 and Mac 1.0.108 remain
+unchanged. Another Device Hub attempt did
 not establish two visible iPad app panes, so Split View remains unverified.
 
-A subsequent source-only Project helper slice adds paged roster loading for
+A subsequent Project helper slice adds paged roster loading for
 older verified current and archived tasks. The client keeps loaded older rows
 when the first page refreshes, marks rows not refreshed as “Last known,” and
 preserves paging during first-page refresh, and stops on a repeated provider
@@ -58,14 +59,14 @@ host's transcript verification bound, and explains that limit if more exist.
 Host ownership tests passed 2/2, native
 wire parsing passed 1/1, and the paged roster plus interleaved refresh/cursor
 loop checks passed 2/2 on both iPhone and iPad simulators. Concurrent request
-timing remains unforced by those fixtures. This is not in installed Testing
-21, production 82, or Mac 1.0.108. The provider-side desktop Running relay is
-still unresolved; a historical “Stopped” entry in Testing 21 is not evidence
+timing remains unforced by those fixtures. The iOS client is in Testing 22;
+production 82 and Mac 1.0.108 do not have it. The provider-side desktop Running
+relay is still unresolved; a historical “Stopped” entry in Testing 21 is not evidence
 that the current desktop turn has stopped.
 
 The October 3 post-checkpoint composer hardening is verified in source and
-signed TestingDiagnostics simulator builds, but is not in Testing 21 or
-production 82. With a large staged attachment, draft edits now persist a
+signed TestingDiagnostics simulator builds and is included in Testing 22, but
+not production 82. With a large staged attachment, draft edits now persist a
 small text overlay instead of encoding and atomically replacing the attachment
 bytes on every keystroke. The overlay is tied to the base intent file identity
 so an interrupted cleanup cannot restore text after a committed Send; file
@@ -76,7 +77,7 @@ measured as a typing-latency improvement on physical hardware. PDF document
 parsing on preview open or revision is still on the main actor and remains a
 measured performance gate.
 
-A separate post-checkpoint PDF failure fix is also source-only. A malformed
+A separate post-checkpoint PDF failure fix is also in Testing 22. A malformed
 PDF now shows a readable error on initial open or after an updated revision,
 instead of a blank or stale page. The focused invalid-PDF UI test and the
 existing valid image/PDF revision test each passed 1/1 on iPhone 17 and iPad
@@ -84,7 +85,8 @@ Pro 13-inch M5 simulators (iOS 26.5). The invalid-file error also passed at
 Accessibility XXXL on both; its final screenshots were inspected. The malformed
 file fixture has a PDF header but no renderable page,
 matching the gap between content-signature validation and PDFKit parsing.
-Testing 21 and production 82 do not contain this correction.
+Production 82 does not contain this correction. Testing 22 installation remains
+unverified.
 
 A replacement Mac companion, 1.0.108, has been signed, notarized, stapled and
 installed over 1.0.107 on the owner's Mac. The same verified DMG installed and
@@ -507,8 +509,8 @@ focused malformed-PDF and composer UI test passed 1/1 on each iPhone 17 and
 iPad Pro 13-inch M5 simulator (iOS 26.5); both captures were inspected. The
 photo/file strip controls also passed a focused iPhone check and an iPad retry;
 the first iPad attempt stopped on a preserved Widget ExtensionKit startup crash.
-The layout changes are absent from Testing 21 and production 82. The owner requested no
-additional upload yet while reviewing the Testing checkpoint.
+The layout changes were absent from Testing 21 and remain absent from
+production 82. They are included in Testing 22; installed behavior awaits review.
 
 [Apple's iPad windowing guide](https://support.apple.com/en-us/125309)
 defines a genuine side-by-side session as two apps visible with a divider.
