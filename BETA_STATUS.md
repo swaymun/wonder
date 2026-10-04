@@ -1,11 +1,12 @@
 # Wonder beta status
 
-The signed public Mac beta remains available. Wonder Testing 1.0 (24) was
-uploaded on October 3, processed by Apple and independently confirmed available
-in the automatic Owner Beta internal group. It is the owner's latest checkpoint
-for both iPhone and iPad. Production Wonder remains at processed build 82;
-its tester availability and TestFlight installation have not been verified.
-No external beta review or public enrollment was requested.
+The signed public Mac beta remains available. On October 4, Wonder Testing
+Release 1.0 (25) uploaded, processed and passed an independent read-only check
+for automatic Owner Beta availability. Production Release 1.0 (83) uploaded
+and processed successfully. TestFlight installation and production
+tester availability remain unverified. Mac 1.0.109 is signed, notarized and
+installed locally with the simplified Settings design and desktop Chats removed.
+No external beta review, public enrollment or new public Mac release was requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -16,15 +17,28 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (82) is uploaded and Apple reports processing complete. Its signed archive includes the Project Widget and passed channel identity, APNs, App Group, Keychain and Diagnostics-exclusion checks. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | The separate blue Release 1.0 (24) is uploaded, processed and available in automatic Owner Beta. Its signed archive passed channel-specific identity, entitlement, Widget, symbol and Diagnostics-exclusion checks. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Replacement 1.0.108 is signed, notarized and installed locally and on a clean second Mac; publication waits for the remaining pairing, permission and draft-upgrade gates. |
-| Source | The reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Testing 24 was archived from a clean, pushed checkpoint; production 82 and Mac 1.0.108 predate the latest fixes. Third-party components retain their own licenses. |
+| iPhone and iPad | Production Release 1.0 (83) uploaded and Apple reports processing complete. The signed archive/export passed production identity, APNs, App Group, Keychain and diagnostic-exclusion checks. Tester availability and TestFlight installation remain unverified. |
+| Wonder Testing | Blue Release 1.0 (25) uploaded, processed and is available in automatic Owner Beta. Signed archive/export identity, entitlements, Widget, symbols and diagnostic exclusions passed. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.109 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed. Actual light/dark Settings, version, manual update feedback and read-only host checks passed. Current fresh-Mac pairing, private permissions and draft-upgrade acceptance remain open. |
+| Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 632 selected public source files matched bytes and executable modes before release records were updated. Third-party components retain their own licenses. |
 
-The chronological qualification notes below describe whether a change was
-source-only when checked. The shipped iOS checkpoint source is now in
-Testing 24, but its installed TestFlight behavior has not yet been observed.
-Mac source changes after 1.0.108 remain uninstalled.
+The chronological qualification notes below retain the limits of earlier checks.
+The October 4 releases include the later Settings, native GitHub review and
+Project Apps recovery source. Simulator checks include iPhone/iPad landscape;
+actual TestFlight-installed behavior remains unverified.
+
+Mac 1.0.109 keeps the native host, menu bar and Settings. Its Settings uses the
+original sun icon, a restrained yellow/apricot sidebar and warm light/dark colors,
+shorter readiness and Access copy, and one automatic-update policy in About.
+The redundant provider-check and restart controls and desktop Chats are removed.
+The installed host is ready, preserves Project IDs and advertises GitHub review
+support. Global Codex Usage/Apps and scoped Project Files reads pass; unloaded
+Project Apps now returns the specific unavailable response. Manual update checking
+completes with “No newer compatible update is available.” Remote reachability is
+currently unavailable with Tailscale recovery shown; no new privacy grant or live
+model turn was made. The new DMG remains local:
+SHA-256 `ccfe3524ed0ee2cf426c5bf388698b139a85aedaaffaa0651f91c79a5c16549b`.
+Notarization was accepted, and staple, Gatekeeper and payload checks passed.
 
 Testing 24 adds New Chat preview notes to the unsent composer and binds them
 to the first Project message after prepare-only thread creation. Notes can be
