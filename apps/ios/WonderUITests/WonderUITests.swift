@@ -2840,6 +2840,133 @@ import UIKit
         XCTAssertFalse(diffText.label.contains("README.md"))
     }
 
+    func testProjectGitHubConsentReviewDisconnectKeepsComposer() throws {
+        try checkProjectGitHubReview(contentSize: "UICTContentSizeCategoryL")
+    }
+    func testProjectGitHubReviewAtAccessibilitySize() throws {
+        try checkProjectGitHubReview(contentSize: "UICTContentSizeCategoryAccessibilityXXXL")
+    }
+    func testProjectGitHubReviewLandscapeRight() throws {
+        try checkProjectGitHubReview(contentSize: "UICTContentSizeCategoryL", orientation: .landscapeRight)
+    }
+    private func checkProjectGitHubReview(contentSize: String, orientation: UIDeviceOrientation = .landscapeLeft) throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-project-files-conversation-preview",
+                               "-github-review-preview", "-UIPreferredContentSizeCategoryName", contentSize]
+        app.launch()
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCUIDevice.shared.orientation = orientation
+            XCTAssertGreaterThan(app.windows.firstMatch.frame.width, app.windows.firstMatch.frame.height)
+        }
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(files.waitForExistence(timeout: 10)); files.tap()
+        let entry = app.buttons["workspace-github-review"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 5)); XCTAssertTrue(entry.isHittable); entry.tap()
+        let connect = app.buttons["github-review-connect"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 5))
+        let content = app.scrollViews["github-review-content"]
+        revealGitHubControl(connect, in: content)
+        XCTAssertTrue(connect.isHittable); connect.tap()
+        let allow = app.buttons["github-review-authorize"]
+        XCTAssertTrue(allow.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Signed in as preview-owner"].exists)
+        XCTAssertFalse(app.buttons["github-review-load"].exists, "Preparing is not consent")
+        let cancelConsent = app.buttons["github-review-preparation-cancel"]
+        revealGitHubControl(cancelConsent, in: content)
+        XCTAssertTrue(cancelConsent.isHittable)
+        retainGitHubScreenshot(app, name: "GitHub repository consent " + contentSize)
+        cancelConsent.tap()
+        XCTAssertTrue(connect.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["github-review-load"].exists)
+        revealGitHubControl(connect, in: content); XCTAssertTrue(connect.isHittable); connect.tap()
+        XCTAssertTrue(allow.waitForExistence(timeout: 5))
+        revealGitHubControl(allow, in: content)
+        XCTAssertTrue(allow.isHittable); allow.tap()
+        let input = app.textFields["github-review-number"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5)); input.tap(); input.typeText("42")
+        XCTAssertEqual(input.value as? String, "42")
+        let load = app.buttons["github-review-load"]
+        XCTAssertTrue(load.isHittable); load.tap()
+        let changed = app.buttons["github-review-file:Sources/Conversation.swift"]
+        XCTAssertTrue(app.staticTexts["github-review-title"].waitForExistence(timeout: 5))
+        revealGitHubControl(changed, in: content)
+        XCTAssertTrue(changed.isHittable)
+        retainGitHubScreenshot(app, name: "GitHub PR files " + contentSize)
+        changed.tap()
+        let patch = app.textViews["github-patch-text"]
+        XCTAssertTrue(patch.waitForExistence(timeout: 5))
+        let details = app.scrollViews["github-review-detail-content"]
+        revealGitHubControl(patch, in: details, fullyVisible: false, minimumVisibleHeight: 100)
+        XCTAssertTrue(patch.isHittable)
+        XCTAssertGreaterThan(patch.frame.intersection(details.frame).height, 100)
+        XCTAssertTrue((patch.value as? String)?.contains("+let title") == true)
+        retainGitHubScreenshot(app, name: "GitHub renamed file patch " + contentSize)
+        app.buttons["github-review-back"].tap()
+        let omitted = app.buttons["github-review-file:Assets/diagram.png"]
+        revealGitHubControl(omitted, in: content)
+        XCTAssertTrue(omitted.isHittable); omitted.tap()
+        XCTAssertTrue(app.staticTexts["github-patch-unavailable"].waitForExistence(timeout: 5))
+        revealGitHubControl(app.buttons["github-review-open-web"], in: details)
+        XCTAssertTrue(app.buttons["github-review-open-web"].isHittable)
+        XCTAssertFalse(app.textViews["github-patch-text"].exists)
+        retainGitHubScreenshot(app, name: "GitHub unavailable patch " + contentSize)
+        app.buttons["github-review-back"].tap()
+        let draft = app.textViews["message-draft"]
+        XCTAssertTrue(draft.isHittable); draft.tap(); draft.typeText("Review this PR")
+        XCTAssertTrue((draft.value as? String)?.contains("Review this PR") == true)
+        retainGitHubScreenshot(app, name: "GitHub review with composer " + contentSize)
+        app.buttons["github-review-back"].tap()
+        XCTAssertTrue(entry.waitForExistence(timeout: 5)); entry.tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 5), "Connection persists across closing Files review")
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "Opening review dismisses the composer keyboard")
+        revealGitHubControl(input, in: content)
+        XCTAssertTrue(input.isHittable)
+        input.tap(); input.typeText("42"); load.tap()
+        XCTAssertTrue(app.staticTexts["github-review-title"].waitForExistence(timeout: 5))
+        let disconnect = app.buttons["github-review-disconnect"]
+        revealGitHubControl(disconnect, in: content)
+        XCTAssertTrue(disconnect.isHittable); disconnect.tap()
+        XCTAssertTrue(connect.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["github-review-load"].exists)
+        XCTAssertTrue((draft.value as? String)?.contains("Review this PR") == true)
+        XCTAssertTrue(anyElement(app, identifier: "composer-attachment:composer-file").exists)
+    }
+    private func revealGitHubControl(_ control: XCUIElement, in scroll: XCUIElement, fullyVisible: Bool = true, minimumVisibleHeight: CGFloat = 0) {
+        for _ in 0..<15 {
+            if control.exists && control.isHittable && control.frame.intersection(scroll.frame).height > minimumVisibleHeight &&
+                (!fullyVisible || scroll.frame.insetBy(dx: -1, dy: -1).contains(control.frame)) { return }
+            let above = control.exists && control.frame.height > 0 && control.frame.minY < scroll.frame.minY
+            if control.exists && control.frame.intersects(scroll.frame) {
+                let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                let end = start.withOffset(CGVector(dx: 0, dy: above ? 60 : -60))
+                start.press(forDuration: 0, thenDragTo: end, withVelocity: XCUIGestureVelocity(rawValue: 50), thenHoldForDuration: 0.5)
+            } else if above { scroll.swipeDown() }
+            else { scroll.swipeUp() }
+        }
+        XCTAssertTrue(control.exists && control.isHittable, "Control \(control.identifier) frame \(control.frame) in viewport \(scroll.frame)")
+        if fullyVisible { XCTAssertTrue(scroll.frame.insetBy(dx: -1, dy: -1).contains(control.frame), "Control \(control.identifier) frame \(control.frame) in viewport \(scroll.frame)") }
+    }
+    private func retainGitHubScreenshot(_ app: XCUIApplication, name: String) {
+        // Let native layout settle. An optional host capture process acknowledges
+        // this exact state before interaction resumes (no log-timing guesses).
+        Thread.sleep(forTimeInterval: 1)
+        let temporary = FileManager.default.temporaryDirectory
+        if FileManager.default.fileExists(atPath: temporary.appendingPathComponent("github-capture-enabled").path) {
+            let token = UUID().uuidString
+            let marker = temporary.appendingPathComponent("github-capture-ready.json")
+            let ack = temporary.appendingPathComponent("github-capture-ack")
+            let data = try! JSONSerialization.data(withJSONObject: ["token": token, "name": name])
+            try! data.write(to: marker, options: .atomic)
+            for _ in 0..<50 {
+                if (try? String(contentsOf: ack, encoding: .utf8)) == token { break }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+        retainMenuScreenshot(app, name: name, fullScreen: true)
+    }
+
     func testProjectConversationFilesPreviewExpandDiffAndKeepComposer() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

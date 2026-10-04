@@ -1918,6 +1918,60 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(project.recentChats.dropFirst().first?.title, "Revised draft")
     }
 
+    @MainActor func testGitHubReviewOwnerFencesBackgroundAndChangedPairing() async throws {
+        MessageRecoveryURLProtocol.reset()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = recoveryModel(root: root)
+        model.projects.forgetCache()
+        let owner = ProjectGitHubReviewOwner(model: model, projectId: "project", rootId: "folder")
+        defer { owner.disappear(); MessageRecoveryURLProtocol.releaseHeld(); model.projects.forgetCache(); try? FileManager.default.removeItem(at: root) }
+        MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: Data(#"{"projects":[{"id":"project","name":"Project","isIncluded":true,"isPinned":false,"rootsRevision":1,"folders":[{"id":"folder","path":"/fixture","name":"Fixture","isPrimary":true,"isAvailable":false}],"createdAt":"fixture"}],"families":[],"githubReviewVersion":1}"#.utf8))
+        await model.projects.refresh()
+        XCTAssertTrue(model.projects.supportsGitHubReview)
+        let path = "/api/v1/projects/project/github-review/folder"
+        let body = Data(#"{"hostInstallationId":"camera-unit-host","projectId":"project","rootId":"folder","rootsRevision":1,"authorizationRevision":0,"connected":false,"repository":null,"repositoryId":null,"accountId":null}"#.utf8)
+        owner.appear(foreground: false)
+        owner.contextChanged()
+        await Task.yield()
+        XCTAssertTrue(MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).isEmpty)
+        MessageRecoveryURLProtocol.enqueue(path: path, body: body)
+        MessageRecoveryURLProtocol.hold(path: path)
+        owner.sceneChanged(foreground: true)
+        for _ in 0..<100 where MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count, 1)
+        owner.sceneChanged(foreground: false)
+        owner.contextChanged()
+        MessageRecoveryURLProtocol.releaseHeld()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertNil(owner.status)
+        XCTAssertFalse(owner.busy)
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count, 1,
+                       "Inactive context changes cannot restart network work")
+        MessageRecoveryURLProtocol.enqueue(path: path, body: body)
+        owner.sceneChanged(foreground: true)
+        for _ in 0..<100 where owner.status == nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNotNil(owner.status)
+        MessageRecoveryURLProtocol.enqueue(path: path, body: body)
+        MessageRecoveryURLProtocol.hold(path: path)
+        owner.reload()
+        for _ in 0..<100 where MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count < 3 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(MessageRecoveryURLProtocol.bodies(path: path, includingEmpty: true).count, 3)
+        let old = try XCTUnwrap(model.connection)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as? [String: Any])
+        var credential = try XCTUnwrap(json["credential"] as? [String: Any])
+        credential["sessionToken"] = "changed-session"
+        json["credential"] = credential
+        model.connection = try JSONDecoder().decode(SavedConnection.self, from: JSONSerialization.data(withJSONObject: json))
+        MessageRecoveryURLProtocol.releaseHeld()
+        for _ in 0..<100 where owner.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(owner.status, "A result from the old session cannot be published")
+        XCTAssertNil(owner.failure, "Old-session errors also cannot be published")
+    }
+
     @MainActor private func prepareProject(_ model: ConnectionModel) async throws {
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/projects", body: projectCatalog(pinned: false))
         await model.projects.refresh()

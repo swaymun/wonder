@@ -2339,6 +2339,33 @@ struct ManagedBotListMutationState {
             // Offline and unavailable hosts leave the useful fallback chips in place.
         }
     }
+    func gitHubReviewProject(_ chat: ChatSummary, rootId: String) -> ProjectSummary? {
+        let draft = chat.id.split(separator: ":", omittingEmptySubsequences: false)
+        let projectId = projectDetail(chat)?.projectId ??
+            (draft.count == 3 && draft[0] == "project-files" ? String(draft[1]) : nil)
+        return projects.projects.first { project in
+            project.id == projectId && project.isIncluded && project.folders.contains(where: { $0.id == rootId })
+        }
+    }
+
+    func makeGitHubReviewClient(_ scope: GitHubReviewScope) throws -> GitHubReviewClient {
+        #if WONDER_DIAGNOSTICS
+        if previewMode, ProcessInfo.processInfo.arguments.contains("-github-review-preview") {
+            return try DiagnosticGitHubReview.client(scope)
+        }
+        #endif
+        guard let connection, !accessEnded else { throw GitHubReviewFailure.scopeChanged }
+        return try GitHubReviewClient(api: api, connection: connection, scope: scope, signer: signingIdentity)
+    }
+    func matchesGitHubReviewClient(_ client: GitHubReviewClient, scope: GitHubReviewScope) -> Bool {
+        #if WONDER_DIAGNOSTICS
+        if previewMode, ProcessInfo.processInfo.arguments.contains("-github-review-preview") {
+            return client.matches(connection: DiagnosticGitHubReview.connection, scope: scope)
+        }
+        #endif
+        return !accessEnded && client.matches(connection: connection, scope: scope)
+    }
+
     func loadWorkspaceRoots(_ chat: ChatSummary) async throws -> WorkspaceRootsResponse {
         if previewMode {
             #if WONDER_DIAGNOSTICS
@@ -2495,7 +2522,8 @@ struct ManagedBotListMutationState {
         return try await api.request(endpoint, origin: saved.origin, credential: saved.credential)
     }
     private func previewWorkspaceRoots(_ chat: ChatSummary) -> WorkspaceRootsResponse {
-        let root = WorkspaceRoot(id: "workspace", label: "Workspace", path: "/preview", isDirectory: true, kind: "workingDirectory", readOnly: true)
+        let root = WorkspaceRoot(id: "workspace", label: "Workspace", path: "/preview", isDirectory: true, kind: "workingDirectory", readOnly: true,
+                                 projectRootId: projectDetail(chat) != nil || chat.id.hasPrefix("project-files:") ? "preview-folder" : nil)
         let attachments = files[chat.id] ?? []
         return WorkspaceRootsResponse(available: true, detail: nil, roots: [root], attachments: attachments)
     }

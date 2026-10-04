@@ -443,6 +443,22 @@ struct ProjectEditorView: View {
                 } header: { Text("Folders") } footer: {
                     Text("New threads start in the primary folder. Other folders are available to the agent in this project.")
                 }
+                if let project, project.isIncluded, library.supportsGitHubReview {
+                    Section {
+                        ForEach(project.folders) { folder in
+                            NavigationLink {
+                                ProjectGitHubFolderReview(model: model, projectId: project.id, rootId: folder.id)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Label(folder.name, systemImage: "arrow.triangle.pull")
+                                    if !folder.isAvailable { Text("Folder unavailable").font(.caption).foregroundStyle(.secondary) }
+                                }
+                            }.accessibilityIdentifier("project-github-folder:" + folder.id)
+                        }
+                    } header: { Text("GitHub review") } footer: {
+                        Text("Reviews use the saved folders. You can disconnect a repository even when its folder is unavailable.")
+                    }
+                }
                 if let failure { FailureDetails(message: failure) }
             }
             .disabled(saving || frozen)

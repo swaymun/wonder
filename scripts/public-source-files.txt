@@ -108,6 +108,7 @@ apps/ios/Wonder/ManagementViews.swift
 apps/ios/Wonder/NativeChats.swift
 apps/ios/Wonder/NewChatView.swift
 apps/ios/Wonder/PhoneIdentity.swift
+apps/ios/Wonder/ProjectGitHubReview.swift
 apps/ios/Wonder/ProjectViews.swift
 apps/ios/Wonder/ProjectWidgetSnapshotPublisher.swift
 apps/ios/Wonder/ProjectsModel.swift

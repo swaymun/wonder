@@ -3292,6 +3292,7 @@ struct WorkspaceBrowser: View {
     @State private var git: WorkspaceGitStatusResponse?
     @State private var viewMode = "all"
     @State private var showHidden = false
+    @State private var githubReview = false
     @State private var loadingRequests: Set<UUID> = []
     @State private var rootsLoadingID: UUID?
     @State private var locationGeneration = UUID()
@@ -3345,7 +3346,7 @@ struct WorkspaceBrowser: View {
         attachmentPhoto != nil || (attachmentSelection != nil && attachmentData != nil && attachmentDigest != nil) ||
         (selectedDiff != nil && diffText != nil)
     }
-    private var shouldPollListing: Bool { scenePhase == .active && !hasPreview }
+    private var shouldPollListing: Bool { scenePhase == .active && !hasPreview && !githubReview }
     private var previewName: String {
         selection?.name ?? documentSelection?.name ?? mediaSelection?.name ?? attachmentPhoto?.name ??
         attachmentSelection?.name ?? selectedDiff?.path ?? "Preview"
@@ -3377,6 +3378,7 @@ struct WorkspaceBrowser: View {
                 .accessibilityValue(showHidden ? "On" : "Off")
                 .accessibilityIdentifier("workspace-hidden-toggle")
             }
+            ProjectGitHubEntry(model: model, chat: chat, root: selectedRoot) { githubReview = true }
             Button(viewMode == "all" ? "Modified" : "Workspace") {
                 viewMode = viewMode == "all" ? "modified" : "all"
             }
@@ -3389,7 +3391,10 @@ struct WorkspaceBrowser: View {
 
     var body: some View {
         Group {
-            if hasPreview {
+            if githubReview, let rootId = selectedRoot?.projectRootId,
+               let project = model.gitHubReviewProject(chat, rootId: rootId) {
+                ProjectGitHubReviewPanel(model: model, projectId: project.id, rootId: rootId) { githubReview = false }
+            } else if hasPreview {
                 inlinePreview
             } else {
                 VStack(spacing: 0) {
