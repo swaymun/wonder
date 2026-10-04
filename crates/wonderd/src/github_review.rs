@@ -75,6 +75,35 @@ pub struct GitHubReviewClient {
 }
 
 impl GitHubReviewClient {
+    /// Narrow account/repository preview for an owner-initiated connection
+    /// flow. The caller derives the repository from a verified selected root.
+    pub async fn connection(
+        &self,
+        repository: &str,
+    ) -> Result<GitHubConnectionIdentity, ReviewError> {
+        if !valid_repository(repository) {
+            return Err(ReviewError::InvalidResponse);
+        }
+        let (account, _) = self.read::<Account>("user").await?;
+        let (repo, _) = self
+            .read::<Repository>(&format!("repos/{repository}"))
+            .await?;
+        let login = account.login.ok_or(ReviewError::InvalidResponse)?;
+        if account.id <= 0
+            || repo.id <= 0
+            || !repo.full_name.eq_ignore_ascii_case(repository)
+            || !valid_repository(&repo.full_name)
+            || login.is_empty()
+        {
+            return Err(ReviewError::ChangedIdentity);
+        }
+        Ok(GitHubConnectionIdentity {
+            account_id: account.id,
+            account_login: bounded_text(&login, 100)?,
+            repository_id: repo.id,
+            repository: repo.full_name,
+        })
+    }
     pub fn new(token: &str) -> Result<Self, ReviewError> {
         if token.is_empty() || token.len() > 16 * 1024 {
             return Err(ReviewError::Authentication);
@@ -315,6 +344,15 @@ fn bounded_text(value: &str, limit: usize) -> Result<String, ReviewError> {
 #[derive(Deserialize)]
 struct Account {
     id: i64,
+    login: Option<String>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubConnectionIdentity {
+    pub account_id: i64,
+    pub account_login: String,
+    pub repository_id: i64,
+    pub repository: String,
 }
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 struct Repository {
@@ -553,7 +591,7 @@ fn patch_state(patch: Option<&str>, additions: u64, deletions: u64) -> PatchStat
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::{
         body::Body,
@@ -586,6 +624,27 @@ mod tests {
         json!({"filename":format!("src/{index}.txt"),"sha":"c".repeat(40),"status":"modified","additions":1,"deletions":1,
             "patch":"@@ -1 +1 @@\n-old\n+new"})
     }
+    #[tokio::test]
+    async fn connection_uses_verified_account_and_canonical_repository() {
+        let server = server(Fixture::new(1)).await;
+        let identity = server.client.connection("owner/repo").await.unwrap();
+        assert_eq!((identity.account_id, identity.repository_id), (42, 123));
+        assert_eq!(identity.account_login, "owner");
+        assert_eq!(identity.repository, "owner/repo");
+        for repository in [
+            "owner/repo/other",
+            "../repo",
+            "owner/..",
+            "https://github.com/owner/repo",
+        ] {
+            assert!(server.client.connection(repository).await.is_err());
+        }
+        server.fixture.lock().unwrap().repository = json!({"id":999,"full_name":"different/repo"});
+        assert!(matches!(
+            server.client.connection("owner/repo").await,
+            Err(ReviewError::ChangedIdentity)
+        ));
+    }
     struct Fixture {
         before: Value,
         after: Value,
@@ -597,6 +656,7 @@ mod tests {
         metadata_reads: usize,
         account_reads: usize,
         response: Option<u16>,
+        gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     }
     impl Fixture {
         fn new(count: usize) -> Self {
@@ -616,13 +676,31 @@ mod tests {
                 metadata_reads: 0,
                 account_reads: 0,
                 response: None,
+                gate: None,
             }
         }
     }
-    struct Server {
+    pub(crate) struct Server {
         client: GitHubReviewClient,
         fixture: Arc<Mutex<Fixture>>,
         task: tokio::task::JoinHandle<()>,
+    }
+    impl Server {
+        pub(crate) fn review_client(&self) -> GitHubReviewClient {
+            GitHubReviewClient {
+                authorization: self.client.authorization.clone(),
+                origin: self.client.origin.clone(),
+            }
+        }
+    }
+    pub(crate) async fn held_server(
+        count: usize,
+    ) -> (Server, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut fixture = Fixture::new(count);
+        fixture.gate = Some((entered.clone(), release.clone()));
+        (server(fixture).await, entered, release)
     }
     impl Drop for Server {
         fn drop(&mut self) {
@@ -648,6 +726,11 @@ mod tests {
         }
     }
     async fn serve(State(fixture): State<Arc<Mutex<Fixture>>>, request: Request<Body>) -> Response {
+        let gate = { fixture.lock().unwrap().gate.take() };
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
         assert_eq!(request.method(), "GET");
         assert_eq!(
             request.headers()["authorization"],
@@ -679,7 +762,7 @@ mod tests {
         }
         let value = if path == "/user" {
             fixture.account_reads += 1;
-            json!({"id":if fixture.account_reads == 1 {fixture.account} else {fixture.account_after}})
+            json!({"id":if fixture.account_reads == 1 {fixture.account} else {fixture.account_after},"login":"owner"})
         } else if path == "/repos/owner/repo" {
             fixture.repository.clone()
         } else if path == "/repos/owner/repo/pulls/7" {

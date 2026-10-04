@@ -32,6 +32,7 @@ pub mod dispatch;
 pub mod file_access;
 mod filesystem;
 pub mod github_review;
+mod github_review_routes;
 mod goals;
 mod group_attachments;
 mod group_collaboration;
@@ -891,6 +892,20 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/projects/candidates", get(projects::candidates))
         .route("/api/v1/projects/{project_id}", patch(projects::update))
+        .route(
+            "/api/v1/projects/{project_id}/github-review/{root_id}",
+            get(github_review_routes::status)
+                .put(github_review_routes::authorize)
+                .delete(github_review_routes::revoke),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/github-review/{root_id}/prepare",
+            post(github_review_routes::prepare),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/github-review/{root_id}/pulls/{number}",
+            get(github_review_routes::snapshot),
+        )
         .route(
             "/api/v1/projects/{project_id}/threads",
             get(projects::threads).post(projects::create_thread),

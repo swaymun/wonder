@@ -135,16 +135,21 @@ impl Store {
         &self,
         project_id: &str,
         root_id: &str,
+        expected_authorization_revision: i64,
     ) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         // Advance even when this root has no saved grant: an outstanding
         // consent request must not recreate it after the owner disconnects.
-        sqlx::query(
-            "UPDATE projects SET github_review_revision=github_review_revision+1 WHERE id=?",
+        let updated = sqlx::query(
+            "UPDATE projects SET github_review_revision=github_review_revision+1 WHERE id=? AND github_review_revision=?",
         )
         .bind(project_id)
+        .bind(expected_authorization_revision)
         .execute(&mut *tx)
         .await?;
+        if updated.rows_affected() == 0 {
+            return Err(sqlx::Error::Protocol("Review authorization changed".into()));
+        }
         sqlx::query("DELETE FROM project_github_review_bindings WHERE project_id=? AND root_id=?")
             .bind(project_id)
             .bind(root_id)
@@ -295,7 +300,7 @@ mod tests {
             .await
             .is_err());
         store
-            .revoke_project_github_review("other", &binding.root_id)
+            .revoke_project_github_review("other", &binding.root_id, 0)
             .await
             .unwrap();
         assert!(store
@@ -304,11 +309,11 @@ mod tests {
             .unwrap()
             .is_some());
         store
-            .revoke_project_github_review("p", &binding.root_id)
+            .revoke_project_github_review("p", &binding.root_id, 5)
             .await
             .unwrap();
         store
-            .revoke_project_github_review("p", &binding.root_id)
+            .revoke_project_github_review("p", &binding.root_id, 6)
             .await
             .unwrap();
         assert!(store
@@ -344,6 +349,25 @@ mod tests {
                 .await
                 .is_err());
         }
+        store
+            .authorize_project_github_review(&refreshed, 7)
+            .await
+            .unwrap();
+        assert!(store
+            .revoke_project_github_review("p", &binding.root_id, 7)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .project_github_review_binding("p", &binding.root_id)
+                .await
+                .unwrap(),
+            Some(refreshed)
+        );
+        store
+            .revoke_project_github_review("p", &binding.root_id, 8)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
