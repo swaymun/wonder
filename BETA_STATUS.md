@@ -17,8 +17,8 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (94) uploaded and Apple reports processing complete. Built from clean, pushed source (`097056a2`) with Diagnostics fixtures absent from the exported binary. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | Blue Release 1.0 (37) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 94. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| iPhone and iPad | Production Release 1.0 (95) uploaded and Apple reports processing complete. Built from clean, pushed source (`797c1ebf`) with Diagnostics fixtures absent from the exported binary. Tester availability and TestFlight installation remain unverified. |
+| Wonder Testing | Blue Release 1.0 (38) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 95. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
 | Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.120 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; `/healthz` and `/readyz` passed after install. Mac Settings screens were not re-checked in this update. Fresh-Mac pairing and private-permission acceptance remain open. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 614 selected public source files matched bytes and executable modes. Third-party components retain their own licenses. |
 
