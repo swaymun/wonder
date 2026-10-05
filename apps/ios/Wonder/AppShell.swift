@@ -14,6 +14,8 @@ struct NewChatRequest: Equatable {
     let host: String?
     let destination: ChatDestination?
     var exactProject = false
+    /// Opens that Mac's screen viewer, as the widget's View computer does.
+    var showComputer = false
 }
 
 /// Widget and external links carry only bounded, nonsecret addresses. The
@@ -21,6 +23,7 @@ struct NewChatRequest: Equatable {
 enum WonderDeepLink: Equatable {
     case chat(host: String, id: String)
     case newProjectChat(host: String, project: String)
+    case computer(host: String)
 
     static func parse(_ url: URL, scheme: String) -> Self? {
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -29,6 +32,9 @@ enum WonderDeepLink: Equatable {
               parts.password == nil, parts.port == nil, parts.query == nil,
               parts.fragment == nil else { return nil }
         let path = parts.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        if path.count == 4, path[0].isEmpty, path[1] == "hosts", validID(path[2]), path[3] == "computer" {
+            return .computer(host: path[2])
+        }
         guard (path.count == 5 || path.count == 6), path[0].isEmpty,
               path[1] == "hosts", validID(path[2]), validID(path[4]) else { return nil }
         if path.count == 5, path[3] == "chats" { return .chat(host: path[2], id: path[4]) }
@@ -40,7 +46,7 @@ enum WonderDeepLink: Equatable {
 
     var host: String {
         switch self {
-        case .chat(let host, _), .newProjectChat(let host, _): host
+        case .chat(let host, _), .newProjectChat(let host, _), .computer(let host): host
         }
     }
 
@@ -56,6 +62,8 @@ enum WonderDeepLink: Equatable {
         case .newProjectChat(_, let project):
             guard Self.validID(project) else { return nil }
             parts.path = "/hosts/\(host)/projects/\(project)/new"
+        case .computer:
+            parts.path = "/hosts/\(host)/computer"
         }
         return parts.url
     }
@@ -86,8 +94,8 @@ enum WonderDeepLink: Equatable {
         settingsOpen = false
     }
     /// A fresh draft; in a project the draft stays in that project.
-    func newChat(host: String? = nil, destination: ChatDestination? = nil, exactProject: Bool = false) {
-        newChatRequest = NewChatRequest(host: host, destination: destination, exactProject: exactProject)
+    func newChat(host: String? = nil, destination: ChatDestination? = nil, exactProject: Bool = false, showComputer: Bool = false) {
+        newChatRequest = NewChatRequest(host: host, destination: destination, exactProject: exactProject, showComputer: showComputer)
         route = .newChat
         linkedConversation = nil
         sidebarOpen = false
@@ -264,6 +272,8 @@ struct ChatShell: View {
         case .chat(let host, let id): shell.open(host: host, conversation: id, fromLink: true)
         case .newProjectChat(let host, let project):
             shell.newChat(host: host, destination: .project(id: project), exactProject: true)
+        case .computer(let host):
+            shell.newChat(host: host, showComputer: true)
         }
         linkIssue = nil
     }
@@ -1030,13 +1040,18 @@ struct SidebarView: View {
             HStack(spacing: 8) {
                 SidebarProviderIcon(family: thread.family)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(thread.title).lineLimit(1)
+                    Text(thread.title).lineLimit(1).truncationMode(.tail)
                     if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                 }
                 Spacer(minLength: 4)
-                if busyThread == thread.reference { ProgressView().controlSize(.small) }
-                else if thread.isWorking { ProgressView().controlSize(.small).accessibilityLabel("Working") }
-                else if thread.hasUnread { Circle().fill(Color.primary).frame(width: 7, height: 7).accessibilityLabel("Unread") }
+                // The status keeps its slot; a long title truncates before it.
+                Group {
+                    if busyThread == thread.reference { ProgressView().controlSize(.small) }
+                    else if thread.isWorking { ProgressView().controlSize(.small).accessibilityLabel("Working") }
+                    else if thread.hasUnread { Circle().fill(Color.primary).frame(width: 7, height: 7).accessibilityLabel("Unread") }
+                }
+                .fixedSize().layoutPriority(1)
+                .accessibilityIdentifier("sidebar-thread-status")
             }
             .padding(.leading, leading).contentShape(Rectangle()).frame(minHeight: subtitle == nil ? 40 : 46)
         }

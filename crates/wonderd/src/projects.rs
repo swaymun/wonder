@@ -232,7 +232,9 @@ fn turn_start_rejected_before_execution(code: i64, message: &str) -> bool {
     code == -32000
         && (message.contains("already has an active turn")
             || message.contains("turn already in progress")
-            || message.contains("thread is busy"))
+            || message.contains("thread is busy")
+            // The Claude bridge refuses while Claude Code runs the session on the Mac.
+            || message.contains("working on this conversation on your mac"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,6 +1216,9 @@ async fn fill_codex(
                 {
                     continue;
                 }
+                if let Some(path) = thread.get("path").and_then(Value::as_str) {
+                    crate::desktop_activity::remember_codex_rollout(id, path);
+                }
                 page.buffer.push_back(NativeThread {
                     family: AgentFamily::Codex,
                     id: id.to_owned(),
@@ -1319,6 +1324,29 @@ async fn attached_summary(
     }
 }
 
+/// Only recently active Codex threads have their rollout log checked.
+const CODEX_DESKTOP_RECENT_SECONDS: i64 = 15 * 60;
+
+async fn mark_desktop_working(
+    thread: &mut ProjectThreadSummary,
+    claude_busy: &std::collections::HashSet<String>,
+    now_seconds: i64,
+) {
+    if thread.is_working {
+        return;
+    }
+    let Some(native) = thread.reference.split_once(':').map(|(_, id)| id) else {
+        return;
+    };
+    thread.is_working = match thread.family {
+        AgentFamily::Claude => claude_busy.contains(native),
+        AgentFamily::Codex => {
+            now_seconds - thread.updated_at <= CODEX_DESKTOP_RECENT_SECONDS
+                && crate::desktop_activity::codex_thread_busy(native).await
+        }
+    };
+}
+
 fn activity_seconds(value: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|t| t.timestamp())
@@ -1417,6 +1445,12 @@ pub(crate) async fn threads(
             );
         }
     }
+    // Desktop or terminal runs on this Mac show as working too.
+    let claude_busy = crate::desktop_activity::claude_busy_sessions().await;
+    let now_seconds = chrono::Utc::now().timestamp();
+    for thread in threads.iter_mut() {
+        mark_desktop_working(thread, &claude_busy, now_seconds).await;
+    }
     let mut native_rows = 0;
     while native_rows < limit {
         fill_codex(&state, &project, &mut cursor.codex, limit).await;
@@ -1458,6 +1492,8 @@ pub(crate) async fn threads(
                 is_working: false,
             },
         };
+        let mut summary = summary;
+        mark_desktop_working(&mut summary, &claude_busy, now_seconds).await;
         threads.push(summary);
         native_rows += 1;
     }
@@ -2650,6 +2686,24 @@ pub(crate) async fn is_project(state: &AppState, conversation: &str) -> bool {
         state.store.project_conversation(conversation).await,
         Ok(Some(_))
     )
+}
+
+/// Whether a desktop or terminal app on this Mac is running this Project
+/// conversation's native session. A Wonder message waits in its queue until
+/// it finishes: two writers would interleave one transcript.
+pub(crate) async fn running_elsewhere(state: &AppState, conversation: &str) -> bool {
+    let Ok(Some(stored)) = state.store.project_conversation(conversation).await else {
+        return false;
+    };
+    let Some(native) = stored.native_session_id.as_deref() else {
+        return false;
+    };
+    match stored.family {
+        AgentFamily::Claude => crate::desktop_activity::claude_busy_sessions()
+            .await
+            .contains(native),
+        AgentFamily::Codex => crate::desktop_activity::codex_thread_busy(native).await,
+    }
 }
 
 pub(crate) async fn ready(state: &AppState) -> bool {
@@ -3974,6 +4028,18 @@ pub(crate) async fn continuation(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_desktop_busy_refusal_was_never_submitted() {
+        assert!(turn_start_rejected_before_execution(
+            -32000,
+            "Claude is working on this conversation on your Mac. Send your message when it finishes."
+        ));
+        assert!(!turn_start_rejected_before_execution(
+            -32000,
+            "Claude stopped unexpectedly"
+        ));
+    }
 
     // Blank, structurally valid two-page PDF for provider-input tests. Offsets
     // are calculated from the emitted objects so a PDF parser can check page 2.

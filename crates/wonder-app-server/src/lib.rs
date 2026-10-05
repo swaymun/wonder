@@ -66,7 +66,7 @@ pub fn is_allowed_method(method: &str) -> bool {
 /// Native project metadata, allowed only on the normal-home Projects client.
 /// Older runtimes without these methods remain compatible; callers treat an
 /// unknown-method response as an unsupported capability.
-pub const PROJECT_METHODS: [&str; 8] = [
+pub const PROJECT_METHODS: [&str; 10] = [
     "project/list",
     "project/read",
     "project/create",
@@ -76,6 +76,9 @@ pub const PROJECT_METHODS: [&str; 8] = [
     "project/sessions/list",
     "project/session/attach",
     "project/folders/list",
+    // Read-only Claude agent tasks and background commands of one session.
+    "thread/backgroundTasks/list",
+    "thread/backgroundTask/read",
 ];
 
 pub fn is_project_method(method: &str) -> bool {
@@ -493,6 +496,17 @@ mod tests {
             assert!(is_project_method(method));
         }
         assert!(!is_project_method("project/delete"));
+        // The Mac's agent-task roster calls these through the Claude bridge.
+        for method in ["thread/backgroundTasks/list", "thread/backgroundTask/read"] {
+            assert!(
+                is_project_method(method),
+                "{method} must reach project clients"
+            );
+            assert!(
+                !is_allowed_method(method),
+                "{method} stays limited to project clients"
+            );
+        }
     }
 
     #[test]

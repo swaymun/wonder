@@ -2,6 +2,10 @@ import XCTest
 import UIKit
 
 @MainActor final class WonderUITests: XCTestCase {
+    // A landscape check must not leave the next test rotated.
+    override func setUp() async throws {
+        XCUIDevice.shared.orientation = .portrait
+    }
     private var appBundleIdentifier: String {
         #if WONDER_TESTING
         "com.swaymun.wonder.testing"
@@ -71,64 +75,62 @@ import UIKit
             let wonder = springboard.cells[appDisplayName]
             XCTAssertTrue(wonder.waitForExistence(timeout: 10))
             wonder.tap()
-            let card = springboard.buttons.matching(NSPredicate(format: "label == %@", "\(appDisplayName), Project")).firstMatch
-            XCTAssertTrue(card.waitForExistence(timeout: 10))
+            let card = springboard.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "\(appDisplayName), Recent Projects")).firstMatch
+            XCTAssertTrue(card.waitForExistence(timeout: 10), springboard.debugDescription)
             card.swipeLeft()
-            XCTAssertTrue((card.value as? String)?.contains("Medium") == true, "Choose the medium recent-chat layout")
+            XCTAssertTrue((card.value as? String)?.contains("Medium") == true, "Choose the medium layout")
             let addSelected = springboard.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Add Widget")).firstMatch
             XCTAssertTrue(addSelected.waitForExistence(timeout: 5))
             addSelected.tap()
             let done = springboard.buttons["Done"]
             if done.exists { done.tap() }
         }
-        guard let widget = mediumProjectWidget(on: springboard) else {
-            XCTFail("A visible medium Wonder Testing Widget was not placed")
-            return
-        }
-        widget.press(forDuration: 1.2)
-        let configure = springboard.buttons["Edit Widget"]
-        XCTAssertTrue(configure.waitForExistence(timeout: 10))
-        configure.tap()
-        let project = springboard.buttons["Project"]
-        XCTAssertTrue(project.waitForExistence(timeout: 10))
-        project.tap()
-        let selected = springboard.buttons["Preview project"]
-        XCTAssertTrue(selected.waitForExistence(timeout: 10))
-        selected.tap()
+        XCTAssertNotNil(mediumProjectWidget(on: springboard), "A visible medium Wonder Testing Widget was placed")
         XCUIDevice.shared.press(.home)
         let capture = XCTAttachment(screenshot: springboard.screenshot())
-        capture.name = "Configured medium Wonder Project Widget"
+        capture.name = "Medium Recent Projects Widget"
         capture.lifetime = .keepAlways
         add(capture)
     }
 
+    // The Widget needs no configuration: its tiles start a new chat in that
+    // Project on the last-used Mac, and View computer opens that Mac's screen.
     func testConfiguredMediumProjectWidgetOpensRecentChat() throws {
         try requireRecentWidgetQA()
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-connections-preview", "-project-files-preview", "-project-files-conversation-preview"]
-        app.launch()
-        XCTAssertTrue(app.buttons["connection-picker"].waitForExistence(timeout: 15))
-        XCUIDevice.shared.press(.home)
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        XCTAssertTrue(springboard.wait(for: .runningForeground, timeout: 10))
-        if mediumProjectWidget(on: springboard) == nil { springboard.swipeLeft() }
-        guard let widget = mediumProjectWidget(on: springboard) else {
-            XCTFail("A configured medium Wonder Testing Widget must be visible")
-            return
+        for target in ["project", "computer"] {
+            app.launch()
+            XCTAssertTrue(app.buttons["connection-picker"].waitForExistence(timeout: 15))
+            XCUIDevice.shared.press(.home)
+            XCTAssertTrue(springboard.wait(for: .runningForeground, timeout: 10))
+            if mediumProjectWidget(on: springboard) == nil { springboard.swipeLeft() }
+            guard let widget = mediumProjectWidget(on: springboard) else {
+                XCTFail("A medium Wonder Testing Widget must be visible")
+                return
+            }
+            // Header: View computer at the top right; tiles below.
+            let point = target == "project" ? CGVector(dx: 0.25, dy: 0.5) : CGVector(dx: 0.82, dy: 0.17)
+            widget.coordinate(withNormalizedOffset: point).tap()
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "The Widget tap must foreground Wonder")
+            if target == "project" {
+                let draft = app.textViews["new-chat-draft"]
+                XCTAssertTrue(draft.waitForExistence(timeout: 15))
+                let destination = anyElement(app, identifier: "destination-picker")
+                XCTAssertTrue(destination.waitForExistence(timeout: 5))
+                XCTAssertEqual(destination.value as? String, "Preview project")
+            } else {
+                XCTAssertTrue(app.descendants(matching: .any)["computer-session-refresh"].waitForExistence(timeout: 15) ||
+                              app.navigationBars.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+            }
+            let capture = XCTAttachment(screenshot: app.screenshot())
+            capture.name = target == "project" ? "Widget project tile destination" : "Widget View computer destination"
+            capture.lifetime = .keepAlways
+            add(capture)
+            app.terminate()
         }
-        widget.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.58)).tap()
-        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "The Widget tap must foreground Wonder")
-        let title = app.buttons["conversation-title-menu"]
-        XCTAssertTrue(title.waitForExistence(timeout: 15))
-        XCTAssertTrue(title.label.contains("Project notes"))
-        XCTAssertTrue(title.label.contains("Preview project"))
-        XCTAssertTrue(app.textViews["message-draft"].exists)
-        XCTAssertFalse(app.textViews["new-chat-draft"].exists)
-        let capture = XCTAttachment(screenshot: app.screenshot())
-        capture.name = "Recent-chat Widget destination"
-        capture.lifetime = .keepAlways
-        add(capture)
     }
 
     func testRemoveMediumProjectWidgetAfterRecentChatQA() throws {
@@ -155,10 +157,26 @@ import UIKit
         let selectable = app.textViews["annotation-selectable-text"]
         XCTAssertTrue(selectable.waitForExistence(timeout: 10))
         selectable.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.06)).doubleTap()
-        let comment = app.buttons["annotation-comment"]
-        XCTAssertTrue(comment.waitForExistence(timeout: 5),
-                      "Selecting preview text must offer a comment")
-        comment.tap()
+        tapEditMenuComment(app, "Selecting preview text must offer Comment in its menu")
+        XCTAssertTrue(app.descendants(matching: .any)["annotation-note"].waitForExistence(timeout: 5))
+    }
+    private func tapEditMenuComment(_ app: XCUIApplication, _ message: String) {
+        let menuItem = app.menuItems["Comment"]
+        if menuItem.waitForExistence(timeout: 5) { menuItem.tap(); return }
+        let button = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@", "Comment", "annotation-comment")).firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 3), message + "\n" + app.debugDescription)
+        button.tap()
+    }
+    /// Long-presses a word in the visible PDF page, which selects it and shows the edit menu.
+    private func selectPDFWord(_ app: XCUIApplication) {
+        let pdf = app.descendants(matching: .any)["workspace-pdf-preview"]
+        XCTAssertTrue(pdf.waitForExistence(timeout: 10))
+        // The fixture page (300×420 pt) fits the viewer's width; its heading sits
+        // about 8% down the page.
+        let width = pdf.frame.width
+        let heading = pdf.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: width * 0.22, dy: 6 + width * 1.4 * 0.08))
+        heading.press(forDuration: 1.2)
     }
     private func workspacePreviewClose(_ app: XCUIApplication, legacyID: String) -> XCUIElement {
         let backToFiles = app.buttons["workspace-preview-back"]
@@ -2987,10 +3005,11 @@ import UIKit
         Thread.sleep(forTimeInterval: 1.5)
         let timeline = app.descendants(matching: .any)["conversation-scroll"]
         let draftInConversation = app.textViews["message-draft"]
-        let composerHint = app.staticTexts["Agent tasks need a newer Wonder on your computer. Update it, then refresh this Project thread."]
         print("Resized timeline frame: \(timeline.frame); draft frame: \(draftInConversation.frame)")
-        XCTAssertTrue(composerHint.exists)
-        XCTAssertLessThanOrEqual(timeline.frame.maxY, composerHint.frame.minY + 2,
+        XCTAssertFalse(app.staticTexts["Agent tasks need a newer Wonder on your computer. Update it, then refresh this Project thread."].exists,
+                       "Agent-task availability is not a composer notice")
+        XCTAssertTrue(draftInConversation.exists)
+        XCTAssertLessThanOrEqual(timeline.frame.maxY, draftInConversation.frame.minY + 2,
                                  "The chat viewport must stop above the composer in a narrow iPad window")
         retainMenuScreenshot(app, name: "Project Files in resized iPad window", fullScreen: true)
 
@@ -3237,8 +3256,19 @@ import UIKit
         let largeFile = app.buttons["workspace-file-entry:large.txt"]
         XCTAssertTrue(largeFile.waitForExistence(timeout: 5))
         largeFile.tap()
-        // A 40 MB file arrives in steps; Files shows its progress meanwhile.
+        // A 40 MB file arrives in steps; its progress takes over Files, and the
+        // X in the ring cancels it without an error.
         let loadingRow = anyElement(app, identifier: "workspace-file-loading")
+        XCTAssertTrue(loadingRow.waitForExistence(timeout: 3))
+        let cancel = app.buttons["workspace-file-load-cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3) && cancel.isHittable)
+        cancel.tap()
+        XCTAssertTrue(loadingRow.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(largeFile.waitForExistence(timeout: 3), "Cancelling returns to the file list")
+        XCTAssertFalse(app.staticTexts["workspace-document-truncated"].waitForExistence(timeout: 3),
+                       "A cancelled download must not open later")
+        XCTAssertFalse(anyElement(app, identifier: "workspace-unavailable").exists)
+        largeFile.tap()
         XCTAssertTrue(loadingRow.waitForExistence(timeout: 3))
         XCTAssertTrue(loadingRow.label.contains("Opening large.txt"), loadingRow.label)
         XCTAssertTrue(loadingRow.label.contains("MB"), loadingRow.label)
@@ -3303,7 +3333,7 @@ import UIKit
     }
 
     // A turn running in Claude or Codex on the Mac reads as running, but Wonder
-    // offers no Stop or Guide for it and explains why Send waits.
+    // offers no Stop or Guide for it; a new message queues on the Mac.
     func testProjectTurnRunningOnMacShowsRunningWithoutStop() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -3315,7 +3345,9 @@ import UIKit
         XCTAssertFalse(app.buttons["Stop response"].exists, "Wonder cannot stop a turn owned by the desktop app")
         let draft = app.textViews["message-draft"]
         draft.tap(); draft.typeText("Next step")
-        XCTAssertFalse(app.buttons["send-message"].isEnabled, "Send waits for the desktop turn to finish")
+        XCTAssertTrue(notice.label.contains("waits until it finishes"), notice.label)
+        XCTAssertEqual(app.buttons["send-message"].label, "Queue message",
+                       "A message sent now waits on the Mac until the desktop turn finishes")
         XCTAssertFalse(app.buttons["activity-group:fixture-turn/desktop-command"].exists
             && app.buttons["activity-group:fixture-turn/desktop-command"].label.contains("interrupted"))
         retainMenuScreenshot(app, name: "Project turn running on the Mac")
@@ -3604,7 +3636,7 @@ import UIKit
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
-    func testProjectPDFRegionAnnotationKeepsSelectedPageWithoutSending() throws {
+    func testProjectPDFTextCommentKeepsSelectedPageWithoutSending() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
@@ -3620,42 +3652,32 @@ import UIKit
         XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "workspace-pdf-preview").count, 1,
                        "Full screen should keep one PDF viewer")
-        let annotate = app.buttons["annotation-pdf-open"]
-        XCTAssertTrue(annotate.waitForExistence(timeout: 5))
-        annotate.tap()
-        let position = app.staticTexts["annotation-page-position"]
-        XCTAssertTrue(position.waitForExistence(timeout: 10))
-        XCTAssertEqual(position.label, "Page 1 of 2")
-        app.buttons["annotation-next-page"].tap()
-        XCTAssertEqual(position.label, "Page 2 of 2")
-        let wholePage = app.buttons["annotation-region-all"]
-        XCTAssertTrue(wholePage.waitForExistence(timeout: 10))
-        XCTAssertTrue(wholePage.isEnabled)
-        let previewPage = app.images["annotation-preview-image"]
-        XCTAssertTrue(previewPage.waitForExistence(timeout: 5))
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            XCTAssertGreaterThan(previewPage.frame.height, 250, "The PDF page should be large enough to select a region on iPad")
-        }
-        wholePage.tap()
-        retainMenuScreenshot(app, name: "PDF page 2 region selection")
-        let note = app.descendants(matching: .any)["annotation-region-note"]
+        XCTAssertFalse(app.buttons["annotation-pdf-open"].exists, "PDF comments start from a text selection")
+        selectPDFWord(app)
+        retainMenuScreenshot(app, name: "PDF selection menu with Comment")
+        tapEditMenuComment(app, "Selecting PDF text must offer Comment in its menu")
+        let excerpt = app.staticTexts["annotation-pdf-excerpt"]
+        XCTAssertTrue(excerpt.waitForExistence(timeout: 5))
+        XCTAssertTrue(excerpt.label.contains("Weekend"), excerpt.label)
+        let note = app.descendants(matching: .any)["annotation-pdf-note"]
         XCTAssertTrue(note.waitForExistence(timeout: 5))
-        note.tap(); note.typeText("Review the second page")
-        app.buttons["annotation-region-add"].tap()
+        note.typeText("Check this heading")
+        retainMenuScreenshot(app, name: "PDF text comment")
+        app.buttons["annotation-pdf-add"].tap()
         XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5),
-                      "Closing the region editor must return to the same full-screen PDF")
+                      "Adding the comment must return to the same full-screen PDF")
         app.buttons["workspace-preview-collapse"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["workspace-pdf-preview"].waitForExistence(timeout: 5),
                       "Collapsing must retain the selected PDF in Files")
         let chip = app.buttons["composer-annotation-edit"]
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         chip.tap()
-        XCTAssertTrue(app.staticTexts["Selected area on page 2"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Selected area on page 1"].waitForExistence(timeout: 5))
         app.buttons["Cancel"].tap()
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
-    func testProjectPDFRegionControlsStayReachableWithLargeTextAndKeyboard() throws {
+    func testProjectPDFCommentStaysReachableWithLargeTextAndKeyboard() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-files-preview",
@@ -3675,36 +3697,14 @@ import UIKit
         }
         XCTAssertTrue(pdf.isHittable, "The PDF row should remain reachable at large text sizes")
         pdf.tap()
-        let annotate = app.buttons["annotation-pdf-open"]
-        XCTAssertTrue(annotate.waitForExistence(timeout: 10))
-        annotate.tap()
-        let wholePage = app.buttons["annotation-region-all"]
-        XCTAssertTrue(wholePage.waitForExistence(timeout: 10))
-        wholePage.tap()
-        let adjust = app.buttons["annotation-region-adjust"]
-        XCTAssertTrue(adjust.waitForExistence(timeout: 5))
-        adjust.tap()
-        let note = app.descendants(matching: .any)["annotation-region-note"]
+        selectPDFWord(app)
+        tapEditMenuComment(app, "Selecting PDF text must offer Comment at large text sizes")
+        let note = app.descendants(matching: .any)["annotation-pdf-note"]
         XCTAssertTrue(note.waitForExistence(timeout: 5))
-        note.tap(); note.typeText("Review this page")
-        let add = app.buttons["annotation-region-add"]
-        XCTAssertTrue(add.exists)
+        note.typeText("Review this page")
+        let add = app.buttons["annotation-pdf-add"]
         XCTAssertTrue(add.isHittable, "Add must remain reachable above the keyboard at large text sizes")
-        XCTAssertLessThanOrEqual(add.frame.maxY, app.frame.maxY - 8)
-        XCTAssertTrue(adjust.isHittable, "Area controls must be reachable after focusing the note")
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            let previewPage = app.images["annotation-preview-image"]
-            XCTAssertGreaterThan(previewPage.frame.height, 250,
-                                 "The page should remain large enough to inspect with the keyboard open")
-        }
-        retainMenuScreenshot(app, name: "Large text PDF comment controls with keyboard")
-        let done = app.buttons["annotation-note-done"]
-        XCTAssertTrue(done.isHittable, "Keyboard focus must have an explicit way back to page controls")
-        done.tap()
-        XCTAssertTrue(wholePage.isHittable, "The whole-page shortcut must return after editing")
-        let nextPage = app.buttons["annotation-next-page"]
-        XCTAssertTrue(nextPage.isHittable && nextPage.isEnabled,
-                      "Page navigation must be usable after editing")
+        retainMenuScreenshot(app, name: "Large text PDF comment with keyboard")
         add.tap()
         XCTAssertTrue(app.buttons["composer-annotation-edit"].waitForExistence(timeout: 5))
     }
@@ -3750,7 +3750,7 @@ import UIKit
         let showPDF = app.buttons["workspace-document-show-revision"]
         XCTAssertTrue(showPDF.waitForExistence(timeout: 5))
         showPDF.tap()
-        XCTAssertTrue(app.buttons["annotation-pdf-open"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-pdf-preview"].exists)
         retainMenuScreenshot(app, name: "Updated PDF in open viewer")
         workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
         closeWorkspace(app)
@@ -4175,6 +4175,28 @@ import UIKit
         }
     }
 
+    // Replies render Markdown blocks instead of showing their syntax.
+    func testAgentReplyRendersMarkdownBlocks() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-activity-preview", "-markdown-reply-preview"]
+        app.launch()
+        let heading = app.staticTexts["Summary"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 10))
+        let contains = { (text: String) in
+            app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+        }
+        XCTAssertTrue(contains("Labels read naturally").exists)
+        XCTAssertTrue(contains("Review the diff").exists)
+        XCTAssertTrue(contains("Remaining work is optional.").exists)
+        XCTAssertTrue(contains("ChatView.swift, Labels").exists, "Table rows read as their cells")
+        // Neither the drawn text nor what VoiceOver reads keeps Markdown syntax.
+        XCTAssertFalse(contains("## Summary").exists, "Heading syntax is not shown or read")
+        XCTAssertFalse(contains("|------|").exists, "Table syntax is not shown or read")
+        XCTAssertFalse(contains("**chat labels**").exists, "Emphasis syntax is not read")
+        retainMenuScreenshot(app, name: "Markdown reply", fullScreen: true)
+    }
+
     func testResponseEditedFilesBelowAnswerAndDiffKeepComposerInLandscape() throws {
         try checkResponseEditedFiles(landscape: true, large: false)
     }
@@ -4193,37 +4215,63 @@ import UIKit
         app.launch()
         XCUIDevice.shared.orientation = landscape ? .landscapeLeft : .portrait
         if landscape { XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5)); XCTAssertGreaterThan(app.frame.width, app.frame.height) }
-        let footer = anyElement(app, identifier: "response-edits:turn")
-        let first = app.buttons["response-edited-file:turn:Sources/ChatView.swift"]
-        XCTAssertTrue(first.waitForExistence(timeout: 10))
-        revealControl(first, in: anyElement(app, identifier: "conversation-scroll"))
+        let pill = app.buttons["response-edits-open:turn"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 10))
+        revealControl(pill, in: anyElement(app, identifier: "conversation-scroll"))
         let answer = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "The tests passed. I updated the chat labels")).firstMatch
         XCTAssertTrue(answer.exists)
-        XCTAssertGreaterThanOrEqual(footer.frame.minY, answer.frame.maxY - 1)
-        retainMenuScreenshot(app, name: large ? "Edited files below answer at large text" : "Edited files below answer in landscape", fullScreen: true)
+        XCTAssertGreaterThanOrEqual(pill.frame.minY, answer.frame.maxY - 1)
+        XCTAssertTrue(pill.label.hasPrefix("Edited "), pill.label)
+        XCTAssertTrue(pill.label.contains("added lines"), pill.label)
+        retainMenuScreenshot(app, name: large ? "Edited files pill at large text" : "Edited files pill in landscape", fullScreen: true)
+        pill.tap()
+        // The review opens with its own pill, which closes it again; files expand in place.
+        let close = app.buttons["response-edits-close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        XCTAssertEqual(close.value as? String, "Open")
+        XCTAssertFalse(app.buttons["response-edits-back"].exists, "The review has no back arrow")
+        let first = app.buttons["response-edited-file:turn:Sources/ChatView.swift"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
         first.tap()
+        XCTAssertEqual(first.value as? String, "Expanded")
         let diff = anyElement(app, identifier: "workspace-diff-text")
         XCTAssertTrue(diff.waitForExistence(timeout: 10))
-        XCTAssertTrue(diff.label.contains("+let label = \"Edited files\""))
+        XCTAssertTrue(diff.label.contains("+let label = \"Edited files\""), diff.label)
         XCTAssertTrue(app.textViews["message-draft"].isHittable)
         retainMenuScreenshot(app, name: large ? "Saved file diff at large text" : "Saved file diff in landscape", fullScreen: true)
-        app.buttons["response-edits-back"].tap()
+        first.tap()
+        XCTAssertEqual(first.value as? String, "Collapsed")
+        let document = anyElement(app, identifier: "diff-document")
         let last = app.buttons["response-edited-file:turn:Sources/Long folder name/Accessible layout.swift"]
-        revealControl(last, in: app.collectionViews.firstMatch)
+        for _ in 0..<8 where !last.isHittable { document.swipeUp() }
         XCTAssertTrue(last.waitForExistence(timeout: 5))
         last.tap()
-        XCTAssertTrue(diff.waitForExistence(timeout: 5))
-        XCTAssertTrue(diff.label.contains("Accessible layout.swift"))
-        XCTAssertTrue(app.staticTexts["Only the first part of this diff was saved. Review the full change on your Mac."].exists)
+        let lastDiff = app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@",
+            "workspace-diff-text", "Accessible layout.swift")).firstMatch
+        for _ in 0..<4 where !lastDiff.exists { document.swipeUp() }
+        XCTAssertTrue(lastDiff.waitForExistence(timeout: 5))
+        let partial = app.staticTexts["Only the first part of this diff was saved. Review the full change on your Mac."]
+        for _ in 0..<12 where !partial.exists { document.swipeUp() }
+        XCTAssertTrue(partial.waitForExistence(timeout: 5))
         retainMenuScreenshot(app, name: large ? "Partial saved diff notice at large text" : "Partial saved diff notice", fullScreen: true)
-        app.buttons["response-edits-back"].tap()
+        let layout = app.segmentedControls["diff-layout"]
+        if layout.exists, layout.isHittable {
+            layout.buttons.element(boundBy: 1).tap()
+            retainMenuScreenshot(app, name: large ? "Side-by-side diff at large text" : "Side-by-side diff", fullScreen: true)
+            layout.buttons.element(boundBy: 0).tap()
+        }
+        close.tap()
+        XCTAssertTrue(anyElement(app, identifier: "response-edits-review").waitForNonExistence(timeout: 5))
+        XCTAssertTrue(pill.waitForExistence(timeout: 5))
         // Files replaces the saved-diff review instead of opening behind it.
+        pill.tap()
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
         let files = app.buttons["conversation-files-pill"]
         files.tap()
         XCTAssertTrue(anyElement(app, identifier: "response-edits-review").waitForNonExistence(timeout: 5))
         XCTAssertEqual(files.value as? String, "Open")
         files.tap()
-        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertTrue(pill.waitForExistence(timeout: 5))
         XCTAssertTrue(app.textViews["message-draft"].isHittable)
     }
 
@@ -5649,9 +5697,9 @@ import UIKit
         picker.tap()
         let studio = app.buttons["connection-option:studio"]
         XCTAssertTrue(studio.waitForExistence(timeout: 5))
-        retainMenuScreenshot(app, name: "Small trailing connection status dots")
+        retainMenuScreenshot(app, name: "Connection status dots before Mac names")
         studio.tap()
-        XCTAssertEqual(picker.value as? String, "Studio")
+        XCTAssertTrue((picker.value as? String)?.hasPrefix("Studio, ") == true, "\(String(describing: picker.value))")
         let draft = app.textViews["new-chat-draft"]
         draft.tap()
         draft.typeText(" Picker check " + UUID().uuidString)
@@ -5659,12 +5707,12 @@ import UIKit
         for _ in 0..<10 {
             picker.tap()
             app.buttons["connection-option:macbook"].tap()
-            XCTAssertEqual(picker.value as? String, "Laptop")
+            XCTAssertTrue((picker.value as? String)?.hasPrefix("Laptop, ") == true)
             XCTAssertFalse(app.buttons["connection-option:studio"].exists)
             picker.tap()
             XCTAssertEqual(app.buttons["connection-option:macbook"].value as? String, "Connected, Selected")
             studio.tap()
-            XCTAssertEqual(picker.value as? String, "Studio")
+            XCTAssertTrue((picker.value as? String)?.hasPrefix("Studio, ") == true)
             XCTAssertEqual(draft.value as? String, text)
         }
         picker.tap()
@@ -5988,7 +6036,7 @@ import UIKit
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         for (flag, expected) in [
-            ("-diagnostics-usage-empty", "Codex returned no usage windows. Try refreshing after checking sign-in on your Mac."),
+            ("-diagnostics-usage-empty", "Codex returned no usage windows. Check Codex sign-in on your Mac."),
             ("-diagnostics-usage-unsupported", "This Codex version doesn't provide usage details in Wonder."),
             ("-diagnostics-usage-unavailable", "Codex usage couldn't be verified on this Mac. Check Codex sign-in, then try again.")
         ] {
@@ -6012,7 +6060,7 @@ import UIKit
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-connections-preview", "-diagnostics-usage-fixture",
-                               "-diagnostics-usage-refresh-fails", "-show-connections"]
+                               "-diagnostics-usage-refresh-fails", "-diagnostics-usage-fast-refresh", "-show-connections"]
         app.launch()
         let studio = app.buttons["Studio"]
         XCTAssertTrue(studio.waitForExistence(timeout: 10))
@@ -6020,12 +6068,14 @@ import UIKit
         let fiveHours = app.descendants(matching: .any).matching(identifier: "codex-usage-window:five-hours").firstMatch
         for _ in 0..<6 where !fiveHours.exists { app.swipeUp() }
         XCTAssertTrue(fiveHours.exists)
+        XCTAssertFalse(app.buttons["codex-usage-refresh"].exists, "Usage refreshes on its own")
+        // The automatic refresh fails; the earlier values stay, marked stale.
+        let stale = app.staticTexts["Previous usage values may be out of date."]
+        for _ in 0..<5 where !stale.waitForExistence(timeout: 2) { app.swipeUp() }
+        XCTAssertTrue(stale.exists)
+        for _ in 0..<4 where !fiveHours.exists { app.swipeUp() }
+        XCTAssertTrue(fiveHours.waitForExistence(timeout: 5))
         XCTAssertEqual(fiveHours.value as? String, "73% left")
-        let refresh = app.buttons["codex-usage-refresh"]
-        for _ in 0..<6 where !refresh.exists { app.swipeUp() }
-        XCTAssertTrue(refresh.waitForExistence(timeout: 10))
-        refresh.tap()
-        XCTAssertTrue(app.staticTexts["Previous usage values may be out of date."].waitForExistence(timeout: 10))
         let retry = app.buttons["codex-usage-retry"]
         for _ in 0..<6 where !retry.exists { app.swipeUp() }
         XCTAssertTrue(retry.exists)

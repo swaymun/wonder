@@ -114,3 +114,28 @@ final class FileChangeSummaryTests: XCTestCase {
         XCTAssertEqual(files[0].additions, 900)
     }
 }
+
+final class DiffLineTests: XCTestCase {
+    func testUnifiedDiffNumbersLinesFromHunkHeaders() {
+        let lines = DiffLine.parse("--- a/A.swift\n+++ b/A.swift\n@@ -10,3 +10,3 @@\n keep\n-old\n+new\n tail\n")
+        XCTAssertEqual(lines.map(\.kind), [.note, .note, .hunk, .context, .removed, .added, .context])
+        XCTAssertEqual(lines[3].oldNumber, 10); XCTAssertEqual(lines[3].newNumber, 10)
+        XCTAssertEqual(lines[4].oldNumber, 11); XCTAssertNil(lines[4].newNumber)
+        XCTAssertEqual(lines[5].newNumber, 11); XCTAssertEqual(lines[5].text, "new")
+        XCTAssertEqual(lines[6].oldNumber, 12); XCTAssertEqual(lines[6].newNumber, 12)
+    }
+
+    func testHeadersWithoutNumbersAndRawAdditionsLeaveNumbersUnknown() {
+        let lines = DiffLine.parse("@@ @@\n-a\n+b\n+c")
+        XCTAssertEqual(lines.map(\.kind), [.hunk, .removed, .added, .added])
+        XCTAssertTrue(lines.allSatisfy { $0.oldNumber == nil && $0.newNumber == nil })
+    }
+
+    func testSplitRowsPairReplacementsAndKeepContextOnBothSides() {
+        let rows = SplitDiffRow.pair(DiffLine.parse("@@ -1,3 +1,2 @@\n same\n-one\n-two\n+uno\n same2"))
+        XCTAssertEqual(rows.count, 5)
+        XCTAssertEqual(rows[2].left?.text, "one"); XCTAssertEqual(rows[2].right?.text, "uno")
+        XCTAssertEqual(rows[3].left?.text, "two"); XCTAssertNil(rows[3].right)
+        XCTAssertEqual(rows[4].left?.text, "same2"); XCTAssertEqual(rows[4].right?.text, "same2")
+    }
+}

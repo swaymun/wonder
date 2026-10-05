@@ -169,6 +169,9 @@ async fn tick(state: &AppState) -> Result<(), String> {
             continue;
         }
         if crate::projects::is_project(state, &message.conversation_id).await {
+            if crate::projects::running_elsewhere(state, &message.conversation_id).await {
+                continue; // Stays queued; sent once the Mac app finishes.
+            }
             crate::projects::dispatch(state.clone(), message).await;
         } else {
             crate::dispatch_to_codex(state.clone(), message).await;

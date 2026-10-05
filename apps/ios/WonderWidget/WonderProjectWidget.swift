@@ -1,95 +1,43 @@
-import AppIntents
 import SwiftUI
 import WidgetKit
 
-struct WonderWidgetProject: AppEntity {
-    static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Project")
-    static let defaultQuery = WonderWidgetProjectQuery()
-
-    let id: String
-    let name: String
-
-    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
-}
-
-struct WonderWidgetProjectQuery: EntityQuery {
-    func entities(for identifiers: [String]) async throws -> [WonderWidgetProject] {
-        let saved = Dictionary(uniqueKeysWithValues: Self.savedProjects().map { ($0.id, $0) })
-        return identifiers.compactMap { id in
-            if let project = saved[id] { return project }
-            let parts = id.split(separator: "/", omittingEmptySubsequences: false)
-            guard parts.count == 2, parts.allSatisfy({ ProjectWidgetLink.validID(String($0)) }) else { return nil }
-            // Keep the configured identity after a Project is removed so the
-            // widget can explain recovery instead of selecting another one.
-            return WonderWidgetProject(id: id, name: "Project unavailable")
-        }
-    }
-
-    func suggestedEntities() async throws -> [WonderWidgetProject] { Self.savedProjects() }
-
-    private static func savedProjects() -> [WonderWidgetProject] {
-        guard let snapshot = ProjectWidgetSnapshotStore.load(bundleIdentifier: Bundle.main.bundleIdentifier) else { return [] }
-        return snapshot.projects.map { WonderWidgetProject(id: $0.selectionID, name: $0.name) }
-    }
-}
-
-struct WonderProjectWidgetConfiguration: WidgetConfigurationIntent {
-    static let title: LocalizedStringResource = "Wonder Project"
-    static let description = IntentDescription("Open a Project chat or start one in Wonder.")
-
-    @Parameter(title: "Project") var project: WonderWidgetProject?
-}
-
+/// Recent Projects on the Mac last used for a new chat. Tapping a Project
+/// starts a new chat there; View computer opens that Mac's screen.
 struct WonderProjectWidgetEntry: TimelineEntry {
-    enum EmptyReason {
-        case chooseProject, snapshotUnavailable, projectUnavailable
-    }
-
     let date: Date
-    let project: ProjectWidgetSnapshot.Project?
-    let savedAt: Date?
+    let snapshot: ProjectWidgetSnapshot?
     let identity: ProjectWidgetIdentity?
-    let emptyReason: EmptyReason?
 
-    var isStale: Bool {
-        guard let savedAt else { return true }
-        return ProjectWidgetSnapshot(savedAt: savedAt, projects: []).isStale(at: date)
-    }
+    var isStale: Bool { snapshot?.isStale(at: date) ?? true }
 }
 
-struct WonderProjectWidgetProvider: AppIntentTimelineProvider {
+struct WonderProjectWidgetProvider: TimelineProvider {
     func placeholder(in context: Context) -> WonderProjectWidgetEntry {
-        WonderProjectWidgetEntry(date: Date(), project: nil, savedAt: nil,
-                                 identity: nil, emptyReason: .chooseProject)
+        WonderProjectWidgetEntry(date: Date(), snapshot: ProjectWidgetSnapshot(hostID: "mac", hostName: "Mac", projects: [
+            .init(id: "one", name: "Project 1"), .init(id: "two", name: "Project 2"),
+            .init(id: "three", name: "Project 3"), .init(id: "four", name: "Project 4"),
+        ]), identity: nil)
     }
 
-    func snapshot(for configuration: WonderProjectWidgetConfiguration, in context: Context) async -> WonderProjectWidgetEntry {
-        entry(for: configuration, at: Date())
+    func getSnapshot(in context: Context, completion: @escaping (WonderProjectWidgetEntry) -> Void) {
+        completion(entry(at: Date()))
     }
 
-    func timeline(for configuration: WonderProjectWidgetConfiguration, in context: Context) async -> Timeline<WonderProjectWidgetEntry> {
+    func getTimeline(in context: Context, completion: @escaping (Timeline<WonderProjectWidgetEntry>) -> Void) {
         let now = Date()
-        let first = entry(for: configuration, at: now)
+        let first = entry(at: now)
         var entries = [first]
-        if let savedAt = first.savedAt {
+        if let savedAt = first.snapshot?.savedAt {
             let staleAt = savedAt.addingTimeInterval(ProjectWidgetSnapshot.staleAfter)
-            if staleAt > now { entries.append(entry(for: configuration, at: staleAt)) }
+            if staleAt > now { entries.append(entry(at: staleAt)) }
         }
-        return Timeline(entries: entries, policy: .after(now.addingTimeInterval(60 * 60)))
+        completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(60 * 60))))
     }
 
-    private func entry(for configuration: WonderProjectWidgetConfiguration, at date: Date) -> WonderProjectWidgetEntry {
-        guard let identity = ProjectWidgetIdentity(bundleIdentifier: Bundle.main.bundleIdentifier),
-              let snapshot = ProjectWidgetSnapshotStore.load(bundleIdentifier: Bundle.main.bundleIdentifier) else {
-            return WonderProjectWidgetEntry(date: date, project: nil, savedAt: nil,
-                                            identity: nil, emptyReason: configuration.project == nil ?
-                                                .chooseProject : .snapshotUnavailable)
-        }
-        let selectedID = configuration.project?.id
-        let project = snapshot.projects.first { $0.selectionID == selectedID }
-        return WonderProjectWidgetEntry(date: date, project: project, savedAt: snapshot.savedAt,
-                                        identity: identity, emptyReason: selectedID == nil ? .chooseProject :
-                                            project == nil ? .projectUnavailable : nil)
+    private func entry(at date: Date) -> WonderProjectWidgetEntry {
+        WonderProjectWidgetEntry(date: date,
+                                 snapshot: ProjectWidgetSnapshotStore.load(bundleIdentifier: Bundle.main.bundleIdentifier),
+                                 identity: ProjectWidgetIdentity(bundleIdentifier: Bundle.main.bundleIdentifier))
     }
 }
 
@@ -97,150 +45,122 @@ struct WonderProjectWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: WonderProjectWidgetEntry
 
+    private var projectLimit: Int {
+        switch family {
+        case .systemSmall: 1
+        case .systemMedium: 4
+        default: 8
+        }
+    }
+    private var columns: Int { family == .systemExtraLarge ? 4 : 2 }
+
     var body: some View {
         Group {
-            if let project = entry.project, let identity = entry.identity {
-                Group {
-                    switch family {
-                    case .systemSmall: small(project, identity: identity)
-                    case .systemLarge: expanded(project, identity: identity, chatLimit: 3)
-                    case .systemExtraLarge: expanded(project, identity: identity, chatLimit: 3)
-                    default: expanded(project, identity: identity, chatLimit: 1)
-                    }
-                }
-                .privacySensitive()
+            if let snapshot = entry.snapshot, let hostID = snapshot.hostID, let identity = entry.identity {
+                if family == .systemSmall { small(snapshot, hostID: hostID, identity: identity) }
+                else { grid(snapshot, hostID: hostID, identity: identity) }
             } else {
-                emptyState
+                VStack(alignment: .leading, spacing: 6) {
+                    Image(systemName: "laptopcomputer").foregroundStyle(.tint)
+                    Spacer(minLength: 0)
+                    Text("Open Wonder").font(.headline)
+                    Text(entry.snapshot == nil ? "Your recent Projects appear here." : "Pair a Mac to see its Projects.")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .padding()
             }
         }
         .containerBackground(.fill.tertiary, for: .widget)
     }
 
-    private func small(_ project: ProjectWidgetSnapshot.Project, identity: ProjectWidgetIdentity) -> some View {
-        Group {
-            if let url = ProjectWidgetLink.newChat(hostID: project.hostID, projectID: project.id,
-                                                   identity: identity) {
-                Link(destination: url) { smallContent(project) }
-                    .buttonStyle(.plain)
-            } else {
-                smallContent(project)
-            }
-        }
-        .accessibilityLabel("\(project.name), new chat. \(savedAccessibility)")
-    }
-
-    private func smallContent(_ project: ProjectWidgetSnapshot.Project) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: "square.stack.3d.up")
-                .foregroundStyle(.tint)
+    /// One tap target: the most recent Project's new chat, or the computer.
+    private func small(_ snapshot: ProjectWidgetSnapshot, hostID: String, identity: ProjectWidgetIdentity) -> some View {
+        let project = snapshot.projects.first
+        let url = project.flatMap { ProjectWidgetLink.newChat(hostID: hostID, projectID: $0.id, identity: identity) }
+            ?? ProjectWidgetLink.computer(hostID: hostID, identity: identity)
+        return VStack(alignment: .leading, spacing: 6) {
+            hostLabel(snapshot)
             Spacer(minLength: 0)
-            Text(project.name).font(.headline).lineLimit(2).privacySensitive()
-            Text("New chat").font(.subheadline).foregroundStyle(.secondary)
-            savedLabel.font(.caption2).foregroundStyle(.secondary)
+            if let project {
+                Image(systemName: "plus.bubble").font(.title3).foregroundStyle(.tint)
+                Text(project.name).font(.headline).lineLimit(2).privacySensitive()
+                Text("New chat").font(.caption).foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "desktopcomputer").font(.title3).foregroundStyle(.tint)
+                Text("View computer").font(.headline)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding()
+        .widgetURL(url)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(project.map { "\($0.name), new chat on \(snapshot.hostName)" } ?? "View \(snapshot.hostName)")
     }
 
-    private func expanded(_ project: ProjectWidgetSnapshot.Project, identity: ProjectWidgetIdentity,
-                          chatLimit: Int) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(project.name).font(.headline).lineLimit(1).privacySensitive()
-                    savedLabel.font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-                if let url = ProjectWidgetLink.newChat(hostID: project.hostID, projectID: project.id,
-                                                      identity: identity) {
+    private func grid(_ snapshot: ProjectWidgetSnapshot, hostID: String, identity: ProjectWidgetIdentity) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                hostLabel(snapshot)
+                Spacer(minLength: 4)
+                if let url = ProjectWidgetLink.computer(hostID: hostID, identity: identity) {
                     Link(destination: url) {
-                        Label("New chat", systemImage: "plus")
-                            .labelStyle(.titleAndIcon)
-                            .font(.subheadline.weight(.semibold))
-                            .frame(minHeight: 44)
-                            .contentShape(Rectangle())
+                        Label("View computer", systemImage: "desktopcomputer")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).frame(minHeight: 30)
+                            .background(.tint.opacity(0.15), in: Capsule())
                     }
-                    .accessibilityLabel("New chat in selected Project")
+                    .accessibilityLabel("View \(snapshot.hostName)")
                 }
             }
-            if project.recentChats.isEmpty {
-                Text("Open Wonder to see recent chats.")
+            if snapshot.projects.isEmpty {
+                Text("Choose Projects in Wonder to start chats from here.")
                     .font(.subheadline).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
             } else {
-                ForEach(project.recentChats.prefix(chatLimit)) { chat in
-                    if let url = ProjectWidgetLink.chat(hostID: project.hostID, chatID: chat.id,
-                                                        identity: identity) {
-                        Link(destination: url) {
-                            Label(chat.title, systemImage: "bubble.left")
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .privacySensitive()
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
+                    ForEach(snapshot.projects.prefix(projectLimit)) { project in
+                        if let url = ProjectWidgetLink.newChat(hostID: hostID, projectID: project.id, identity: identity) {
+                            Link(destination: url) { tile(project) }
+                                .accessibilityLabel("\(project.name), new chat")
                         }
                     }
                 }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
             if entry.isStale {
-                Text("Open Wonder to refresh saved links")
-                    .font(.caption2).foregroundStyle(.secondary)
+                Text("Open Wonder to refresh").font(.caption2).foregroundStyle(.secondary)
             }
         }
         .padding()
     }
 
-    private var emptyState: some View {
-        Group {
-            if family == .systemSmall {
-                VStack(alignment: .leading, spacing: 6) {
-                    Image(systemName: "square.stack.3d.up").foregroundStyle(.tint)
-                    Spacer(minLength: 0)
-                    Text("Choose a Project").font(.headline).lineLimit(2)
-                    Text("Edit widget to start").font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    Image(systemName: "square.stack.3d.up").foregroundStyle(.tint)
-                    Text("Wonder Projects").font(.headline)
-                    Text(emptyMessage)
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-            }
+    private func tile(_ project: ProjectWidgetSnapshot.Project) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "plus.bubble").foregroundStyle(.tint)
+            Text(project.name).font(.footnote.weight(.medium)).lineLimit(2).minimumScaleFactor(0.85).privacySensitive()
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .padding()
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .background(.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
     }
 
-    private var emptyMessage: String {
-        switch entry.emptyReason {
-        case .snapshotUnavailable: "Saved links unavailable. Open Wonder to refresh."
-        case .projectUnavailable: "Project unavailable. Choose another Project in widget settings."
-        default: "Choose a Project in widget settings."
-        }
-    }
-
-    private var savedLabel: Text {
-        guard let savedAt = entry.savedAt else { return Text("No saved links") }
-        if savedAt.timeIntervalSince(entry.date) > 5 * 60 { return Text("Saved links need refresh") }
-        let prefix = entry.isStale ? "Last saved" : "Saved"
-        return Text("\(prefix) \(savedAt.formatted(date: .abbreviated, time: .shortened))")
-    }
-
-    private var savedAccessibility: String {
-        guard let savedAt = entry.savedAt else { return "No saved links" }
-        if savedAt.timeIntervalSince(entry.date) > 5 * 60 { return "Saved links need refresh" }
-        return "\(entry.isStale ? "Last saved" : "Saved") \(savedAt.formatted(date: .abbreviated, time: .shortened))"
+    private func hostLabel(_ snapshot: ProjectWidgetSnapshot) -> some View {
+        Label(snapshot.hostName, systemImage: "laptopcomputer")
+            .font(.caption.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
+            .privacySensitive()
     }
 }
 
 struct WonderProjectWidget: Widget {
     var body: some WidgetConfiguration {
-        AppIntentConfiguration(kind: ProjectWidgetSnapshot.widgetKind, intent: WonderProjectWidgetConfiguration.self,
-                               provider: WonderProjectWidgetProvider()) { entry in
+        StaticConfiguration(kind: ProjectWidgetSnapshot.widgetKind, provider: WonderProjectWidgetProvider()) { entry in
             WonderProjectWidgetView(entry: entry)
         }
-        .configurationDisplayName("Project")
-        .description("Open a recent Project chat or start a new one.")
+        .configurationDisplayName("Recent Projects")
+        .description("Start a chat in a recent Project on your Mac, or view its screen.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge])
     }
 }

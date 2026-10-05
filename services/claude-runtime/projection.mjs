@@ -54,6 +54,66 @@ export function questionAnswer(original, normalized, response) {
 // ExitPlanMode carries the proposed plan as markdown. The conversation shows it
 // as a plan item shaped like Codex's ({ type, id, text }); a call without plan
 // text has nothing to show and produces no row.
+// Claude Code's shell and file tools use the same rows as Codex: a command
+// with its output, or a file change with its patch.
+const lines = text => String(text ?? "").replace(/\n$/, "").split("\n");
+const hunk = (before, after) => ["@@ @@", ...(before === "" ? [] : lines(before).map(l => `-${l}`)),
+  ...(after === "" ? [] : lines(after).map(l => `+${l}`))].join("\n");
+export function claudeToolItem(block, status) {
+  const input = block?.input ?? {};
+  if (block?.name === "Bash" && typeof input.command === "string" && input.command.trim()) {
+    return { type: "commandExecution", id: block.id, command: input.command, status };
+  }
+  const path = typeof input.file_path === "string" && input.file_path ? input.file_path : null;
+  if (!path) return null;
+  if (block.name === "Write" && typeof input.content === "string") {
+    return { type: "fileChange", id: block.id, status, changes: [{ path, kind: { type: "add" }, diff: input.content }] };
+  }
+  if (block.name === "Edit" && typeof input.old_string === "string" && typeof input.new_string === "string") {
+    return { type: "fileChange", id: block.id, status, changes: [{ path, kind: { type: "update" }, diff: hunk(input.old_string, input.new_string) }] };
+  }
+  if (block.name === "MultiEdit" && Array.isArray(input.edits)) {
+    const edits = input.edits.filter(e => typeof e?.old_string === "string" && typeof e?.new_string === "string");
+    if (edits.length) return { type: "fileChange", id: block.id, status,
+      changes: [{ path, kind: { type: "update" }, diff: edits.map(e => hunk(e.old_string, e.new_string)).join("\n") }] };
+  }
+  return null;
+}
+// Apply a tool result to a projected item, in place.
+export function applyClaudeToolResult(item, block) {
+  item.success = block.is_error !== true;
+  const contentItems = toolContent(block.content);
+  const text = contentItems.filter(c => c.type === "inputText").map(c => c.text).join("\n");
+  if (item.type === "commandExecution") {
+    item.aggregatedOutput = text;
+    item.status = item.success ? "completed" : "failed";
+    return;
+  }
+  if (item.type === "fileChange") {
+    item.status = item.success ? "completed" : "failed";
+    if (!item.success) item.error = { message: text || "Edit failed" };
+    return;
+  }
+  item.contentItems = contentItems;
+  item.result = { content: block.content ?? [] };
+  item.status = item.success ? "completed" : "failed";
+  if (!item.success) item.error = { message: text || "Tool failed" };
+}
+
+// Text written between tool calls is progress, like Codex commentary; only
+// text after the turn's last tool call is the reply. Returns changed items.
+export function markCommentary(items) {
+  const changed = [];
+  let workAfter = false;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type === "agentMessage") {
+      if (workAfter && item.phase !== "commentary") { item.phase = "commentary"; changed.push(item); }
+    } else if (!["userMessage", "plan"].includes(item.type)) workAfter = true;
+  }
+  return changed;
+}
+
 export function planItem(block, status) {
   const text = typeof block?.input?.plan === "string" ? block.input.plan : "";
   return text.trim() ? { type: "plan", id: block.id, text, status } : null;
@@ -164,11 +224,16 @@ export class TurnProjection {
       if (plan) this.finishItem(this.startItem(plan));
       return;
     }
+    // Text before this tool call was progress; restate it as commentary.
+    for (const item of markCommentary([...this.items.values(), { type: "tool" }])) {
+      if (item.status === "completed") this.notify("item/completed", { item: { ...item } });
+    }
     const wonder = block.name?.startsWith("mcp__wonder__") ? block.name.slice("mcp__wonder__".length) : null;
     const native = block.name?.startsWith("mcp__cua_repl__") ? block.name.slice("mcp__cua_repl__".length) : null;
     this.startItem(wonder
       ? { type: "dynamicToolCall", id: block.id, tool: wonder, arguments: block.input, status: "inProgress" }
-      : { type: "mcpToolCall", id: block.id, server: native ? "cua_repl" : "Claude", tool: native ?? block.name, arguments: block.input, status: "inProgress" });
+      : (!native && claudeToolItem(block, "inProgress"))
+        || { type: "mcpToolCall", id: block.id, server: native ? "cua_repl" : "Claude", tool: native ?? block.name, arguments: block.input, status: "inProgress" });
   }
   toolResult(block, result) {
     if (this.agentTools.has(block.tool_use_id)) {
@@ -177,10 +242,8 @@ export class TurnProjection {
     }
     const item = this.items.get(block.tool_use_id);
     if (!item || ["completed", "failed"].includes(item.status)) return;
-    item.success = block.is_error !== true;
-    item.contentItems = toolContent(block.content);
-    item.result = { content: block.content ?? [] };
-    if (!item.success) item.error = { message: item.contentItems.filter(c => c.type === "inputText").map(c => c.text).join("\n") || "Tool failed" };
+    applyClaudeToolResult(item, block);
+    item.status = "inProgress"; // finishItem publishes the terminal state.
     this.finishItem(item);
   }
   finish(status, error) {

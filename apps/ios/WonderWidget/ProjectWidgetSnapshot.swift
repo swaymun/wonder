@@ -1,37 +1,37 @@
 import Foundation
 
-/// The only data shared with WidgetKit. It contains navigation labels and
-/// opaque IDs, never message text, folder paths, credentials, or agent state.
+/// The only data shared with WidgetKit: the last-used Mac and its recent
+/// Projects as navigation labels and opaque IDs, never message text, folder
+/// paths, credentials, or agent state.
 struct ProjectWidgetSnapshot: Codable, Equatable, Sendable {
-    static let version = 1
+    static let version = 2
     static let widgetKind = "WonderProjectWidget"
     static let showNamesPreferenceKey = "wonder.widgets.showNames"
     static let staleAfter: TimeInterval = 60 * 60
     static let maxBytes = 32 * 1024
-
-    struct Chat: Codable, Equatable, Sendable, Identifiable {
-        let id: String
-        let title: String
-    }
+    static let maxProjects = 8
 
     struct Project: Codable, Equatable, Sendable, Identifiable {
-        let hostID: String
         let id: String
         let name: String
-        let recentChats: [Chat]
-
-        var selectionID: String { "\(hostID)/\(id)" }
     }
 
     let schemaVersion: Int
     let savedAt: Date
     let showNamesOnWidgets: Bool
+    /// The Mac last used for a new chat; nil when none is paired.
+    let hostID: String?
+    let hostName: String
+    /// That Mac's Projects, most recently used first.
     let projects: [Project]
 
-    init(savedAt: Date = Date(), showNamesOnWidgets: Bool = false, projects: [Project]) {
+    init(savedAt: Date = Date(), showNamesOnWidgets: Bool = false, hostID: String?, hostName: String,
+         projects: [Project]) {
         self.schemaVersion = Self.version
         self.savedAt = savedAt
         self.showNamesOnWidgets = showNamesOnWidgets
+        self.hostID = hostID
+        self.hostName = hostName
         self.projects = projects
     }
 
@@ -39,26 +39,20 @@ struct ProjectWidgetSnapshot: Codable, Equatable, Sendable {
     /// is a data boundary, not a source of trusted URLs or unbounded view text.
     func validated() -> Self? {
         guard schemaVersion == Self.version, savedAt.timeIntervalSince1970.isFinite else { return nil }
-        var seenProjects = Set<String>()
-        var safeProjects: [Project] = []
-        for project in projects {
-            if safeProjects.count == 10 { break }
-            guard ProjectWidgetLink.validID(project.hostID), ProjectWidgetLink.validID(project.id),
-                  seenProjects.insert(project.selectionID).inserted else { continue }
-            var seenChats = Set<String>()
-            var chats: [Chat] = []
-            for chat in project.recentChats {
-                if chats.count == 3 { break }
-                guard ProjectWidgetLink.validID(chat.id), seenChats.insert(chat.id).inserted else { continue }
-                let title = showNamesOnWidgets ? Self.safeLabel(chat.title, fallback: "Recent chat") :
-                    "Recent chat \(chats.count + 1)"
-                chats.append(Chat(id: chat.id, title: title))
-            }
-            let name = showNamesOnWidgets ? Self.safeLabel(project.name, fallback: "Project") :
-                "Project \(safeProjects.count + 1)"
-            safeProjects.append(Project(hostID: project.hostID, id: project.id, name: name, recentChats: chats))
+        guard let hostID, ProjectWidgetLink.validID(hostID) else {
+            return Self(savedAt: savedAt, showNamesOnWidgets: showNamesOnWidgets, hostID: nil, hostName: "Mac", projects: [])
         }
-        return Self(savedAt: savedAt, showNamesOnWidgets: showNamesOnWidgets, projects: safeProjects)
+        var seen = Set<String>()
+        var safe: [Project] = []
+        for project in projects {
+            if safe.count == Self.maxProjects { break }
+            guard ProjectWidgetLink.validID(project.id), seen.insert(project.id).inserted else { continue }
+            let name = showNamesOnWidgets ? Self.safeLabel(project.name, fallback: "Project") :
+                "Project \(safe.count + 1)"
+            safe.append(Project(id: project.id, name: name))
+        }
+        let host = showNamesOnWidgets ? Self.safeLabel(hostName, fallback: "Mac") : "Mac"
+        return Self(savedAt: savedAt, showNamesOnWidgets: showNamesOnWidgets, hostID: hostID, hostName: host, projects: safe)
     }
 
     func isStale(at date: Date) -> Bool {
@@ -98,6 +92,11 @@ enum ProjectWidgetLink {
         return url(path: "/hosts/\(hostID)/projects/\(projectID)/new", identity: identity)
     }
 
+    static func computer(hostID: String, identity: ProjectWidgetIdentity) -> URL? {
+        guard validID(hostID) else { return nil }
+        return url(path: "/hosts/\(hostID)/computer", identity: identity)
+    }
+
     static func chat(hostID: String, chatID: String, identity: ProjectWidgetIdentity) -> URL? {
         guard validID(hostID), validID(chatID) else { return nil }
         return url(path: "/hosts/\(hostID)/chats/\(chatID)", identity: identity)
@@ -120,7 +119,7 @@ enum ProjectWidgetLink {
 }
 
 enum ProjectWidgetSnapshotStore {
-    private static let fileName = "project-widget-snapshot-v1.json"
+    private static let fileName = "project-widget-snapshot-v2.json"
 
     static func containerURL(bundleIdentifier: String?) -> URL? {
         guard let identity = ProjectWidgetIdentity(bundleIdentifier: bundleIdentifier),

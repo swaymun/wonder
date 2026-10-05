@@ -145,3 +145,85 @@ public struct ResponseEditedFiles: Sendable {
         }, uniquingKeysWith: { first, _ in first })
     }
 }
+
+/// One line of a unified diff, numbered for display. Hunk headers without
+/// line numbers (as Claude's edits produce) leave the numbers unknown.
+public struct DiffLine: Equatable, Sendable, Identifiable {
+    public enum Kind: Sendable { case context, added, removed, hunk, note }
+    public let id: Int
+    public let kind: Kind
+    public let oldNumber: Int?
+    public let newNumber: Int?
+    public let text: String
+
+    public static func parse(_ diff: String, limit: Int = 20_000) -> [DiffLine] {
+        var lines: [DiffLine] = []
+        var old: Int?, new: Int?
+        for raw in diff.split(separator: "\n", omittingEmptySubsequences: false).prefix(limit) {
+            let line = String(raw)
+            let id = lines.count
+            if line.hasPrefix("@@") {
+                let numbers = hunkStarts(line)
+                old = numbers?.0; new = numbers?.1
+                lines.append(DiffLine(id: id, kind: .hunk, oldNumber: nil, newNumber: nil, text: line))
+            } else if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("diff ") || line.hasPrefix("index ") {
+                lines.append(DiffLine(id: id, kind: .note, oldNumber: nil, newNumber: nil, text: line))
+            } else if line.hasPrefix("Edit "), line.dropFirst(5).allSatisfy(\.isNumber) {
+                old = nil; new = nil
+                lines.append(DiffLine(id: id, kind: .note, oldNumber: nil, newNumber: nil, text: line))
+            } else if line.hasPrefix("+") {
+                lines.append(DiffLine(id: id, kind: .added, oldNumber: nil, newNumber: new, text: String(line.dropFirst())))
+                new = new.map { $0 + 1 }
+            } else if line.hasPrefix("-") {
+                lines.append(DiffLine(id: id, kind: .removed, oldNumber: old, newNumber: nil, text: String(line.dropFirst())))
+                old = old.map { $0 + 1 }
+            } else if line.hasPrefix("\\") {
+                lines.append(DiffLine(id: id, kind: .note, oldNumber: nil, newNumber: nil, text: line))
+            } else {
+                // A blank line at the very end is the patch's trailing newline.
+                if line.isEmpty, raw.endIndex == diff.endIndex { continue }
+                lines.append(DiffLine(id: id, kind: .context, oldNumber: old, newNumber: new,
+                                      text: line.hasPrefix(" ") ? String(line.dropFirst()) : line))
+                old = old.map { $0 + 1 }; new = new.map { $0 + 1 }
+            }
+        }
+        return lines
+    }
+
+    private static func hunkStarts(_ header: String) -> (Int, Int)? {
+        // @@ -12,3 +12,4 @@
+        let parts = header.split(separator: " ")
+        guard parts.count >= 3, parts[1].hasPrefix("-"), parts[2].hasPrefix("+"),
+              let old = Int(parts[1].dropFirst().split(separator: ",")[0]),
+              let new = Int(parts[2].dropFirst().split(separator: ",")[0]) else { return nil }
+        return (old, new)
+    }
+}
+
+/// Side-by-side rows: each removal pairs with the addition that replaced it.
+public struct SplitDiffRow: Equatable, Sendable, Identifiable {
+    public let id: Int
+    public let left: DiffLine?
+    public let right: DiffLine?
+
+    public static func pair(_ lines: [DiffLine]) -> [SplitDiffRow] {
+        var rows: [SplitDiffRow] = []
+        var removed: [DiffLine] = [], added: [DiffLine] = []
+        func flush() {
+            for index in 0..<max(removed.count, added.count) {
+                rows.append(SplitDiffRow(id: rows.count, left: index < removed.count ? removed[index] : nil,
+                                         right: index < added.count ? added[index] : nil))
+            }
+            removed = []; added = []
+        }
+        for line in lines {
+            switch line.kind {
+            case .removed: if !added.isEmpty { flush() }; removed.append(line)
+            case .added: added.append(line)
+            default: flush(); rows.append(SplitDiffRow(id: rows.count, left: line, right: line))
+            }
+        }
+        flush()
+        return rows
+    }
+}

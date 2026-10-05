@@ -4,7 +4,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { planItem, toolContent } from "./projection.mjs";
+import { applyClaudeToolResult, claudeToolItem, markCommentary, planItem, toolContent } from "./projection.mjs";
 
 const textOf = content => typeof content === "string" ? content
   : Array.isArray(content) ? content.filter(b => b?.type === "text").map(b => b.text ?? "").join("\n") : "";
@@ -37,10 +37,8 @@ export function nativeTurns(messages, journal = [], active = false) {
       for (const block of results) {
         const item = tools.get(block.tool_use_id);
         if (!item) continue;
-        item.success = block.is_error !== true;
-        item.status = item.success ? "completed" : "failed";
-        item.contentItems = toolContent(block.content);
-        if (!item.success) item.error = { message: item.contentItems.filter(c => c.type === "inputText").map(c => c.text).join("\n") || "Tool failed" };
+        applyClaudeToolResult(item, block);
+        if (item.type === "mcpToolCall") delete item.result;
       }
       const text = textOf(content);
       if (results.length || !text.trim() || syntheticUser(entry)) continue;
@@ -65,12 +63,14 @@ export function nativeTurns(messages, journal = [], active = false) {
         const plan = planItem(block, "completed");
         if (plan) turn.items.push(plan);
       } else if (block?.type === "tool_use" && !["Agent", "Task"].includes(block.name)) {
-        const item = { type: "mcpToolCall", id: block.id, server: "Claude", tool: block.name, arguments: block.input ?? {}, status: "completed" };
+        const item = claudeToolItem(block, "completed")
+          ?? { type: "mcpToolCall", id: block.id, server: "Claude", tool: block.name, arguments: block.input ?? {}, status: "completed" };
         tools.set(block.id, item);
         turn.items.push(item);
       }
     }
   }
+  for (const t of turns) markCommentary(t.items);
   const last = turns.at(-1);
   for (const t of turns) if (t.interrupted) { t.status = "interrupted"; delete t.interrupted; }
   if (last && active) last.status = "inProgress";
@@ -94,8 +94,15 @@ const taskStatus = status => ({ completed: "completed", failed: "failed", error:
 // Agent tasks and background commands, newest first, for the agent-task list.
 // A task still marked running in a session that is no longer working on the
 // Mac lost its completion notice; its state is unknown, not running.
-export function backgroundTasks(messages, live = false) {
+export function backgroundTasks(messages, live = false, agentFiles = []) {
   const tasks = new Map();
+  // Claude Code's task files outlive compaction; transcript entries refine them.
+  for (const file of [...agentFiles].sort((a, b) => String(a.startedAt ?? "").localeCompare(String(b.startedAt ?? "")))) {
+    tasks.set(file.toolUseId, { id: file.toolUseId, kind: "agent", background: file.background,
+      title: bounded(file.description, 200) ?? "Agent task", role: bounded(file.agentType, 80),
+      status: file.finished ? "completed" : "running", request: null, summary: null, result: null,
+      outputFile: null, taskId: file.agentId, startedAt: file.startedAt ?? null });
+  }
   for (const entry of messages) {
     if (entry?.parent_tool_use_id) continue;
     const content = entry?.message?.content;
@@ -103,13 +110,14 @@ export function backgroundTasks(messages, live = false) {
       for (const block of content) {
         if (block?.type !== "tool_use" || typeof block.id !== "string") continue;
         const agent = ["Agent", "Task"].includes(block.name);
-        const background = block.input?.run_in_background === true;
+        const known = tasks.get(block.id);
+        const background = block.input?.run_in_background === true || known?.background === true;
         if (!agent && !background) continue;
-        tasks.set(block.id, { id: block.id, kind: agent ? "agent" : "command", background,
-          title: bounded(block.input?.description, 200) ?? (agent ? "Agent task" : "Background command"),
-          role: agent ? bounded(block.input?.subagent_type, 80) : null, status: "running",
+        tasks.set(block.id, { ...known, id: block.id, kind: agent ? "agent" : "command", background,
+          title: bounded(block.input?.description, 200) ?? known?.title ?? (agent ? "Agent task" : "Background command"),
+          role: agent ? bounded(block.input?.subagent_type, 80) ?? known?.role ?? null : null, status: known?.status ?? "running",
           request: bounded(agent ? block.input?.prompt : block.input?.command, 8000),
-          summary: null, result: null, outputFile: null, taskId: null, startedAt: entry.timestamp ?? null });
+          summary: null, result: null, outputFile: null, taskId: known?.taskId ?? null, startedAt: entry.timestamp ?? known?.startedAt ?? null });
       }
     }
     if (entry?.type !== "user") continue;
@@ -117,16 +125,30 @@ export function backgroundTasks(messages, live = false) {
       const task = block?.type === "tool_result" ? tasks.get(block.tool_use_id) : null;
       if (!task) continue;
       const text = bounded(toolContent(block.content).filter(c => c.type === "inputText").map(c => c.text).join("\n"), 32_000);
+      // Claude Code may run an agent in the background without the explicit flag;
+      // its immediate result only acknowledges the launch.
+      if (task.kind === "agent" && /^Async agent launched/i.test(text ?? "")) { task.background = true; continue; }
       // A background launch only acknowledges the start; the notice carries its outcome.
       if (block.is_error === true) { task.status = "failed"; task.result = text; }
       else if (!task.background) { task.status = "completed"; task.result = text; }
     }
     const notice = taskNotification(entry);
-    const task = notice?.toolUseId ? tasks.get(notice.toolUseId) : null;
-    if (task) Object.assign(task, { status: taskStatus(notice.status), summary: bounded(notice.summary, 2000),
-      outputFile: notice.outputFile, taskId: notice.taskId });
+    if (!notice?.toolUseId) continue;
+    let task = tasks.get(notice.toolUseId);
+    if (!task) {
+      // The launch scrolled out of the readable transcript; the notice still names the task.
+      task = { id: notice.toolUseId, kind: "command", background: true,
+        title: bounded(notice.summary?.match(/"([^"]{1,200})"/)?.[1], 200) ?? "Background task", role: null,
+        status: "running", request: null, summary: null, result: null, outputFile: null, taskId: null, startedAt: entry.timestamp ?? null };
+      tasks.set(notice.toolUseId, task);
+    }
+    Object.assign(task, { status: taskStatus(notice.status), summary: bounded(notice.summary, 2000),
+      outputFile: notice.outputFile, taskId: notice.taskId ?? task.taskId });
   }
-  const list = [...tasks.values()].reverse().slice(0, 100);
+  const list = [...tasks.values()]
+    .map((task, order) => ({ task, order }))
+    .sort((a, b) => String(b.task.startedAt ?? "").localeCompare(String(a.task.startedAt ?? "")) || b.order - a.order)
+    .map(({ task }) => task).slice(0, 100);
   if (!live) for (const task of list) if (task.status === "running") task.status = "unknown";
   return list;
 }

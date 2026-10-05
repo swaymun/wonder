@@ -25,6 +25,7 @@ mod computer_runtime;
 pub mod computer_sessions;
 mod computer_tools;
 mod connected_apps;
+mod desktop_activity;
 pub mod dispatch;
 pub mod file_access;
 mod filesystem;
@@ -1142,6 +1143,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/conversations/{conversation_id}/history/refresh",
             get(history_refresh_status).post(refresh_history),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/history/activity",
+            get(history::history_activity),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/composer-options",

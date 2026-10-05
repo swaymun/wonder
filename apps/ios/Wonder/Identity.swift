@@ -51,7 +51,11 @@ import WonderPairing
         }
         #endif
         load()
+        // The widget follows the Mac last used for a new chat.
+        lastHostObservation = NotificationCenter.default.publisher(for: NewChatDraftStore.lastHostChanged)
+            .sink { [weak self] _ in self?.scheduleWidgetSnapshot() }
     }
+    private var lastHostObservation: AnyCancellable?
 
     func load() {
         guard !loaded else { return }

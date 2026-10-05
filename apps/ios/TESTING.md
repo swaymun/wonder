@@ -92,15 +92,17 @@ codes and result bundles under `.local/`, then remove the files and revoke the
 exact simulator device in Mac Settings. Neither a skipped test nor a visible
 player alone establishes playback acceptance.
 
-The opt-in medium recent-chat Widget UI checks require a disposable Wonder
-Testing simulator with a synthetic App Group snapshot. Set
-`WONDER_WIDGET_RECENT_QA=1` and `WONDER_WIDGET_QA_DEVICE_NAME` to that simulator's
-exact `SIMULATOR_DEVICE_NAME`; the tests skip on a different device or the
-production app. The placement check changes the simulator Home Screen. After
-the tap check, run `testRemoveMediumProjectWidgetAfterRecentChatQA` for the
-exact medium card and restore that simulator's prior App Group snapshot. A
-direct deep-link test or Widget editor selection alone does
-not verify the configured Home Screen tap.
+The opt-in medium Recent Projects Widget UI checks require a disposable Wonder
+Testing simulator with a synthetic App Group snapshot
+(`project-widget-snapshot-v2.json`: the last-used Mac's ID, generic labels and
+its Projects). Set `WONDER_WIDGET_RECENT_QA=1` and `WONDER_WIDGET_QA_DEVICE_NAME`
+to that simulator's exact `SIMULATOR_DEVICE_NAME`; the tests skip on a different
+device or the production app. The placement check changes the simulator Home
+Screen; the Widget needs no configuration. The tap check opens a Project tile
+(a new chat in that Project) and View computer (that Mac's screen). Afterwards
+run `testRemoveMediumProjectWidgetAfterRecentChatQA` for the exact medium card
+and restore that simulator's prior App Group snapshot. A direct deep-link test
+alone does not verify the Home Screen tap.
 
 Focused Project Files UI checks open Files inside the conversation, then a
 file or diff in the same area. The composer stays available; Full screen and

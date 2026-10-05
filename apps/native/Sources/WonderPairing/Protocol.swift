@@ -176,33 +176,39 @@ public final class PairingAPI: Sendable {
         request.httpShouldHandleCookies = false
         request.setValue(origin, forHTTPHeaderField: "Origin")
         request.setValue("__Host-wonder_session=\(connection.credential.sessionToken)", forHTTPHeaderField: "Cookie")
-        let (bytes, response) = try await session.bytes(for: request)
-        defer { bytes.task.cancel() }
+        // Download to a file and map it: a large PDF or image never needs a
+        // second full copy in memory while it arrives.
+        let watcher = WorkspaceDownloadProgress(limit: limit, byteSize: byteSize, progress: progress)
+        progress?(0, byteSize)
+        let session = session
+        let (file, response): (URL, URLResponse) = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.downloadTask(with: request) { location, response, error in
+                    watcher.finish()
+                    if let error { continuation.resume(throwing: watcher.exceeded ? FileFailure.tooLarge : error); return }
+                    guard let location, let response else { continuation.resume(throwing: URLError(.badServerResponse)); return }
+                    // The system removes its file when this handler returns.
+                    let kept = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("wonder-preview-" + UUID().uuidString)
+                    do {
+                        try FileManager.default.moveItem(at: location, to: kept)
+                        continuation.resume(returning: (kept, response))
+                    } catch { continuation.resume(throwing: error) }
+                }
+                watcher.start(task)
+            }
+        } onCancel: { watcher.cancel() }
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw status == 413 ? FileFailure.tooLarge : PairingFailure.response(status)
         }
-        let length = http.value(forHTTPHeaderField: "Content-Length").flatMap(Int.init)
-        if let length, length > limit { throw FileFailure.tooLarge }
-        let expected = length ?? byteSize
-        var data = Data()
-        data.reserveCapacity(min(expected ?? 0, limit))
-        // Append in chunks; a byte-at-a-time Data append is too slow for large files.
-        let chunkSize = 1024 * 1024
-        var chunk = [UInt8](); chunk.reserveCapacity(chunkSize)
-        progress?(0, expected)
-        for try await byte in bytes {
-            chunk.append(byte)
-            if chunk.count == chunkSize {
-                guard data.count + chunk.count <= limit else { throw FileFailure.tooLarge }
-                data.append(contentsOf: chunk); chunk.removeAll(keepingCapacity: true)
-                progress?(data.count, expected)
-                try Task.checkCancellation()
-            }
-        }
-        guard data.count + chunk.count <= limit else { throw FileFailure.tooLarge }
-        data.append(contentsOf: chunk)
-        progress?(data.count, expected)
+        let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size <= limit else { throw FileFailure.tooLarge }
+        // A mapped file stays readable after its directory entry is removed.
+        let data = size == 0 ? Data() : try Data(contentsOf: file, options: .alwaysMapped)
+        progress?(data.count, data.count)
         guard byteSize == nil || byteSize == data.count,
               sha256 == nil || sha256 == ConversationFile.digest(data) else { throw FileFailure.integrity }
         if let mimeType { try ConversationFile.validateContent(data, mime: mimeType) }
@@ -318,4 +324,59 @@ public final class PairingAPI: Sendable {
         return value
     }
 
+}
+
+
+/// Reports a workspace download's progress and stops one that grows past the limit.
+final class WorkspaceDownloadProgress: @unchecked Sendable {
+    private let limit: Int
+    private let byteSize: Int?
+    private let progress: (@Sendable (_ received: Int, _ expected: Int?) -> Void)?
+    private let lock = NSLock()
+    private var task: URLSessionDownloadTask?
+    private var observation: NSKeyValueObservation?
+    private var cancelled = false
+    private var tooLarge = false
+    private var lastReported = 0
+    var exceeded: Bool { lock.withLock { tooLarge } }
+
+    init(limit: Int, byteSize: Int?, progress: (@Sendable (_ received: Int, _ expected: Int?) -> Void)?) {
+        self.limit = limit; self.byteSize = byteSize; self.progress = progress
+    }
+    func start(_ task: URLSessionDownloadTask) {
+        let observation = task.observe(\.countOfBytesReceived, options: [.new]) { [weak self] task, _ in
+            self?.received(Int(clamping: task.countOfBytesReceived), Int(clamping: task.countOfBytesExpectedToReceive), task)
+        }
+        let cancel = lock.withLock { () -> Bool in
+            self.task = task; self.observation = observation
+            return cancelled
+        }
+        if cancel { task.cancel() } else { task.resume() }
+    }
+    func cancel() {
+        let task = lock.withLock { () -> URLSessionDownloadTask? in cancelled = true; return self.task }
+        task?.cancel()
+    }
+    func finish() {
+        let observation = lock.withLock { () -> NSKeyValueObservation? in
+            defer { self.observation = nil }
+            return self.observation
+        }
+        observation?.invalidate()
+    }
+    private func received(_ received: Int, _ reported: Int, _ task: URLSessionDownloadTask) {
+        let expected = reported > 0 ? reported : byteSize
+        if received > limit || (expected ?? 0) > limit {
+            lock.withLock { tooLarge = true }
+            task.cancel()
+            return
+        }
+        // About every 256 KB; the UI coalesces further.
+        let report = lock.withLock { () -> Bool in
+            guard received - lastReported >= 256 * 1024 || received == expected else { return false }
+            lastReported = received
+            return true
+        }
+        if report { progress?(received, expected) }
+    }
 }

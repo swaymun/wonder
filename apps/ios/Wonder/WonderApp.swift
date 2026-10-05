@@ -269,6 +269,24 @@ struct ProviderUsageView: View {
     }
 }
 
+/// Usage refreshes on its own while visible: cached values first, then a fresh
+/// check every minute until the section disappears.
+enum UsageAutoRefresh {
+    /// Values older than this are fetched again; a restarted view keeps the pace.
+    static var maxAge: TimeInterval {
+        #if WONDER_DIAGNOSTICS
+        if ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-fast-refresh") { return 2 }
+        #endif
+        return 60
+    }
+    @MainActor static func run(_ load: @MainActor (Bool) async -> Void) async {
+        while !Task.isCancelled {
+            await load(false)
+            try? await Task.sleep(for: .seconds(maxAge))
+        }
+    }
+}
+
 private struct CodexUsageSection: View {
     @ObservedObject var model: ConnectionModel
     @State private var loading = false
@@ -297,19 +315,21 @@ private struct CodexUsageSection: View {
             if loading {
                 ProgressView("Loading usage…").accessibilityIdentifier("codex-usage-loading")
             } else if failure == nil && windows.isEmpty && model.codexUsageCache[model.assignmentScope] != nil {
-                Text("Codex returned no usage windows. Try refreshing after checking sign-in on your Mac.").foregroundStyle(.secondary)
+                Text("Codex returned no usage windows. Check Codex sign-in on your Mac.").foregroundStyle(.secondary)
             } else if failure == nil && windows.isEmpty {
                 Text("Usage is unavailable right now.").foregroundStyle(.secondary)
             }
-            Button(failure == nil ? "Refresh Codex usage" : "Try again") {
-                Task { await load(force: true) }
+            if failure != nil {
+                Button("Try again") { Task { await load(force: true) } }
+                    .disabled(loading)
+                    .accessibilityIdentifier("codex-usage-retry")
             }
-            .disabled(loading)
-            .accessibilityIdentifier(failure == nil ? "codex-usage-refresh" : "codex-usage-retry")
         } header: {
             Text("Codex usage").accessibilityIdentifier("codex-usage-section")
         }
-        .task(id: model.assignmentScope) { await load(force: false) }
+        .task(id: model.assignmentScope) {
+            await UsageAutoRefresh.run { force in await load(force: force) }
+        }
         .onChange(of: model.accessEnded) { _, ended in
             if ended { failure = "Access ended. Reconnect this Mac to check usage." }
         }
@@ -321,7 +341,7 @@ private struct CodexUsageSection: View {
         loading = true
         defer { if scope == model.assignmentScope { loading = false } }
         do {
-            try await model.loadCodexUsage(force: force)
+            try await model.loadUsage(family: .codex, force: force, maxAge: UsageAutoRefresh.maxAge)
         } catch {
             guard scope == model.assignmentScope, !model.accessEnded else { return }
             if case PairingFailure.response(404) = error {
@@ -356,19 +376,25 @@ private struct ClaudeUsageSection: View {
                     .accessibilityValue("\(window.roundedRemainingPercent)% left")
                 }
             } else if loading { ProgressView("Loading usage…") }
-            if let failure { Text(failure).foregroundStyle(.secondary) }
-            Button("Refresh Claude usage") { Task { await load(force: true) } }.disabled(loading)
+            if let failure {
+                Text(failure).foregroundStyle(.secondary)
+                Button("Try again") { Task { await load(force: true) } }
+                    .disabled(loading)
+                    .accessibilityIdentifier("claude-usage-retry")
+            }
         } header: { Text("Claude usage").accessibilityIdentifier("claude-usage-section") }
-        .task(id: model.assignmentScope) { await load(force: false) }
+        .task(id: model.assignmentScope) {
+            await UsageAutoRefresh.run { force in await load(force: force) }
+        }
     }
     private func load(force: Bool) async {
         let scope = model.assignmentScope
         loading = true; failure = nil
         defer { if scope == model.assignmentScope { loading = false } }
-        do { try await model.loadUsage(family: .claude, force: force) }
+        do { try await model.loadUsage(family: .claude, force: force, maxAge: UsageAutoRefresh.maxAge) }
         catch {
             guard scope == model.assignmentScope, !model.accessEnded else { return }
-            failure = "Claude usage couldn’t be loaded. Check your Claude sign-in in Wonder on your Mac, then refresh."
+            failure = "Claude usage couldn’t be loaded. Check your Claude sign-in in Wonder on your Mac, then try again."
         }
     }
 }
@@ -601,9 +627,24 @@ struct ConnectedAppsView: View {
                 if loading { ProgressView("Checking apps…") }
                 else if cursor != nil { Button("Load more") { Task { await load(more: true) } } }
                 else if apps.isEmpty && failure == nil { Text("No apps were found for this scope.").foregroundStyle(.secondary) }
-            } footer: {
                 if (reportedFamily ?? selectedFamily) == .claude {
-                    Link("Manage Claude connections", destination: URL(string: "https://claude.ai/settings/connectors")!)
+                    Link(destination: URL(string: "https://claude.ai/settings/connectors")!) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "slider.horizontal.3")
+                                .frame(width: 32, height: 32)
+                                .foregroundStyle(.secondary)
+                                .accessibilityHidden(true)
+                            Text("Manage Claude connections")
+                            Spacer(minLength: 8)
+                            Image(systemName: "arrow.up.right")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                                .accessibilityHidden(true)
+                        }
+                        .foregroundStyle(.primary)
+                    }
+                    .accessibilityIdentifier("connected-apps-manage-claude")
+                    .accessibilityHint("Opens claude.ai in your browser")
                 }
             }
         }

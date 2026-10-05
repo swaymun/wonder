@@ -1512,6 +1512,72 @@ pub(super) async fn history_refresh_status(
     }
 }
 
+/// The newest native turn and whether an app on the Mac is running it. Cheap
+/// enough to poll while a conversation is open; it reads no items.
+pub(super) async fn history_activity(
+    State(state): State<AppState>,
+    Path(conversation): Path<String>,
+) -> Response {
+    if !crate::projects::is_project(&state, &conversation).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let thread = match state.store.conversation_thread(&conversation).await {
+        Ok(Some(thread)) => thread,
+        // A new Project chat has no native session until its first message.
+        Ok(None) => {
+            return Json(serde_json::json!({"latestTurnId": null, "latestTurnStatus": "none", "runningElsewhere": false}))
+                .into_response()
+        }
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let Ok(runtime) = crate::claude::for_thread(&state, &thread).await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Ok(response) = runtime
+        .request(
+            "thread/turns/list",
+            serde_json::json!({"threadId": thread, "limit": 1, "itemsView": "notLoaded"}),
+        )
+        .await
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let latest = response
+        .result
+        .as_ref()
+        .and_then(|result| result.get("data"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|turns| turns.first());
+    let id = latest
+        .and_then(|turn| turn.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let mut status = NativeTurnStatus {
+        status: latest
+            .and_then(|turn| turn.get("status"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("none")
+            .to_owned(),
+        running_elsewhere: latest
+            .and_then(|turn| turn.get("runningElsewhere"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
+    };
+    if let (Some(id), false) = (&id, thread.starts_with("claude-")) {
+        let mut statuses = HashMap::from([(id.clone(), status.clone())]);
+        mark_codex_desktop_turn(&runtime, &thread, &mut statuses).await;
+        if let Some(marked) = statuses.remove(id) {
+            status = marked;
+        }
+    }
+    Json(serde_json::json!({
+        "latestTurnId": id,
+        "latestTurnStatus": status.status,
+        "runningElsewhere": status.running_elsewhere,
+    }))
+    .into_response()
+}
+
 /// The receipt acknowledges a refresh job, never completed hydration. Readers
 /// keep serving local pages; failures retain saved history and can be retried.
 pub(super) async fn refresh_history(
@@ -1787,6 +1853,7 @@ async fn mark_codex_desktop_turn(
     let Some(path) = thread_value.get("path").and_then(serde_json::Value::as_str) else {
         return;
     };
+    crate::desktop_activity::remember_codex_rollout(thread, path);
     let path = std::path::PathBuf::from(path);
     let Some(turn) = tokio::task::spawn_blocking(move || {
         codex_rollout_open_turn(&path, std::time::SystemTime::now())

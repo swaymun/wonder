@@ -2047,10 +2047,9 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(model.projects.threads["project"]?.threads.compactMap(\.conversationId),
                        ["second-chat", "draft-chat", "started-chat"], "Locally created rows must keep their sidebar order")
         let library = ConnectionLibrary(diagnosticModel: model)
-        let project = try XCTUnwrap(ProjectWidgetSnapshotPublisher.projectRows(from: library).first)
-        XCTAssertEqual(project.id, "project")
-        XCTAssertEqual(project.recentChats.map(\.id), ["second-chat", "draft-chat", "started-chat"])
-        XCTAssertEqual(project.recentChats.dropFirst().first?.title, "Revised draft")
+        let (hostID, _, projects) = ProjectWidgetSnapshotPublisher.lastMacRows(from: library)
+        XCTAssertEqual(hostID, model.connection?.credential.hostInstallationId, "The widget follows the paired Mac")
+        XCTAssertEqual(projects.map(\.id), ["project"])
     }
 
     @MainActor private func prepareProject(_ model: ConnectionModel) async throws {

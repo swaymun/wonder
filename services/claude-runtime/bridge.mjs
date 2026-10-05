@@ -6,6 +6,7 @@ import { baseOptions, inspectSdk, isSubscription } from "./sdk-runtime.mjs";
 import { ToolPolicy, closeCommandSandbox, toolCallKey } from "./permissions.mjs";
 import { createNativeCua } from "./native-cua.mjs";
 import { backgroundTasks, claudeSessionBusy, nativeTurns, sessionSummary } from "./project-history.mjs";
+import { ClaudeSessionFiles } from "./session-file.mjs";
 import { lstat, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
 
@@ -102,8 +103,10 @@ async function sdkInput(input, policy) {
 }
 
 export class ClaudeBridge {
-  constructor({ updates, sessions, send, inspect = inspectSdk, onFatal = () => {}, claudeSessionsDir = undefined }) {
+  constructor({ updates, sessions, send, inspect = inspectSdk, onFatal = () => {}, claudeSessionsDir = undefined, claudeProjectsDir = undefined }) {
     Object.assign(this, { updates, sessions, send, inspect, onFatal, claudeSessionsDir });
+    this.sessionFiles = new ClaudeSessionFiles(claudeProjectsDir);
+    this.transcripts = new Map();
     this.active = new Map(); this.pending = new Map(); this.inspection = null; this.inspectionAt = 0;
   }
   async catalog(refresh = false) {
@@ -182,8 +185,7 @@ export class ClaudeBridge {
       return page(selected.flatMap(t => t.items.map(item => ({ turnId: t.id, item }))), params);
     }
     if (session.options.wonderProject && method === "thread/backgroundTasks/list") {
-      const { messages, desktop } = await this.projectMessages(session);
-      const tasks = backgroundTasks(messages, desktop || this.active.has(session.id));
+      const tasks = await this.projectTasks(session);
       return { data: tasks.map(({ request, result, outputFile, ...summary }) => summary) };
     }
     if (session.options.wonderProject && method === "thread/backgroundTask/read") return this.backgroundTask(session, params.taskId);
@@ -296,10 +298,29 @@ export class ClaudeBridge {
   }
   async projectMessages(session) {
     if (!session.sdkStarted) return { messages: [], desktop: false };
-    const messages = await this.withSdk(sdk => sdk.getSessionMessages(session.sdkSessionId, { dir: session.options.wonderProject.cwd }));
+    const cwd = session.options.wonderProject.cwd;
+    // History pages call this repeatedly; reuse the read until the transcript changes.
+    const stamp = await this.sessionFiles.stamp(session.sdkSessionId, cwd);
+    const cached = this.transcripts.get(session.sdkSessionId);
+    let messages;
+    if (stamp && cached?.stamp === stamp) messages = cached.messages;
+    else {
+      const recent = await this.withSdk(sdk => sdk.getSessionMessages(session.sdkSessionId, { dir: cwd }));
+      // The SDK reader begins at the latest compaction; keep the turns before it.
+      const earlier = recent.length ? await this.sessionFiles.earlierMessages(session.sdkSessionId, cwd, recent[0].uuid) : [];
+      messages = earlier.length ? [...earlier, ...recent] : recent;
+      this.transcripts.delete(session.sdkSessionId);
+      if (stamp) this.transcripts.set(session.sdkSessionId, { stamp, messages });
+      while (this.transcripts.size > 4) this.transcripts.delete(this.transcripts.keys().next().value);
+    }
     // A turn started on the Mac (Claude desktop or terminal) is running there.
     const desktop = !this.active.has(session.id) && await claudeSessionBusy(session.sdkSessionId, this.claudeSessionsDir);
     return { messages, desktop };
+  }
+  async projectTasks(session) {
+    const { messages, desktop } = await this.projectMessages(session);
+    const files = session.sdkStarted ? await this.sessionFiles.agentTasks(session.sdkSessionId, session.options.wonderProject.cwd) : [];
+    return backgroundTasks(messages, desktop || this.active.has(session.id), files);
   }
   async projectTurns(session) {
     if (!session.sdkStarted) return session.turns;
@@ -311,17 +332,30 @@ export class ClaudeBridge {
   // Read-only detail for one agent task or background command.
   async backgroundTask(session, taskId) {
     if (typeof taskId !== "string" || !taskId || taskId.length > 256) throw new Error("Choose an agent task.");
-    const { messages, desktop } = await this.projectMessages(session);
-    const task = backgroundTasks(messages, desktop || this.active.has(session.id)).find(t => t.id === taskId);
+    const task = (await this.projectTasks(session)).find(t => t.id === taskId);
     if (!task) throw new Error("This agent task is no longer in the conversation.");
     const sections = [];
     if (task.request) sections.push(task.kind === "agent" ? `Task\n\n${task.request}` : `Command\n\n\`\`\`\n${task.request}\n\`\`\``);
-    if (task.summary) sections.push(task.summary);
-    if (task.result) sections.push(task.result);
+    const work = task.kind === "agent" ? await this.agentWork(session, task) : [];
+    if (task.summary && !work.length) sections.push(task.summary);
+    if (task.result && !/^Async agent launched/i.test(task.result)) sections.push(task.result);
     const output = task.kind === "command" ? await this.taskOutput(session, task) : null;
     if (output) sections.push(`Latest output\n\n\`\`\`\n${output}\n\`\`\``);
     const { request, result, outputFile, ...summary } = task;
-    return { task: summary, items: sections.map((text, index) => ({ type: "agentMessage", id: `${task.id}:${index}`, text, status: "completed" })) };
+    const items = sections.map((text, index) => ({ type: "agentMessage", id: `${task.id}:${index}`, text, status: "completed" }));
+    return { task: summary, items: [...items.slice(0, 1), ...work, ...items.slice(1)] };
+  }
+  // The agent's own transcript, projected like the parent's history.
+  async agentWork(session, task) {
+    if (!task.taskId || !/^[A-Za-z0-9_-]{1,64}$/.test(task.taskId)) return [];
+    try {
+      const messages = await this.withSdk(sdk => sdk.getSubagentMessages?.(session.sdkSessionId, task.taskId,
+        { dir: session.options.wonderProject.cwd }) ?? []);
+      // Every message names its parent task; inside its own transcript it is top level.
+      const own = messages.map(message => ({ ...message, parent_tool_use_id: null }));
+      const turns = nativeTurns(own, [], task.status === "running");
+      return turns.flatMap(turn => turn.items.filter(item => item.type !== "userMessage")).slice(-200);
+    } catch { return []; }
   }
   // Only Claude Code's own task output file for this exact session and task.
   async taskOutput(session, task) {

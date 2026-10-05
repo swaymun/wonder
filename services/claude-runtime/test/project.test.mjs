@@ -7,6 +7,7 @@ import { Sessions } from "../sessions.mjs";
 import { ClaudeBridge } from "../bridge.mjs";
 import { ToolPolicy, closeCommandSandbox } from "../permissions.mjs";
 import { backgroundTasks, claudeSessionBusy, nativeTurns } from "../project-history.mjs";
+import { ClaudeSessionFiles, projectFolderName } from "../session-file.mjs";
 
 // Contract owner: project conversations continue the owner's native Claude Code
 // session by exact UUID, read history from that transcript, and never receive
@@ -185,8 +186,40 @@ test("native history includes Claude Code turns and reuses Wonder receipts by id
   assert.equal(turns[0].items[0].clientId, "client-1");
   // Same ID shape as the live stream: turn:message:content-block-index.
   assert.equal(turns[0].items[1].id, "turn-1:msg-1:1");
-  assert.equal(turns[1].items[1].status, "completed");
-  assert.equal(turns[1].items[1].contentItems[0].text, "ok");
+  // Shell commands use Codex's command row: the command and its output.
+  assert.deepEqual(turns[1].items[1], { type: "commandExecution", id: "tool-1", command: "ls", status: "completed", success: true, aggregatedOutput: "ok" });
+});
+
+test("text between Claude tool calls is commentary; text after the last one is the reply", () => {
+  const [turn] = nativeTurns([
+    { type: "user", uuid: "turn-1", message: { content: "Fix it" } },
+    { type: "assistant", uuid: "a1", message: { id: "m1", content: [{ type: "text", text: "Looking" },
+      { type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }] } },
+    { type: "assistant", uuid: "a2", message: { id: "m2", content: [{ type: "text", text: "Now editing" },
+      { type: "tool_use", id: "t2", name: "Read", input: { file_path: "/p/a" } }] } },
+    { type: "assistant", uuid: "a3", message: { id: "m3", content: [{ type: "text", text: "Done" }] } },
+  ]);
+  const messages = turn.items.filter(item => item.type === "agentMessage");
+  assert.deepEqual(messages.map(item => [item.text, item.phase]), [["Looking", "commentary"], ["Now editing", "commentary"], ["Done", undefined]]);
+});
+
+test("Claude file tools become file changes with patches, including failures", () => {
+  const turns = nativeTurns([
+    { type: "user", uuid: "turn-1", message: { content: "Edit" } },
+    { type: "assistant", uuid: "a1", message: { id: "m1", content: [
+      { type: "tool_use", id: "w", name: "Write", input: { file_path: "/p/new.txt", content: "one\ntwo\n" } },
+      { type: "tool_use", id: "e", name: "Edit", input: { file_path: "/p/a.swift", old_string: "let a = 1", new_string: "let a = 2\nlet b = 3" } },
+      { type: "tool_use", id: "m", name: "MultiEdit", input: { file_path: "/p/b.swift", edits: [{ old_string: "x", new_string: "y" }, { old_string: "z", new_string: "" }] } },
+      { type: "tool_use", id: "r", name: "Read", input: { file_path: "/p/a.swift" } }] } },
+    { type: "user", uuid: "r1", message: { content: [{ type: "tool_result", tool_use_id: "e", is_error: true, content: "String not found" }] } },
+  ]);
+  const [write, edit, multi, read] = turns[0].items.slice(1);
+  assert.deepEqual(write.changes, [{ path: "/p/new.txt", kind: { type: "add" }, diff: "one\ntwo\n" }]);
+  assert.equal(edit.changes[0].diff, "@@ @@\n-let a = 1\n+let a = 2\n+let b = 3");
+  assert.equal(edit.status, "failed");
+  assert.equal(edit.error.message, "String not found");
+  assert.equal(multi.changes[0].diff, "@@ @@\n-x\n+y\n@@ @@\n-z");
+  assert.equal(read.type, "mcpToolCall");
 });
 
 test("project search is allowed only where no protected folder can be traversed", async t => {
@@ -295,4 +328,47 @@ test("a desktop-busy Claude session shows its turn running elsewhere and refuses
   const idle = await bridge.request("thread/turns/list", { threadId: thread.id, itemsView: "notLoaded" });
   assert.equal(idle.data[0].status, "completed");
   assert.equal(idle.data[0].runningElsewhere, undefined);
+});
+
+test("turns and agent tasks from before a compaction stay visible", async t => {
+  const root = await mkdtemp(join(tmpdir(), "wonder-claude-projects-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = "/work/My App", id = "11111111-2222-4333-8444-555555555555";
+  const folder = join(root, projectFolderName(cwd));
+  await mkdir(join(folder, id, "subagents"), { recursive: true });
+  const rows = [
+    { type: "user", uuid: "u1", parentUuid: null, message: { role: "user", content: "Research the bug" }, timestamp: "2026-10-01T00:00:00Z" },
+    { type: "assistant", uuid: "a1", parentUuid: "u1", message: { id: "m1", content: [{ type: "tool_use", id: "tu-a", name: "Agent", input: { description: "Find it", prompt: "Look", subagent_type: "Explore" } }] } },
+    { type: "assistant", uuid: "a2", parentUuid: "a1", message: { id: "m1", content: [{ type: "tool_use", id: "tu-b", name: "Bash", input: { command: "make" } }] } },
+    // Parallel results branch off their own tool calls.
+    { type: "user", uuid: "r1", parentUuid: "a1", message: { content: [{ type: "tool_result", tool_use_id: "tu-a", content: "Async agent launched successfully. agentId: x1" }] } },
+    { type: "user", uuid: "r2", parentUuid: "a2", message: { content: [{ type: "tool_result", tool_use_id: "tu-b", content: "built" }] } },
+    { type: "user", uuid: "side", parentUuid: "r2", isSidechain: true, message: { content: "child" } },
+    { type: "user", uuid: "meta", parentUuid: "r2", isMeta: true, message: { content: "caveat" } },
+    { type: "system", uuid: "b1", parentUuid: null, logicalParentUuid: "meta", subtype: "compact_boundary" },
+    { type: "user", uuid: "s1", parentUuid: "b1", isCompactSummary: true, message: { content: "Summary" } },
+    { type: "user", uuid: "u2", parentUuid: "s1", message: { role: "user", content: "Continue" } },
+  ];
+  await writeFile(join(folder, `${id}.jsonl`), rows.map(r => JSON.stringify(r)).join("\n") + "\n");
+  await writeFile(join(folder, id, "subagents", "agent-x1.meta.json"), JSON.stringify({ agentType: "Explore", description: "Find it", toolUseId: "tu-a", requestShape: "background" }));
+  await writeFile(join(folder, id, "subagents", "agent-x1.jsonl"), [
+    { type: "user", timestamp: "2026-10-01T00:00:01Z", message: { content: "Look" } },
+    { type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "Found" }] } }].map(r => JSON.stringify(r)).join("\n"));
+  await writeFile(join(folder, id, "subagents", "agent-..%2f.meta.json"), "{}");
+  const files = new ClaudeSessionFiles(root);
+  const earlier = await files.earlierMessages(id, cwd, "u2");
+  assert.deepEqual(earlier.map(m => m.uuid), ["u1", "a1", "a2", "r1", "r2"]);
+  const recent = [{ type: "user", uuid: "u2", message: { content: "Continue" } }];
+  assert.deepEqual(nativeTurns([...earlier, ...recent]).map(t => t.id), ["u1", "u2"]);
+  const agents = await files.agentTasks(id, cwd);
+  assert.deepEqual(agents.map(a => [a.agentId, a.finished, a.startedAt]), [["x1", true, "2026-10-01T00:00:01Z"]]);
+  // The launch acknowledgement neither completes the agent nor becomes its result.
+  const live = backgroundTasks(earlier, true, [{ ...agents[0], finished: false }]);
+  assert.deepEqual(live.map(t => [t.id, t.kind, t.status, t.role, t.taskId]), [["tu-a", "agent", "running", "Explore", "x1"]]);
+  assert.equal(live[0].result, null);
+  assert.equal(backgroundTasks([], false, agents)[0].status, "completed");
+  // Appending reads only the new line and keeps the parsed history.
+  await writeFile(join(folder, `${id}.jsonl`), rows.concat([{ type: "user", uuid: "u3", parentUuid: "u2", message: { content: "More" } }]).map(r => JSON.stringify(r)).join("\n") + "\n");
+  assert.deepEqual((await files.earlierMessages(id, cwd, "u3")).map(m => m.uuid), ["u1", "a1", "a2", "r1", "r2", "u2"]);
+  assert.deepEqual(await files.earlierMessages("not-a-uuid", cwd, "u2"), []);
 });

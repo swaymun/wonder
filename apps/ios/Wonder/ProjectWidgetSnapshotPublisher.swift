@@ -12,49 +12,41 @@ import WonderPairing
             return false
         }
         let showNames = UserDefaults.standard.bool(forKey: ProjectWidgetSnapshot.showNamesPreferenceKey)
-        let projects = projectRows(from: library)
+        let (hostID, hostName, projects) = lastMacRows(from: library)
         let previous = ProjectWidgetSnapshotStore.load(bundleIdentifier: Bundle.main.bundleIdentifier)
-        let candidate = ProjectWidgetSnapshot(savedAt: previous?.savedAt ?? Date(),
-                                              showNamesOnWidgets: showNames, projects: projects).validated()
+        let candidate = ProjectWidgetSnapshot(savedAt: previous?.savedAt ?? Date(), showNamesOnWidgets: showNames,
+                                              hostID: hostID, hostName: hostName, projects: projects).validated()
         if let candidate, let previous,
-           candidate.showNamesOnWidgets == previous.showNamesOnWidgets,
-           candidate.projects == previous.projects {
+           candidate.showNamesOnWidgets == previous.showNamesOnWidgets, candidate.hostID == previous.hostID,
+           candidate.hostName == previous.hostName, candidate.projects == previous.projects {
             let age = Date().timeIntervalSince(previous.savedAt)
             if !refreshIfUnchanged || (age >= 0 && age < 15 * 60) { return true }
         }
-        let snapshot = ProjectWidgetSnapshot(showNamesOnWidgets: showNames, projects: projects)
+        let snapshot = ProjectWidgetSnapshot(showNamesOnWidgets: showNames, hostID: hostID, hostName: hostName, projects: projects)
         guard ProjectWidgetSnapshotStore.save(snapshot, bundleIdentifier: Bundle.main.bundleIdentifier) else { return false }
         WidgetCenter.shared.reloadTimelines(ofKind: ProjectWidgetSnapshot.widgetKind)
         return true
     }
 
-    static func projectRows(from library: ConnectionLibrary) -> [ProjectWidgetSnapshot.Project] {
-        var result: [ProjectWidgetSnapshot.Project] = []
-        for saved in library.saved.connections where !saved.requiresPairing {
-            if result.count == 10 { break }
+    /// The Mac last chosen for a new chat (or the first paired one) and its
+    /// Projects, most recently used first.
+    static func lastMacRows(from library: ConnectionLibrary) -> (String?, String, [ProjectWidgetSnapshot.Project]) {
+        let usable = library.saved.connections.filter { saved in
+            guard !saved.requiresPairing else { return false }
             let model = library.model(for: saved)
-            guard model.connection?.credential.deviceId == saved.credential.deviceId,
-                  model.connection?.credential.sessionToken == saved.credential.sessionToken,
-                  !model.accessEnded, model.projects.supportsProjects != false else { continue }
-            let hostID = saved.credential.hostInstallationId
-            for project in model.projects.includedProjects.prefix(10 - result.count) {
-                let rows = (model.projects.threads[project.id]?.threads ?? []) + model.projects.pinned
-                    .filter { $0.projectId == project.id }.map(\.thread)
-                var seen = Set<String>()
-                let recent = rows.sorted { left, right in
-                    if left.updatedAt != right.updatedAt { return left.updatedAt > right.updatedAt }
-                    return left.reference < right.reference
-                }.compactMap { row -> ProjectWidgetSnapshot.Chat? in
-                    guard let id = row.conversationId,
-                          seen.insert(id).inserted, !model.projects.unavailable.contains(id),
-                          model.projects.details[id]?.isArchived != true,
-                          model.projects.details[id].map({ $0.projectId == project.id }) ?? true else { return nil }
-                    return ProjectWidgetSnapshot.Chat(id: id, title: row.title)
-                }
-                result.append(.init(hostID: hostID, id: project.id, name: project.name,
-                                    recentChats: Array(recent.prefix(3))))
-            }
+            return model.connection?.credential.deviceId == saved.credential.deviceId
+                && model.connection?.credential.sessionToken == saved.credential.sessionToken && !model.accessEnded
         }
-        return result
+        let last = NewChatDraftStore.lastHost
+        guard let saved = usable.first(where: { $0.credential.hostInstallationId == last }) ?? usable.first else {
+            return (nil, "Mac", [])
+        }
+        let model = library.model(for: saved)
+        guard model.projects.supportsProjects != false else { return (saved.credential.hostInstallationId, model.macName, []) }
+        let projects = model.projects.includedProjects
+            .sorted { ($0.lastUsedAt ?? $0.createdAt) > ($1.lastUsedAt ?? $1.createdAt) }
+            .prefix(ProjectWidgetSnapshot.maxProjects)
+            .map { ProjectWidgetSnapshot.Project(id: $0.id, name: $0.name) }
+        return (saved.credential.hostInstallationId, model.macName, projects)
     }
 }

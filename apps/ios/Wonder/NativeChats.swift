@@ -23,6 +23,27 @@ struct FailureDetails: View {
     }
 }
 
+/// A composer notice that fades after a short read. A new message (a different
+/// key) shows again; VoiceOver users get longer to reach it.
+struct TemporaryNotice<Content: View>: View {
+    let key: String
+    @ViewBuilder var content: () -> Content
+    @State private var dismissedKey: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        if dismissedKey != key {
+            content()
+                .transition(.opacity)
+                .task(id: key) {
+                    let seconds = UIAccessibility.isVoiceOverRunning ? 30.0 : 10.0
+                    try? await Task.sleep(for: .seconds(seconds))
+                    guard !Task.isCancelled else { return }
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.3)) { dismissedKey = key }
+                }
+        }
+    }
+}
+
 /// The receipt of the latest row while its end is inside the viewport. The row
 /// reports visibility rather than its frame, so scrolling changes the
 /// scroller's state only when visibility flips, not on every frame.
@@ -440,16 +461,33 @@ private struct ConversationColumn: ViewModifier {
 
 /// A turn running in a desktop app sends no live events to Wonder; re-read its
 /// history until it finishes.
+/// Notices work started, progressing or finished in a desktop app on the Mac
+/// while this Project chat is open: a cheap activity check every few seconds,
+/// and a history reload only when it changes (or periodically while running).
 private struct RunningElsewhereRefresh: ViewModifier {
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
     let readOnly: Bool
-    private var running: Bool { !readOnly && model.isProject(chat) && model.turnRunsElsewhere(chat.id) }
+    @Environment(\.scenePhase) private var phase
+    private var watching: Bool { !readOnly && phase == .active && model.isProject(chat) }
     func body(content: Content) -> some View {
-        content.task(id: chat.id + ":" + String(running)) {
-            while running, !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(8)) } catch { return }
-                await model.reloadNativeHistory(chat)
+        content.task(id: chat.id + ":" + String(watching)) {
+            guard watching else { return }
+            var lastReload = ContinuousClock.now
+            while !Task.isCancelled {
+                let running = model.turnRunsElsewhere(chat.id)
+                do { try await Task.sleep(for: .seconds(running ? 3 : 5)) } catch { return }
+                guard !model.botWorking(chat.id) || model.turnRunsElsewhere(chat.id) else { continue }
+                let changed = await model.nativeActivityChanged(chat)
+                guard !Task.isCancelled else { return }
+                if changed || (model.turnRunsElsewhere(chat.id) && ContinuousClock.now - lastReload >= .seconds(8)) {
+                    lastReload = .now
+                    await model.reloadNativeHistory(chat)
+                    if changed {
+                        await model.loadProjectSubagents(chat)
+                        await model.projects.refresh() // Sidebar working state.
+                    }
+                }
             }
         }
     }
@@ -707,7 +745,7 @@ struct ConversationView: View {
             BotMessageText(text: row.text)
                 .modifier(ChatBubbleSurface())
                 .frame(maxWidth: 640, alignment: .leading)
-                .accessibilityLabel(row.author + ": " + row.text)
+                .accessibilityLabel(row.author + ": " + ChatPlainText.of(row.text))
         } else {
             ActivityItemView(
                 row: row,
@@ -1204,29 +1242,37 @@ struct ConversationView: View {
                 QuestionDock(model: model, chat: chat)
                 if (!chat.isArchived || model.isSubagent(chat)) && (chat.botId != nil || model.groups[chat.id] != nil || model.isProject(chat)) {
                     if model.nativeHistoryFailures.contains(chat.id) {
-                        Button("Couldn’t check for new turns. Try again") { Task { await model.reloadNativeHistory(chat) } }
-                            .font(.caption).frame(minHeight: 44)
-                            .accessibilityIdentifier("native-history-retry")
+                        TemporaryNotice(key: "history") {
+                            Button("Couldn’t check for new turns. Try again") { Task { await model.reloadNativeHistory(chat) } }
+                                .font(.caption).frame(minHeight: 44)
+                                .accessibilityIdentifier("native-history-retry")
+                        }
+                        // One quiet retry covers a brief network drop without asking.
+                        .task {
+                            try? await Task.sleep(for: .seconds(4))
+                            guard !Task.isCancelled else { return }
+                            await model.reloadNativeHistory(chat)
+                        }
                     }
-                    if let error = model.controlErrors[chat.id] { FailureDetails(message: error) }
+                    if let error = model.controlErrors[chat.id] {
+                        TemporaryNotice(key: error) { FailureDetails(message: error) }
+                    }
                     if let error = model.composerErrors[chat.id] {
-                        FailureDetails("Message not saved", message: error)
-                    }
-                    if model.isProject(chat), (model.projectSubagents[chat.id] ?? []).isEmpty,
-                       let detail = model.projectSubagentErrors[chat.id] {
-                        Text(detail).font(.caption).foregroundStyle(.secondary)
+                        TemporaryNotice(key: error) { FailureDetails("Message not saved", message: error) }
                     }
                     if model.turnRunsElsewhere(chat.id) {
-                        Label("Working in \(model.agentFamily(chat).title) on your Mac. You can send when it finishes.",
+                        Label("Working in \(model.agentFamily(chat).title) on your Mac. A message you send now waits until it finishes.",
                               systemImage: "desktopcomputer")
                             .font(.caption).foregroundStyle(.secondary)
                             .accessibilityElement(children: .combine)
                             .accessibilityIdentifier("running-elsewhere")
                     }
                     if !model.botWorking(chat.id), let issue = model.snapshots[chat.id]?.latestRequestIssue {
-                        Text(issue)
-                            .font(.caption).foregroundStyle(.secondary)
-                            .accessibilityIdentifier("last-request-issue")
+                        TemporaryNotice(key: issue) {
+                            Text(issue)
+                                .font(.caption).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("last-request-issue")
+                        }
                     }
                     if model.loadingPhotos.contains(chat.id) { ProgressView("Loading photo…") }
                     else if model.uploading.contains(chat.id) { ProgressView("Uploading attachments…") }
@@ -1368,7 +1414,7 @@ struct ConversationView: View {
                             }
                             .foregroundStyle(Color(uiColor: .systemBackground))
                             .background(model.canSend(chat) ? Color.primary : Color.secondary.opacity(0.35), in: Circle())
-                            .accessibilityLabel("Send message").accessibilityIdentifier("send-message")
+                            .accessibilityLabel(model.turnRunsElsewhere(chat.id) ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
                             .keyboardShortcut(.return, modifiers: .command)
                             .disabled(!model.canSend(chat))
                         } else {
@@ -2231,7 +2277,7 @@ struct MessageRow: View {
                                 openDocument: openDocument
                             )
                         }
-                        if !row.text.isEmpty { Text(row.text).textSelection(.enabled) }
+                        if !row.text.isEmpty { BotMessageText(text: row.text) }
                     }
                 }
                 else { BotMessageText(text: row.text) }
@@ -2239,7 +2285,7 @@ struct MessageRow: View {
                 .modifier(ChatBubbleSurface(isUser: row.isUser))
         }
             .accessibilityElement(children: row.attachmentIds.isEmpty && !recoveredBeforeReconnect ? .combine : .contain)
-            .accessibilityLabel(row.isUser ? row.text : "\(row.author): \(row.text)")
+            .accessibilityLabel(row.isUser ? ChatPlainText.of(row.text) : "\(row.author): \(ChatPlainText.of(row.text))")
     }
 }
 
@@ -2341,9 +2387,32 @@ struct PlanCard: View {
     }
 }
 
+/// Spoken form of a message, cached per text like its rendering.
+@MainActor enum ChatPlainText {
+    private static let cache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>(); cache.countLimit = 300; return cache
+    }()
+    static func of(_ text: String) -> String {
+        let key = text as NSString
+        if let hit = cache.object(forKey: key) { return hit as String }
+        let plain = MarkdownBlock.plainText(text)
+        cache.setObject(plain as NSString, forKey: key)
+        return plain
+    }
+}
+
 struct BotMessageText: View {
     let text: String
-    fileprivate struct Block { let text: String; let code: Bool; var inline: AttributedString? = nil }
+    /// A block with its inline Markdown prepared.
+    fileprivate enum Block {
+        case text(AttributedString, style: TextStyle)
+        case item(marker: String, depth: Int, AttributedString)
+        case quote(AttributedString)
+        case code(String)
+        case table(header: [AttributedString], rows: [[AttributedString]])
+        case rule
+    }
+    fileprivate enum TextStyle { case body, heading1, heading2, heading3 }
     /// Parsed once per distinct message text. Rows re-enter the lazy stack on
     /// every scroll; settled replies keep their text, so they hit the cache.
     @MainActor private final class Parsed {
@@ -2359,42 +2428,21 @@ struct BotMessageText: View {
     private var parsedBlocks: [Block] {
         let key = text as NSString
         if let hit = Parsed.cache.object(forKey: key) { return hit.blocks }
-        let parsed = blocks.map { block in
-            block.code ? block : Block(text: block.text, code: false, inline: inline(block.text))
+        let parsed = MarkdownBlock.parse(text).map { block -> Block in
+            switch block {
+            case .paragraph(let text): .text(Self.inline(text), style: .body)
+            case .heading(let level, let text): .text(Self.inline(text), style: level == 1 ? .heading1 : level == 2 ? .heading2 : .heading3)
+            case .listItem(let marker, let depth, let text): .item(marker: marker, depth: depth, Self.inline(text))
+            case .quote(let text): .quote(Self.inline(text))
+            case .code(_, let text): .code(text)
+            case .table(let header, let rows): .table(header: header.map(Self.inline), rows: rows.map { $0.map(Self.inline) })
+            case .rule: .rule
+            }
         }
         Parsed.cache.setObject(Parsed(parsed), forKey: key, cost: key.length)
         return parsed
     }
-    private var blocks: [Block] {
-        var result: [Block] = []
-        var lines: [String] = []
-        var fence: (Character, Int)?
-        func flush(code: Bool) {
-            if !lines.isEmpty { result.append(Block(text: lines.joined(separator: "\n"), code: code)); lines = [] }
-        }
-        for line in text.components(separatedBy: "\n") {
-            let indent = line.prefix(while: { $0 == " " }).count
-            let candidate = line.dropFirst(indent)
-            let marker = candidate.first
-            let count = candidate.prefix(while: { $0 == marker }).count
-            if indent <= 3, let marker, (marker == "`" || marker == "~"), count >= 3 {
-                if let current = fence {
-                    if marker == current.0, count >= current.1,
-                       candidate.dropFirst(count).trimmingCharacters(in: .whitespaces).isEmpty {
-                        flush(code: true); fence = nil; continue
-                    }
-                } else {
-                    if marker != "`" || !candidate.dropFirst(count).contains("`") {
-                        flush(code: false); fence = (marker, count); continue
-                    }
-                }
-            }
-            lines.append(line)
-        }
-        flush(code: fence != nil)
-        return result
-    }
-    private func inline(_ source: String) -> AttributedString {
+    private static func inline(_ source: String) -> AttributedString {
         var value = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)
         // Model text cannot turn a chat link into a local-file or app-control link.
         for run in Array(value.runs) {
@@ -2407,16 +2455,54 @@ struct BotMessageText: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(parsedBlocks.enumerated()), id: \.offset) { _, block in
-                if block.code {
+                switch block {
+                case .text(let value, let style):
+                    Text(value).font(font(style)).textSelection(.enabled)
+                        .accessibilityAddTraits(style == .body ? [] : .isHeader)
+                case .item(let marker, let depth, let value):
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(marker).monospacedDigit().foregroundStyle(.secondary)
+                        Text(value).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.leading, CGFloat(depth) * 16)
+                    .accessibilityElement(children: .combine)
+                case .quote(let value):
+                    HStack(spacing: 8) {
+                        Capsule().fill(.secondary.opacity(0.4)).frame(width: 3)
+                        Text(value).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                case .code(let code):
                     ScrollView(.horizontal) {
-                        Text(block.text).font(.system(.body, design: .monospaced))
+                        Text(code).font(.system(.body, design: .monospaced))
                             .textSelection(.enabled).fixedSize(horizontal: true, vertical: false)
                             .padding(10)
                     }.background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
-                } else {
-                    Text(block.inline ?? AttributedString(block.text)).textSelection(.enabled)
+                case .table(let header, let rows):
+                    ScrollView(.horizontal) {
+                        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
+                            GridRow { ForEach(Array(header.enumerated()), id: \.offset) { Text($0.element).bold() } }
+                            Divider()
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                GridRow { ForEach(Array(row.enumerated()), id: \.offset) { Text($0.element) } }
+                            }
+                        }
+                        .font(.subheadline).textSelection(.enabled).padding(.vertical, 4)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(([header] + rows).map { $0.map { String($0.characters) }.joined(separator: ", ") }.joined(separator: "\n"))
+                case .rule:
+                    Divider()
                 }
             }
+        }
+    }
+    private func font(_ style: TextStyle) -> Font {
+        switch style {
+        case .body: .body
+        case .heading1: .title3.weight(.semibold)
+        case .heading2: .headline
+        case .heading3: .subheadline.weight(.semibold)
         }
     }
 }
@@ -3428,31 +3514,56 @@ struct WorkspaceFileLoad: Equatable {
     var expected: Int?
 }
 
-/// Large previews arrive from the Mac over the network; show how far along
-/// they are instead of leaving the tap without feedback.
-private struct WorkspaceFileLoadRow: View {
+/// Previews arrive from the Mac over the network. The download takes over the
+/// Files pane with its progress; the X in the ring cancels it.
+private struct WorkspaceFileLoadOverlay: View {
     let load: WorkspaceFileLoad
-    private func megabytes(_ bytes: Int) -> String {
+    let cancel: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private func size(_ bytes: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
+    private var fraction: Double? {
+        guard let expected = load.expected, expected > 0 else { return nil }
+        return min(1, Double(load.received) / Double(expected))
+    }
     private var detail: String {
-        guard let expected = load.expected, expected > 0 else { return megabytes(load.received) }
-        return "\(megabytes(load.received)) of \(megabytes(expected))"
+        guard let expected = load.expected, expected > 0 else { return size(load.received) }
+        return "\(size(load.received)) of \(size(expected))"
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Opening \(load.name)").font(.subheadline).lineLimit(2)
-            if let expected = load.expected, expected > 0 {
-                ProgressView(value: Double(min(load.received, expected)), total: Double(expected))
-            } else {
-                ProgressView()
+        VStack(spacing: 16) {
+            Button(action: cancel) {
+                ZStack {
+                    Circle().stroke(Color.secondary.opacity(0.25), lineWidth: 5)
+                    if let fraction {
+                        Circle().trim(from: 0, to: max(0.02, fraction))
+                            .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .animation(reduceMotion ? nil : .linear(duration: 0.2), value: fraction)
+                    } else {
+                        ProgressView().controlSize(.large)
+                    }
+                    Image(systemName: "xmark").font(.title3.weight(.semibold)).foregroundStyle(.primary)
+                }
+                .frame(width: 72, height: 72)
+                .contentShape(Circle())
             }
-            Text(detail).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel download")
+            .accessibilityIdentifier("workspace-file-load-cancel")
+            VStack(spacing: 4) {
+                Text(load.name).font(.headline).lineLimit(2).multilineTextAlignment(.center)
+                Text(detail).font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Opening \(load.name), \(detail)")
+            .accessibilityIdentifier("workspace-file-loading")
         }
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Opening \(load.name), \(detail)")
-        .accessibilityIdentifier("workspace-file-loading")
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemBackground))
+        .transition(.opacity)
     }
 }
 
@@ -3511,6 +3622,7 @@ struct WorkspaceBrowser: View {
     @State private var attachmentRequestID = UUID()
     @State private var failure: String?
     @State private var fileLoad: WorkspaceFileLoad?
+    @State private var fileLoadTask: Task<Void, Never>?
     /// Closing a preview rebuilds the list; return to the row that was opened.
     @State private var returnEntryPath: String?
     @State private var selection: WorkspacePreviewSelection?
@@ -3535,10 +3647,11 @@ struct WorkspaceBrowser: View {
 
     private var loading: Bool { !loadingRequests.isEmpty }
     private var selectedRoot: WorkspaceRoot? { response?.roots.first(where: { $0.id == selectedRootID }) }
+    /// Files lists the project folder. Message attachments appear only when a
+    /// message's attachment chip opened this browser for those files.
     private var visibleAttachments: [ConversationFile] {
-        let files = response?.attachments ?? []
-        guard let attachmentIDs else { return files }
-        return files.filter { attachmentIDs.contains($0.id) }
+        guard let attachmentIDs else { return [] }
+        return (response?.attachments ?? []).filter { attachmentIDs.contains($0.id) }
     }
     // Hidden-file changes are explicitly reloaded by the action below. Keeping
     // this task identity scoped to navigation prevents one tap from starting
@@ -3613,48 +3726,53 @@ struct WorkspaceBrowser: View {
         .padding(.horizontal, 16)
     }
 
+    private var fileBrowser: some View {
+        VStack(spacing: 0) {
+            workspaceControls
+            if let response, response.roots.count > 1 {
+                Menu {
+                    ForEach(response.roots) { root in
+                        WorkspaceRootMenuButton(root: root) { selectRoot($0) }
+                    }
+                } label: {
+                    HStack {
+                        Label(selectedRoot?.label ?? "Choose location", systemImage: "folder")
+                        Spacer()
+                        Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal)
+                .accessibilityIdentifier("workspace-root-picker")
+            }
+            if let failure {
+                VStack(spacing: 12) {
+                    ContentUnavailableView("Files unavailable", systemImage: "externaldrive.badge.xmark", description: Text(failure))
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Files unavailable. \(failure)")
+                        .accessibilityIdentifier("workspace-unavailable")
+                    Button("Try again") { Task { await retryWorkspace() } }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("workspace-retry")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if viewMode == "modified" {
+                modifiedView
+            } else {
+                allFilesView
+            }
+        }
+        .overlay { fileLoadOverlay }
+    }
+
     var body: some View {
         Group {
             if hasPreview {
                 inlinePreview
             } else {
-                VStack(spacing: 0) {
-                    workspaceControls
-                    if let response, response.roots.count > 1 {
-                        Menu {
-                            ForEach(response.roots) { root in
-                                WorkspaceRootMenuButton(root: root) { selectRoot($0) }
-                            }
-                        } label: {
-                            HStack {
-                                Label(selectedRoot?.label ?? "Choose location", systemImage: "folder")
-                                Spacer()
-                                Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(.secondary)
-                            }
-                            .frame(minHeight: 44)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal)
-                        .accessibilityIdentifier("workspace-root-picker")
-                    }
-                    if let failure {
-                        VStack(spacing: 12) {
-                            ContentUnavailableView("Files unavailable", systemImage: "externaldrive.badge.xmark", description: Text(failure))
-                                .accessibilityElement(children: .ignore)
-                                .accessibilityLabel("Files unavailable. \(failure)")
-                                .accessibilityIdentifier("workspace-unavailable")
-                            Button("Try again") { Task { await retryWorkspace() } }
-                                .buttonStyle(.bordered)
-                                .accessibilityIdentifier("workspace-retry")
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if viewMode == "modified" {
-                        modifiedView
-                    } else {
-                        allFilesView
-                    }
-                }
+                fileBrowser
             }
         }
             .task(id: model.assignmentScope) {
@@ -3973,12 +4091,17 @@ struct WorkspaceBrowser: View {
         }
     }
 
+    @ViewBuilder private var fileLoadOverlay: some View {
+        if let fileLoad {
+            WorkspaceFileLoadOverlay(load: fileLoad) { cancelFileLoad() }
+                .id(fileLoad.id)
+        }
+    }
     @ViewBuilder private var allFilesView: some View {
         if loading && directory == nil && visibleAttachments.isEmpty { ProgressView("Loading files…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         else {
             ScrollViewReader { proxy in
             List {
-                if let fileLoad { WorkspaceFileLoadRow(load: fileLoad) }
                 if let root = selectedRoot {
                     if !directoryPath.isEmpty {
                         Button { navigate(to: directory?.parentPath ?? "") } label: { Label("Back", systemImage: "chevron.left") }
@@ -4011,7 +4134,7 @@ struct WorkspaceBrowser: View {
                     }
                 }
                 if !visibleAttachments.isEmpty {
-                    Section("Conversation attachments") {
+                    Section("Attachments") {
                         ForEach(visibleAttachments) { file in
                             Button { openAttachment(file) } label: { Label(file.name, systemImage: PhotoViewerRouting.isImage(file) ? "photo" : "paperclip") }
                                 .accessibilityIdentifier("workspace-attachment:\(file.id)")
@@ -4362,7 +4485,7 @@ struct WorkspaceBrowser: View {
     }
     private func open(_ entry: WorkspaceEntry) {
         if entry.isDirectory { returnEntryPath = nil; navigate(to: entry.path) }
-        else { returnEntryPath = entry.path; Task { await loadWorkspaceFile(entry) } }
+        else { returnEntryPath = entry.path; startFileLoad(entry) }
     }
     private func openRootFile(_ root: WorkspaceRoot) {
         let name = URL(fileURLWithPath: root.path).lastPathComponent
@@ -4374,7 +4497,17 @@ struct WorkspaceBrowser: View {
         } else {
             mime = "application/octet-stream"
         }
-        Task { await loadWorkspaceFile(WorkspaceEntry(name: name, path: "", isDirectory: false, byteSize: root.byteSize, mimeType: mime)) }
+        startFileLoad(WorkspaceEntry(name: name, path: "", isDirectory: false, byteSize: root.byteSize, mimeType: mime))
+    }
+    private func startFileLoad(_ entry: WorkspaceEntry) {
+        fileLoadTask?.cancel()
+        fileLoadTask = Task { await loadWorkspaceFile(entry) }
+    }
+    private func cancelFileLoad() {
+        fileLoadTask?.cancel()
+        fileLoadTask = nil
+        fileRequestID = UUID() // A late result is discarded.
+        fileLoad = nil
     }
     @discardableResult private func loadWorkspaceFile(_ entry: WorkspaceEntry) async -> Bool {
         guard let root = selectedRoot else { return false }
@@ -4423,7 +4556,8 @@ struct WorkspaceBrowser: View {
             else { attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil; selection = nil; selectedDiff = nil; diffText = nil; documentSelection = WorkspacePreviewSelection(id: root.id + ":" + entry.path, name: entry.name, mimeType: entry.mimeType ?? "application/octet-stream", data: data, sha256: sha256, rootID: root.id, path: entry.path, scope: captured.scope) }
             return true
         } catch {
-            guard isCurrent(captured), requestID == fileRequestID else { return false }
+            guard isCurrent(captured), requestID == fileRequestID, !Task.isCancelled,
+                  !(error is CancellationError) else { return false }
             if case FileFailure.tooLarge = error {
                 failure = "This file is too large to preview here. With the latest Wonder on your Mac, files up to 256 MB open in Files; open larger files on your Mac."
             } else {
@@ -4710,7 +4844,7 @@ private struct WorkspaceImagePreview: View {
             }
             .fullScreenCover(isPresented: $showingRegion) {
                 WorkspaceRegionEditor(name: item.name, source: revision.currentData, context: context,
-                                      format: .image, onAnnotation: onAnnotation, initialNote: initialNote,
+                                      onAnnotation: onAnnotation, initialNote: initialNote,
                                       annotationUnavailableReason: annotationUnavailableReason)
             }
             .task(id: refreshPoint) {
@@ -4726,19 +4860,15 @@ private struct WorkspaceImagePreview: View {
     }
 }
 
-private enum WorkspaceRegionFormat: Sendable { case image, pdf }
 
 private struct WorkspaceRegionEditor: View {
     let name: String
     let source: Data
     let context: ArtifactPreviewContext
-    let format: WorkspaceRegionFormat
     let onAnnotation: (ArtifactAnnotation) throws -> Void
     var initialNote: String = ""
     var annotationUnavailableReason: String? = nil
     @Environment(\.dismiss) private var dismiss
-    @State private var page = 1
-    @State private var pageCount = 0
     @State private var preview: UIImage?
     @State private var region: CGRect?
     @State private var note = ""
@@ -4750,34 +4880,6 @@ private struct WorkspaceRegionEditor: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if format == .pdf, pageCount > 0, !noteFocused {
-                    HStack {
-                        Button {
-                            guard !loading else { return }
-                            loading = true
-                            page -= 1
-                        } label: {
-                            Image(systemName: "chevron.left").frame(minWidth: 44, minHeight: 44)
-                        }
-                        .accessibilityLabel("Previous page")
-                        .disabled(loading || page <= 1).accessibilityIdentifier("annotation-previous-page")
-                        Spacer()
-                        Text("\(page) / \(pageCount)")
-                            .accessibilityLabel("Page \(page) of \(pageCount)")
-                            .accessibilityIdentifier("annotation-page-position")
-                        Spacer()
-                        Button {
-                            guard !loading else { return }
-                            loading = true
-                            page += 1
-                        } label: {
-                            Image(systemName: "chevron.right").frame(minWidth: 44, minHeight: 44)
-                        }
-                        .accessibilityLabel("Next page")
-                        .disabled(loading || page >= pageCount).accessibilityIdentifier("annotation-next-page")
-                    }
-                    .padding(.horizontal, 16).padding(.vertical, 8)
-                }
                 if loading { ProgressView("Preparing preview…").frame(maxWidth: .infinity, maxHeight: .infinity) }
                 else if let preview {
                     WorkspaceRegionCanvas(image: preview, region: $region)
@@ -4807,7 +4909,7 @@ private struct WorkspaceRegionEditor: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 8) {
                             if !noteFocused {
-                                Button(format == .pdf ? "Select whole page" : "Select whole image") {
+                                Button("Select whole image") {
                                     region = CGRect(x: 0, y: 0, width: 1, height: 1)
                                 }
                                 .disabled(loading || preview == nil)
@@ -4850,7 +4952,7 @@ private struct WorkspaceRegionEditor: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.regularMaterial)
             }
-            .task(id: page) { await preparePreview() }
+            .task { await preparePreview() }
             .onAppear { if note.isEmpty { note = initialNote } }
         }
     }
@@ -4858,24 +4960,12 @@ private struct WorkspaceRegionEditor: View {
     private func preparePreview() async {
         preview = nil; region = nil; showingAreaControls = false; loading = true; failure = nil
         let source = source
-        let page = page
-        let format = format
-        let rendering = Task.detached(priority: .userInitiated) { () -> (UIImage?, Int) in
-            switch format {
-            case .image:
-                return (ToolPreviewImage.decode(source), 1)
-            case .pdf:
-                guard let document = PDFDocument(data: source), document.pageCount > 0,
-                      page <= min(document.pageCount, 10_000), let pdfPage = document.page(at: page - 1) else { return (nil, 0) }
-                return (pdfPage.thumbnail(of: CGSize(width: 1200, height: 1600), for: .cropBox), min(document.pageCount, 10_000))
-            }
-        }
-        let result = await withTaskCancellationHandler(operation: { await rendering.value }, onCancel: { rendering.cancel() })
+        let rendering = Task.detached(priority: .userInitiated) { ToolPreviewImage.decode(source) }
+        let image = await withTaskCancellationHandler(operation: { await rendering.value }, onCancel: { rendering.cancel() })
         guard !Task.isCancelled else { return }
-        preview = result.0
-        pageCount = result.1
+        preview = image
         loading = false
-        if result.0 == nil { failure = "The selected page could not be rendered." }
+        if image == nil { failure = "The image could not be rendered." }
     }
 
     private func addAnnotation() {
@@ -4883,17 +4973,9 @@ private struct WorkspaceRegionEditor: View {
         do {
             let x = Double(region.minX), y = Double(region.minY)
             let width = Double(region.width), height = Double(region.height)
-            let annotation: ArtifactAnnotation
-            switch format {
-            case .image:
-                annotation = try ArtifactAnnotation(projectId: context.projectID, conversationId: context.conversationID,
-                    rootId: context.rootID, path: context.path, source: source,
-                    imageX: x, y: y, width: width, height: height, note: note)
-            case .pdf:
-                annotation = try ArtifactAnnotation(projectId: context.projectID, conversationId: context.conversationID,
-                    rootId: context.rootID, path: context.path, source: source,
-                    pdfPage: page, x: x, y: y, width: width, height: height, note: note)
-            }
+            let annotation = try ArtifactAnnotation(projectId: context.projectID, conversationId: context.conversationID,
+                rootId: context.rootID, path: context.path, source: source,
+                imageX: x, y: y, width: width, height: height, note: note)
             try onAnnotation(annotation)
             dismiss()
         } catch { failure = "The preview note could not be saved. Reopen the file and try again." }
@@ -4990,10 +5072,13 @@ private struct WorkspaceRegionCanvas: View {
 
 /// Native selection preserves the exact highlighted characters, including
 /// Unicode and line endings, for a revision-bound preview comment.
+/// Read-only text whose own selection menu offers Comment; choosing it pins
+/// the selection for the comment bar.
 private struct SelectablePreviewText: UIViewRepresentable {
     let text: String
     @Binding var selectedRange: NSRange?
     let selectionResetID: UUID
+    var onComment: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(selectedRange: $selectedRange, selectionResetID: selectionResetID)
@@ -5021,28 +5106,29 @@ private struct SelectablePreviewText: UIViewRepresentable {
                                           range: selectedRange)
             context.coordinator.highlightedRange = selectedRange
         }
+        context.coordinator.appliedRange = selectedRange
+        context.coordinator.onComment = onComment
         context.coordinator.isUpdating = false
         return view
     }
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.selectedRange = $selectedRange
+        context.coordinator.onComment = onComment
         let reset = context.coordinator.selectionResetID != selectionResetID
-        if reset {
-            context.coordinator.selectionResetID = selectionResetID
-            context.coordinator.pendingSelection = nil
-            context.coordinator.selectionEventID = UUID()
-        }
+        if reset { context.coordinator.selectionResetID = selectionResetID }
         context.coordinator.isUpdating = true
         // The view is recreated for each source SHA; text is immutable within
         // that identity. Do not compare or assign 128 KB on every note keystroke.
-        if reset || (selectedRange == nil && context.coordinator.pendingSelection == nil) {
+        // The reader's own selection stays until a comment pins or clears one.
+        if reset {
             if view.selectedRange.length > 0 {
                 view.selectedRange = NSRange(location: view.selectedRange.location, length: 0)
             }
-        } else if let selectedRange, context.coordinator.pendingSelection == nil,
+        } else if let selectedRange, context.coordinator.appliedRange != selectedRange,
                   view.selectedRange != selectedRange {
             view.selectedRange = selectedRange
         }
+        context.coordinator.appliedRange = selectedRange
         let highlightedRange = selectedRange.flatMap { range in
             range.length > 0 && NSMaxRange(range) <= view.textStorage.length ? range : nil
         }
@@ -5062,28 +5148,24 @@ private struct SelectablePreviewText: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         var selectedRange: Binding<NSRange?>
         var selectionResetID: UUID
-        var selectionEventID = UUID()
-        var pendingSelection: NSRange?
+        var appliedRange: NSRange?
         var highlightedRange: NSRange?
+        var onComment: (() -> Void)?
         var isUpdating = false
         init(selectedRange: Binding<NSRange?>, selectionResetID: UUID) {
             self.selectedRange = selectedRange
             self.selectionResetID = selectionResetID
         }
-        func textViewDidChangeSelection(_ textView: UITextView) {
-            guard !isUpdating else { return }
-            let range = textView.selectedRange
-            let selected = range.length > 0 ? range : nil
-            pendingSelection = selected
-            let eventID = UUID()
-            selectionEventID = eventID
-            Task { @MainActor [weak self] in
-                guard let self, self.selectionEventID == eventID else { return }
-                self.pendingSelection = nil
-                if self.selectedRange.wrappedValue != selected {
-                    self.selectedRange.wrappedValue = selected
-                }
+        func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
+                      suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard range.length > 0, onComment != nil else { return UIMenu(children: suggestedActions) }
+            let comment = UIAction(title: "Comment", image: UIImage(systemName: "text.bubble")) { [weak self] _ in
+                guard let self else { return }
+                self.appliedRange = range
+                self.selectedRange.wrappedValue = range
+                self.onComment?()
             }
+            return UIMenu(children: [comment] + suggestedActions)
         }
     }
 }
@@ -5195,23 +5277,27 @@ private struct WorkspaceDocumentPreview: View {
         self.onClose = onClose
     }
     @Environment(\.dismiss) private var dismiss
-    @State private var showingPDFRegion = false
+    @State private var pdfComment: PDFTextComment?
+    @State private var showingHTMLSource = false
     var body: some View {
         NavigationStack {
             Group {
                 if mimeType == "application/pdf" {
                     PDFPreview(data: revision.currentData, revision: revision.currentSha256,
-                               session: pdfSession)
+                               session: pdfSession,
+                               onComment: annotationContext != nil && onAnnotation != nil
+                                   ? { selection in pdfComment = PDFTextComment(selection) } : nil)
                         .ignoresSafeArea(edges: .bottom)
                         .accessibilityIdentifier("workspace-pdf-preview")
                 }
                 else if revision.preparingText && revision.preparedText == nil { ProgressView("Preparing preview…") }
-                else if mimeType == "text/html", let html = revision.preparedText {
+                else if mimeType == "text/html", !showingHTMLSource, let html = revision.preparedText {
                     ConstrainedHTML(html: html, sourceID: revision.currentSha256, session: htmlSession)
                 }
                 else if let text = revision.preparedText, canAnnotate {
                     SelectablePreviewText(text: text, selectedRange: $draft.selectedRange,
-                                          selectionResetID: draft.selectionResetID)
+                                          selectionResetID: draft.selectionResetID,
+                                          onComment: { draft.editingSelection = true })
                         .id(revision.currentSha256)
                         .accessibilityIdentifier("annotation-selectable-text")
                 } else if let text = revision.preparedText {
@@ -5231,17 +5317,12 @@ private struct WorkspaceDocumentPreview: View {
             .toolbar(onClose == nil ? .visible : .hidden, for: .navigationBar)
             .toolbar {
                 if onClose == nil {
-                    ToolbarItem(placement: .topBarLeading) {
-                        if mimeType == "application/pdf", annotationContext != nil, onAnnotation != nil {
-                            Button("Annotate region") { showingPDFRegion = true }
-                                .disabled(!canStageAnnotation)
-                                .accessibilityHint(annotationUnavailableReason ?? "")
-                                .accessibilityIdentifier("annotation-pdf-open")
-                        }
-                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button("Done") { dismiss() }
                             .accessibilityIdentifier("workspace-document-close")
+                    }
+                    if offersHTMLSource {
+                        ToolbarItem(placement: .topBarLeading) { htmlSourceToggle }
                     }
                     if refresh != nil {
                         ToolbarItem(placement: .topBarTrailing) { refreshButton }
@@ -5265,14 +5346,9 @@ private struct WorkspaceDocumentPreview: View {
                         .padding(.horizontal, 12).padding(.vertical, 6)
                         .accessibilityIdentifier("annotation-document-unavailable")
                 }
-                if onClose != nil && (refresh != nil || mimeType == "application/pdf" && annotationContext != nil && onAnnotation != nil) {
+                if onClose != nil && (refresh != nil || offersHTMLSource) {
                     HStack {
-                        if mimeType == "application/pdf", annotationContext != nil, onAnnotation != nil {
-                            Button("Annotate region") { showingPDFRegion = true }
-                                .disabled(!canStageAnnotation)
-                                .accessibilityHint(annotationUnavailableReason ?? "")
-                                .accessibilityIdentifier("annotation-pdf-open")
-                        }
+                        if offersHTMLSource { htmlSourceToggle }
                         Spacer()
                         if refresh != nil { refreshButton }
                     }
@@ -5347,11 +5423,11 @@ private struct WorkspaceDocumentPreview: View {
                     .padding(.horizontal, 12).padding(.bottom, 4)
                 }
             }
-            .fullScreenCover(isPresented: $showingPDFRegion) {
+            .sheet(item: $pdfComment) { comment in
                 if let annotationContext, let onAnnotation {
-                    WorkspaceRegionEditor(name: name, source: revision.currentData, context: annotationContext,
-                                          format: .pdf, onAnnotation: onAnnotation, initialNote: draft.note,
-                                          annotationUnavailableReason: annotationUnavailableReason)
+                    WorkspacePDFCommentSheet(comment: comment, source: revision.currentData, context: annotationContext,
+                                             onAnnotation: onAnnotation, initialNote: draft.note,
+                                             annotationUnavailableReason: annotationUnavailableReason)
                 }
             }
             .task(id: refreshPoint) {
@@ -5363,11 +5439,25 @@ private struct WorkspaceDocumentPreview: View {
         }
     }
 
+    /// Any UTF-8 text file takes comments from its selection menu; rendered
+    /// HTML does so from its source view.
     private var canAnnotate: Bool {
         !revision.preparingText && annotationContext != nil && onAnnotation != nil &&
-        (canStageAnnotation || draft.selectedRange != nil) && mimeType != "text/html" &&
-        (mimeType.hasPrefix("text/") || ["application/json", "application/yaml", "application/xml", "application/sql"].contains(mimeType)) &&
+        (canStageAnnotation || draft.selectedRange != nil) &&
+        (mimeType != "text/html" || showingHTMLSource) && mimeType != "application/pdf" &&
         revision.preparedText != nil
+    }
+    private var offersHTMLSource: Bool {
+        mimeType == "text/html" && revision.preparedText != nil && annotationContext != nil && onAnnotation != nil
+    }
+    private var htmlSourceToggle: some View {
+        Button(showingHTMLSource ? "Preview" : "Source",
+               systemImage: showingHTMLSource ? "doc.richtext" : "chevron.left.forwardslash.chevron.right") {
+            draft.clearSelection(discardNote: false)
+            showingHTMLSource.toggle()
+        }
+        .accessibilityHint(showingHTMLSource ? "Show the rendered page" : "Show the HTML source to comment on it")
+        .accessibilityIdentifier("workspace-html-source")
     }
     private var canStageAnnotation: Bool {
         annotationContext != nil && annotationUnavailableReason == nil
@@ -5523,139 +5613,332 @@ private struct EditedFilesReviewRequest {
     let scope: String
 }
 
+/// "N files +A −D" below a response; opens and closes its saved changes.
+private struct EditedFilesPill: View {
+    let summary: ResponseEditedFiles
+    let isOpen: Bool
+    let toggle: () -> Void
+    @Environment(\.colorScheme) private var scheme
+    private var additions: Int? {
+        summary.files.allSatisfy { $0.additions != nil } ? summary.files.reduce(0) { $0 + ($1.additions ?? 0) } : nil
+    }
+    private var deletions: Int? {
+        summary.files.allSatisfy { $0.deletions != nil } ? summary.files.reduce(0) { $0 + ($1.deletions ?? 0) } : nil
+    }
+    private var title: String {
+        summary.files.count == 1 ? "Edited \(summary.files[0].name)" : "Edited \(summary.files.count) files"
+    }
+    @Environment(\.dynamicTypeSize) private var typeSize
+    private var counts: some View {
+        HStack(spacing: 8) {
+            if let additions { Text("+\(additions)").foregroundStyle(DiffColors.added(scheme)) }
+            if let deletions { Text("−\(deletions)").foregroundStyle(DiffColors.removed(scheme)) }
+            Image(systemName: isOpen ? "chevron.up" : "chevron.down")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+        }.fixedSize()
+    }
+    var body: some View {
+        Button(action: toggle) {
+            Group {
+                if typeSize.isAccessibilitySize {
+                    // Large text: the name gets its own line instead of a crushed capsule.
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title).lineLimit(2).truncationMode(.middle)
+                        counts
+                    }
+                    .padding(12)
+                    .background(Color(uiColor: .secondarySystemFill), in: RoundedRectangle(cornerRadius: 16))
+                } else {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.text").foregroundStyle(.secondary)
+                        Text(title).lineLimit(1).truncationMode(.middle)
+                        counts
+                    }
+                    .padding(.horizontal, 12).frame(minHeight: 36)
+                    .background(Color(uiColor: .secondarySystemFill), in: Capsule())
+                }
+            }
+            .font(.subheadline.monospacedDigit())
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(minHeight: 44)
+        .accessibilityLabel(([title] + [additions.map { "\($0) added lines" }, deletions.map { "\($0) removed lines" }].compactMap { $0 })
+            .joined(separator: ", "))
+        .accessibilityValue(isOpen ? "Open" : "Closed")
+        .accessibilityHint(isOpen ? "Return to the chat" : "Show the changes saved with this response")
+    }
+}
+
+enum DiffColors {
+    static func added(_ scheme: ColorScheme) -> Color { scheme == .dark ? .green : Color(red: 0.1, green: 0.42, blue: 0.2) }
+    static func removed(_ scheme: ColorScheme) -> Color { scheme == .dark ? .red : Color(red: 0.75, green: 0.12, blue: 0.16) }
+}
+
 private struct ResponseEditedFilesFooter: View {
     let summary: ResponseEditedFiles
     let open: (ResponseEditedFile?) -> Void
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
-    @Environment(\.dynamicTypeSize) private var typeSize
-    private var previewCount: Int { verticalSizeClass == .compact || typeSize.isAccessibilitySize ? 1 : 3 }
-    private var remaining: Int { max(0, summary.files.count - previewCount) }
-    private var title: some View {
-        Label(summary.files.count == 1 ? "Edited a file" : "Edited \(summary.files.count) files", systemImage: "doc.text")
-            .font(.subheadline.weight(.medium))
-    }
-    private var viewChanges: some View {
-        Button("View changes") { open(nil) }.font(.subheadline).frame(minHeight: 44)
+    var body: some View {
+        EditedFilesPill(summary: summary, isOpen: false) { open(nil) }
+            .padding(.top, 4)
+            .frame(maxWidth: 640, alignment: .leading)
             .accessibilityIdentifier("response-edits-open:" + summary.turnID)
     }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if typeSize.isAccessibilitySize {
-                VStack(alignment: .leading, spacing: 4) { title; viewChanges }
-            } else {
-                HStack { title; Spacer(minLength: 8); viewChanges }
-            }
-            ForEach(Array(summary.files.prefix(previewCount))) { file in
-                Button { open(file) } label: {
-                    EditedFileLabel(file: file)
-                }.buttonStyle(.plain).frame(minHeight: 44)
-                    .accessibilityIdentifier("response-edited-file:" + summary.turnID + ":" + file.path)
-            }
-            if remaining > 0 {
-                Button(remaining == 1 ? "Show 1 more file" : "Show \(remaining) more files") { open(nil) }
-                    .font(.subheadline).frame(minHeight: 44)
-            }
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .padding(.top, 4)
-        .frame(maxWidth: 640, alignment: .leading)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("response-edits:" + summary.turnID)
-    }
 }
 
-private struct EditedFileLabel: View {
-    let file: ResponseEditedFile
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.dynamicTypeSize) private var typeSize
-    private var name: some View {
-        Text(FileChangeSummary.relativePath(file.path) != nil ? file.path : file.name)
-            .font(.subheadline).lineLimit(2).truncationMode(.middle)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-    private var counts: some View {
-        HStack(spacing: 8) {
-            if let added = file.additions { Text("+\(added)").foregroundStyle(scheme == .dark ? Color.green : Color(red: 0.1, green: 0.42, blue: 0.2)) }
-            if let removed = file.deletions { Text("−\(removed)").foregroundStyle(scheme == .dark ? Color.red : Color(red: 0.75, green: 0.12, blue: 0.16)) }
-        }.font(.caption.monospacedDigit()).fixedSize()
-    }
-    var body: some View {
-        Group {
-            if typeSize.isAccessibilitySize {
-                VStack(alignment: .leading, spacing: 4) { name; counts }
-            } else {
-                HStack(spacing: 12) { name; counts }
-            }
-        }.fixedSize(horizontal: false, vertical: true).padding(.vertical, 6).contentShape(Rectangle())
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(([file.path] + [file.additions.map { "\($0) added lines" }, file.deletions.map { "\($0) removed lines" }].compactMap { $0 }).joined(separator: ", "))
-            .accessibilityHint("View the changes saved with this response")
-    }
-}
-
+/// Saved changes of one response. Its pill closes it; each file expands in
+/// place to its diff, unified or side by side.
 private struct ResponseEditedFilesReview: View {
     let request: EditedFilesReviewRequest
     let close: () -> Void
-    @State private var selectedPath: String?
-    @State private var patch: String?
-    @State private var oversized = false
-    @State private var patchPath: String?
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var expanded: Set<String>
+    @State private var prepared: [String: PreparedDiff] = [:]
+    @AppStorage("wonder.diff.layout") private var layout = DiffLayout.automatic
+    @Environment(\.horizontalSizeClass) private var sizeClass
     init(request: EditedFilesReviewRequest, close: @escaping () -> Void) {
         self.request = request; self.close = close
-        _selectedPath = State(initialValue: request.selectedPath)
+        let first = request.selectedPath ?? (request.summary.files.count == 1 ? request.summary.files.first?.path : nil)
+        _expanded = State(initialValue: first.map { [$0] } ?? [])
     }
-    private var selected: ResponseEditedFile? { request.summary.files.first { $0.path == selectedPath } }
+    private var split: Bool { layout.split(sizeClass) }
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Button {
-                    if selectedPath != nil { selectedPath = nil } else { close() }
-                } label: {
-                    if dynamicTypeSize.isAccessibilitySize {
-                        Image(systemName: "chevron.left").accessibilityLabel(selectedPath == nil ? "Chat" : "Edited files")
-                    } else { Label(selectedPath == nil ? "Chat" : "Edited files", systemImage: "chevron.left") }
-                }
-                    .frame(minHeight: 44).accessibilityIdentifier("response-edits-back")
+                EditedFilesPill(summary: request.summary, isOpen: true, toggle: close)
+                    .accessibilityIdentifier("response-edits-close")
                 Spacer(minLength: 0)
-                if let selected { Text(selected.name).font(.headline).lineLimit(1).truncationMode(.middle) }
-                else { Text("Edited files").font(.headline).lineLimit(1) }
-            }.padding(.horizontal, 16)
-            if let selected {
-                if selected.patches.isEmpty {
-                    ContentUnavailableView("Diff unavailable", systemImage: "doc.text", description: Text("This response saved the filename but no text diff."))
-                } else if oversized, patchPath == selected.path {
-                    ContentUnavailableView("Diff too large to preview", systemImage: "doc.text", description: Text("Review these saved changes on your Mac."))
-                } else if let patch, patchPath == selected.path {
-                    WorkspaceDiffPreview(path: selected.path,
-                                         state: "Only the first part of this diff was saved. Review the full change on your Mac.",
-                                         diff: patch, showState: selected.partial, onClose: close)
-                } else { ProgressView("Loading diff…").frame(maxWidth: .infinity, maxHeight: .infinity) }
-            } else {
-                List(request.summary.files) { file in
-                    Button { selectedPath = file.path } label: { EditedFileLabel(file: file) }
-                        .accessibilityIdentifier("response-edited-file:" + request.summary.turnID + ":" + file.path)
-                }.listStyle(.plain)
+                DiffLayoutPicker(layout: $layout, split: split)
+            }
+            .padding(.horizontal, 16)
+            DiffDocument(sections: request.summary.files.map { file in
+                DiffDocument.Section(id: file.path, title: FileChangeSummary.relativePath(file.path) != nil ? file.path : file.name,
+                                     additions: file.additions, deletions: file.deletions,
+                                     expanded: expanded.contains(file.path), diff: prepared[file.path],
+                                     note: file.patches.isEmpty ? "This response saved the filename but no text diff."
+                                         : file.partial ? "Only the first part of this diff was saved. Review the full change on your Mac." : nil,
+                                     identifier: "response-edited-file:" + request.summary.turnID + ":" + file.path)
+            }, split: split) { path in
+                if expanded.contains(path) { expanded.remove(path) } else { expanded.insert(path) }
             }
         }
-        .task(id: selectedPath) {
-            patch = nil
-            oversized = false
-            patchPath = nil
-            guard let selected, !selected.patches.isEmpty else { return }
-            let value = await Task.detached(priority: .userInitiated) {
-                guard selected.patches.reduce(0, { $0 + $1.utf8.count }) <= 512 * 1024 else { return Optional<String>.none }
-                return selected.patches.enumerated().map { index, text in
-                    selected.patches.count == 1 ? text : "Edit \(index + 1)\n" + text
-                }.joined(separator: "\n\n")
-            }.value
-            guard !Task.isCancelled, selectedPath == selected.path else { return }
-            patch = value
-            oversized = value == nil
-            patchPath = selected.path
+        .task(id: expanded) {
+            for file in request.summary.files where expanded.contains(file.path) && prepared[file.path] == nil && !file.patches.isEmpty {
+                let patches = file.patches
+                let diff = await Task.detached(priority: .userInitiated) { PreparedDiff(patches: patches) }.value
+                guard !Task.isCancelled else { return }
+                prepared[file.path] = diff
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("response-edits-review")
+    }
+}
+
+enum DiffLayout: String {
+    case automatic, unified, split
+    func split(_ sizeClass: UserInterfaceSizeClass?) -> Bool {
+        self == .split || (self == .automatic && sizeClass == .regular)
+    }
+}
+
+private struct DiffLayoutPicker: View {
+    @Binding var layout: DiffLayout
+    let split: Bool
+    var body: some View {
+        Picker("Diff layout", selection: Binding(get: { split }, set: { layout = $0 ? .split : .unified })) {
+            Image(systemName: "rectangle.grid.1x2").accessibilityLabel("Unified").tag(false)
+            Image(systemName: "rectangle.split.2x1").accessibilityLabel("Side by side").tag(true)
+        }
+        .pickerStyle(.segmented).fixedSize()
+        .accessibilityIdentifier("diff-layout")
+    }
+}
+
+/// A diff parsed off the main thread, with what its layout needs.
+struct PreparedDiff: Sendable {
+    let lines: [DiffLine]
+    let rows: [SplitDiffRow]
+    let text: String
+    let longestLine: Int
+    let numberDigits: Int
+    let oversized: Bool
+    init(patches: [String]) {
+        let size = patches.reduce(0) { $0 + $1.utf8.count }
+        oversized = size > 512 * 1024
+        text = oversized ? "" : patches.enumerated().map { index, patch in
+            patches.count == 1 ? patch : "Edit \(index + 1)\n" + patch
+        }.joined(separator: "\n")
+        // The file name heads each diff; git's own header lines repeat it.
+        lines = DiffLine.parse(text).filter { line in
+            !(line.kind == .note && ["diff ", "index ", "--- ", "+++ "].contains { line.text.hasPrefix($0) })
+        }
+        rows = SplitDiffRow.pair(lines)
+        longestLine = lines.reduce(0) { max($0, $1.text.count) }
+        numberDigits = max(2, String(lines.reduce(0) { max($0, $1.oldNumber ?? 0, $1.newNumber ?? 0) }).count)
+    }
+}
+
+/// Files with collapsible diffs in one lazy stack.
+private struct DiffDocument: View {
+    struct Section: Identifiable {
+        let id: String
+        let title: String
+        let additions: Int?
+        let deletions: Int?
+        let expanded: Bool
+        let diff: PreparedDiff?
+        let note: String?
+        let identifier: String
+    }
+    let sections: [Section]
+    let split: Bool
+    var showsHeaders = true
+    let toggle: (String) -> Void
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        GeometryReader { geometry in
+            let column = max(300, (geometry.size.width - 1) / 2)
+            ScrollView(split ? [.vertical, .horizontal] : .vertical) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(sections) { section in
+                        if showsHeaders { header(section, width: split ? column * 2 : geometry.size.width) }
+                        if section.expanded { content(section, column: column) }
+                    }
+                }
+                .frame(width: split ? column * 2 + 1 : geometry.size.width, alignment: .leading)
+            }
+            .accessibilityIdentifier("diff-document")
+        }
+    }
+    private func header(_ section: Section, width: CGFloat) -> some View {
+        Button { toggle(section.id) } label: {
+            HStack(spacing: 10) {
+                Image(systemName: section.expanded ? "chevron.down" : "chevron.right")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(width: 14)
+                Text(section.title).font(.subheadline).lineLimit(2).truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let added = section.additions { Text("+\(added)").foregroundStyle(DiffColors.added(scheme)) }
+                if let removed = section.deletions { Text("−\(removed)").foregroundStyle(DiffColors.removed(scheme)) }
+            }
+            .font(.caption.monospacedDigit())
+            .padding(.horizontal, 16).frame(minHeight: 44)
+            .frame(maxWidth: min(width, 900), alignment: .leading)
+            .background(Color(uiColor: .systemBackground))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(([section.title] + [section.additions.map { "\($0) added lines" }, section.deletions.map { "\($0) removed lines" }].compactMap { $0 }).joined(separator: ", "))
+        .accessibilityValue(section.expanded ? "Expanded" : "Collapsed")
+        .accessibilityIdentifier(section.identifier)
+    }
+    @ViewBuilder private func content(_ section: Section, column: CGFloat) -> some View {
+        if let note = section.note, section.diff == nil || section.note?.hasPrefix("This response") == true {
+            Text(note).font(.footnote).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 8)
+        } else if let diff = section.diff {
+            if diff.oversized {
+                Text("This diff is too large to preview. Review these saved changes on your Mac.")
+                    .font(.footnote).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 8)
+            } else {
+                // One element reads the whole diff; the drawn rows stay lazy.
+                Color.clear.frame(height: 1)
+                    .accessibilityElement()
+                    .accessibilityLabel(section.title + "\n" + diff.text)
+                    .accessibilityIdentifier("workspace-diff-text")
+                if split {
+                    ForEach(diff.rows) { row in
+                        SplitDiffRowView(row: row, digits: diff.numberDigits, column: column).accessibilityHidden(true)
+                    }
+                } else {
+                    ForEach(diff.lines) { line in
+                        DiffLineView(line: line, digits: diff.numberDigits).accessibilityHidden(true)
+                    }
+                }
+                if let note = section.note {
+                    Text(note).font(.footnote).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 8)
+                }
+            }
+        } else {
+            ProgressView().frame(maxWidth: .infinity).padding(.vertical, 12)
+        }
+    }
+}
+
+private struct DiffLineView: View {
+    let line: DiffLine
+    let digits: Int
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            DiffNumber(value: line.kind == .added ? nil : line.oldNumber, digits: digits)
+            DiffNumber(value: line.kind == .removed ? nil : line.newNumber, digits: digits)
+            DiffText(line: line)
+        }
+        .background(DiffBackground.color(line.kind, scheme))
+    }
+}
+
+private struct SplitDiffRowView: View {
+    let row: SplitDiffRow
+    let digits: Int
+    let column: CGFloat
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        if let line = row.left, line == row.right, line.kind == .hunk || line.kind == .note {
+            DiffText(line: line).frame(width: column * 2, alignment: .leading)
+                .background(DiffBackground.color(line.kind, scheme))
+        } else {
+            HStack(alignment: .top, spacing: 1) {
+                side(row.left, number: row.left?.oldNumber)
+                side(row.right, number: row.right?.newNumber)
+            }
+            .background(Color(uiColor: .separator))
+        }
+    }
+    private func side(_ line: DiffLine?, number: Int?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            DiffNumber(value: line == nil ? nil : number, digits: digits)
+            if let line { DiffText(line: line) } else { Color.clear.frame(maxWidth: .infinity, minHeight: 1) }
+        }
+        .frame(width: column - 0.5, alignment: .leading)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(line.map { DiffBackground.color($0.kind, scheme) } ?? Color(uiColor: .secondarySystemBackground))
+    }
+}
+
+private struct DiffNumber: View {
+    let value: Int?
+    let digits: Int
+    var body: some View {
+        Text(value.map(String.init) ?? "")
+            .font(.system(.caption2, design: .monospaced)).foregroundStyle(.tertiary)
+            .frame(width: CGFloat(digits) * 8 + 10, alignment: .trailing)
+            .padding(.trailing, 6)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct DiffText: View {
+    let line: DiffLine
+    var body: some View {
+        let sign: String = switch line.kind { case .added: "+"; case .removed: "−"; default: " " }
+        Text((line.kind == .hunk || line.kind == .note ? "" : sign + " ") + line.text)
+            .font(.system(.footnote, design: .monospaced))
+            .foregroundStyle(line.kind == .hunk || line.kind == .note ? Color.secondary : Color.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 1).padding(.trailing, 8)
+            .padding(.leading, line.kind == .hunk || line.kind == .note ? 12 : 0)
+            .textSelection(.enabled)
+    }
+}
+
+enum DiffBackground {
+    static func color(_ kind: DiffLine.Kind, _ scheme: ColorScheme) -> Color {
+        switch kind {
+        case .added: Color.green.opacity(scheme == .dark ? 0.22 : 0.14)
+        case .removed: Color.red.opacity(scheme == .dark ? 0.22 : 0.12)
+        case .hunk: Color.accentColor.opacity(0.08)
+        default: Color.clear
+        }
     }
 }
 
@@ -5666,23 +5949,40 @@ struct WorkspaceDiffPreview: View {
     var showState = true
     var onClose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @AppStorage("wonder.diff.layout") private var layout = DiffLayout.automatic
+    @State private var prepared: PreparedDiff?
     var body: some View {
         NavigationStack {
-            ToolTextView(text: diff.isEmpty ? "No textual diff is available for this change." : diff, diff: true, accessible: true)
-                .accessibilityIdentifier("workspace-diff-text")
-                .navigationTitle(path).navigationBarTitleDisplayMode(.inline)
-                .toolbar(onClose == nil ? .visible : .hidden, for: .navigationBar)
-                .toolbar {
-                    if onClose == nil {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Done") { dismiss() }
-                                .accessibilityIdentifier("workspace-diff-close")
-                        }
+            Group {
+                if diff.isEmpty {
+                    Text("No textual diff is available for this change.").foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityIdentifier("workspace-diff-text")
+                } else {
+                    DiffDocument(sections: [DiffDocument.Section(id: path, title: path, additions: nil, deletions: nil,
+                        expanded: true, diff: prepared, note: nil, identifier: "workspace-diff-file")],
+                                 split: layout.split(sizeClass), showsHeaders: false) { _ in }
+                }
+            }
+            .navigationTitle(path).navigationBarTitleDisplayMode(.inline)
+            .toolbar(onClose == nil ? .visible : .hidden, for: .navigationBar)
+            .toolbar {
+                if onClose == nil {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                            .accessibilityIdentifier("workspace-diff-close")
                     }
+                    ToolbarItem(placement: .primaryAction) { DiffLayoutPicker(layout: $layout, split: layout.split(sizeClass)) }
                 }
-                .safeAreaInset(edge: .bottom) {
-                    if showState { Text(state).font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8) }
-                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if showState { Text(state).font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8) }
+            }
+            .task(id: diff) {
+                let diff = diff
+                prepared = await Task.detached(priority: .userInitiated) { PreparedDiff(patches: [diff]) }.value
+            }
         }
     }
 }
@@ -5850,6 +6150,17 @@ struct PreviewDeck: View {
 
 private final class PDFPreviewView: PDFView {
     var restoreAfterLayout: (() -> Void)?
+    /// Offered in the text selection menu when the preview accepts comments.
+    var onComment: ((PDFSelection) -> Void)?
+
+    override func buildMenu(with builder: UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        guard builder.system == .context, let onComment, let selection = currentSelection,
+              !(selection.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let comment = UIAction(title: "Comment", image: UIImage(systemName: "text.bubble"),
+                               identifier: UIAction.Identifier("wonder.pdf.comment")) { _ in onComment(selection) }
+        builder.insertChild(UIMenu(options: .displayInline, children: [comment]), atStartOfMenu: .standardEdit)
+    }
     private lazy var failureLabel: UILabel = {
         let label = UILabel()
         label.text = "Can't open this PDF. Try again."
@@ -5891,6 +6202,7 @@ struct PDFPreview: UIViewRepresentable {
     let data: Data
     var revision: String? = nil
     var session: PDFPreviewSession? = nil
+    var onComment: ((PDFSelection) -> Void)? = nil
     final class Coordinator {
         var revision: String?
         weak var session: PDFPreviewSession?
@@ -5899,6 +6211,7 @@ struct PDFPreview: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(session: session) }
     func makeUIView(context: Context) -> PDFView {
         let view = PDFPreviewView()
+        view.onComment = onComment
         let current = revision ?? ConversationFile.digest(data)
         if let session {
             session.install(view, data: data, revision: current)
@@ -5916,6 +6229,7 @@ struct PDFPreview: UIViewRepresentable {
         session.activeView = nil
     }
     func updateUIView(_ view: PDFView, context: Context) {
+        (view as? PDFPreviewView)?.onComment = onComment
         let nextRevision = revision ?? ConversationFile.digest(data)
         guard context.coordinator.revision != nextRevision else { return }
         session?.capture()
@@ -5954,6 +6268,82 @@ struct PDFPreview: UIViewRepresentable {
         }
         context.coordinator.revision = nextRevision
         session?.update(document: document, revision: nextRevision, view: view)
+    }
+}
+
+/// A PDF text selection, kept as its area on the first selected page.
+struct PDFTextComment: Identifiable {
+    let id = UUID()
+    let page: Int
+    let area: CGRect
+    let excerpt: String
+
+    @MainActor init?(_ selection: PDFSelection) {
+        guard let page = selection.pages.first, let document = page.document else { return nil }
+        let box = page.bounds(for: .cropBox), bounds = selection.bounds(for: page)
+        guard box.width > 0, box.height > 0, !bounds.isEmpty else { return nil }
+        // PDF space starts at the bottom left; annotation areas start at the top left.
+        let x = (bounds.minX - box.minX) / box.width, y = (box.maxY - bounds.maxY) / box.height
+        let clamped = CGRect(x: x, y: y, width: bounds.width / box.width, height: bounds.height / box.height)
+            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !clamped.isNull, clamped.width > 0, clamped.height > 0 else { return nil }
+        self.page = document.index(for: page) + 1
+        self.area = clamped
+        self.excerpt = (selection.string ?? "").split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+    }
+}
+
+private struct WorkspacePDFCommentSheet: View {
+    let comment: PDFTextComment
+    let source: Data
+    let context: ArtifactPreviewContext
+    let onAnnotation: (ArtifactAnnotation) throws -> Void
+    var initialNote = ""
+    var annotationUnavailableReason: String?
+    @Environment(\.dismiss) private var dismiss
+    @State private var note = ""
+    @State private var failure: String?
+    @FocusState private var focused: Bool
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Page \(comment.page)") {
+                    Text(comment.excerpt.isEmpty ? "Selected area" : "“\(String(comment.excerpt.prefix(300)))”")
+                        .font(.callout).foregroundStyle(.secondary).lineLimit(4)
+                        .accessibilityIdentifier("annotation-pdf-excerpt")
+                }
+                Section {
+                    TextField("Add a comment", text: $note, axis: .vertical)
+                        .lineLimit(3...8).focused($focused)
+                        .accessibilityIdentifier("annotation-pdf-note")
+                    if note.utf8.count > 4096 { Text("Keep the comment under 4,096 bytes.").font(.footnote).foregroundStyle(.red) }
+                    if let annotationUnavailableReason { Text(annotationUnavailableReason).font(.footnote).foregroundStyle(.secondary) }
+                    if let failure { Text(failure).font(.footnote).foregroundStyle(.red) }
+                }
+            }
+            .navigationTitle("Comment").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") { add() }
+                        .disabled(annotationUnavailableReason != nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                  || note.utf8.count > 4096)
+                        .accessibilityIdentifier("annotation-pdf-add")
+                }
+            }
+            .onAppear { if note.isEmpty { note = initialNote }; focused = true }
+        }
+        .presentationDetents([.medium, .large])
+    }
+    private func add() {
+        do {
+            try onAnnotation(ArtifactAnnotation(projectId: context.projectID, conversationId: context.conversationID,
+                rootId: context.rootID, path: context.path, source: source, pdfPage: comment.page,
+                x: Double(comment.area.minX), y: Double(comment.area.minY),
+                width: Double(comment.area.width), height: Double(comment.area.height), note: note))
+            dismiss()
+        } catch { failure = "The comment could not be saved. Reopen the file and try again." }
     }
 }
 

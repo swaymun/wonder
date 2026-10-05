@@ -167,6 +167,7 @@ apps/native/Sources/WonderPairing/Dictation.swift
 apps/native/Sources/WonderPairing/FileChangeSummary.swift
 apps/native/Sources/WonderPairing/Files.swift
 apps/native/Sources/WonderPairing/Management.swift
+apps/native/Sources/WonderPairing/MarkdownBlocks.swift
 apps/native/Sources/WonderPairing/Projects.swift
 apps/native/Sources/WonderPairing/Protocol.swift
 apps/native/Sources/WonderPairing/Queue.swift
@@ -194,6 +195,7 @@ apps/native/Tests/WonderPairingTests/GroupTests.swift
 apps/native/Tests/WonderPairingTests/GuideTests.swift
 apps/native/Tests/WonderPairingTests/IdentityRecoveryTests.swift
 apps/native/Tests/WonderPairingTests/ManagementTests.swift
+apps/native/Tests/WonderPairingTests/MarkdownBlocksTests.swift
 apps/native/Tests/WonderPairingTests/MessageProjectionTests.swift
 apps/native/Tests/WonderPairingTests/ProjectsTests.swift
 apps/native/Tests/WonderPairingTests/ProtocolTests.swift
@@ -396,6 +398,7 @@ crates/wonderd/src/computer_sessions.rs
 crates/wonderd/src/computer_tools.rs
 crates/wonderd/src/connected_apps.rs
 crates/wonderd/src/data_home.rs
+crates/wonderd/src/desktop_activity.rs
 crates/wonderd/src/diagnostics.rs
 crates/wonderd/src/dispatch.rs
 crates/wonderd/src/enrollment_tests.rs
@@ -574,6 +577,7 @@ services/claude-runtime/project-history.mjs
 services/claude-runtime/projection.mjs
 services/claude-runtime/runtime-updates.mjs
 services/claude-runtime/sdk-runtime.mjs
+services/claude-runtime/session-file.mjs
 services/claude-runtime/sessions.mjs
 services/claude-runtime/test/bridge.test.mjs
 services/claude-runtime/test/fixtures/native-cua-peer.mjs

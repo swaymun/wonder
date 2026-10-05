@@ -152,7 +152,15 @@ private final class LargePreviewProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
             headerFields: ["Content-Length": large ? "0" : "\(Self.body.count)", "Content-Type": "application/pdf"])!,
             cacheStoragePolicy: .notAllowed)
-        if !large { client?.urlProtocol(self, didLoad: Self.body) }
+        // A network delivers the body in pieces; progress follows them.
+        if !large {
+            var offset = 0
+            while offset < Self.body.count {
+                let end = min(offset + 1024 * 1024, Self.body.count)
+                client?.urlProtocol(self, didLoad: Self.body.subdata(in: offset..<end))
+                offset = end
+            }
+        }
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
@@ -173,7 +181,8 @@ final class WorkspacePreviewDownloadTests: XCTestCase {
         let seen = reports.values
         XCTAssertEqual(seen.last?.0, body.count)
         XCTAssertTrue(seen.allSatisfy { $0.1 == body.count })
-        XCTAssertGreaterThan(seen.count, 9, "Large files report progress while they load")
+        XCTAssertTrue(seen.contains { $0.0 > 0 && $0.0 < body.count }, "Large files report progress while they load")
+        XCTAssertEqual(seen.map(\.0), seen.map(\.0).sorted(), "Progress never goes backwards")
         do {
             _ = try await api.downloadWorkspaceBytes("/api/v1/conversations/c/workspace/file?path=too-large", connection: connection,
                                                      byteSize: nil, sha256: nil, mimeType: nil)

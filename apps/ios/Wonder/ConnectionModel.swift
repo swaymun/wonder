@@ -206,6 +206,30 @@ struct ManagedBotListMutationState {
             nativeHistoryFailures.insert(chat.id)
         }
     }
+    /// The newest native turn seen per conversation, from the cheap activity check.
+    private var nativeActivity: [String: String] = [:]
+    private var nativeActivityUnsupported: Set<String> = []
+    /// Checks whether work on the Mac started, finished or moved on, without
+    /// re-reading history. Returns true when the conversation should reload.
+    func nativeActivityChanged(_ chat: ChatSummary) async -> Bool {
+        guard isProject(chat), !previewMode, let saved = connection, !accessEnded,
+              !nativeActivityUnsupported.contains(assignmentScope) else { return false }
+        struct Activity: Decodable, Sendable { let latestTurnId: String?; let latestTurnStatus: String; let runningElsewhere: Bool }
+        let scope = assignmentScope
+        do {
+            let activity: Activity = try await api.request("/api/v1/conversations/\(Self.escape(chat.id))/history/activity",
+                origin: saved.origin, credential: saved.credential)
+            guard scope == assignmentScope else { return false }
+            let signature = [activity.latestTurnId ?? "", activity.latestTurnStatus, String(activity.runningElsewhere)].joined(separator: "\u{1F}")
+            let previous = nativeActivity.updateValue(signature, forKey: chat.id)
+            return previous != nil && previous != signature
+                || (previous == nil && activity.runningElsewhere != turnRunsElsewhere(chat.id))
+        } catch PairingFailure.response(404) {
+            // An older Mac without the check: keep the slower running refresh.
+            if scope == assignmentScope { nativeActivityUnsupported.insert(scope) }
+            return false
+        } catch { return false }
+    }
     @Published var status = "Connect to your computer to get started."
     @Published var busy = false
     @Published var verification: String?
@@ -676,7 +700,22 @@ struct ManagedBotListMutationState {
                         finalPayload["contentItems"] = [["type":"wonderArtifact", "file":finalFile]]
                     }
                 }
-                let reply = commandFailed ? "The test command failed. I checked the remaining project files and notes." : failed ? "The tests passed, but I couldn’t load the project notes." : "The tests passed. I updated the chat labels and checked the project notes."
+                let markdownReply = """
+                ## Summary
+                The tests passed. I updated the **chat labels** and checked the `project notes`.
+
+                - Labels read naturally
+                - Notes stay in sync
+                1. Run the tests
+                2. Review the diff
+
+                > Remaining work is optional.
+
+                | File | Change |
+                |------|--------|
+                | ChatView.swift | Labels |
+                """
+                let reply = commandFailed ? "The test command failed. I checked the remaining project files and notes." : failed ? "The tests passed, but I couldn’t load the project notes." : ProcessInfo.processInfo.arguments.contains("-markdown-reply-preview") ? markdownReply : "The tests passed. I updated the chat labels and checked the project notes."
                 let toolState = failed ? "failed" : running ? "streaming" : "completed"
                 var items: [[String: Any]] = [
                     ["id":"echo", "type":"userMessage", "state":"completed", "text":"Runtime input wrapper", "createdAt":"0", "payload":["clientId":"fixture-user"]],
@@ -797,7 +836,7 @@ struct ManagedBotListMutationState {
         }
 
         #if WONDER_DIAGNOSTICS
-        if family == .codex, force, ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-refresh-fails") {
+        if family == .codex, codexUsageCache[scope] != nil, ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-refresh-fails") {
             throw PairingFailure.response(503)
         }
         if family == .codex, ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-unsupported") {
@@ -1733,7 +1772,8 @@ struct ManagedBotListMutationState {
     func canSend(_ chat: ChatSummary) -> Bool {
         let draft = composers[chat.id]?.draft ?? ""
         return !dictation.blocksSending(conversationID: chat.id) && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && (chat.botId != nil || groups[chat.id] != nil || isProject(chat)) && connection != nil && !accessEnded
-            && !turnRunsElsewhere(chat.id)
+            // While the Mac app runs this conversation, the Mac holds a sent
+            // message in its queue and delivers it when that turn finishes.
             && !isSubagent(chat) && usageLimitMessage(chat) == nil
             // Both direct and Group sends have durable host-side acceptance.
             // Replay invalidation does not revoke permission to submit intent.
@@ -2405,7 +2445,7 @@ struct ManagedBotListMutationState {
                 let data = previewWorkspaceData(entry: entry)
                 for step in 0...8 {
                     progress?(data.count * step / 8, data.count)
-                    try await Task.sleep(for: .milliseconds(300))
+                    try await Task.sleep(for: .milliseconds(700))
                 }
                 return data
             }

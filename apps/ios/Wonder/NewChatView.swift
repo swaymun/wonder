@@ -146,9 +146,14 @@ enum NewChatDraftStore {
                Date().timeIntervalSince(date) > 3600 { try? FileManager.default.removeItem(at: file) }
         }
     }
+    static let lastHostChanged = Notification.Name("wonder.newchat.lastHostChanged")
     static var lastHost: String? {
         get { UserDefaults.standard.string(forKey: hostKey) }
-        set { UserDefaults.standard.set(newValue, forKey: hostKey) }
+        set {
+            guard newValue != lastHost else { return }
+            UserDefaults.standard.set(newValue, forKey: hostKey)
+            NotificationCenter.default.post(name: lastHostChanged, object: nil)
+        }
     }
 }
 
@@ -158,6 +163,7 @@ struct NewChatView: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
     @State private var hostID: String?
+    @State private var showingComputer = false
     @State private var draft = NewChatDraft()
     @State private var sending = false
     @State private var sendTask = NewChatSendTask()
@@ -188,7 +194,7 @@ struct NewChatView: View {
                         NewChatContent(library: library, shell: shell, model: model, projects: model.projects,
                                        hostID: $hostID, draft: $draft, sending: $sending, sendTask: $sendTask, failure: $failure,
                                        addingProject: $addingProject, pairing: $pairing,
-                                       linkedProjectID: $linkedProjectID)
+                                       linkedProjectID: $linkedProjectID, showingComputer: $showingComputer)
                     }
                 }
             } else {
@@ -381,6 +387,7 @@ struct NewChatView: View {
         if let destination = request.destination, !draft.isSubmitted, let hostID {
             draft = NewChatDraftStore.selecting(destination, from: draft, host: hostID, project: projectSummary(destination))
         }
+        if request.showComputer, request.host == hostID { showingComputer = true }
         shell.newChatRequest = nil
     }
 
@@ -470,6 +477,7 @@ private struct NewChatContent: View {
     @Binding var addingProject: Bool
     @Binding var pairing: Bool
     @Binding var linkedProjectID: String?
+    @Binding var showingComputer: Bool
     @Environment(\.dynamicTypeSize) private var typeSize
 
     @State private var importing = false
@@ -483,7 +491,6 @@ private struct NewChatContent: View {
     @State private var showingCamera = false
     @State private var cameraScope: String?
     @State private var showingModel = false
-    @State private var showingComputer = false
     @State private var showingFiles = false
     @State private var showingConnectionPicker = false
     @State private var pairAfterConnectionPicker = false
@@ -911,12 +918,13 @@ private struct NewChatContent: View {
                             choose(host: saved.credential.hostInstallationId)
                         } label: {
                             HStack(spacing: 10) {
-                                Image(systemName: "checkmark")
-                                    .opacity(selected ? 1 : 0).frame(width: 16)
-                                Text(candidate.macName).lineLimit(2)
                                 Circle().fill(connected ? Color.green : Color.secondary.opacity(0.6))
-                                    .frame(width: 7, height: 7).accessibilityHidden(true)
-                                Spacer(minLength: 12)
+                                    .frame(width: 8, height: 8).frame(width: 16).accessibilityHidden(true)
+                                Text(candidate.macName).lineLimit(2)
+                                Spacer(minLength: 8)
+                                Image(systemName: "checkmark")
+                                    .font(.body.weight(.semibold)).foregroundStyle(Color.accentColor)
+                                    .opacity(selected ? 1 : 0)
                             }
                             .frame(minHeight: 44).contentShape(Rectangle())
                         }
@@ -940,7 +948,7 @@ private struct NewChatContent: View {
             }
             .scrollBounceBehavior(.basedOnSize)
             .accessibilityIdentifier("connection-options")
-            .frame(idealWidth: 280, maxWidth: 320, idealHeight: preferredHeight, maxHeight: preferredHeight)
+            .frame(idealWidth: 250, maxWidth: 300, idealHeight: preferredHeight, maxHeight: preferredHeight)
             .presentationCompactAdaptation(.popover)
             .onDisappear {
                 if pairAfterConnectionPicker {
