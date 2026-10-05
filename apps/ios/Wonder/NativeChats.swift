@@ -23,6 +23,43 @@ struct FailureDetails: View {
     }
 }
 
+/// A Claude chat open in Claude on the Mac keeps its conversation in memory
+/// there, so Wonder holds a message until Claude closes the chat (about 30
+/// minutes after its last use) or the owner sends it now anyway.
+private struct OpenOnMacNotice: View {
+    @ObservedObject var model: ConnectionModel
+    let chat: ChatSummary
+    let waiting: Bool
+    var body: some View {
+        if waiting {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Waiting: this chat is open in Claude on your Mac. Your message sends when Claude closes it there, about 30 minutes after you last used it.",
+                      systemImage: "desktopcomputer")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("open-elsewhere")
+                Button {
+                    Task { await model.deliverNow(chat) }
+                } label: {
+                    if model.deliveringNow.contains(chat.id) { ProgressView() } else { Text("Send now") }
+                }
+                .font(.caption.weight(.semibold)).frame(minHeight: 44)
+                .disabled(model.deliveringNow.contains(chat.id))
+                .accessibilityHint("Claude on your Mac won’t know about this message until you reopen the chat there")
+                .accessibilityIdentifier("open-elsewhere-send-now")
+            }
+        } else {
+            TemporaryNotice(key: "open-elsewhere:" + chat.id) {
+                Label("This chat is open in Claude on your Mac. Messages sent here wait until Claude closes it there.",
+                      systemImage: "desktopcomputer")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("open-elsewhere")
+            }
+        }
+    }
+}
+
 /// A composer notice that fades after a short read. A new message (a different
 /// key) shows again; VoiceOver users get longer to reach it.
 struct TemporaryNotice<Content: View>: View {
@@ -1261,13 +1298,8 @@ struct ConversationView: View {
                         TemporaryNotice(key: error) { FailureDetails("Message not saved", message: error) }
                     }
                     if !model.turnRunsElsewhere(chat.id), model.nativeOpenElsewhere.contains(chat.id) {
-                        TemporaryNotice(key: "open-elsewhere:" + chat.id) {
-                            Label("Also open in Claude on your Mac. Replies to messages sent here appear there after you reopen this chat in Claude.",
-                                  systemImage: "desktopcomputer")
-                                .font(.caption).foregroundStyle(.secondary)
-                                .accessibilityElement(children: .combine)
-                                .accessibilityIdentifier("open-elsewhere")
-                        }
+                        OpenOnMacNotice(model: model, chat: chat,
+                                        waiting: model.snapshots[chat.id]?.hasUnassignedPreTurnWork == true)
                     }
                     if model.turnRunsElsewhere(chat.id) {
                         Label("Working in \(model.agentFamily(chat).title) on your Mac. A message you send now waits until it finishes.",

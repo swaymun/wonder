@@ -3353,6 +3353,21 @@ import UIKit
         retainMenuScreenshot(app, name: "Project turn running on the Mac")
     }
 
+    // A Claude chat open in Claude on the Mac keeps its own copy of the
+    // conversation, so a message waits; Send now is an explicit choice.
+    func testMessageWaitsWhileClaudeChatIsOpenOnMac() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-send-preview", "-project-files-conversation-preview", "-project-open-on-mac-preview"]
+        app.launch()
+        let notice = anyElement(app, identifier: "open-elsewhere")
+        XCTAssertTrue(notice.waitForExistence(timeout: 10))
+        let sendNow = app.buttons["open-elsewhere-send-now"]
+        XCTAssertTrue(sendNow.waitForExistence(timeout: 5) && sendNow.isHittable)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "open in Claude on your Mac")).firstMatch.exists)
+        retainMenuScreenshot(app, name: "Message waiting while open in Claude on the Mac")
+    }
+
     func testProjectVideoPreviewStreamsAndReopensWithoutSending() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

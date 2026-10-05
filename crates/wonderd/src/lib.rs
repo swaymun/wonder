@@ -897,6 +897,10 @@ pub fn router(state: AppState) -> Router {
             get(projects::conversation).patch(projects::update_conversation),
         )
         .route(
+            "/api/v1/project-conversations/{conversation_id}/deliver-now",
+            post(projects::deliver_now),
+        )
+        .route(
             "/api/v1/project-conversations/{conversation_id}/subagents",
             get(project_subagents::list),
         )

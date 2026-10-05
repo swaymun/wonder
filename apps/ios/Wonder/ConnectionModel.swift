@@ -214,6 +214,23 @@ struct ManagedBotListMutationState {
     /// Claude conversations also open in Claude on the Mac, which shows replies
     /// to Wonder's messages only after the chat is reopened there.
     @Published private(set) var nativeOpenElsewhere: Set<String> = []
+    @Published private(set) var deliveringNow: Set<String> = []
+    /// Sends a message waiting while the chat is open in Claude on the Mac.
+    /// Wonder then answers it in its own Claude process.
+    func deliverNow(_ chat: ChatSummary) async {
+        guard isProject(chat), let saved = connection, !accessEnded, !deliveringNow.contains(chat.id) else { return }
+        let scope = assignmentScope
+        deliveringNow.insert(chat.id)
+        defer { if scope == assignmentScope { deliveringNow.remove(chat.id) } }
+        struct Empty: Decodable, Sendable {}
+        do {
+            let _: Empty = try await api.request("/api/v1/project-conversations/\(Self.escape(chat.id))/deliver-now",
+                origin: saved.origin, body: Data("{}".utf8), credential: saved.credential)
+        } catch {
+            guard scope == assignmentScope else { return }
+            controlErrors[chat.id] = "The message couldn’t be sent now. It still waits for Claude on your Mac."
+        }
+    }
     /// The newest native turn seen per conversation, from the cheap activity check.
     private var nativeActivity: [String: String] = [:]
     private var nativeActivityUnsupported: Set<String> = []
@@ -426,6 +443,9 @@ struct ManagedBotListMutationState {
             let composerQueuedPreview = arguments.contains("-composer-queued-preview")
             let messageAttachmentsPreview = arguments.contains("-message-attachments-preview")
             let projectRunningElsewherePreview = arguments.contains("-project-running-elsewhere-preview")
+            // A Claude chat open, idle, in Claude on the Mac, with a message waiting for it.
+            let projectOpenOnMacPreview = arguments.contains("-project-open-on-mac-preview")
+            if projectOpenOnMacPreview { nativeOpenElsewhere.insert("preview") }
             let projectTerminalTurnPreview = arguments.contains("-project-terminal-turn-preview") || projectRunningElsewherePreview
             var group: [String: Any] = [
                 "id": "preview-group", "conversationId": "preview", "name": saved?.hostName == "Laptop" ? "Travel plans" : saved?.hostName == "Home" ? "Reading list" : "Weekend plans", "isArchived": false,
@@ -507,7 +527,8 @@ struct ManagedBotListMutationState {
                     }
                     let fixture: [String: Any] = [
                         "conversationId": "preview", "hostEpoch": "preview", "lastSequence": 1,
-                        "messages": [["messageId": "1", "body": messageAttachmentsPreview ? "Here are the reference images and notes." : "Can you help me plan a relaxed Saturday?", "state": (ProcessInfo.processInfo.arguments.contains("-active-preview") || composerRunningPreview) ? "streaming" : "completed", "codexTurnId": "fixture-turn", "codexThreadId": "fixture-thread", "createdAt": "1700000000000", "attachmentIds": messageAttachmentsPreview ? ["message-image-1", "message-image-2", "message-notes"] : []]],
+                        "messages": [["messageId": "1", "body": messageAttachmentsPreview ? "Here are the reference images and notes." : "Can you help me plan a relaxed Saturday?", "state": (ProcessInfo.processInfo.arguments.contains("-active-preview") || composerRunningPreview) ? "streaming" : "completed", "codexTurnId": "fixture-turn", "codexThreadId": "fixture-thread", "createdAt": "1700000000000", "attachmentIds": messageAttachmentsPreview ? ["message-image-1", "message-image-2", "message-notes"] : []]]
+                            + (projectOpenOnMacPreview ? [["messageId": "2", "body": "Also check the tests.", "state": "accepted_by_wonder", "createdAt": "1700000002000", "attachmentIds": [String]()]] : []),
                         "assistantMessages": assistantMessages,
                         "thread": thread
                     ]

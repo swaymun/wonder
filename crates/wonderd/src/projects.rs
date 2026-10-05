@@ -94,6 +94,9 @@ pub struct ProjectRuntime {
     /// Runtime generation that accepted each running turn. A changed or dead
     /// generation means the turn must be reconciled from native history.
     generations: std::sync::Mutex<HashMap<String, String>>,
+    /// Conversations whose owner chose to send while the chat is open, idle,
+    /// in Claude on the Mac. Cleared when that message is dispatched.
+    deliver_now: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl ProjectRuntime {
@@ -123,6 +126,7 @@ impl ProjectRuntime {
             receipt_scans: std::sync::Mutex::new(HashMap::new()),
             notices: std::sync::Mutex::new(HashMap::new()),
             generations: std::sync::Mutex::new(HashMap::new()),
+            deliver_now: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -2688,10 +2692,12 @@ pub(crate) async fn is_project(state: &AppState, conversation: &str) -> bool {
     )
 }
 
-/// Whether a desktop or terminal app on this Mac is running this Project
-/// conversation's native session. A Wonder message waits in its queue until
-/// it finishes: two writers would interleave one transcript.
-pub(crate) async fn running_elsewhere(state: &AppState, conversation: &str) -> bool {
+/// Whether a Wonder message must wait for the Mac app. Claude Code keeps an
+/// open chat's conversation in memory: it neither sees a turn written by
+/// Wonder nor continues after it, so a Claude chat open in Claude on the Mac
+/// (busy, or idle unless the owner chose to send now) holds the message.
+/// Codex holds it only while its desktop app is running a turn.
+pub(crate) async fn held_on_mac(state: &AppState, conversation: &str) -> bool {
     let Ok(Some(stored)) = state.store.project_conversation(conversation).await else {
         return false;
     };
@@ -2699,11 +2705,49 @@ pub(crate) async fn running_elsewhere(state: &AppState, conversation: &str) -> b
         return false;
     };
     match stored.family {
-        AgentFamily::Claude => crate::desktop_activity::claude_busy_sessions()
+        AgentFamily::Claude => match crate::desktop_activity::claude_live_sessions()
             .await
-            .contains(native),
+            .get(native)
+        {
+            Some(true) => true,
+            Some(false) => !state
+                .projects
+                .deliver_now
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(conversation),
+            None => false,
+        },
         AgentFamily::Codex => crate::desktop_activity::codex_thread_busy(native).await,
     }
+}
+
+pub(crate) fn clear_deliver_now(state: &AppState, conversation: &str) {
+    state
+        .projects
+        .deliver_now
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(conversation);
+}
+
+/// The owner sends a waiting message even though the chat is open, idle, in
+/// Claude on the Mac; Wonder runs it in its own Claude process.
+pub(crate) async fn deliver_now(
+    State(state): State<AppState>,
+    Extension(_authority): Extension<OwnerAuthority>,
+    Path(conversation): Path<String>,
+) -> Response {
+    if !is_project(&state, &conversation).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    state
+        .projects
+        .deliver_now
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(conversation);
+    StatusCode::ACCEPTED.into_response()
 }
 
 pub(crate) async fn ready(state: &AppState) -> bool {
