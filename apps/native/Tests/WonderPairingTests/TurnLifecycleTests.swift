@@ -12,6 +12,21 @@ final class TurnLifecycleTests: XCTestCase {
         XCTAssertFalse(old.isInProgress)
     }
 
+    // A turn running in a desktop app is active but owned elsewhere; older
+    // payloads without the field stay ordinary turns.
+    func testTurnRunningElsewhereIsActiveButOwnedByTheMac() throws {
+        let elsewhere = try JSONDecoder().decode(ReadTurn.self, from: Data(#"{"id":"desk","status":"inProgress","runningElsewhere":true,"items":[]}"#.utf8))
+        XCTAssertTrue(elsewhere.runningElsewhere)
+        XCTAssertTrue(snapshot(messages: [], turns: [elsewhere]).activeTurnRunsElsewhere)
+        let local = try JSONDecoder().decode(ReadTurn.self, from: Data(#"{"id":"local","status":"inProgress","items":[]}"#.utf8))
+        XCTAssertFalse(local.runningElsewhere)
+        let active = snapshot(messages: [], turns: [local])
+        XCTAssertEqual(active.activeTurnID, "local")
+        XCTAssertFalse(active.activeTurnRunsElsewhere)
+        let restored = try JSONDecoder().decode(ReadTurn.self, from: JSONEncoder().encode(elsewhere))
+        XCTAssertTrue(restored.runningElsewhere)
+    }
+
     func testStaleReceiptsDoNotReactivateStoppedOrCompletedTurns() {
         let snapshot = snapshot(
             messages: [

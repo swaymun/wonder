@@ -438,6 +438,23 @@ private struct ConversationColumn: ViewModifier {
     }
 }
 
+/// A turn running in a desktop app sends no live events to Wonder; re-read its
+/// history until it finishes.
+private struct RunningElsewhereRefresh: ViewModifier {
+    @ObservedObject var model: ConnectionModel
+    let chat: ChatSummary
+    let readOnly: Bool
+    private var running: Bool { !readOnly && model.isProject(chat) && model.turnRunsElsewhere(chat.id) }
+    func body(content: Content) -> some View {
+        content.task(id: chat.id + ":" + String(running)) {
+            while running, !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(8)) } catch { return }
+                await model.reloadNativeHistory(chat)
+            }
+        }
+    }
+}
+
 private struct ComposerUsageMonitor: ViewModifier {
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
@@ -1107,6 +1124,7 @@ struct ConversationView: View {
             await history
             if model.previewMode, ProcessInfo.processInfo.arguments.contains("-preview-document") { workspaceRequest = WorkspaceBrowserRequest() }
         }
+        .modifier(RunningElsewhereRefresh(model: model, chat: chat, readOnly: readOnly))
         .task(id: chat.id + ":" + model.agentFamily(chat).rawValue) {
             guard !readOnly, (chat.botId != nil || model.isProject(chat)), model.agentFamily(chat) == .codex else { return }
             while !Task.isCancelled {
@@ -1197,6 +1215,13 @@ struct ConversationView: View {
                     if model.isProject(chat), (model.projectSubagents[chat.id] ?? []).isEmpty,
                        let detail = model.projectSubagentErrors[chat.id] {
                         Text(detail).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if model.turnRunsElsewhere(chat.id) {
+                        Label("Working in \(model.agentFamily(chat).title) on your Mac. You can send when it finishes.",
+                              systemImage: "desktopcomputer")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("running-elsewhere")
                     }
                     if !model.botWorking(chat.id), let issue = model.snapshots[chat.id]?.latestRequestIssue {
                         Text(issue)
@@ -1310,7 +1335,7 @@ struct ConversationView: View {
                                 Button(model.attachmentsSupported(chat) ? "Attach file" : "Attachments unavailable — update Wonder on your Mac", systemImage: "paperclip") {
                                     importScope = model.assignmentScope; importing = true
                                 }.disabled(!model.canAttach(chat) || model.loadingPhotos.contains(chat.id))
-                                if model.activeTurn(chat.id) != nil {
+                                if model.activeTurn(chat.id) != nil, !model.turnRunsElsewhere(chat.id) {
                                     Button("Stop response", systemImage: "stop.fill") { Task { await model.stop(chat) } }
                                         .disabled(model.stopping.contains(chat.id) || model.accessEnded || model.previewMode)
                                 }
@@ -1329,7 +1354,7 @@ struct ConversationView: View {
                         } else if model.isProject(chat) {
                             ProjectComposerSettings(model: model, library: model.projects, chat: chat)
                         } else { Spacer(minLength: 0) }
-                        if model.activeTurn(chat.id) != nil {
+                        if model.activeTurn(chat.id) != nil, !model.turnRunsElsewhere(chat.id) {
                             Button { Task { await model.stop(chat) } } label: {
                                 if model.stopping.contains(chat.id) { ProgressView().frame(width: 44, height: 44) }
                                 else { Image(systemName: "stop.fill").font(.system(size: 20)).frame(width: 44, height: 44) }

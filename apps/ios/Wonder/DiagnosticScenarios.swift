@@ -591,6 +591,17 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     "title": "Builder", "agentNickname": "Builder", "agentRole": "implementation",
                     "status": "completed", "isArchived": false, "canAcceptDirectInput": false
                 ]
+                if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-claude-tasks") {
+                    // Claude Code background commands and agents, as the host lists them.
+                    let command: [String: Any] = ["parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.childThreadID,
+                        "title": "Run focused UI tests", "agentNickname": NSNull(), "agentRole": "Background command",
+                        "status": "running", "isArchived": false, "canAcceptDirectInput": false]
+                    let agent: [String: Any] = ["parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.secondChildThreadID,
+                        "title": "Review the parser", "agentNickname": NSNull(), "agentRole": "Explore",
+                        "status": "completed", "isArchived": false, "canAcceptDirectInput": false]
+                    finish(status: 200, body: json(["available": true, "detail": NSNull(), "subagents": [command, agent],
+                        "nextCurrentCursor": NSNull(), "nextArchivedCursor": NSNull()])); return
+                }
                 if pagedProbe && cursor == "older-page" {
                     finish(status: 200, body: json(["available": true, "detail": NSNull(),
                         "subagents": [builder], "nextCurrentCursor": cycleProbe ? "second-page" as Any : NSNull(),

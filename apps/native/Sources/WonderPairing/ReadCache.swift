@@ -134,6 +134,10 @@ public struct ConversationSnapshot: Codable, Sendable {
         guard let newest = newestRuntimeTurn, newest.isInProgress else { return nil }
         return newest.id
     }
+    /// The active turn is running in a desktop or terminal app on the Mac.
+    public var activeTurnRunsElsewhere: Bool {
+        activeTurnID != nil && newestRuntimeTurn?.runningElsewhere == true
+    }
     public var latestRequestIssue: String? {
         guard activeTurnID == nil, !hasUnassignedPreTurnWork,
               let message = messages.last(where: { !$0.wasCancelledBeforeDispatch }) else { return nil }
@@ -275,12 +279,17 @@ public struct ReadTurn: Codable, Sendable {
     /// is active; item or message delivery states can arrive late during a
     /// steer, stop, reconnect, or replay.
     public let status: String
-    public init(id: String, items: [ReadItem], startedAt: String? = nil, completedAt: String? = nil, status: String = "unknown") {
+    /// Running in a desktop or terminal app on the Mac. Wonder shows it but
+    /// cannot steer, stop, or add a turn until it finishes.
+    public var runningElsewhere = false
+    public init(id: String, items: [ReadItem], startedAt: String? = nil, completedAt: String? = nil, status: String = "unknown",
+                runningElsewhere: Bool = false) {
         self.id = id
         self.items = items
         self.startedAt = startedAt
         self.completedAt = completedAt
         self.status = status
+        self.runningElsewhere = runningElsewhere
     }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -291,8 +300,9 @@ public struct ReadTurn: Codable, Sendable {
         // Pre-status caches remain readable, but are deliberately treated as
         // unknown instead of being inferred from stale delivery receipts.
         status = try container.decodeIfPresent(String.self, forKey: .status) ?? "unknown"
+        runningElsewhere = try container.decodeIfPresent(Bool.self, forKey: .runningElsewhere) ?? false
     }
-    private enum CodingKeys: String, CodingKey { case id, items, startedAt, completedAt, status }
+    private enum CodingKeys: String, CodingKey { case id, items, startedAt, completedAt, status, runningElsewhere }
     public var isInProgress: Bool { status == "inProgress" }
     public var terminalLabel: String? {
         switch status {

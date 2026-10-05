@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { Sessions } from "../sessions.mjs";
 import { ClaudeBridge } from "../bridge.mjs";
 import { ToolPolicy, closeCommandSandbox } from "../permissions.mjs";
-import { nativeTurns } from "../project-history.mjs";
+import { backgroundTasks, claudeSessionBusy, nativeTurns } from "../project-history.mjs";
 
 // Contract owner: project conversations continue the owner's native Claude Code
 // session by exact UUID, read history from that transcript, and never receive
@@ -226,4 +226,73 @@ test("project attachments keep other conversations and Bot homes protected", asy
   assert.equal(await policy.decision("Grep", { path: media }), "deny");
   await symlink(secret, join(media, "escape"));
   assert.equal(await policy.permits(join(media, "escape")), false);
+});
+
+const notice = (toolUseId, status, summary) => ({ type: "user", uuid: `n-${toolUseId}`, isQueuedCommand: true,
+  origin: { kind: "task-notification", producer: "session-task" },
+  message: { content: `<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<output-file>/tmp/x</output-file>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>` } });
+
+// Background-task notices and the interrupt marker are runtime events, not
+// owner messages; tasks come from the tool calls and their notices.
+test("native history hides runtime notices and records background tasks", () => {
+  const messages = [
+    { type: "user", uuid: "turn-1", origin: { kind: "human" }, message: { content: "Build and test" } },
+    { type: "assistant", uuid: "a1", message: { id: "m1", content: [
+      { type: "tool_use", id: "bg-1", name: "Bash", input: { command: "make", description: "Build the app", run_in_background: true } },
+      { type: "tool_use", id: "bg-2", name: "Bash", input: { command: "make test", description: "Run tests", run_in_background: true } },
+      { type: "tool_use", id: "agent-1", name: "Agent", input: { description: "Review code", subagent_type: "Explore", prompt: "Look" } },
+      { type: "tool_use", id: "fg", name: "Bash", input: { command: "ls" } }] } },
+    { type: "user", uuid: "r1", message: { content: [{ type: "tool_result", tool_use_id: "bg-1", content: "Command running in background" },
+      { type: "tool_result", tool_use_id: "agent-1", content: [{ type: "text", text: "Looks fine" }] }] } },
+    notice("bg-1", "completed", "Background command \"Build the app\" completed (exit code 0)"),
+    { type: "user", uuid: "stop", message: { content: [{ type: "text", text: "[Request interrupted by user]" }] } },
+    { type: "user", uuid: "turn-2", origin: { kind: "human" }, message: { content: "Continue" } },
+  ];
+  const turns = nativeTurns(messages, []);
+  assert.deepEqual(turns.map(t => t.id), ["turn-1", "turn-2"]);
+  assert.equal(turns[0].status, "interrupted");
+  assert.ok(!JSON.stringify(turns).includes("task-notification"));
+  const live = backgroundTasks(messages, true);
+  assert.deepEqual(live.map(t => [t.id, t.kind, t.status]), [["agent-1", "agent", "completed"], ["bg-2", "command", "running"], ["bg-1", "command", "completed"]]);
+  assert.equal(live[2].summary, "Background command \"Build the app\" completed (exit code 0)");
+  assert.equal(live[0].role, "Explore");
+  // Once the session stops working on the Mac, a task without a notice is unknown.
+  assert.equal(backgroundTasks(messages, false).find(t => t.id === "bg-2").status, "unknown");
+});
+
+test("desktop session liveness reads only Claude Code's busy session records", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "wonder-claude-sessions-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const record = (pid, sessionId, status) => writeFile(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId, status }));
+  await record(process.pid, "live", "busy");
+  await writeFile(join(dir, `${process.pid}.abc.key`), "{}");
+  assert.equal(await claudeSessionBusy("live", dir), true);
+  await record(process.pid, "live", "idle");
+  assert.equal(await claudeSessionBusy("live", dir), false);
+  await rm(join(dir, `${process.pid}.json`));
+  await record(2147483646, "dead", "busy");
+  assert.equal(await claudeSessionBusy("dead", dir), false, "A record from an exited process is not running");
+  assert.equal(await claudeSessionBusy("missing", join(dir, "absent")), false);
+});
+
+test("a desktop-busy Claude session shows its turn running elsewhere and refuses a second writer", async t => {
+  const f = await fixture(t, { transcripts: {} });
+  const dir = await mkdtemp(join(tmpdir(), "wonder-claude-sessions-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sdkSessionId = "11111111-2222-3333-4444-555555555555";
+  const messages = [{ type: "user", uuid: "turn-1", origin: { kind: "human" }, message: { content: "Working on the Mac" } },
+    { type: "assistant", uuid: "a1", message: { id: "m1", content: [{ type: "text", text: "Starting" }] } }];
+  const sdk = { getSessionMessages: async () => messages, getSessionInfo: async (id, { dir: cwd }) => ({ sessionId: id, cwd, lastModified: 1 }) };
+  const bridge = new ClaudeBridge({ updates: { acquire: async () => ({ runtime: { sdk }, release: async () => {} }) },
+    sessions: f.sessions, send: async () => {}, claudeSessionsDir: dir });
+  const { thread } = await bridge.request("project/session/attach", { sessionId: sdkSessionId, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+  await writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sdkSessionId, status: "busy" }));
+  const { data } = await bridge.request("thread/turns/list", { threadId: thread.id, itemsView: "notLoaded" });
+  assert.equal(data[0].status, "inProgress");
+  assert.equal(data[0].runningElsewhere, true);
+  await assert.rejects(bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Another" }] }), /working on this conversation on your Mac/);
+  await writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sdkSessionId, status: "idle" }));
+  const idle = await bridge.request("thread/turns/list", { threadId: thread.id, itemsView: "notLoaded" });
+  assert.equal(idle.data[0].status, "completed");
+  assert.equal(idle.data[0].runningElsewhere, undefined);
 });

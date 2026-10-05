@@ -61,6 +61,9 @@ pub(super) struct ConversationTurn {
     pub(super) created_at: String,
     pub(super) updated_at: String,
     pub(super) items: Vec<ConversationThreadItem>,
+    /// Running in a desktop or terminal app on the Mac; Wonder can't steer it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) running_elsewhere: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -160,6 +163,7 @@ pub(super) fn ensure_conversation_turn(
                 created_at: created_at.to_owned(),
                 updated_at: updated_at.to_owned(),
                 items: Vec::new(),
+                running_elsewhere: false,
             },
         );
     }
@@ -390,6 +394,20 @@ pub(super) fn sanitize_ansi_and_secrets(value: &str, limit: usize) -> String {
         let mut offset = 0;
         while let Some(found) = clean[offset..].find(prefix) {
             let start = offset + found;
+            // Key prefixes start a token; "sk-" inside a word such as
+            // "task-id" or "disk-usage" is ordinary text.
+            if prefix != "token="
+                && clean[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                offset = start + prefix.len();
+                if offset >= clean.len() {
+                    break;
+                }
+                continue;
+            }
             let end = clean[start + prefix.len()..]
                 .find(char::is_whitespace)
                 .map(|idx| start + prefix.len() + idx)
@@ -948,14 +966,20 @@ pub(super) fn conversation_thread_projection_with_items(
                                     // receipt; hydration carries the provider
                                     // outcome of turns run on the Mac.
                                     if target.status == "unknown" {
+                                        let elsewhere = detail
+                                            .get("turnRunningElsewhere")
+                                            .and_then(serde_json::Value::as_bool)
+                                            == Some(true);
                                         if let Some(status) = detail
                                             .get("turnStatus")
                                             .and_then(serde_json::Value::as_str)
                                             .filter(|s| {
                                                 matches!(*s, "completed" | "failed" | "interrupted")
+                                                    || (elsewhere && *s == "inProgress")
                                             })
                                         {
                                             target.status = status.to_owned();
+                                            target.running_elsewhere = elsewhere;
                                         }
                                     }
                                     let entry = AppServerThreadItem {
@@ -1620,7 +1644,10 @@ async fn refresh_runtime_history(
                 serde_json::from_str(&detail).map_err(|e| e.to_string())?;
             detail["historyRefresh"] = serde_json::Value::Bool(true);
             if let Some(status) = statuses.get(turn) {
-                detail["turnStatus"] = serde_json::Value::String(status.clone());
+                detail["turnStatus"] = serde_json::Value::String(status.status.clone());
+                if status.running_elsewhere {
+                    detail["turnRunningElsewhere"] = serde_json::Value::Bool(true);
+                }
             }
             let detail = detail.to_string();
             publish_event_with_context(
@@ -1670,11 +1697,19 @@ async fn refresh_runtime_history(
     }
 }
 
+/// Outcome of a native turn. `running_elsewhere` marks a turn still running in
+/// a desktop or terminal app on the Mac, which Wonder cannot steer or stop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeTurnStatus {
+    pub(crate) status: String,
+    pub(crate) running_elsewhere: bool,
+}
+
 /// Terminal outcomes of native turns, including turns run on the Mac.
 async fn native_turn_statuses(
     runtime: &wonder_app_server::RpcClient,
     thread: &str,
-) -> Result<HashMap<String, String>, String> {
+) -> Result<HashMap<String, NativeTurnStatus>, String> {
     let mut statuses = HashMap::new();
     let mut cursor: Option<String> = None;
     for _ in 0..100 {
@@ -1696,7 +1731,19 @@ async fn native_turn_statuses(
                 turn.get("id").and_then(serde_json::Value::as_str),
                 turn.get("status").and_then(serde_json::Value::as_str),
             ) {
-                statuses.insert(id.to_owned(), status.to_owned());
+                // The Claude bridge reads Claude Code's own busy record.
+                let running_elsewhere = status == "inProgress"
+                    && turn
+                        .get("runningElsewhere")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true);
+                statuses.insert(
+                    id.to_owned(),
+                    NativeTurnStatus {
+                        status: status.to_owned(),
+                        running_elsewhere,
+                    },
+                );
             }
         }
         cursor = result
@@ -1707,7 +1754,109 @@ async fn native_turn_statuses(
             break;
         }
     }
+    if !thread.starts_with("claude-") {
+        mark_codex_desktop_turn(runtime, thread, &mut statuses).await;
+    }
     Ok(statuses)
+}
+
+/// Wonder's App Server reports a thread that the Codex desktop app is running
+/// as `notLoaded`, and its unfinished turn as interrupted. The thread's own
+/// rollout log is the shared record: an unfinished `task_started` that was
+/// written recently is still running there.
+async fn mark_codex_desktop_turn(
+    runtime: &wonder_app_server::RpcClient,
+    thread: &str,
+    statuses: &mut HashMap<String, NativeTurnStatus>,
+) {
+    let Ok(response) = runtime
+        .request("thread/read", serde_json::json!({"threadId": thread}))
+        .await
+    else {
+        return;
+    };
+    let Some(read) = response.result else { return };
+    let thread_value = read.get("thread").unwrap_or(&read);
+    if thread_value
+        .pointer("/status/type")
+        .and_then(serde_json::Value::as_str)
+        == Some("active")
+    {
+        return; // Wonder's own runtime is running it and reports it live.
+    }
+    let Some(path) = thread_value.get("path").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let Some(turn) = tokio::task::spawn_blocking(move || {
+        codex_rollout_open_turn(&path, std::time::SystemTime::now())
+    })
+    .await
+    .ok()
+    .flatten() else {
+        return;
+    };
+    if let Some(status) = statuses.get_mut(&turn) {
+        if matches!(status.status.as_str(), "interrupted" | "inProgress") {
+            status.status = "inProgress".into();
+            status.running_elsewhere = true;
+        }
+    }
+}
+
+/// How long an unfinished Codex turn may go without a log write before it is
+/// treated as abandoned (for example after the app quit or crashed).
+const CODEX_DESKTOP_IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const CODEX_ROLLOUT_TAIL_BYTES: u64 = 1024 * 1024;
+
+/// The turn that the rollout started last and has not finished, if the log is
+/// a regular Codex session file written within the idle limit.
+pub(crate) fn codex_rollout_open_turn(
+    path: &std::path::Path,
+    now: std::time::SystemTime,
+) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let name = path.file_name()?.to_str()?;
+    if !path.is_absolute() || !name.starts_with("rollout-") || !name.ends_with(".jsonl") {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let age = now
+        .duration_since(metadata.modified().ok()?)
+        .unwrap_or_default();
+    if age > CODEX_DESKTOP_IDLE_LIMIT {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let start = metadata.len().saturating_sub(CODEX_ROLLOUT_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = Vec::new();
+    file.take(CODEX_ROLLOUT_TAIL_BYTES)
+        .read_to_end(&mut tail)
+        .ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let mut open: Option<String> = None;
+    for line in text.lines().skip(usize::from(start > 0)) {
+        if !line.contains("\"event_msg\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let payload = &value["payload"];
+        let turn = payload.get("turn_id").and_then(serde_json::Value::as_str);
+        match payload.get("type").and_then(serde_json::Value::as_str) {
+            Some("task_started") => open = turn.map(str::to_owned),
+            Some("task_complete" | "turn_aborted") if turn.is_none() || open.as_deref() == turn => {
+                open = None
+            }
+            _ => {}
+        }
+    }
+    open
 }
 
 #[cfg(test)]
@@ -1754,6 +1903,7 @@ mod commentary_tests {
                 created_at: "1000".into(),
                 updated_at: "1000".into(),
                 items: vec![],
+                running_elsewhere: false,
             };
             if lifecycle_first {
                 upsert_conversation_thread_item_at(&mut turn, lifecycle(), 1);
@@ -1788,6 +1938,7 @@ mod commentary_tests {
             created_at: "1000".into(),
             updated_at: "2000".into(),
             items: vec![],
+            running_elsewhere: false,
         };
         upsert_conversation_thread_item_at(&mut turn, started, 1);
         upsert_conversation_thread_item_at(&mut turn, hydrated, 3);
@@ -1814,6 +1965,7 @@ mod commentary_tests {
             created_at: "1000".into(),
             updated_at: "1000".into(),
             items: vec![],
+            running_elsewhere: false,
         };
         upsert_conversation_thread_item_at(&mut turn, running, 1);
         upsert_conversation_thread_item_at(&mut turn, hydrated, 3);

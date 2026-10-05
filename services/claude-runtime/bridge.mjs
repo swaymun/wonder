@@ -5,9 +5,9 @@ import { BRIDGE_PROTOCOL, HAIKU_MODEL, TurnProjection, questionRequest, question
 import { baseOptions, inspectSdk, isSubscription } from "./sdk-runtime.mjs";
 import { ToolPolicy, closeCommandSandbox, toolCallKey } from "./permissions.mjs";
 import { createNativeCua } from "./native-cua.mjs";
-import { nativeTurns, sessionSummary } from "./project-history.mjs";
-import { stat } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { backgroundTasks, claudeSessionBusy, nativeTurns, sessionSummary } from "./project-history.mjs";
+import { lstat, realpath, stat } from "node:fs/promises";
+import { basename, isAbsolute } from "node:path";
 
 const BUILTINS = ["Read", "Write", "Edit", "NotebookEdit", "Bash", "WebFetch", "WebSearch",
   "AskUserQuestion", "Agent", "ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop"];
@@ -102,8 +102,8 @@ async function sdkInput(input, policy) {
 }
 
 export class ClaudeBridge {
-  constructor({ updates, sessions, send, inspect = inspectSdk, onFatal = () => {} }) {
-    Object.assign(this, { updates, sessions, send, inspect, onFatal });
+  constructor({ updates, sessions, send, inspect = inspectSdk, onFatal = () => {}, claudeSessionsDir = undefined }) {
+    Object.assign(this, { updates, sessions, send, inspect, onFatal, claudeSessionsDir });
     this.active = new Map(); this.pending = new Map(); this.inspection = null; this.inspectionAt = 0;
   }
   async catalog(refresh = false) {
@@ -181,6 +181,12 @@ export class ClaudeBridge {
       const selected = params.turnId ? turns.filter(t => t.id === params.turnId) : params.sortDirection === "asc" ? turns : [...turns].reverse();
       return page(selected.flatMap(t => t.items.map(item => ({ turnId: t.id, item }))), params);
     }
+    if (session.options.wonderProject && method === "thread/backgroundTasks/list") {
+      const { messages, desktop } = await this.projectMessages(session);
+      const tasks = backgroundTasks(messages, desktop || this.active.has(session.id));
+      return { data: tasks.map(({ request, result, outputFile, ...summary }) => summary) };
+    }
+    if (session.options.wonderProject && method === "thread/backgroundTask/read") return this.backgroundTask(session, params.taskId);
     if (method === "thread/read") return { thread: this.sessions.describe(session, params.includeTurns === true) };
     if (method === "thread/turns/list") return page([...session.turns].reverse().map(t => params.itemsView === "notLoaded" ? { ...t, items: [] } : t), params);
     if (method === "thread/items/list") {
@@ -199,6 +205,10 @@ export class ClaudeBridge {
       return { thread: this.sessions.describe(session, true), model: next.model };
     }
     if (method === "turn/start") {
+      // Two writers on one Claude Code session would interleave its transcript.
+      if (session.options.wonderProject && session.sdkStarted && !this.active.has(session.id)
+        && await claudeSessionBusy(session.sdkSessionId, this.claudeSessionsDir))
+        throw new Error("Claude is working on this conversation on your Mac. Send your message when it finishes.");
       if (session.options.wonderProject && params.wonderProject) params.wonderProject = await projectContext(params.wonderProject);
       const options = { ...session.options, ...params };
       if (options.wonderProject && options.wonderProject.cwd !== session.options.wonderProject?.cwd)
@@ -284,10 +294,53 @@ export class ClaudeBridge {
     const session = await this.sessions.create({ ...params, wonderProject: project, cwd: project.cwd }, null, { sdkSessionId: params.sessionId, sdkStarted: true });
     return { thread: this.sessions.describe(session) };
   }
+  async projectMessages(session) {
+    if (!session.sdkStarted) return { messages: [], desktop: false };
+    const messages = await this.withSdk(sdk => sdk.getSessionMessages(session.sdkSessionId, { dir: session.options.wonderProject.cwd }));
+    // A turn started on the Mac (Claude desktop or terminal) is running there.
+    const desktop = !this.active.has(session.id) && await claudeSessionBusy(session.sdkSessionId, this.claudeSessionsDir);
+    return { messages, desktop };
+  }
   async projectTurns(session) {
     if (!session.sdkStarted) return session.turns;
-    const messages = await this.withSdk(sdk => sdk.getSessionMessages(session.sdkSessionId, { dir: session.options.wonderProject.cwd }));
-    return nativeTurns(messages, session.turns, this.active.has(session.id));
+    const { messages, desktop } = await this.projectMessages(session);
+    const turns = nativeTurns(messages, session.turns, this.active.has(session.id) || desktop);
+    if (desktop && turns.length) turns.at(-1).runningElsewhere = true;
+    return turns;
+  }
+  // Read-only detail for one agent task or background command.
+  async backgroundTask(session, taskId) {
+    if (typeof taskId !== "string" || !taskId || taskId.length > 256) throw new Error("Choose an agent task.");
+    const { messages, desktop } = await this.projectMessages(session);
+    const task = backgroundTasks(messages, desktop || this.active.has(session.id)).find(t => t.id === taskId);
+    if (!task) throw new Error("This agent task is no longer in the conversation.");
+    const sections = [];
+    if (task.request) sections.push(task.kind === "agent" ? `Task\n\n${task.request}` : `Command\n\n\`\`\`\n${task.request}\n\`\`\``);
+    if (task.summary) sections.push(task.summary);
+    if (task.result) sections.push(task.result);
+    const output = task.kind === "command" ? await this.taskOutput(session, task) : null;
+    if (output) sections.push(`Latest output\n\n\`\`\`\n${output}\n\`\`\``);
+    const { request, result, outputFile, ...summary } = task;
+    return { task: summary, items: sections.map((text, index) => ({ type: "agentMessage", id: `${task.id}:${index}`, text, status: "completed" })) };
+  }
+  // Only Claude Code's own task output file for this exact session and task.
+  async taskOutput(session, task) {
+    const path = task.outputFile;
+    if (typeof path !== "string" || !task.taskId || !/^[A-Za-z0-9_-]{1,64}$/.test(task.taskId)) return null;
+    if (!/^\/(private\/)?tmp\/claude-[0-9]+\//.test(path) || basename(path) !== `${task.taskId}.output`
+      || !path.includes(`/${session.sdkSessionId}/tasks/`)) return null;
+    try {
+      const info = await lstat(path);
+      if (!info.isFile() || (await realpath(path)) !== (path.startsWith("/tmp/") ? `/private${path}` : path)) return null;
+      const handle = await open(path, "r");
+      try {
+        const length = Math.min(info.size, 32 * 1024);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, info.size - length);
+        const text = buffer.toString("utf8").replace(/^[^\n]*\n/, info.size > length ? "" : "$&").replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+        return text.trim() ? text.trimEnd() : null;
+      } finally { await handle.close(); }
+    } catch { return null; }
   }
   serverCall(method, params, signal) {
     if (signal?.aborted) return Promise.reject(new Error("Claude action cancelled."));

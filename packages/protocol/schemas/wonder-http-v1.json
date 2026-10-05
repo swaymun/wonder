@@ -2179,6 +2179,7 @@
         "items"
       ],
       "properties": {
+        "runningElsewhere": { "const": true },
         "startedAt": { "type": ["string", "null"] },
         "completedAt": { "type": ["string", "null"] },
         "id": {

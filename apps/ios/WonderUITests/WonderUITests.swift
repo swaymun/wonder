@@ -496,6 +496,31 @@ import UIKit
         app.terminate()
     }
 
+    // Claude Code background commands and agents use the same agent-task list.
+    func testClaudeBackgroundTasksAppearInAgentTasks() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+                               "-diagnostics-chat-layout-unsaved", "-diagnostics-project-subagents", "-diagnostics-project-claude-tasks"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let parent = app.buttons["pinned-thread:codex:read-fixture"]
+        XCTAssertTrue(parent.waitForExistence(timeout: 15))
+        parent.tap()
+        let pill = app.buttons["project-subagent-status-pill"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 15))
+        pill.tap()
+        let command = app.buttons["project-subagent-roster:fixture-child-thread"]
+        XCTAssertTrue(command.waitForExistence(timeout: 5))
+        XCTAssertTrue(command.label.hasPrefix("Run focused UI tests"), command.label)
+        XCTAssertTrue(command.label.hasSuffix("Running"), command.label)
+        let agent = app.buttons["project-subagent-roster:fixture-second-child-thread"]
+        XCTAssertTrue(agent.exists)
+        XCTAssertTrue(agent.label.hasSuffix("Completed"), agent.label)
+        Thread.sleep(forTimeInterval: 0.5)
+        retainMenuScreenshot(app, name: "Claude background tasks in agent tasks")
+    }
+
     func testProjectAgentTaskOpensReadOnlyTranscript() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -3275,6 +3300,25 @@ import UIKit
         XCTAssertEqual(compaction.label, "Context compaction interrupted")
         XCTAssertTrue(app.textViews["message-draft"].exists)
         retainMenuScreenshot(app, name: "Project response status")
+    }
+
+    // A turn running in Claude or Codex on the Mac reads as running, but Wonder
+    // offers no Stop or Guide for it and explains why Send waits.
+    func testProjectTurnRunningOnMacShowsRunningWithoutStop() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-read-preview", "-project-running-elsewhere-preview"]
+        app.launch()
+        let notice = anyElement(app, identifier: "running-elsewhere")
+        XCTAssertTrue(notice.waitForExistence(timeout: 10))
+        XCTAssertTrue(notice.label.contains("on your Mac"), notice.label)
+        XCTAssertFalse(app.buttons["Stop response"].exists, "Wonder cannot stop a turn owned by the desktop app")
+        let draft = app.textViews["message-draft"]
+        draft.tap(); draft.typeText("Next step")
+        XCTAssertFalse(app.buttons["send-message"].isEnabled, "Send waits for the desktop turn to finish")
+        XCTAssertFalse(app.buttons["activity-group:fixture-turn/desktop-command"].exists
+            && app.buttons["activity-group:fixture-turn/desktop-command"].label.contains("interrupted"))
+        retainMenuScreenshot(app, name: "Project turn running on the Mac")
     }
 
     func testProjectVideoPreviewStreamsAndReopensWithoutSending() throws {

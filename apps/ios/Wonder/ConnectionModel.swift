@@ -390,7 +390,8 @@ struct ManagedBotListMutationState {
             let composerRunningPreview = arguments.contains("-composer-running-preview")
             let composerQueuedPreview = arguments.contains("-composer-queued-preview")
             let messageAttachmentsPreview = arguments.contains("-message-attachments-preview")
-            let projectTerminalTurnPreview = arguments.contains("-project-terminal-turn-preview")
+            let projectRunningElsewherePreview = arguments.contains("-project-running-elsewhere-preview")
+            let projectTerminalTurnPreview = arguments.contains("-project-terminal-turn-preview") || projectRunningElsewherePreview
             var group: [String: Any] = [
                 "id": "preview-group", "conversationId": "preview", "name": saved?.hostName == "Laptop" ? "Travel plans" : saved?.hostName == "Home" ? "Reading list" : "Weekend plans", "isArchived": false,
                 "members": [["botId":"ada", "botName":"Ada", "role":"worker"]],
@@ -432,7 +433,15 @@ struct ManagedBotListMutationState {
                             "id": "fixture-turn", "status": "inProgress", "startedAt": "1700000000000", "items": []
                         ]]]
                         : ["hydrated": true]
-                    if projectTerminalTurnPreview {
+                    if projectRunningElsewherePreview {
+                        // A turn the Claude desktop app is running on the Mac.
+                        thread = ["hydrated": true, "turns": [[
+                            "id": "fixture-turn", "status": "inProgress", "runningElsewhere": true, "items": [[
+                                "id": "desktop-command", "type": "commandExecution", "state": "started",
+                                "createdAt": "1700000001000", "payload": ["command": "swift test"]
+                            ]]
+                        ]]]
+                    } else if projectTerminalTurnPreview {
                         thread = ["hydrated": true, "turns": [[
                             "id": "fixture-turn", "status": "interrupted", "items": [[
                                 "id": "stopped-command", "type": "commandExecution", "state": "interrupted",
@@ -1628,6 +1637,12 @@ struct ManagedBotListMutationState {
         snapshots[chat]?.activeTurnID
     }
 
+    /// A Project turn started in Codex or Claude on the Mac. Wonder can't stop
+    /// or steer it, and a new message waits until it finishes.
+    func turnRunsElsewhere(_ chat: String) -> Bool {
+        snapshots[chat]?.activeTurnRunsElsewhere == true
+    }
+
     func activeTurnIDs(_ chat: String) -> Set<String> {
         snapshots[chat]?.activeTurnIDs ?? []
     }
@@ -1637,7 +1652,7 @@ struct ManagedBotListMutationState {
         return snapshots[chat]?.thread.turns?.first(where: { $0.id == turnID })
     }
     func canGuide(_ chat: ChatSummary) -> Bool {
-        !dictation.blocksSending(conversationID: chat.id) && agentFamily(chat) == .codex && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id) && chat.botId != nil && activeTurn(chat.id) != nil && connection != nil && !accessEnded
+        !dictation.blocksSending(conversationID: chat.id) && agentFamily(chat) == .codex && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id) && chat.botId != nil && activeTurn(chat.id) != nil && !turnRunsElsewhere(chat.id) && connection != nil && !accessEnded
             && !isSubagent(chat) && usageLimitMessage(chat) == nil
             && !sending.contains(chat.id)
             && composers[chat.id]?.pending == nil && composerErrors[chat.id] == nil
@@ -1665,7 +1680,7 @@ struct ManagedBotListMutationState {
         } catch { controlErrors[chat.id] = "Guide could not be saved. Your text is still here." }
     }
     func stop(_ chat: ChatSummary) async {
-        guard !isSubagent(chat) else { return }
+        guard !isSubagent(chat), !turnRunsElsewhere(chat.id) else { return }
         guard let turn = activeTurn(chat.id), let saved = connection, !accessEnded,
               chat.botId != nil || isProject(chat), !stopping.contains(chat.id) else { return }
         let key = partition
@@ -1718,6 +1733,7 @@ struct ManagedBotListMutationState {
     func canSend(_ chat: ChatSummary) -> Bool {
         let draft = composers[chat.id]?.draft ?? ""
         return !dictation.blocksSending(conversationID: chat.id) && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && (chat.botId != nil || groups[chat.id] != nil || isProject(chat)) && connection != nil && !accessEnded
+            && !turnRunsElsewhere(chat.id)
             && !isSubagent(chat) && usageLimitMessage(chat) == nil
             // Both direct and Group sends have durable host-side acceptance.
             // Replay invalidation does not revoke permission to submit intent.

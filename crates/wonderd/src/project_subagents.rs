@@ -110,16 +110,11 @@ async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent
     if roots_valid.is_err() {
         return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
-    if conversation.family != AgentFamily::Codex {
-        return Err(Box::new(
-            (
-                StatusCode::NOT_IMPLEMENTED,
-                "Project agent tasks are available for Codex threads.",
-            )
-                .into_response(),
-        ));
-    }
-    if conversation.provider_store != state.projects.codex_store {
+    let store = match conversation.family {
+        AgentFamily::Codex => &state.projects.codex_store,
+        AgentFamily::Claude => &state.projects.claude_store,
+    };
+    if &conversation.provider_store != store {
         return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
     let thread_id = conversation.native_session_id.clone().ok_or_else(|| {
@@ -147,9 +142,9 @@ async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent
     {
         return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
-    let rpc = projects::codex_rpc(state)
+    let rpc = projects::rpc_for(state, conversation.family)
         .await
-        .map_err(|_| Box::new(unavailable("Codex is unavailable on your Mac.")))?;
+        .map_err(|_| Box::new(unavailable("The agent runtime is unavailable on your Mac.")))?;
     let read = request(
         &rpc,
         "thread/read",
@@ -327,6 +322,31 @@ pub(crate) async fn list(
         }
         Err(response) => return *response,
     };
+    if parent.conversation.family == AgentFamily::Claude {
+        // Claude agent tasks and background commands come from the session
+        // transcript itself; they have no archive or paging of their own.
+        if query.archived == Some(true) || query.cursor.is_some() {
+            return Json(ProjectSubagentList {
+                available: true,
+                detail: None,
+                subagents: Vec::new(),
+                next_current_cursor: None,
+                next_archived_cursor: None,
+            })
+            .into_response();
+        }
+        return match claude_tasks(&parent).await {
+            Ok(subagents) => Json(ProjectSubagentList {
+                available: true,
+                detail: None,
+                subagents,
+                next_current_cursor: None,
+                next_archived_cursor: None,
+            })
+            .into_response(),
+            Err(response) => *response,
+        };
+    }
     let mut children = Vec::new();
     let mut seen = HashSet::new();
     let mut next_current_cursor = None;
@@ -407,6 +427,9 @@ pub(crate) async fn transcript(
         Ok(parent) => parent,
         Err(response) => return *response,
     };
+    if parent.conversation.family == AgentFamily::Claude {
+        return claude_transcript(&state, &parent, &conversation_id, &thread_id).await;
+    }
     let read = match request(
         &parent.rpc,
         "thread/read",
@@ -497,9 +520,162 @@ pub(crate) async fn transcript(
     .into_response()
 }
 
+fn claude_task_summary(
+    parent_conversation_id: &str,
+    task: &Value,
+) -> Option<ProjectSubagentSummary> {
+    let id = task
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 256)?;
+    let title = task
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())?;
+    let role = match task.get("kind").and_then(Value::as_str)? {
+        "agent" => task
+            .get("role")
+            .and_then(Value::as_str)
+            .filter(|role| !role.trim().is_empty())
+            .unwrap_or("Agent"),
+        "command" => "Background command",
+        _ => return None,
+    };
+    let status = match task.get("status").and_then(Value::as_str)? {
+        status @ ("running" | "completed" | "failed" | "interrupted") => status,
+        _ => "unknown",
+    };
+    Some(ProjectSubagentSummary {
+        parent_conversation_id: parent_conversation_id.to_owned(),
+        thread_id: id.to_owned(),
+        title: title.chars().take(200).collect(),
+        agent_nickname: None,
+        agent_role: Some(role.chars().take(80).collect()),
+        status: status.to_owned(),
+        is_archived: false,
+        can_accept_direct_input: false,
+    })
+}
+
+async fn claude_tasks(
+    parent: &ProjectParent,
+) -> Result<Vec<ProjectSubagentSummary>, Box<Response>> {
+    let result = request(
+        &parent.rpc,
+        "thread/backgroundTasks/list",
+        json!({"threadId": parent.thread_id}),
+    )
+    .await
+    .map_err(|_| Box::new(unavailable("Agent tasks could not be loaded. Try again.")))?;
+    let tasks = result
+        .get("data")
+        .and_then(Value::as_array)
+        .filter(|tasks| tasks.len() <= MAX_CHILDREN)
+        .ok_or_else(|| Box::new(unavailable("Claude returned an invalid agent task list.")))?;
+    Ok(tasks
+        .iter()
+        .filter_map(|task| claude_task_summary(&parent.conversation.conversation_id, task))
+        .collect())
+}
+
+async fn claude_transcript(
+    state: &AppState,
+    parent: &ProjectParent,
+    conversation_id: &str,
+    task_id: &str,
+) -> Response {
+    let result = match request(
+        &parent.rpc,
+        "thread/backgroundTask/read",
+        json!({"threadId": parent.thread_id, "taskId": task_id}),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let Some(child) = result
+        .get("task")
+        .and_then(|task| claude_task_summary(&parent.conversation.conversation_id, task))
+        .filter(|child| child.thread_id == task_id)
+    else {
+        return unavailable("Claude returned an invalid agent task.");
+    };
+    let Some(entries) = result
+        .get("items")
+        .and_then(Value::as_array)
+        .filter(|items| items.len() <= PAGE_SIZE)
+    else {
+        return unavailable("Claude returned invalid agent task history.");
+    };
+    let items: Vec<history::AppServerThreadItem> = entries
+        .iter()
+        .filter(|item| {
+            item.get("type").and_then(Value::as_str) == Some("agentMessage")
+                && item.get("id").and_then(Value::as_str).is_some()
+                && item.get("text").and_then(Value::as_str).is_some()
+        })
+        .map(|item| history::AppServerThreadItem {
+            turn_id: task_id.to_owned(),
+            item: item.clone(),
+        })
+        .collect();
+    let projection = history::conversation_thread_projection_with_items(
+        Some(task_id.to_owned()),
+        &[],
+        &[],
+        &[],
+        &items,
+        Some(&parent.conversation.cwd),
+    );
+    Json(ProjectSubagentTranscript {
+        subagent: child,
+        snapshot: history::ConversationSnapshot {
+            conversation_id: format!("project-agent:{}:{}", conversation_id, task_id),
+            host_epoch: state.host_epoch.clone(),
+            last_sequence: 0,
+            codex_thread_id: Some(task_id.to_owned()),
+            messages: Vec::new(),
+            assistant_messages: Vec::new(),
+            thread: projection,
+            events: Vec::new(),
+        },
+    })
+    .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Claude agent tasks and background commands share the read-only roster;
+    // unknown kinds are dropped and unrecognized states are not claimed.
+    #[test]
+    fn claude_tasks_map_to_read_only_roster_rows() {
+        let row = |task: Value| claude_task_summary("chat", &task);
+        let command = row(
+            json!({"id":"toolu_1","kind":"command","title":"Build the app","status":"running"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (command.agent_role.as_deref(), command.status.as_str()),
+            (Some("Background command"), "running")
+        );
+        assert!(!command.can_accept_direct_input);
+        let agent = row(json!({"id":"toolu_2","kind":"agent","title":"Review","role":"Explore","status":"completed"})).unwrap();
+        assert_eq!(agent.agent_role.as_deref(), Some("Explore"));
+        assert_eq!(
+            row(json!({"id":"toolu_3","kind":"agent","title":"Old","status":"lost"}))
+                .unwrap()
+                .status,
+            "unknown"
+        );
+        assert!(
+            row(json!({"id":"toolu_4","kind":"shell","title":"x","status":"running"})).is_none()
+        );
+        assert!(row(json!({"id":"","kind":"command","title":"x","status":"running"})).is_none());
+    }
 
     #[test]
     fn project_child_status_preserves_waiting_and_provider_failures() {

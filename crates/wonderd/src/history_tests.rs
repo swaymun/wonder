@@ -814,3 +814,118 @@ async fn compact_history_view_omits_unrendered_screenshot_data_only_when_request
         matches!(replay.event, WonderEvent::ComputerUseScreenshot { ref image_url } if image_url.is_empty())
     );
 }
+
+fn refresh_envelope(id: &str, detail: serde_json::Value) -> HostEventEnvelope {
+    HostEventEnvelope {
+        event_id: id.into(),
+        host_epoch: "epoch".into(),
+        sequence: 0,
+        occurred_at: "1000".into(),
+        conversation_id: Some("chat".into()),
+        thread_id: Some("thread".into()),
+        turn_id: Some("turn".into()),
+        request_id: None,
+        device_id: None,
+        message_id: None,
+        item_id: Some("reply".into()),
+        approval_id: None,
+        event: WonderEvent::Activity {
+            category: "thread_item_upsert".into(),
+            state: "updated".into(),
+            detail: Some(detail.to_string()),
+        },
+    }
+}
+
+// A turn still running in a desktop or terminal app is shown as running there,
+// and only that explicit marker lets refreshed history claim "inProgress".
+#[test]
+fn refreshed_desktop_turn_runs_elsewhere_until_it_finishes() {
+    let item = serde_json::json!({"id":"reply", "type":"agentMessage", "text":"Working", "status":"inProgress"});
+    let detail = |status: &str, elsewhere: bool| {
+        let mut value: serde_json::Value = serde_json::from_str(
+            &thread_item_upsert_detail("turn", &item, "updated", None).unwrap(),
+        )
+        .unwrap();
+        value["historyRefresh"] = serde_json::json!(true);
+        value["turnStatus"] = serde_json::json!(status);
+        if elsewhere {
+            value["turnRunningElsewhere"] = serde_json::json!(true);
+        }
+        value
+    };
+    let project = |detail: serde_json::Value| {
+        conversation_thread_projection_with_items(
+            None,
+            &[],
+            &[],
+            &[refresh_envelope("e", detail)],
+            &[],
+            None,
+        )
+    };
+    let running = project(detail("inProgress", true));
+    assert_eq!(running.turns[0].status, "inProgress");
+    assert!(running.turns[0].running_elsewhere);
+    assert_eq!(
+        serde_json::to_value(&running.turns[0]).unwrap()["runningElsewhere"],
+        true
+    );
+    let unmarked = project(detail("inProgress", false));
+    assert_ne!(unmarked.turns[0].status, "inProgress");
+    let finished = project(detail("completed", false));
+    assert_eq!(finished.turns[0].status, "completed");
+    assert!(serde_json::to_value(&finished.turns[0])
+        .unwrap()
+        .get("runningElsewhere")
+        .is_none());
+}
+
+#[test]
+fn key_redaction_ignores_prefixes_inside_words() {
+    let clean = sanitize_ansi_and_secrets(
+        "<task-id>b1</task-id> disk-usage sk-live123 Bearer abc token=xyz",
+        1024,
+    );
+    assert_eq!(
+        clean,
+        "<task-id>b1</task-id> disk-usage [redacted] [redacted] [redacted]"
+    );
+}
+
+// The Codex desktop app runs turns in its own private app server; the
+// thread's rollout log is the only shared record that a turn is unfinished.
+#[test]
+fn codex_rollout_reports_only_a_recent_unfinished_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollout-2026-10-04T00-00-00-thread.jsonl");
+    let event = |kind: &str, turn: &str| {
+        format!("{{\"timestamp\":\"t\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"{kind}\",\"turn_id\":\"{turn}\"}}}}\n")
+    };
+    std::fs::write(
+        &path,
+        event("task_started", "one")
+            + &event("task_complete", "one")
+            + &event("task_started", "two"),
+    )
+    .unwrap();
+    let now = std::time::SystemTime::now();
+    assert_eq!(codex_rollout_open_turn(&path, now).as_deref(), Some("two"));
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&event("turn_aborted", "two"));
+    std::fs::write(&path, &text).unwrap();
+    assert_eq!(codex_rollout_open_turn(&path, now), None);
+    std::fs::write(&path, event("task_started", "three")).unwrap();
+    let later = now + std::time::Duration::from_secs(16 * 60);
+    assert_eq!(
+        codex_rollout_open_turn(&path, later),
+        None,
+        "a silent log is no longer running"
+    );
+    let link = dir.path().join("rollout-link.jsonl");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    assert_eq!(codex_rollout_open_turn(&link, now), None);
+    let other = dir.path().join("notes.jsonl");
+    std::fs::write(&other, event("task_started", "four")).unwrap();
+    assert_eq!(codex_rollout_open_turn(&other, now), None);
+}

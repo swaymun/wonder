@@ -111,6 +111,13 @@ loading progress row and the 128 KiB visible
 preview bound on both iPhone and iPad. These fixtures do not send a message or
 prove that a live provider receives an annotation.
 
+`-project-running-elsewhere-preview` shows a Project turn that Claude or Codex is
+running on the Mac: it reads as running, offers no Stop or Guide, and Send waits.
+`-diagnostics-project-claude-tasks` (with `-diagnostics-project-subagents`) lists
+Claude background commands and agents in the agent-task sheet. Live liveness comes
+from Claude Code's busy record and the Codex rollout log on the paired Mac; these
+fixtures do not exercise those Mac signals.
+
 For explicitly requested physical QA, use the approved Testing development profiles. Set
 `WONDER_APP_SIGNING_STYLE=Manual` and supply `WONDER_MAIN_PROFILE`,
 `WONDER_PUSH_PROFILE`, `WONDER_SHARE_PROFILE` and `WONDER_WIDGET_PROFILE` to `xcodebuild` with the
