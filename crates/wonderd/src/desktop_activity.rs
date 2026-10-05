@@ -81,6 +81,176 @@ pub(crate) fn busy_sessions_in(dir: &Path) -> HashSet<String> {
 
 fn live_sessions_in(dir: &Path) -> HashMap<String, bool> {
     let mut live = HashMap::new();
+    for record in live_records_in(dir) {
+        *live.entry(record.session).or_insert(false) |= record.busy;
+        if live.len() >= MAX_SESSION_RECORDS {
+            break;
+        }
+    }
+    live
+}
+
+/// One live Claude Code process and the session it has open.
+struct LiveRecord {
+    pid: i32,
+    session: String,
+    busy: bool,
+    desktop: bool,
+}
+
+/// Why a desktop chat could not be stopped for Wonder to continue it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StopRefusal {
+    Busy,
+    Terminal,
+    StillRunning,
+}
+
+/// Stops the idle process the Claude desktop app keeps for this chat, so a
+/// message from Wonder becomes part of the conversation: the app starts the
+/// chat again from its transcript when it is next opened. A busy chat, or one
+/// open in Claude Code in a terminal, is never stopped.
+pub(crate) async fn stop_idle_desktop_session(session: &str) -> Result<(), StopRefusal> {
+    let Some(dir) = claude_sessions_dir() else {
+        return Ok(());
+    };
+    let session = session.to_owned();
+    tokio::task::spawn_blocking(move || stop_idle_desktop_session_in(&dir, &session))
+        .await
+        .unwrap_or(Err(StopRefusal::StillRunning))
+}
+
+fn stop_idle_desktop_session_in(dir: &Path, session: &str) -> Result<(), StopRefusal> {
+    let records: Vec<LiveRecord> = live_records_in(dir)
+        .into_iter()
+        .filter(|record| record.session == session)
+        .collect();
+    if records.iter().any(|record| record.busy) {
+        return Err(StopRefusal::Busy);
+    }
+    if records
+        .iter()
+        .any(|record| !record.desktop || !desktop_claude_process(record.pid))
+    {
+        return Err(StopRefusal::Terminal);
+    }
+    for record in &records {
+        unsafe { libc::kill(record.pid, libc::SIGTERM) };
+    }
+    for _ in 0..50 {
+        if records.iter().all(|record| !process_alive(record.pid)) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(StopRefusal::StillRunning)
+}
+
+const DESKTOP_APP: &str = "/Applications/Claude.app";
+const DESKTOP_BUNDLE_ID: &str = "com.anthropic.claudefordesktop";
+
+/// A new Claude chat started in Wonder also belongs in the Claude desktop app.
+/// After its first response, the Mac opens Claude's own resume link in the
+/// background, which adds the chat to the app's sidebar, then closes the idle
+/// process the app starts for it so Wonder keeps sending directly. The link
+/// waits while the app is in front, so the chat you are reading never changes.
+pub(crate) fn schedule_desktop_import(
+    state: crate::AppState,
+    conversation: String,
+    session: String,
+) {
+    if cfg!(test) || !Path::new(DESKTOP_APP).is_dir() || !valid_session_id(&session) {
+        return;
+    }
+    tokio::spawn(async move {
+        let started = tokio::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(2 * 60 * 60) {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let working = state
+                .store
+                .conversation_has_active_turn(&conversation)
+                .await
+                .unwrap_or(true);
+            if working || desktop_app_frontmost().await {
+                continue;
+            }
+            if claude_live_sessions().await.contains_key(&session) {
+                return; // Already open on the Mac.
+            }
+            let link = format!("claude://resume?session={session}");
+            let opened = tokio::process::Command::new("/usr/bin/open")
+                .args(["-g", &link])
+                .status()
+                .await
+                .is_ok_and(|status| status.success());
+            if !opened {
+                return;
+            }
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if claude_live_sessions().await.get(&session) == Some(&false) {
+                    let _ = stop_idle_desktop_session(&session).await;
+                    break;
+                }
+            }
+            let _ = state.logger.record(
+                "info",
+                "claude_desktop_import",
+                serde_json::json!({"conversationId": conversation}),
+            );
+            return;
+        }
+    });
+}
+
+fn valid_session_id(value: &str) -> bool {
+    value.len() == 36 && value.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
+async fn desktop_app_frontmost() -> bool {
+    let Ok(front) = tokio::process::Command::new("/usr/bin/lsappinfo")
+        .arg("front")
+        .output()
+        .await
+    else {
+        return true;
+    };
+    let asn = String::from_utf8_lossy(&front.stdout).trim().to_owned();
+    if asn.is_empty() {
+        return false;
+    }
+    let Ok(info) = tokio::process::Command::new("/usr/bin/lsappinfo")
+        .args(["info", "-only", "bundleid", &asn])
+        .output()
+        .await
+    else {
+        return true;
+    };
+    String::from_utf8_lossy(&info.stdout).contains(DESKTOP_BUNDLE_ID)
+}
+
+/// The Claude Code binary the Claude desktop app runs for its chats, checked
+/// by executable path so a reused process ID is never signalled.
+#[cfg(target_os = "macos")]
+fn desktop_claude_process(pid: i32) -> bool {
+    let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return false;
+    }
+    let path = String::from_utf8_lossy(&buffer[..length as usize]);
+    path.contains("/Library/Application Support/Claude/claude-code/")
+        && path.ends_with("/MacOS/claude")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn desktop_claude_process(_pid: i32) -> bool {
+    false
+}
+
+fn live_records_in(dir: &Path) -> Vec<LiveRecord> {
+    let mut live = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return live;
     };
@@ -116,8 +286,13 @@ fn live_sessions_in(dir: &Path) -> HashMap<String, bool> {
             continue;
         };
         if process_alive(pid) {
-            let busy = record.get("status").and_then(serde_json::Value::as_str) == Some("busy");
-            *live.entry(session.to_owned()).or_insert(false) |= busy;
+            live.push(LiveRecord {
+                pid,
+                session: session.to_owned(),
+                busy: record.get("status").and_then(serde_json::Value::as_str) == Some("busy"),
+                desktop: record.get("entrypoint").and_then(serde_json::Value::as_str)
+                    == Some("claude-desktop"),
+            });
         }
         if live.len() >= MAX_SESSION_RECORDS {
             break;
@@ -174,6 +349,22 @@ mod tests {
             HashSet::from(["busy".to_owned()])
         );
         assert!(busy_sessions_in(&idle).is_empty());
+        // The test process is not the desktop app's Claude Code, so it is never stopped.
+        let me_session = "busy";
+        assert_eq!(
+            stop_idle_desktop_session_in(dir.path(), me_session),
+            Err(StopRefusal::Busy)
+        );
+        std::fs::write(
+            idle.join(format!("{me}.json")),
+            serde_json::json!({"pid": me, "sessionId": "idle", "status": "idle", "entrypoint": "claude-desktop"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            stop_idle_desktop_session_in(&idle, "idle"),
+            Err(StopRefusal::Terminal)
+        );
+        assert_eq!(stop_idle_desktop_session_in(&idle, "absent"), Ok(()));
         // An idle session is still open in that app.
         assert_eq!(
             live_sessions_in(&idle),

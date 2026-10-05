@@ -2738,8 +2738,38 @@ pub(crate) async fn deliver_now(
     Extension(_authority): Extension<OwnerAuthority>,
     Path(conversation): Path<String>,
 ) -> Response {
-    if !is_project(&state, &conversation).await {
+    let Ok(Some(stored)) = state.store.project_conversation(&conversation).await else {
         return StatusCode::NOT_FOUND.into_response();
+    };
+    if stored.family == AgentFamily::Claude {
+        if let Some(native) = stored.native_session_id.as_deref() {
+            // Stopping the idle desktop process lets the app continue the chat
+            // from its transcript, including this message, when it is reopened.
+            match crate::desktop_activity::stop_idle_desktop_session(native).await {
+                Ok(()) => {}
+                Err(crate::desktop_activity::StopRefusal::Busy) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        "Claude is working on this chat on your Mac. It sends when that finishes.",
+                    )
+                        .into_response()
+                }
+                Err(crate::desktop_activity::StopRefusal::Terminal) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        "This chat is open in Claude Code in a terminal on your Mac. Exit it there to send.",
+                    )
+                        .into_response()
+                }
+                Err(crate::desktop_activity::StopRefusal::StillRunning) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Claude on your Mac didn't close the chat. Try again.",
+                    )
+                        .into_response()
+                }
+            }
+        }
     }
     state
         .projects
@@ -3051,6 +3081,11 @@ async fn dispatch_inner(
                 .set_project_native_session(&conversation.conversation_id, &session, &now)
                 .await
                 .map_err(|e| e.to_string())?;
+            crate::desktop_activity::schedule_desktop_import(
+                state.clone(),
+                conversation.conversation_id.clone(),
+                session.clone(),
+            );
             state
                 .store
                 .bind_project_runtime(

@@ -25,7 +25,8 @@ struct FailureDetails: View {
 
 /// A Claude chat open in Claude on the Mac keeps its conversation in memory
 /// there, so Wonder holds a message until Claude closes the chat (about 30
-/// minutes after its last use) or the owner sends it now anyway.
+/// minutes after its last use) or the owner sends it now, which closes the
+/// idle chat there first; reopening it continues after Wonder's turn.
 private struct OpenOnMacNotice: View {
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
@@ -45,7 +46,7 @@ private struct OpenOnMacNotice: View {
                 }
                 .font(.caption.weight(.semibold)).frame(minHeight: 44)
                 .disabled(model.deliveringNow.contains(chat.id))
-                .accessibilityHint("Claude on your Mac won’t know about this message until you reopen the chat there")
+                .accessibilityHint("Closes this chat in Claude on your Mac and sends it here. Reopen the chat there to continue with this message.")
                 .accessibilityIdentifier("open-elsewhere-send-now")
             }
         } else {
