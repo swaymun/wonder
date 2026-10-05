@@ -107,7 +107,7 @@ alone does not verify the Home Screen tap.
 Focused Project Files UI checks open Files inside the conversation, then a
 file or diff in the same area. The composer stays available; Full screen and
 Show in chat switch the preview presentation. Text selection opens a comment
-editor, and Save stages an unsent preview note. The `-workspace-large-text-preview`
+editor, and Save stages an unsent comment. The `-workspace-large-text-preview`
 Diagnostics fixture serves a 40 MiB text file in timed steps to verify the
 loading progress row and the 128 KiB visible
 preview bound on both iPhone and iPad. These fixtures do not send a message or

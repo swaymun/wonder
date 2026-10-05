@@ -420,7 +420,7 @@ struct ManagedBotListMutationState {
     private var diagnosticReplayEnabled = true
     private var previewProjectFilesRootReads = 0
     private var previewWorkspaceRootReads = 0
-    private var previewWorkspaceFileReads: [String: Int] = [:]
+    private var previewWorkspaceFileOpens: [String: Int] = [:]
     #endif
     var previewMode: Bool {
         #if DEBUG || WONDER_DIAGNOSTICS
@@ -2490,6 +2490,7 @@ struct ManagedBotListMutationState {
         return try await api.request(endpoint, origin: saved.origin, credential: saved.credential)
     }
     func downloadWorkspaceFile(_ chat: ChatSummary, root: WorkspaceRoot, entry: WorkspaceEntry,
+                               countsAsOpen: Bool = true,
                                progress: (@Sendable (_ received: Int, _ expected: Int?) -> Void)? = nil) async throws -> Data {
         if previewMode {
             #if WONDER_DIAGNOSTICS
@@ -2506,17 +2507,11 @@ struct ManagedBotListMutationState {
                ProcessInfo.processInfo.arguments.contains("-malformed-pdf-preview") {
                 return Data("%PDF-1.7\ninvalid document".utf8)
             }
-            if ProcessInfo.processInfo.arguments.contains("-artifact-revision-preview") {
-                let key = root.id + ":" + entry.path
-                previewWorkspaceFileReads[key, default: 0] += 1
-                let initialReads = entry.path == "README.md" ? 2 : 1
-                if previewWorkspaceFileReads[key, default: 0] > initialReads {
-                    if entry.path == "Weekend.pdf",
-                       ProcessInfo.processInfo.arguments.contains("-malformed-pdf-revision-preview") {
-                        return Data("%PDF-1.7\ninvalid revision".utf8)
-                    }
-                    return previewWorkspaceRevisionData(entry: entry)
-                }
+            if countsAsOpen, ProcessInfo.processInfo.arguments.contains("-artifact-revision-preview") {
+                // Opening always shows the original. The open preview's own
+                // checks see the revision once the file has been opened enough
+                // times (README needs a second open after its first comment).
+                previewWorkspaceFileOpens[root.id + ":" + entry.path, default: 0] += 1
             }
             #endif
             return previewWorkspaceData(entry: entry)
@@ -2537,7 +2532,17 @@ struct ManagedBotListMutationState {
         // without that expectation, then validate the advertised format again.
         let current = WorkspaceEntry(name: entry.name, path: entry.path, isDirectory: false,
                                      byteSize: nil, mimeType: entry.mimeType)
-        let data = try await downloadWorkspaceFile(chat, root: root, entry: current)
+        #if WONDER_DIAGNOSTICS
+        if previewMode, ProcessInfo.processInfo.arguments.contains("-artifact-revision-preview"),
+           previewWorkspaceFileOpens[root.id + ":" + entry.path, default: 0] >= (entry.path == "README.md" ? 2 : 1) {
+            if entry.path == "Weekend.pdf",
+               ProcessInfo.processInfo.arguments.contains("-malformed-pdf-revision-preview") {
+                return Data("%PDF-1.7\ninvalid revision".utf8)
+            }
+            return previewWorkspaceRevisionData(entry: current)
+        }
+        #endif
+        let data = try await downloadWorkspaceFile(chat, root: root, entry: current, countsAsOpen: false)
         if let mime = current.mimeType { try ConversationFile.validateContent(data, mime: mime) }
         return data
     }

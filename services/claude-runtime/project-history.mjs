@@ -163,6 +163,7 @@ export async function claudeSessionBusy(sessionId, dir = join(homedir(), ".claud
     let record;
     try { record = JSON.parse(await readFile(join(dir, name), "utf8")); } catch { continue; }
     if (record?.sessionId !== sessionId || `${record.pid}.json` !== name || !Number.isSafeInteger(record.pid)) continue;
+    if (record.entrypoint === "sdk-ts") continue; // An Agent SDK run, such as Wonder's own.
     try { process.kill(record.pid, 0); } catch (error) { if (error.code !== "EPERM") continue; }
     if (record.status === "busy") return true;
   }

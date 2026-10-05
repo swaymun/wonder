@@ -3461,9 +3461,9 @@ import UIKit
         add.tap()
         XCTAssertTrue(app.buttons["workspace-preview-expand"].exists,
                       "Saving a comment keeps the preview in the chat")
-        retainMenuScreenshot(app, name: "Highlighted preview note in composer")
+        retainMenuScreenshot(app, name: "Highlighted comment in composer")
         let chip = app.buttons["composer-annotation-edit"]
-        XCTAssertTrue(chip.waitForExistence(timeout: 5), "A preview note should appear in the unsent composer")
+        XCTAssertTrue(chip.waitForExistence(timeout: 5), "A comment should appear in the unsent composer")
         XCTAssertTrue(app.textViews["message-draft"].exists)
         chip.tap()
         let edit = app.textViews["annotation-edit-note"]
@@ -3473,7 +3473,7 @@ import UIKit
         edit.typeText(" again")
         app.buttons["annotation-edit-save"].tap()
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
-        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove preview note")).firstMatch
+        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove comment")).firstMatch
         XCTAssertTrue(remove.waitForExistence(timeout: 5))
         remove.tap()
         XCTAssertFalse(chip.exists)
@@ -3529,7 +3529,7 @@ import UIKit
         app.buttons["workspace-preview-collapse"].tap()
         XCTAssertTrue(app.buttons["composer-annotation-edit"].waitForExistence(timeout: 5),
                       "The saved highlight should be attached to the unsent composer")
-        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove preview note")).firstMatch
+        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove comment")).firstMatch
         XCTAssertTrue(remove.waitForExistence(timeout: 5))
         remove.tap()
         app.buttons["workspace-preview-expand"].tap()
@@ -3603,35 +3603,23 @@ import UIKit
         app.buttons["workspace-preview-back"].tap()
         XCTAssertTrue(file.waitForExistence(timeout: 10))
         file.tap()
-        let refresh = app.buttons["workspace-document-refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 5))
-        refresh.tap()
-        let show = app.buttons["workspace-document-show-revision"]
-        XCTAssertTrue(show.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.descendants(matching: .any)["workspace-document-revision-warning"].exists)
-        retainMenuScreenshot(app, name: "Changed file offers new version and keeps note")
-        app.buttons["workspace-preview-expand"].tap()
-        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.descendants(matching: .any)
-            .matching(identifier: "workspace-document-revision-warning")
-            .allElementsBoundByIndex.contains(where: { $0.isHittable }),
-            "Expanding the file must retain the offered revision")
-        app.buttons["workspace-preview-collapse"].tap()
-        XCTAssertTrue(show.waitForExistence(timeout: 5), "Collapsing must retain the offered revision")
-        show.tap()
-        XCTAssertTrue((app.textViews["annotation-selectable-text"].value as? String)?
-            .contains("Revised workspace file") == true)
+        XCTAssertFalse(app.buttons["workspace-document-refresh"].exists, "Open files update on their own")
+        let revised = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "Revised workspace file"),
+                                                object: app.textViews["annotation-selectable-text"])
+        XCTAssertEqual(XCTWaiter.wait(for: [revised], timeout: 10), .completed,
+                       "The open file should show the new version without a refresh control")
+        retainMenuScreenshot(app, name: "Open file updated automatically")
         workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
         closeWorkspace(app)
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
-        XCTAssertTrue(chip.label.contains("Source changed"), chip.label)
+        XCTAssertTrue(chip.label.contains("File changed"), chip.label)
         chip.tap()
         XCTAssertTrue(app.staticTexts["annotation-edit-stale"].waitForExistence(timeout: 5))
         let staleNote = app.textViews["annotation-edit-note"]
         staleNote.tap(); staleNote.typeText(" keep this note")
         app.buttons["annotation-edit-save"].tap()
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
-        XCTAssertTrue(chip.label.contains("Source changed"),
+        XCTAssertTrue(chip.label.contains("File changed"),
                       "Editing the note must not clear the old source revision warning")
         chip.tap()
         XCTAssertTrue(app.staticTexts["annotation-edit-stale"].waitForExistence(timeout: 5))
@@ -3647,7 +3635,7 @@ import UIKit
         app.buttons["annotation-add"].tap()
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons.matching(identifier: "composer-annotation-edit").count, 1)
-        XCTAssertFalse(chip.label.contains("Source changed"), chip.label)
+        XCTAssertFalse(chip.label.contains("File changed"), chip.label)
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
@@ -3737,34 +3725,26 @@ import UIKit
         let image = app.buttons["workspace-file-entry:diagram.png"]
         XCTAssertTrue(image.waitForExistence(timeout: 10))
         image.tap()
-        let refreshImage = app.buttons["workspace-image-refresh"]
-        XCTAssertTrue(refreshImage.waitForExistence(timeout: 5))
         let viewedImage = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "photo-viewer-image:")).firstMatch
         XCTAssertTrue(viewedImage.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["workspace-image-refresh"].exists, "Open images update on their own")
         viewedImage.doubleTap()
         let zoomedBefore = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "200%"), object: viewedImage)
         XCTAssertEqual(XCTWaiter.wait(for: [zoomedBefore], timeout: 5), .completed)
-        refreshImage.tap()
-        let showImage = app.buttons["workspace-image-show-revision"]
-        XCTAssertTrue(showImage.waitForExistence(timeout: 5), app.debugDescription)
-        showImage.tap()
+        // Small files are checked every few seconds while open.
+        Thread.sleep(forTimeInterval: 5)
         XCTAssertTrue(app.buttons["annotation-image-open"].exists)
-        let zoomedAfter = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "200%"), object: viewedImage)
-        XCTAssertEqual(XCTWaiter.wait(for: [zoomedAfter], timeout: 5), .completed,
-                       "The open image should retain its zoom after showing the new revision")
+        XCTAssertTrue((viewedImage.value as? String)?.contains("200%") == true,
+                      "The open image should keep its zoom when the new version arrives")
         retainMenuScreenshot(app, name: "Updated image in open viewer")
         workspacePreviewClose(app, legacyID: "photo-viewer-close").tap()
 
         let pdf = app.buttons["workspace-file-entry:Weekend.pdf"]
         XCTAssertTrue(pdf.waitForExistence(timeout: 5))
         pdf.tap()
-        let refreshPDF = app.buttons["workspace-document-refresh"]
-        XCTAssertTrue(refreshPDF.waitForExistence(timeout: 5))
-        refreshPDF.tap()
-        let showPDF = app.buttons["workspace-document-show-revision"]
-        XCTAssertTrue(showPDF.waitForExistence(timeout: 5))
-        showPDF.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["workspace-pdf-preview"].waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 5)
         XCTAssertTrue(app.descendants(matching: .any)["workspace-pdf-preview"].exists)
         retainMenuScreenshot(app, name: "Updated PDF in open viewer")
         workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
@@ -3829,11 +3809,7 @@ import UIKit
         XCTAssertTrue(revisedPDF.waitForExistence(timeout: 10))
         revisedPDF.tap()
         XCTAssertFalse(app.staticTexts["workspace-pdf-error"].exists)
-        app.buttons["workspace-document-refresh"].tap()
-        let showRevision = app.buttons["workspace-document-show-revision"]
-        XCTAssertTrue(showRevision.waitForExistence(timeout: 5))
-        showRevision.tap()
-        XCTAssertTrue(app.staticTexts["workspace-pdf-error"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.staticTexts["workspace-pdf-error"].waitForExistence(timeout: 10),
                       "A malformed update must not silently leave the old page visible")
         retainMenuScreenshot(app, name: "Invalid PDF revision in viewer")
         workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
@@ -3961,7 +3937,7 @@ import UIKit
         XCTAssertTrue(chip.waitForExistence(timeout: 5), "The note must enter the New Chat composer")
         app.buttons["project-agent-picker"].tap()
         app.buttons["Second"].tap()
-        XCTAssertTrue(app.buttons["Switch and remove preview notes"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.buttons["Switch and remove comments"].waitForExistence(timeout: 5),
                       "Changing folders must ask before removing saved notes")
         app.buttons["Keep current folder"].tap()
         app.buttons["Done"].tap()
@@ -3973,7 +3949,7 @@ import UIKit
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         editor.tap(); editor.typeText(" again")
         app.buttons["annotation-edit-save"].tap()
-        retainMenuScreenshot(app, name: "New Project chat preview note before send")
+        retainMenuScreenshot(app, name: "New Project chat comment before send")
         app.terminate()
 
         app.launchArguments = ["-connections-preview", "-project-files-preview", "-files-preview",
@@ -3988,7 +3964,7 @@ import UIKit
         XCTAssertTrue(restoredText.contains("Check") && restoredText.contains("again"),
                       "The edited comment must survive relaunch: \(restoredText)")
         app.buttons["Cancel"].tap()
-        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove preview note")).firstMatch
+        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove comment")).firstMatch
         XCTAssertTrue(remove.waitForExistence(timeout: 5))
         remove.tap()
         XCTAssertFalse(app.descendants(matching: .any)["composer-attachments"].exists)
@@ -5507,7 +5483,7 @@ import UIKit
         app.open(url)
         XCTAssertTrue(app.buttons["conversation-title-menu"].waitForExistence(timeout: 20))
         XCTAssertFalse(app.buttons["composer-annotation-edit"].exists,
-                       "The disposable thread must start without an older unsent preview note")
+                       "The disposable thread must start without an older unsent comment")
         let files = app.buttons["conversation-files-pill"]
         XCTAssertTrue(files.waitForExistence(timeout: 10))
         files.tap()
@@ -5524,13 +5500,13 @@ import UIKit
         app.buttons["annotation-add"].tap()
         let chip = app.buttons["composer-annotation-edit"]
         let staged = chip.waitForExistence(timeout: 10)
-        if staged { retainMenuScreenshot(app, name: "Live Project preview note in composer") }
-        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove preview note")).firstMatch
+        if staged { retainMenuScreenshot(app, name: "Live Project comment in composer") }
+        let remove = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remove comment")).firstMatch
         let removable = remove.waitForExistence(timeout: 5)
         if removable { remove.tap() }
         XCTAssertTrue(staged, "The note must become an unsent composer attachment")
         XCTAssertTrue(removable, "The test note must offer immediate removal")
-        XCTAssertFalse(chip.exists, "The test must leave no preview note in the composer")
+        XCTAssertFalse(chip.exists, "The test must leave no comment in the composer")
 
         app.buttons["workspace-preview-back"].tap()
         app.buttons["Modified"].tap()

@@ -188,17 +188,11 @@ import XCTest
         open("workspace-reader.epub", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["workspace-epub-content"]
             .waitForExistence(timeout: 15))
-        app.buttons["workspace-binary-refresh"].tap()
-        let show = app.buttons["workspace-binary-show-revision"]
-        XCTAssertTrue(show.waitForExistence(timeout: 10))
-        app.buttons["workspace-preview-expand"].tap()
-        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
-        XCTAssertTrue(show.exists, "The offered EPUB should survive full screen")
-        app.buttons["workspace-preview-collapse"].tap()
-        XCTAssertTrue(show.waitForExistence(timeout: 5))
-        show.tap()
+        XCTAssertFalse(app.buttons["workspace-binary-refresh"].exists, "Open books update on their own")
+        // The open book is checked every few seconds and reopens with new bytes.
+        Thread.sleep(forTimeInterval: 5)
         XCTAssertTrue(app.descendants(matching: .any)["workspace-epub-content"]
-            .waitForExistence(timeout: 15), "Accepted EPUB bytes should reopen")
+            .waitForExistence(timeout: 15), "Updated EPUB bytes should reopen")
         app.buttons["workspace-epub-chapters"].tap()
         let chapter = app.buttons["Chapter 2"]
         XCTAssertTrue(chapter.waitForExistence(timeout: 5))
@@ -215,19 +209,26 @@ import XCTest
         open("sidecar.obj", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["workspace-model-error"]
             .waitForExistence(timeout: 10))
-        app.buttons["workspace-binary-refresh"].tap()
-        let show = app.buttons["workspace-binary-show-revision"]
-        XCTAssertTrue(show.waitForExistence(timeout: 10))
-        show.tap()
         let scene = app.descendants(matching: .any)["workspace-model-scene"]
-        XCTAssertTrue(scene.waitForExistence(timeout: 12), "Accepted OBJ should replace the unsupported source")
+        XCTAssertTrue(scene.waitForExistence(timeout: 15), "The updated OBJ should replace the unsupported source")
         XCTAssertTrue(scene.isHittable)
         capture(app, name: "Accepted OBJ revision")
     }
 
-    func testHTMLReadingPositionAndAcceptedRevision() {
+    func testHTMLRevisionAppearsWhileOpen() {
         continueAfterFailure = false
         let app = launchProjectFiles(revision: true, html: true)
+        open("reader.html", in: app)
+        XCTAssertFalse(app.buttons["workspace-document-refresh"].exists, "Open pages update on their own")
+        XCTAssertTrue(waitUntilHittable(app.webViews.containing(.staticText, identifier: "Accepted HTML revision")
+            .firstMatch.staticTexts["Accepted HTML revision"], timeout: 15),
+            "New bytes must replace the old HTML while the page is open")
+        capture(app, name: "Updated HTML revision")
+    }
+
+    func testHTMLReadingPositionSurvivesFullScreen() {
+        continueAfterFailure = false
+        let app = launchProjectFiles(html: true)
         open("reader.html", in: app)
         let web = app.webViews.containing(.staticText, identifier: "Original reading page").firstMatch
         XCTAssertTrue(web.waitForExistence(timeout: 10))
@@ -253,16 +254,6 @@ import XCTest
         XCTAssertTrue(waitUntilHittable(app.webViews.containing(.staticText, identifier: "Original reading page")
             .firstMatch.staticTexts["Reading section 25"]),
             "A quick full-screen round trip should not overwrite the saved reading position")
-        app.buttons["workspace-document-refresh"].tap()
-        let show = app.buttons["workspace-document-show-revision"]
-        XCTAssertTrue(show.waitForExistence(timeout: 10))
-        show.tap()
-        XCTAssertTrue(waitUntilHittable(app.webViews.containing(.staticText, identifier: "Accepted HTML revision")
-            .firstMatch.staticTexts["Accepted HTML revision"], timeout: 10),
-            "Accepted bytes must replace the old HTML at a visible position")
-        XCTAssertFalse(app.webViews.containing(.staticText, identifier: "Original reading page")
-            .allElementsBoundByIndex.contains(where: { $0.isHittable }))
-        capture(app, name: "Accepted HTML revision")
     }
 
     func testHTMLPreviewDoesNotRunEmbeddedScript() {

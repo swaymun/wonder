@@ -282,6 +282,11 @@ fn live_records_in(dir: &Path) -> Vec<LiveRecord> {
         if record.get("pid").and_then(serde_json::Value::as_i64) != Some(i64::from(pid)) {
             continue;
         }
+        // Agent SDK processes, including Wonder's own Claude runs, are not a
+        // chat open in Claude on the Mac.
+        if record.get("entrypoint").and_then(serde_json::Value::as_str) == Some("sdk-ts") {
+            continue;
+        }
         let Some(session) = record.get("sessionId").and_then(serde_json::Value::as_str) else {
             continue;
         };
@@ -349,6 +354,14 @@ mod tests {
             HashSet::from(["busy".to_owned()])
         );
         assert!(busy_sessions_in(&idle).is_empty());
+        // Wonder's own Agent SDK run is not a chat open on the Mac.
+        let sdk = tempfile::tempdir().unwrap();
+        std::fs::write(
+            sdk.path().join(format!("{me}.json")),
+            serde_json::json!({"pid": me, "sessionId": "wonder", "status": "busy", "entrypoint": "sdk-ts"}).to_string(),
+        )
+        .unwrap();
+        assert!(live_sessions_in(sdk.path()).is_empty());
         // The test process is not the desktop app's Claude Code, so it is never stopped.
         let me_session = "busy";
         assert_eq!(

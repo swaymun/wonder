@@ -532,10 +532,10 @@ private struct NewChatContent: View {
               let hostID else { return nil }
         let draftID = draft.annotations?.first?.draftID ?? draft.requestID
         let scope = model.assignmentScope
-        let reason: String? = sending || draft.isSubmitted ? "Wait for this message before adding a note."
+        let reason: String? = sending || draft.isSubmitted ? "Wait for this message before adding a comment."
             : loadingAttachment ? "Wait for the file to finish attaching."
-            : draft.attachmentCount >= 4 ? "Remove an attachment to add a note."
-            : model.macConnected != true ? "Reconnect to your Mac to add a note."
+            : draft.attachmentCount >= 4 ? "Remove an attachment to add a comment."
+            : model.macConnected != true ? "Reconnect to your Mac to add a comment."
             : nil
         return WorkspaceDraftAnnotationActions(projectID: project.id, draftID: draftID,
             unavailableReason: reason, stage: { annotation in
@@ -1101,9 +1101,9 @@ private struct NewChatContent: View {
         .alert("Switch working folder?", isPresented: $showingFolderChangeConfirmation,
                presenting: pendingFolderSelection) { folder in
             Button("Keep current folder", role: .cancel) {}
-            Button("Switch and remove preview notes", role: .destructive) { chooseFolder(folder) }
+            Button("Switch and remove comments", role: .destructive) { chooseFolder(folder) }
         } message: { _ in
-            Text("The saved preview notes belong to this folder. Switching removes them from this draft.")
+            Text("Your comments belong to files in this folder. Switching removes them from this draft.")
         }
         .presentationDetents([.large]).presentationDragIndicator(.visible)
     }
@@ -1196,7 +1196,7 @@ private struct NewChatContent: View {
               let device = model.connection?.credential.deviceId else { return }
         sending = true; failure = nil
         guard !(draft.annotations ?? []).contains(where: \.sourceChanged) else {
-            failure = "A noted file changed. Remove its note and select the current content before sending."
+            failure = "A file you commented on changed. Remove that comment and select the current content before sending."
             return
         }
         let noteDraftID = draft.annotations?.first?.draftID ?? draft.requestID
@@ -1209,7 +1209,7 @@ private struct NewChatContent: View {
                                      rootsRevision: rootsRevision ?? -1)
             }
         } catch {
-            failure = "A preview note no longer matches this Project folder. Remove it and select the current file before sending."
+            failure = "A comment no longer matches this Project folder. Remove it and select the current file before sending."
             return
         }
         let scope = model.assignmentScope
@@ -1346,21 +1346,21 @@ private struct NewChatAnnotationEditor: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("\(pending.annotation.path) · Preview note") {
+                Section(pending.annotation.path) {
                     TextEditor(text: $note)
                         .frame(minHeight: 110)
                         .accessibilityIdentifier("annotation-edit-note")
                     if pending.sourceChanged {
-                        Text("This file changed. Remove this note and select the current text before sending.")
+                        Text("This file changed. Remove this comment and select the current text before sending.")
                             .foregroundStyle(.orange)
                     }
                     if note.utf8.count > 4096 {
-                        Text("Keep the note under 4,096 bytes.").foregroundStyle(.red)
+                        Text("Keep the comment under 4,096 bytes.").foregroundStyle(.red)
                     }
                 }
                 if let failure { Text(failure).foregroundStyle(.red) }
             }
-            .navigationTitle("Preview note")
+            .navigationTitle("Comment")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
