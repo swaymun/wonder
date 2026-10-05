@@ -87,7 +87,9 @@ import WonderPairing
     private func start(chat: ChatSummary) async {
         guard let model, !model.previewMode, !busy, intent == nil, !model.accessEnded, !Task.isCancelled else { return }
         busy = true; failure = nil
-        preparingConversationID = chat.id; preparationStatus = "Preparing dictation…"
+        // The mic button's spinner covers the usual short start. Only a
+        // language download, which can take a while, is explained in text.
+        preparingConversationID = chat.id; preparationStatus = nil
         let initialScope = model.assignmentScope, generation = captureGeneration
         defer {
             if initialScope == model.assignmentScope, generation == captureGeneration {

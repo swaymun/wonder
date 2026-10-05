@@ -94,7 +94,7 @@ import UIKit
     }
 
     // The Widget needs no configuration: its tiles start a new chat in that
-    // Project on the last-used Mac, and View computer opens that Mac's screen.
+    // Project on the last-used Mac, and Live View opens that Mac's screen.
     func testConfiguredMediumProjectWidgetOpensRecentChat() throws {
         try requireRecentWidgetQA()
         continueAfterFailure = false
@@ -111,8 +111,8 @@ import UIKit
                 XCTFail("A medium Wonder Testing Widget must be visible")
                 return
             }
-            // Header: View computer at the top right; tiles below.
-            let point = target == "project" ? CGVector(dx: 0.25, dy: 0.5) : CGVector(dx: 0.9, dy: 0.17)
+            // Two rows of tiles: the most recent Project first, Live View last.
+            let point = target == "project" ? CGVector(dx: 0.25, dy: 0.39) : CGVector(dx: 0.75, dy: 0.72)
             widget.coordinate(withNormalizedOffset: point).tap()
             XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "The Widget tap must foreground Wonder")
             if target == "project" {
@@ -126,7 +126,7 @@ import UIKit
                               app.navigationBars.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
             }
             let capture = XCTAttachment(screenshot: app.screenshot())
-            capture.name = target == "project" ? "Widget project tile destination" : "Widget View computer destination"
+            capture.name = target == "project" ? "Widget project tile destination" : "Widget Live View destination"
             capture.lifetime = .keepAlways
             add(capture)
             app.terminate()
@@ -3626,6 +3626,10 @@ import UIKit
         let unsavedNote = app.textViews["annotation-edit-note"]
         unsavedNote.tap(); unsavedNote.typeText(" unsaved addition")
         app.buttons["annotation-edit-reanchor"].tap()
+        // The fixture opens the original; the open file's own check brings in the revision.
+        let reopenedRevision = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", "Revised workspace file"),
+                                                         object: app.textViews["annotation-selectable-text"])
+        XCTAssertEqual(XCTWaiter.wait(for: [reopenedRevision], timeout: 10), .completed)
         selectTextForPreviewComment(app)
         let carriedNote = app.descendants(matching: .any)["annotation-note"]
         XCTAssertTrue(carriedNote.waitForExistence(timeout: 5))

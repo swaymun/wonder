@@ -194,6 +194,19 @@ final class WorkspacePreviewDownloadTests: XCTestCase {
             XCTFail("Oversized listings are refused before transfer")
         } catch FileFailure.tooLarge {}
     }
+
+    func testPreviewLimitFollowsInstalledMemory() {
+        let gigabyte: UInt64 = 1024 * 1024 * 1024
+        let megabyte = 1024 * 1024
+        // Reported RAM sits a little under the nominal size.
+        XCTAssertEqual(PairingAPI.previewLimit(physicalMemory: 3 * gigabyte - 100 * UInt64(megabyte)), 92 * megabyte)
+        XCTAssertEqual(PairingAPI.previewLimit(physicalMemory: 4 * gigabyte), 128 * megabyte, "iPhone 11")
+        XCTAssertEqual(PairingAPI.previewLimit(physicalMemory: 6 * gigabyte), 192 * megabyte)
+        XCTAssertEqual(PairingAPI.previewLimit(physicalMemory: 8 * gigabyte), 256 * megabyte)
+        XCTAssertEqual(PairingAPI.previewLimit(physicalMemory: 12 * gigabyte), 256 * megabyte,
+                       "The host refuses larger files, so more RAM does not raise the cap")
+        XCTAssertEqual(PairingAPI.previewLimit(physicalMemory: 1 * gigabyte), 64 * megabyte)
+    }
 }
 
 private final class LockedReports: @unchecked Sendable {

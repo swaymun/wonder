@@ -14,7 +14,7 @@ struct NewChatRequest: Equatable {
     let host: String?
     let destination: ChatDestination?
     var exactProject = false
-    /// Opens that Mac's screen viewer, as the widget's View computer does.
+    /// Opens that Mac's screen viewer, as the widget's Live View does.
     var showComputer = false
 }
 

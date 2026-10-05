@@ -164,8 +164,17 @@ public final class PairingAPI: Sendable {
         return data
     }
     /// Workspace previews stream from the paired Mac; large PDFs and images
-    /// take time over Wi-Fi, so callers can show progress.
-    public static let workspacePreviewLimit = 256 * 1024 * 1024
+    /// take time over Wi-Fi, so callers can show progress. An open preview
+    /// can hold the shown and a newer revision while PDFKit, WebKit or image
+    /// decoding add their own working memory, so the cap follows installed
+    /// RAM: about 1/32 of it, 128 MB on a 4 GB iPhone and 256 MB from 8 GB.
+    public static let workspacePreviewLimit = previewLimit(physicalMemory: ProcessInfo.processInfo.physicalMemory)
+    static func previewLimit(physicalMemory: UInt64) -> Int {
+        let megabyte: UInt64 = 1024 * 1024
+        // Round down to whole megabytes; reported RAM is slightly under nominal.
+        let scaled = (physicalMemory / 32 / megabyte) * megabyte
+        return Int(min(256 * megabyte, max(64 * megabyte, scaled)))
+    }
     public func downloadWorkspaceBytes(_ path: String, connection: SavedConnection, byteSize: Int?, sha256: String?, mimeType: String?,
                                        progress: (@Sendable (_ received: Int, _ expected: Int?) -> Void)? = nil) async throws -> Data {
         let limit = Self.workspacePreviewLimit

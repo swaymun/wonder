@@ -102,12 +102,17 @@ import XCTest
         XCTAssertFalse(app.progressIndicators["conversation-loading"].exists)
     }
 
-    func testOfflineCachedProjectLinkWaitsForItsMac() {
+    /// A widget tap while the Mac is still reconnecting opens the draft at once.
+    func testOfflineCachedProjectLinkOpensDraftWithoutRecoveryScreen() {
         continueAfterFailure = false
         let app = launch("/hosts/studio/projects/preview-project/new",
                          extras: ["-project-files-preview", "-diagnostics-deep-link-offline"])
-        XCTAssertTrue(app.staticTexts["Computer offline"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.buttons["Try again"].exists)
-        XCTAssertFalse(app.buttons["destination-picker"].exists)
+        let project = app.buttons["destination-picker"]
+        XCTAssertTrue(project.waitForExistence(timeout: 15))
+        XCTAssertEqual(project.value as? String, "Preview project")
+        XCTAssertTrue(app.textViews["new-chat-draft"].exists)
+        XCTAssertFalse(app.staticTexts["Computer offline"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["linked-project-recovery"].exists)
+        keep(app, "Project link opens New Chat while the Mac reconnects")
     }
 }

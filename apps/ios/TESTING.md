@@ -99,7 +99,7 @@ its Projects). Set `WONDER_WIDGET_RECENT_QA=1` and `WONDER_WIDGET_QA_DEVICE_NAME
 to that simulator's exact `SIMULATOR_DEVICE_NAME`; the tests skip on a different
 device or the production app. The placement check changes the simulator Home
 Screen; the Widget needs no configuration. The tap check opens a Project tile
-(a new chat in that Project) and View computer (that Mac's screen). Afterwards
+(a new chat in that Project) and the Live View tile (that Mac's screen). Afterwards
 run `testRemoveMediumProjectWidgetAfterRecentChatQA` for the exact medium card
 and restore that simulator's prior App Group snapshot. A direct deep-link test
 alone does not verify the Home Screen tap.

@@ -53,6 +53,46 @@ private struct OpenOnMacNotice: View {
     }
 }
 
+/// Shows its content only once the condition that mounted it has lasted, so a
+/// brief reconnect does not flash a status line.
+struct SettledNotice<Content: View>: View {
+    let delay: Duration
+    @ViewBuilder var content: () -> Content
+    @State private var settled = false
+    var body: some View {
+        Group { if settled { content() } }
+            .task {
+                try? await Task.sleep(for: delay)
+                if !Task.isCancelled { settled = true }
+            }
+    }
+}
+
+/// One quiet retry covers a brief network drop; only a failure that outlasts
+/// it asks the reader to act.
+private struct HistoryRetryNotice: View {
+    let reload: () async -> Void
+    @State private var quietRetryFailed = false
+    var body: some View {
+        Group {
+            if quietRetryFailed {
+                TemporaryNotice(key: "history") {
+                    Button("Couldn’t check for new turns. Try again") { Task { await reload() } }
+                        .font(.caption).frame(minHeight: 44)
+                        .accessibilityIdentifier("native-history-retry")
+                }
+            }
+        }
+        .task {
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            await reload()
+            // Still mounted means the failure persisted.
+            if !Task.isCancelled { quietRetryFailed = true }
+        }
+    }
+}
+
 /// A composer notice that fades after a short read. A new message (a different
 /// key) shows again; VoiceOver users get longer to reach it.
 struct TemporaryNotice<Content: View>: View {
@@ -1258,6 +1298,19 @@ struct ConversationView: View {
         .accessibilityHint("Show conversation actions")
         .accessibilityIdentifier("conversation-title-menu")
     }
+    /// Photo loading, uploads and send preparation show on Send itself rather
+    /// than as status lines above the composer.
+    private var preparingSend: Bool {
+        model.loadingPhotos.contains(chat.id) || model.uploading.contains(chat.id) ||
+            model.preparingSends.contains(chat.id)
+    }
+    @ViewBuilder private func sendSymbol(preparing: Bool) -> some View {
+        if preparing {
+            ProgressView().tint(Color(uiColor: .systemBackground)).frame(width: 44, height: 44)
+        } else {
+            Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44)
+        }
+    }
     private var composer: some View {
             let attachments = composerAttachments
             return VStack(alignment: .leading, spacing: 8) {
@@ -1272,17 +1325,7 @@ struct ConversationView: View {
                 QuestionDock(model: model, chat: chat)
                 if (!chat.isArchived || model.isSubagent(chat)) && (chat.botId != nil || model.groups[chat.id] != nil || model.isProject(chat)) {
                     if model.nativeHistoryFailures.contains(chat.id) {
-                        TemporaryNotice(key: "history") {
-                            Button("Couldn’t check for new turns. Try again") { Task { await model.reloadNativeHistory(chat) } }
-                                .font(.caption).frame(minHeight: 44)
-                                .accessibilityIdentifier("native-history-retry")
-                        }
-                        // One quiet retry covers a brief network drop without asking.
-                        .task {
-                            try? await Task.sleep(for: .seconds(4))
-                            guard !Task.isCancelled else { return }
-                            await model.reloadNativeHistory(chat)
-                        }
+                        HistoryRetryNotice { await model.reloadNativeHistory(chat) }
                     }
                     if let error = model.controlErrors[chat.id] {
                         TemporaryNotice(key: error) { FailureDetails(message: error) }
@@ -1308,9 +1351,6 @@ struct ConversationView: View {
                                 .accessibilityIdentifier("last-request-issue")
                         }
                     }
-                    if model.loadingPhotos.contains(chat.id) { ProgressView("Loading photo…") }
-                    else if model.uploading.contains(chat.id) { ProgressView("Uploading attachments…") }
-                    else if model.preparingSends.contains(chat.id) { ProgressView("Preparing message…") }
                     VStack(spacing: 4) {
                         HStack(alignment: .bottom, spacing: 4) {
                             ComputerDock(isPresented: $showingComputer)
@@ -1443,12 +1483,11 @@ struct ConversationView: View {
                         }
                         DictationSendControls(controller: model.dictation, conversationID: chat.id) {
                         if chat.botId == nil || model.agentFamily(chat) == .claude {
-                            Button { Task { await model.send(chat) } } label: {
-                                Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44)
-                            }
+                            Button { Task { await model.send(chat) } } label: { sendSymbol(preparing: preparingSend) }
                             .foregroundStyle(Color(uiColor: .systemBackground))
                             .background(model.canSend(chat) ? Color.primary : Color.secondary.opacity(0.35), in: Circle())
                             .accessibilityLabel(model.turnRunsElsewhere(chat.id) ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
+                            .accessibilityValue(preparingSend ? "Preparing" : "")
                             .keyboardShortcut(.return, modifiers: .command)
                             .disabled(!model.canSend(chat))
                         } else {
@@ -1458,7 +1497,7 @@ struct ConversationView: View {
                             Button("Queue", systemImage: "text.line.last.and.arrowtriangle.forward") { Task { await model.send(chat) } }
                                 .disabled(!model.canSend(chat))
                         } label: {
-                            Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44)
+                            sendSymbol(preparing: preparingSend)
                         } primaryAction: {
                             Task { await model.send(chat) }
                         }
@@ -1467,6 +1506,7 @@ struct ConversationView: View {
                         .foregroundStyle(Color(uiColor: .systemBackground))
                         .background(model.canSend(chat) ? Color.primary : Color.secondary.opacity(0.35), in: Circle())
                         .accessibilityLabel(model.botWorking(chat.id) && chat.botId != nil ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
+                        .accessibilityValue(preparingSend ? "Preparing" : "")
                         .accessibilityHint("Touch and hold for message actions.")
                         .keyboardShortcut(.return, modifiers: .command)
                         .disabled(!model.canSend(chat) && !model.previewMode)
@@ -4538,7 +4578,7 @@ struct WorkspaceBrowser: View {
             guard isCurrent(captured), requestID == fileRequestID, !Task.isCancelled,
                   !(error is CancellationError) else { return false }
             if case FileFailure.tooLarge = error {
-                failure = "This file is too large to preview here. With the latest Wonder on your Mac, files up to 256 MB open in Files; open larger files on your Mac."
+                failure = "This file is too large to preview on this \(UIDevice.current.model). Files up to \(PairingAPI.workspacePreviewLimit / (1024 * 1024)) MB open here; open larger files on your Mac."
             } else {
                 failure = "This file could not be opened. It may have moved, been deleted, or need workspace access."
             }

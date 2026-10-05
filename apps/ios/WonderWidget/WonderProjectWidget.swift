@@ -2,7 +2,7 @@ import SwiftUI
 import WidgetKit
 
 /// Recent Projects on the Mac last used for a new chat. Tapping a Project
-/// starts a new chat there; View computer opens that Mac's screen.
+/// starts a new chat there; Live View opens that Mac's screen.
 struct WonderProjectWidgetEntry: TimelineEntry {
     let date: Date
     let snapshot: ProjectWidgetSnapshot?
@@ -45,14 +45,11 @@ struct WonderProjectWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: WonderProjectWidgetEntry
 
-    private var projectLimit: Int {
-        switch family {
-        case .systemSmall: 1
-        case .systemMedium: 4
-        default: 8
-        }
-    }
+    /// Larger widgets show three recent Projects and Live View as equal tiles.
+    static let projectLimit = 3
     private var columns: Int { family == .systemExtraLarge ? 4 : 2 }
+    /// Large and extra-large tiles fill their space with a stacked layout.
+    private var tall: Bool { family == .systemLarge || family == .systemExtraLarge }
 
     var body: some View {
         Group {
@@ -88,46 +85,43 @@ struct WonderProjectWidgetView: View {
                 Text("New chat").font(.caption).foregroundStyle(.secondary)
             } else {
                 Image(systemName: "desktopcomputer").font(.title3).foregroundStyle(.tint)
-                Text("View computer").font(.headline)
+                Text("Live View").font(.headline)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding()
         .widgetURL(url)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(project.map { "\($0.name), new chat on \(snapshot.hostName)" } ?? "View \(snapshot.hostName)")
+        .accessibilityLabel(project.map { "\($0.name), new chat on \(snapshot.hostName)" } ?? "Live View of \(snapshot.hostName)")
     }
 
     private func grid(_ snapshot: ProjectWidgetSnapshot, hostID: String, identity: ProjectWidgetIdentity) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                hostLabel(snapshot)
-                Spacer(minLength: 4)
-                if let url = ProjectWidgetLink.computer(hostID: hostID, identity: identity) {
-                    Link(destination: url) {
-                        Image(systemName: "desktopcomputer")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(width: 36, height: 30)
-                            .background(.tint.opacity(0.15), in: Capsule())
-                    }
-                    .accessibilityLabel("View \(snapshot.hostName)")
-                }
-            }
-            if snapshot.projects.isEmpty {
+        let projects = Array(snapshot.projects.prefix(Self.projectLimit))
+        let rows = (projects.count + 1 + columns - 1) / columns
+        return VStack(alignment: .leading, spacing: 8) {
+            hostLabel(snapshot)
+            if projects.isEmpty {
                 Text("Choose Projects in Wonder to start chats from here.")
                     .font(.subheadline).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-            } else {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
-                    ForEach(snapshot.projects.prefix(projectLimit)) { project in
-                        if let url = ProjectWidgetLink.newChat(hostID: hostID, projectID: project.id, identity: identity) {
-                            Link(destination: url) { tile(project) }
-                                .accessibilityLabel("\(project.name), new chat")
+            }
+            Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+                ForEach(0..<rows, id: \.self) { row in
+                    GridRow {
+                        ForEach(0..<columns, id: \.self) { column in
+                            let index = row * columns + column
+                            if index < projects.count {
+                                projectLink(projects[index], hostID: hostID, identity: identity)
+                            } else if index == projects.count {
+                                liveViewLink(snapshot, hostID: hostID, identity: identity)
+                            } else {
+                                Color.clear
+                            }
                         }
                     }
                 }
-                Spacer(minLength: 0)
             }
+            .frame(maxHeight: tall ? .infinity : nil)
+            if !tall { Spacer(minLength: 0) }
             if entry.isStale {
                 Text("Open Wonder to refresh").font(.caption2).foregroundStyle(.secondary)
             }
@@ -135,14 +129,49 @@ struct WonderProjectWidgetView: View {
         .padding()
     }
 
-    private func tile(_ project: ProjectWidgetSnapshot.Project) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "plus.bubble").foregroundStyle(.tint)
-            Text(project.name).font(.subheadline).lineLimit(1).minimumScaleFactor(0.8).privacySensitive()
-            Spacer(minLength: 0)
+    @ViewBuilder private func projectLink(_ project: ProjectWidgetSnapshot.Project, hostID: String,
+                                          identity: ProjectWidgetIdentity) -> some View {
+        if let url = ProjectWidgetLink.newChat(hostID: hostID, projectID: project.id, identity: identity) {
+            Link(destination: url) {
+                tile(icon: "plus.bubble", title: project.name, private: true, detail: "New chat")
+            }
+            .accessibilityLabel("\(project.name), new chat")
         }
-        .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+    }
+
+    @ViewBuilder private func liveViewLink(_ snapshot: ProjectWidgetSnapshot, hostID: String,
+                                           identity: ProjectWidgetIdentity) -> some View {
+        if let url = ProjectWidgetLink.computer(hostID: hostID, identity: identity) {
+            Link(destination: url) {
+                tile(icon: "desktopcomputer", title: "Live View", private: false, detail: "See your Mac")
+            }
+            .accessibilityLabel("Live View of \(snapshot.hostName)")
+        }
+    }
+
+    private func tile(icon: String, title: String, private isPrivate: Bool, detail: String) -> some View {
+        Group {
+            if tall {
+                VStack(alignment: .leading, spacing: 4) {
+                    Image(systemName: icon).font(.title3).foregroundStyle(.tint)
+                    Spacer(minLength: 0)
+                    Text(title).font(.subheadline.weight(.semibold)).lineLimit(2).minimumScaleFactor(0.8)
+                        .privacySensitive(isPrivate)
+                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: icon).foregroundStyle(.tint)
+                    Text(title).font(.subheadline).lineLimit(1).minimumScaleFactor(0.8)
+                        .privacySensitive(isPrivate)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            }
+        }
         .background(.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
         .contentShape(Rectangle())
     }
@@ -160,7 +189,7 @@ struct WonderProjectWidget: Widget {
             WonderProjectWidgetView(entry: entry)
         }
         .configurationDisplayName("Recent Projects")
-        .description("Start a chat in a recent Project on your Mac, or view its screen.")
+        .description("Start a chat in a recent Project on your Mac, or open Live View of its screen.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge])
     }
 }

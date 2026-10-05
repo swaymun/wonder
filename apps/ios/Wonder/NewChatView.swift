@@ -184,9 +184,11 @@ struct NewChatView: View {
         Group {
             if let model {
                 ProjectRouteGate(projects: model.projects) {
+                    // A project this device already knows opens at once, even
+                    // while the Mac reconnects; the check below still catches
+                    // one that has since been removed.
                     if let linkedProjectID,
-                       (!linkedProjectChecked || model.macConnected != true ||
-                        model.projects.failure != nil ||
+                       (pendingLinkedRequest != nil ||
                         model.projects.project(linkedProjectID)?.isIncluded != true ||
                         draft.destination != .project(id: linkedProjectID)) {
                         linkedProjectRecovery(model)
@@ -284,7 +286,9 @@ struct NewChatView: View {
                         }
                     }
                 }
-            } else if model.macConnected != true {
+            } else if model.macConnected == nil {
+                ProgressView("Opening project…")
+            } else if model.macConnected == false {
                 ContentUnavailableView {
                     Label("Computer offline", systemImage: "wifi.slash")
                 } description: {
@@ -757,7 +761,11 @@ private struct NewChatContent: View {
                 FailureDetails(draft.isSubmitted ? "Not confirmed" : "Couldn’t send", message: failure)
             }
             if model.macConnected == false {
-                Text("Can’t reach \(model.macName). Your draft is saved.").font(.caption).foregroundStyle(.secondary)
+                // Returning to the app reconnects within a moment; only a
+                // lasting outage is worth a line above the composer.
+                SettledNotice(delay: .seconds(3)) {
+                    Text("Can’t reach \(model.macName). Your draft is saved.").font(.caption).foregroundStyle(.secondary)
+                }
             }
             if projects.supportsProjects == false {
                 Text("Update Wonder on \(model.macName) to use Projects.").font(.caption).foregroundStyle(.secondary)
