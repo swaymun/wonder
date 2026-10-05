@@ -17,10 +17,18 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (89) uploaded and Apple reports processing complete. Built from clean source with Diagnostics fixtures absent from the exported binary. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | Blue Release 1.0 (32) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 89. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.112 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; `/healthz` and `/readyz` passed after install. Mac Settings screens were not re-checked in this update. Fresh-Mac pairing and private-permission acceptance remain open. |
+| iPhone and iPad | Production Release 1.0 (90) uploaded and Apple reports processing complete. Built from clean source with Diagnostics fixtures absent from the exported binary. Tester availability and TestFlight installation remain unverified. |
+| Wonder Testing | Blue Release 1.0 (33) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 90. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.113 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; `/healthz` and `/readyz` passed after install. Mac Settings screens were not re-checked in this update. Fresh-Mac pairing and private-permission acceptance remain open. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 614 selected public source files matched bytes and executable modes. Third-party components retain their own licenses. |
+
+Testing 33, production 90 and Mac 1.0.113 show turns started in the Claude or
+Codex desktop apps as running ("Working in Claude/Codex on your Mac"), without
+Stop or Guide, and wait to send until they finish. Claude history no longer
+shows background-task notices as owner messages; background commands and agents
+appear in the agent-task sheet. Codex liveness comes from the thread's rollout
+log, so a silent step or crash can take up to 15 minutes to reflect. Simulator
+and read-only Mac checks only; device behavior remains unverified.
 
 Testing 32, production 89 and Mac 1.0.112 add the October 4 review fixes:
 Files replaces an open saved-diff review; saved diffs capped by the host are
