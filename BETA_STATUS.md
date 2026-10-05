@@ -17,12 +17,12 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (93) uploaded and Apple reports processing complete. Built from clean, pushed source (`fb3bf2d7`) with Diagnostics fixtures absent from the exported binary. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | Blue Release 1.0 (36) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 93. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.118 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; `/healthz` and `/readyz` passed after install. Mac Settings screens were not re-checked in this update. Fresh-Mac pairing and private-permission acceptance remain open. |
+| iPhone and iPad | Production Release 1.0 (94) uploaded and Apple reports processing complete. Built from clean, pushed source (`097056a2`) with Diagnostics fixtures absent from the exported binary. Tester availability and TestFlight installation remain unverified. |
+| Wonder Testing | Blue Release 1.0 (37) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 94. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.119 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; `/healthz` and `/readyz` passed after install. Mac Settings screens were not re-checked in this update. Fresh-Mac pairing and private-permission acceptance remain open. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 614 selected public source files matched bytes and executable modes. Third-party components retain their own licenses. |
 
-Testing 36, production 93 and Mac 1.0.118 deliver messages sent from Wonder to a Claude session started on the Mac (a leftover task notice no longer ends the turn early) and hold them while that chat is open in Claude on the Mac, with Send now, list Claude agent tasks (including
+Testing 37, production 94 and Mac 1.0.119 add new Claude chats started in Wonder to the Claude desktop app, deliver messages sent from Wonder to a Claude session started on the Mac (a leftover task notice no longer ends the turn early) and hold them while that chat is open in Claude on the Mac; Send now closes the idle desktop chat first, list Claude agent tasks (including
 those launched before a compaction), keep earlier Claude turns after a
 compaction, render Claude's Bash and file edits like Codex and collapse its tool
 work into one group. Desktop runs show within seconds, including the sidebar
