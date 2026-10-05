@@ -117,7 +117,7 @@ async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent
     if &conversation.provider_store != store {
         return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
-    let thread_id = conversation.native_session_id.clone().ok_or_else(|| {
+    let native_session = conversation.native_session_id.clone().ok_or_else(|| {
         Box::new(
             (
                 StatusCode::CONFLICT,
@@ -136,12 +136,10 @@ async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent
             ))
         })?
         .ok_or_else(|| Box::new(StatusCode::CONFLICT.into_response()))?;
-    if binding.execution_scope != "projects"
-        || binding.family != conversation.family
-        || binding.thread_id != thread_id
-    {
+    if !binding_matches(conversation.family, &native_session, &binding) {
         return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
+    let thread_id = binding.thread_id.clone();
     let rpc = projects::rpc_for(state, conversation.family)
         .await
         .map_err(|_| Box::new(unavailable("The agent runtime is unavailable on your Mac.")))?;
@@ -154,6 +152,8 @@ async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent
     .map_err(|_| Box::new(unavailable("The Project thread could not be verified.")))?;
     let thread = read.get("thread").unwrap_or(&read);
     if thread.get("id").and_then(Value::as_str) != Some(thread_id.as_str())
+        || (conversation.family == AgentFamily::Claude
+            && thread.get("sessionId").and_then(Value::as_str) != Some(native_session.as_str()))
         || thread.get("cwd").and_then(Value::as_str) != Some(conversation.cwd.as_str())
         || thread
             .get("parentThreadId")
@@ -168,6 +168,21 @@ async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent
         thread_id,
         rpc,
     })
+}
+
+/// Codex binds the provider thread itself. Claude binds Wonder's bridge thread,
+/// whose session is the native Claude Code session.
+fn binding_matches(
+    family: AgentFamily,
+    native_session: &str,
+    binding: &wonder_store::RuntimeBinding,
+) -> bool {
+    binding.execution_scope == "projects"
+        && binding.family == family
+        && match family {
+            AgentFamily::Codex => binding.thread_id == native_session,
+            AgentFamily::Claude => binding.session_id.as_deref() == Some(native_session),
+        }
 }
 
 fn verified_child(
@@ -648,6 +663,41 @@ async fn claude_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A Claude Project conversation stores the Claude Code session; its binding
+    // names Wonder's bridge thread. Both families must accept their own shape.
+    #[test]
+    fn project_bindings_match_each_family_identity() {
+        let binding = |family, thread: &str, session: Option<&str>| wonder_store::RuntimeBinding {
+            conversation_id: "chat".into(),
+            family,
+            thread_id: thread.into(),
+            session_id: session.map(str::to_owned),
+            execution_scope: "projects".into(),
+        };
+        let claude = binding(AgentFamily::Claude, "claude-bridge", Some("native-session"));
+        assert!(binding_matches(
+            AgentFamily::Claude,
+            "native-session",
+            &claude
+        ));
+        assert!(!binding_matches(
+            AgentFamily::Claude,
+            "other-session",
+            &claude
+        ));
+        assert!(!binding_matches(
+            AgentFamily::Codex,
+            "native-session",
+            &claude
+        ));
+        let codex = binding(AgentFamily::Codex, "thread", None);
+        assert!(binding_matches(AgentFamily::Codex, "thread", &codex));
+        assert!(!binding_matches(AgentFamily::Codex, "other", &codex));
+        let mut bot = codex.clone();
+        bot.execution_scope = "bots".into();
+        assert!(!binding_matches(AgentFamily::Codex, "thread", &bot));
+    }
 
     // Claude agent tasks and background commands share the read-only roster;
     // unknown kinds are dropped and unrecognized states are not claimed.
