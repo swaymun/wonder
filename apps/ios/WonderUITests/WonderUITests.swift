@@ -112,7 +112,7 @@ import UIKit
                 return
             }
             // Header: View computer at the top right; tiles below.
-            let point = target == "project" ? CGVector(dx: 0.25, dy: 0.5) : CGVector(dx: 0.82, dy: 0.17)
+            let point = target == "project" ? CGVector(dx: 0.25, dy: 0.5) : CGVector(dx: 0.9, dy: 0.17)
             widget.coordinate(withNormalizedOffset: point).tap()
             XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "The Widget tap must foreground Wonder")
             if target == "project" {

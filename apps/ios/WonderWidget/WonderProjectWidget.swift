@@ -105,9 +105,9 @@ struct WonderProjectWidgetView: View {
                 Spacer(minLength: 4)
                 if let url = ProjectWidgetLink.computer(hostID: hostID, identity: identity) {
                     Link(destination: url) {
-                        Label("View computer", systemImage: "desktopcomputer")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 10).frame(minHeight: 30)
+                        Image(systemName: "desktopcomputer")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(width: 36, height: 30)
                             .background(.tint.opacity(0.15), in: Capsule())
                     }
                     .accessibilityLabel("View \(snapshot.hostName)")
@@ -138,7 +138,7 @@ struct WonderProjectWidgetView: View {
     private func tile(_ project: ProjectWidgetSnapshot.Project) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "plus.bubble").foregroundStyle(.tint)
-            Text(project.name).font(.footnote.weight(.medium)).lineLimit(2).minimumScaleFactor(0.85).privacySensitive()
+            Text(project.name).font(.subheadline).lineLimit(1).minimumScaleFactor(0.8).privacySensitive()
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)

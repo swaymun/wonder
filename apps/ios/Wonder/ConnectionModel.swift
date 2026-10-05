@@ -190,22 +190,30 @@ struct ManagedBotListMutationState {
             let detail = try await projects.loadDetail(chat.id)
             guard detail.hasNativeSession else { nativeHistoryFailures.remove(chat.id); return }
             var status: Status = try await api.request(path, origin: saved.origin, body: Data("{}".utf8), credential: saved.credential, decodingStatuses: [202])
-            // Bounded wait; saved history stays on screen meanwhile.
-            for _ in 0..<40 where status.state == "refreshing" {
+            // Bounded wait; saved history stays on screen meanwhile. A long chat
+            // can take a while: one still refreshing is not a failure, and the
+            // open conversation's activity check picks up its result later.
+            for _ in 0..<120 where status.state == "refreshing" {
                 try await Task.sleep(for: .milliseconds(250))
                 guard scope == assignmentScope, !Task.isCancelled else { return }
                 status = try await api.request(path, origin: saved.origin, credential: saved.credential)
             }
             guard scope == assignmentScope else { return }
+            if status.state == "refreshing" { nativeHistoryFailures.remove(chat.id); return }
             guard status.state == "completed" else { throw PairingFailure.response(503) }
             nativeHistoryFailures.remove(chat.id)
             await refreshConversation(chat)
         } catch is CancellationError {
+        } catch PairingFailure.response(429) {
+            // Other history is refreshing on the Mac; the next check retries.
         } catch {
             guard scope == assignmentScope else { return }
             nativeHistoryFailures.insert(chat.id)
         }
     }
+    /// Claude conversations also open in Claude on the Mac, which shows replies
+    /// to Wonder's messages only after the chat is reopened there.
+    @Published private(set) var nativeOpenElsewhere: Set<String> = []
     /// The newest native turn seen per conversation, from the cheap activity check.
     private var nativeActivity: [String: String] = [:]
     private var nativeActivityUnsupported: Set<String> = []
@@ -214,12 +222,15 @@ struct ManagedBotListMutationState {
     func nativeActivityChanged(_ chat: ChatSummary) async -> Bool {
         guard isProject(chat), !previewMode, let saved = connection, !accessEnded,
               !nativeActivityUnsupported.contains(assignmentScope) else { return false }
-        struct Activity: Decodable, Sendable { let latestTurnId: String?; let latestTurnStatus: String; let runningElsewhere: Bool }
+        struct Activity: Decodable, Sendable {
+            let latestTurnId: String?; let latestTurnStatus: String; let runningElsewhere: Bool; let openElsewhere: Bool?
+        }
         let scope = assignmentScope
         do {
             let activity: Activity = try await api.request("/api/v1/conversations/\(Self.escape(chat.id))/history/activity",
                 origin: saved.origin, credential: saved.credential)
             guard scope == assignmentScope else { return false }
+            if activity.openElsewhere == true { nativeOpenElsewhere.insert(chat.id) } else { nativeOpenElsewhere.remove(chat.id) }
             let signature = [activity.latestTurnId ?? "", activity.latestTurnStatus, String(activity.runningElsewhere)].joined(separator: "\u{1F}")
             let previous = nativeActivity.updateValue(signature, forKey: chat.id)
             return previous != nil && previous != signature
@@ -1518,8 +1529,11 @@ struct ManagedBotListMutationState {
     }
 
     /// Retries a conversation that has no saved content after a failed load.
+    /// Quiet first-load retries before a chat with nothing saved shows a failure.
+    private var conversationLoadRetries: [String: Int] = [:]
     func retryConversation(_ chat: ChatSummary) async {
         conversationLoadFailures[chat.id] = nil
+        conversationLoadRetries[chat.id] = nil
         if macConnected != true { await loadChats(force: true) }
         else { await refreshConversation(chat) }
     }
@@ -1945,6 +1959,7 @@ struct ManagedBotListMutationState {
             next.install(page)
             try commit(next, publishing: .snapshots)
             conversationLoadFailures[chat.id] = nil
+            conversationLoadRetries[chat.id] = nil
             if var intent = composers[chat.id], intent.pending != nil || !(intent.recoveredPending ?? []).isEmpty {
                 intent.reconcile(page)
                 try saveComposer(intent, chat: chat.id)
@@ -1955,10 +1970,23 @@ struct ManagedBotListMutationState {
                 do { try removeDeletedConversation(chat.id) } catch { readFailed(error, run: run) }
                 chatsStatus = "This conversation was removed."
             } else {
-                // Saved content stays on screen; only an empty chat shows the failure.
+                // Saved content stays on screen; only an empty chat shows the failure,
+                // and only after quiet retries: a long chat's first page can time out
+                // while the Mac is still reading its history.
                 if run == generation, !(error is CancellationError),
                    projection.snapshots[chat.id] == nil, projection.groups[chat.id] == nil {
-                    conversationLoadFailures[chat.id] = "Wonder couldn’t load this chat from your computer."
+                    let attempt = conversationLoadRetries[chat.id, default: 0]
+                    if attempt < 2 {
+                        conversationLoadRetries[chat.id] = attempt + 1
+                        Task { [weak self] in
+                            try? await Task.sleep(for: .seconds(attempt == 0 ? 2 : 5))
+                            guard let self, !Task.isCancelled, run == self.generation,
+                                  self.projection.snapshots[chat.id] == nil else { return }
+                            await self.refreshConversation(chat)
+                        }
+                    } else {
+                        conversationLoadFailures[chat.id] = "Wonder couldn’t load this chat from your computer."
+                    }
                 }
                 readFailed(error, run: run)
             }

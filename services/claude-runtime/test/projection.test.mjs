@@ -114,3 +114,18 @@ test("error results preserve their reason and never become successful replies", 
     assert.equal(events.at(-1).params.turn.items.length, 0);
   }
 });
+
+test("a result for earlier queued work does not end the prompt's turn", () => {
+  const events = [];
+  const projection = new TurnProjection({ threadId: "t", turnId: "turn-1", promptUuid: "turn-1", emit: e => events.push(e) });
+  // A resumed session first finishes a queued background-task notice.
+  projection.accept({ type: "result", subtype: "success", is_error: false, user_message_uuid: "notice-1" });
+  assert.equal(projection.terminal, false);
+  projection.accept({ type: "result", subtype: "success", is_error: false, user_message_uuids: ["turn-1"] });
+  assert.equal(projection.terminal, true);
+  assert.equal(projection.result.status, "completed");
+  // Without a reported prompt identity, the first result still ends the turn.
+  const plain = new TurnProjection({ threadId: "t", turnId: "turn-2", promptUuid: "turn-2", emit: () => {} });
+  plain.accept({ type: "result", subtype: "success", is_error: false });
+  assert.equal(plain.terminal, true);
+});

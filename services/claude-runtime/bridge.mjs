@@ -426,6 +426,7 @@ export class ClaudeBridge {
     const done = Promise.withResolvers(), submit = Promise.withResolvers();
     const output = [];
     const projection = new TurnProjection({ threadId: session.id, turnId: run.turn.id, internal: policy.internal,
+      promptUuid: options.wonderProject ? run.turn.id : null,
       emit: event => output.push(event), onSession: id => { session.sdkSessionId = id; session.sdkStarted = true; },
       onChild: message => { if (!options.wonderPlanning) run.childMessages.push(message); } });
     run.childMessages = [];

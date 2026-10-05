@@ -132,8 +132,8 @@ export function usageWindow(type, source, timestamp = Date.now()) {
 }
 
 export class TurnProjection {
-  constructor({ threadId, turnId, emit, onSession = () => {}, onUsage = () => {}, onChild = () => {}, internal = false }) {
-    Object.assign(this, { threadId, turnId, emit, onSession, onUsage, onChild, internal });
+  constructor({ threadId, turnId, emit, onSession = () => {}, onUsage = () => {}, onChild = () => {}, internal = false, promptUuid = null }) {
+    Object.assign(this, { threadId, turnId, emit, onSession, onUsage, onChild, internal, promptUuid });
     this.items = new Map(); this.textByMessage = new Map(); this.blocks = new Map(); this.agentTools = new Map();
     this.messageId = null; this.terminal = false; this.completedTexts = new Set();
   }
@@ -178,6 +178,11 @@ export class TurnProjection {
       for (const block of message.message.content) if (block.type === "tool_result") this.toolResult(block, message.tool_use_result);
     }
     if (message.type === "result") {
+      // A resumed session can first finish work queued before this prompt
+      // (for example a background-task notice). Only the result that answers
+      // this prompt ends the turn.
+      const answered = [message.user_message_uuid, ...(message.user_message_uuids ?? [])].filter(Boolean);
+      if (this.promptUuid && answered.length && !answered.includes(this.promptUuid)) return;
       this.structuredOutput = message.structured_output;
       const success = message.subtype === "success" && !message.is_error;
       this.finish(success ? "completed" : "failed", success ? undefined : (message.errors?.[0] ?? message.result ?? "Claude could not complete this response."));

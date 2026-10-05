@@ -52,19 +52,37 @@ pub(crate) fn claude_sessions_dir() -> Option<PathBuf> {
 }
 
 pub(crate) async fn claude_busy_sessions() -> HashSet<String> {
+    claude_live_sessions()
+        .await
+        .into_iter()
+        .filter_map(|(session, busy)| busy.then_some(session))
+        .collect()
+}
+
+/// Sessions a live Claude Code process (desktop or terminal) has open, and
+/// whether each is busy.
+pub(crate) async fn claude_live_sessions() -> HashMap<String, bool> {
     let Some(dir) = claude_sessions_dir() else {
-        return HashSet::new();
+        return HashMap::new();
     };
-    tokio::task::spawn_blocking(move || busy_sessions_in(&dir))
+    tokio::task::spawn_blocking(move || live_sessions_in(&dir))
         .await
         .unwrap_or_default()
 }
 
 /// Session IDs whose live Claude Code process reports itself busy.
+#[cfg(test)]
 pub(crate) fn busy_sessions_in(dir: &Path) -> HashSet<String> {
-    let mut busy = HashSet::new();
+    live_sessions_in(dir)
+        .into_iter()
+        .filter_map(|(session, busy)| busy.then_some(session))
+        .collect()
+}
+
+fn live_sessions_in(dir: &Path) -> HashMap<String, bool> {
+    let mut live = HashMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return busy;
+        return live;
     };
     for entry in entries.flatten().take(MAX_SESSION_RECORDS * 4) {
         let name = entry.file_name();
@@ -91,22 +109,21 @@ pub(crate) fn busy_sessions_in(dir: &Path) -> HashSet<String> {
         let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
-        if record.get("pid").and_then(serde_json::Value::as_i64) != Some(i64::from(pid))
-            || record.get("status").and_then(serde_json::Value::as_str) != Some("busy")
-        {
+        if record.get("pid").and_then(serde_json::Value::as_i64) != Some(i64::from(pid)) {
             continue;
         }
         let Some(session) = record.get("sessionId").and_then(serde_json::Value::as_str) else {
             continue;
         };
         if process_alive(pid) {
-            busy.insert(session.to_owned());
+            let busy = record.get("status").and_then(serde_json::Value::as_str) == Some("busy");
+            *live.entry(session.to_owned()).or_insert(false) |= busy;
         }
-        if busy.len() >= MAX_SESSION_RECORDS {
+        if live.len() >= MAX_SESSION_RECORDS {
             break;
         }
     }
-    busy
+    live
 }
 
 fn process_alive(pid: i32) -> bool {
@@ -157,5 +174,10 @@ mod tests {
             HashSet::from(["busy".to_owned()])
         );
         assert!(busy_sessions_in(&idle).is_empty());
+        // An idle session is still open in that app.
+        assert_eq!(
+            live_sessions_in(&idle),
+            HashMap::from([("idle".to_owned(), false)])
+        );
     }
 }

@@ -1260,6 +1260,15 @@ struct ConversationView: View {
                     if let error = model.composerErrors[chat.id] {
                         TemporaryNotice(key: error) { FailureDetails("Message not saved", message: error) }
                     }
+                    if !model.turnRunsElsewhere(chat.id), model.nativeOpenElsewhere.contains(chat.id) {
+                        TemporaryNotice(key: "open-elsewhere:" + chat.id) {
+                            Label("Also open in Claude on your Mac. Replies to messages sent here appear there after you reopen this chat in Claude.",
+                                  systemImage: "desktopcomputer")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .accessibilityElement(children: .combine)
+                                .accessibilityIdentifier("open-elsewhere")
+                        }
+                    }
                     if model.turnRunsElsewhere(chat.id) {
                         Label("Working in \(model.agentFamily(chat).title) on your Mac. A message you send now waits until it finishes.",
                               systemImage: "desktopcomputer")
