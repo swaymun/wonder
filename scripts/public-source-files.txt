@@ -90,7 +90,6 @@ apps/ios/Wonder/ManagementViews.swift
 apps/ios/Wonder/NativeChats.swift
 apps/ios/Wonder/NewChatView.swift
 apps/ios/Wonder/PhoneIdentity.swift
-apps/ios/Wonder/ProjectGitHubReview.swift
 apps/ios/Wonder/ProjectViews.swift
 apps/ios/Wonder/ProjectWidgetSnapshotPublisher.swift
 apps/ios/Wonder/ProjectsModel.swift
@@ -167,7 +166,6 @@ apps/native/Sources/WonderPairing/ComputerSession.swift
 apps/native/Sources/WonderPairing/Dictation.swift
 apps/native/Sources/WonderPairing/FileChangeSummary.swift
 apps/native/Sources/WonderPairing/Files.swift
-apps/native/Sources/WonderPairing/GitHubReview.swift
 apps/native/Sources/WonderPairing/Management.swift
 apps/native/Sources/WonderPairing/Projects.swift
 apps/native/Sources/WonderPairing/Protocol.swift
@@ -192,7 +190,6 @@ apps/native/Tests/WonderPairingTests/DictationTests.swift
 apps/native/Tests/WonderPairingTests/FileAccessManagementTests.swift
 apps/native/Tests/WonderPairingTests/FileChangeSummaryTests.swift
 apps/native/Tests/WonderPairingTests/FileTests.swift
-apps/native/Tests/WonderPairingTests/GitHubReviewTests.swift
 apps/native/Tests/WonderPairingTests/GroupTests.swift
 apps/native/Tests/WonderPairingTests/GuideTests.swift
 apps/native/Tests/WonderPairingTests/IdentityRecoveryTests.swift
@@ -360,12 +357,12 @@ crates/wonder-store/migrations/0084_project_service_tier.sql
 crates/wonder-store/migrations/0085_project_automation_targets.sql
 crates/wonder-store/migrations/0086_automation_revisions.sql
 crates/wonder-store/migrations/0087_project_github_review_bindings.sql
+crates/wonder-store/migrations/0088_remove_project_github_review.sql
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs
 crates/wonder-store/src/bot_management.rs
 crates/wonder-store/src/computer_sessions.rs
 crates/wonder-store/src/file_access.rs
-crates/wonder-store/src/github_review_bindings.rs
 crates/wonder-store/src/goals.rs
 crates/wonder-store/src/group_collaboration.rs
 crates/wonder-store/src/groups.rs
@@ -404,8 +401,6 @@ crates/wonderd/src/dispatch.rs
 crates/wonderd/src/enrollment_tests.rs
 crates/wonderd/src/file_access.rs
 crates/wonderd/src/filesystem.rs
-crates/wonderd/src/github_review.rs
-crates/wonderd/src/github_review_routes.rs
 crates/wonderd/src/goals.rs
 crates/wonderd/src/group_attachments.rs
 crates/wonderd/src/group_collaboration.rs

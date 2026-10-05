@@ -44,18 +44,6 @@ final class ProjectsTests: XCTestCase {
         let projects = try JSONDecoder().decode(ProjectsResponse.self, from: Data(#"{"projects":[{"id":"p","name":"Codex P0","isIncluded":true,"isPinned":false,"rootsRevision":1,"folders":[{"id":"f","path":"/Users/owner/app","name":"app","isPrimary":true,"isAvailable":true}],"lastFamily":null,"lastUsedAt":null,"createdAt":"2026-09-30T02:18:38.447Z"}],"families":[{"family":"codex","available":true},{"family":"claude","available":true}]}"#.utf8))
         XCTAssertEqual(projects.projects.first?.primaryFolder?.path, "/Users/owner/app")
         XCTAssertNil(projects.archiveVersion, "Older hosts do not offer Archive")
-        XCTAssertNil(projects.githubReviewVersion, "Older hosts do not offer GitHub review")
-        let modern = try JSONDecoder().decode(ProjectsResponse.self,
-            from: Data(#"{"projects":[],"families":[],"githubReviewVersion":1}"#.utf8))
-        XCTAssertEqual(modern.githubReviewVersion, 1)
-        for (field, expected) in [("", nil as String?), (",\"projectRootId\":\"stored-folder\"", "stored-folder")] {
-            let response = "{\"available\":true,\"detail\":null,\"roots\":[{\"id\":\"workspace\",\"label\":\"Workspace\",\"path\":\"/work\",\"isDirectory\":true,\"kind\":\"workingDirectory\",\"readOnly\":true" + field + "}],\"attachments\":[]}"
-            let roots = try JSONDecoder().decode(WorkspaceRootsResponse.self, from: Data(response.utf8))
-            XCTAssertEqual(roots.roots.first?.id, "workspace")
-            XCTAssertEqual(roots.roots.first?.projectRootId, expected)
-            let restored = try JSONDecoder().decode(WorkspaceRootsResponse.self, from: JSONEncoder().encode(roots))
-            XCTAssertEqual(restored.roots.first?.projectRootId, expected)
-        }
         let page = try JSONDecoder().decode(ProjectThreadsPage.self, from: Data(#"{"threads":[{"reference":"claude:a0b0","conversationId":"f861","title":"Wonder-p0","family":"claude","updatedAt":1790735086,"isPinned":false,"hasUnread":true,"isWorking":false}],"nextCursor":null,"partial":[]}"#.utf8))
         XCTAssertEqual(page.threads.first?.family, .claude)
         let detail = try JSONDecoder().decode(ProjectConversationDetail.self, from: Data(#"{"conversationId":"c","projectId":"p","projectName":"Codex P0","title":"t","family":"codex","model":"gpt-5.6-luna","effort":"low","serviceTier":"fast","accessMode":"read_only","workingFolder":"/w","workingFolderName":"w","isPinned":false,"hasUnread":false,"hasNativeSession":true,"folderInProject":true,"notice":null}"#.utf8))

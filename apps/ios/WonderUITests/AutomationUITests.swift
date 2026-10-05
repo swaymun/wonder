@@ -9,6 +9,25 @@ import XCTest
         #endif
     }
 
+    // Keep the visible state with every failure; a failed assertion alone
+    // rarely shows which control was covered or missing.
+    override func record(_ issue: XCTIssue) {
+        var issue = issue
+        let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screen.name = "Failure screen"; screen.lifetime = .keepAlways
+        issue.add(screen)
+        let tree = XCTAttachment(string: XCUIApplication(bundleIdentifier: appBundleIdentifier).debugDescription)
+        tree.name = "Failure hierarchy"; tree.lifetime = .keepAlways
+        issue.add(tree)
+        super.record(issue)
+    }
+
+    private func keep(_ app: XCUIApplication, _ name: String) {
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = name; shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     func testExistingBotAndGroupSchedulesPauseAndResume() {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -24,6 +43,7 @@ import XCTest
         XCTAssertTrue(bot.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Next: ")).firstMatch.exists)
         XCTAssertTrue(bot.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Last: ")).firstMatch.exists)
         XCTAssertTrue(app.buttons["project-automation-new"].exists)
+        keep(app, "Schedules in Mac connection")
 
         let toggle = app.buttons["automation-toggle:fixture-bot-schedule"]
         XCTAssertTrue(toggle.isHittable)
@@ -79,6 +99,7 @@ import XCTest
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         XCTAssertTrue(row.staticTexts["Daily launch review"].exists)
         XCTAssertTrue(row.staticTexts["Roadmap · Plan launch"].exists)
+        keep(app, "Project schedule saved")
 
         let edit = app.buttons["automation-edit:fixture-project-schedule"]
         XCTAssertTrue(edit.isHittable)

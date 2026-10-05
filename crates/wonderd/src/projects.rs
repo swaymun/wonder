@@ -659,7 +659,6 @@ struct ProjectsResponse {
     families: Vec<FamilyAvailability>,
     modes_version: u8,
     archive_version: u8,
-    github_review_version: u8,
     pinned: Vec<PinnedThread>,
 }
 
@@ -746,7 +745,6 @@ pub(crate) async fn list(
         families,
         modes_version: MODES_VERSION,
         archive_version: 1,
-        github_review_version: 1,
         pinned: pinned_threads,
     })
     .into_response()
@@ -5645,7 +5643,6 @@ pub(crate) mod tests {
             }],
             modes_version: MODES_VERSION,
             archive_version: 1,
-            github_review_version: 1,
             pinned: vec![PinnedThread {
                 project_id: "p1".into(),
                 thread: pinned,
@@ -5654,7 +5651,6 @@ pub(crate) mod tests {
         .unwrap();
         crate::tests::validate_http_contract("projectsResponse", &library);
         assert_eq!(library["modesVersion"], 1);
-        assert_eq!(library["githubReviewVersion"], 1);
         let detail = serde_json::to_value(ProjectConversationDetail {
             conversation_id: "c1".into(),
             project_id: "p1".into(),

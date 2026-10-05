@@ -9,6 +9,19 @@ import XCTest
         #endif
     }
 
+    // Keep the visible state with every failure; a failed assertion alone
+    // rarely shows which control was covered or missing.
+    override func record(_ issue: XCTIssue) {
+        var issue = issue
+        let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screen.name = "Failure screen"; screen.lifetime = .keepAlways
+        issue.add(screen)
+        let tree = XCTAttachment(string: XCUIApplication(bundleIdentifier: appBundleIdentifier).debugDescription)
+        tree.name = "Failure hierarchy"; tree.lifetime = .keepAlways
+        issue.add(tree)
+        super.record(issue)
+    }
+
     private func launchProjectFiles(revision: Bool = false, html: Bool = false,
                                     hostileHTML: Bool = false) -> XCUIApplication {
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

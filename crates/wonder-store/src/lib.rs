@@ -11,9 +11,7 @@ mod runtime_bindings;
 pub use runtime_bindings::{AgentFamily, RuntimeBinding};
 mod update_handoff;
 pub use update_handoff::UpdateHandoff;
-mod github_review_bindings;
 mod projects;
-pub use github_review_bindings::ProjectGitHubReviewBinding;
 pub use projects::{
     ProjectConversationCreate, ProjectConversationInsert, ProjectConversationPatch, ProjectCreate,
     ProjectRootInput, StoredProject, StoredProjectConversation, StoredProjectRoot,

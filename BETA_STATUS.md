@@ -610,6 +610,22 @@ layout adaptation is open. This Mac has Xcode 27.0 and no Duo simulator device;
 specifies Xcode 27.1 and DeviceHub for pose checks. Duo behavior has not been
 verified on a simulator or physical device.
 
+The post-release hardening review additionally corrected Bot and Project
+history/lifecycle waits that could delay update handoff; the combined daemon
+library suite passed 341 tests with three existing ignores, and the installer
+handoff suite passed 12/12. A visible Chats control in the iPad conversation
+shell passed a real-shell accessibility-size UI regression on iPad and the
+corresponding iPhone check (1/1 each). These changes remain in unshipped draft
+PR #61. With the owner's approval, a read-only pairing attempt found the
+installed Mac did not expose a usable full link through the accessible Devices
+UI, and the available simulator builds lacked durable pairing entitlements.
+No new owner device appeared; paired mobile acceptance remains open.
+An address-and-code option now exposes the existing pairing-code path in draft
+PR #61. Its focused UI check passed 1/1 on each iPhone and iPad simulator,
+including codes with `-` and `_`. A simulator-only ad-hoc signed build produced
+an empty entitlement payload and was not installed for owner pairing. A live
+code claim, Mac approval and paired Files/media/send roundtrip remain open.
+
 ## Earlier qualification
 
 Testing build 7 and production build 71 passed six focused iPhone Simulator

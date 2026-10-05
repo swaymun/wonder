@@ -25,6 +25,9 @@ use wonder_store::{StoredConversationFile, StoredProject};
 const PAGE_SIZE: usize = 200;
 const MAX_ENTRIES: usize = 20_000;
 const MAX_WORKSPACE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Previews stream from disk, so large PDFs and images need no host buffer.
+const MAX_WORKSPACE_PREVIEW_BYTES: u64 = 256 * 1024 * 1024;
+const PREVIEW_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_MEDIA_RANGE_BYTES: u64 = 1024 * 1024;
 const MAX_DIFF_BYTES: usize = 1024 * 1024;
 const TOO_MANY_ENTRIES_DETAIL: &str =
@@ -291,7 +294,6 @@ fn list_directory(
 #[derive(Clone, Debug)]
 struct WorkspaceRoot {
     id: String,
-    project_root_id: Option<String>,
     label: String,
     path: PathBuf,
     is_directory: bool,
@@ -302,8 +304,6 @@ struct WorkspaceRoot {
 #[serde(rename_all = "camelCase")]
 struct WorkspaceRootResponse {
     id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    project_root_id: Option<String>,
     label: String,
     path: String,
     is_directory: bool,
@@ -441,7 +441,6 @@ fn add_root(
         return Ok(());
     }
     roots.push(WorkspaceRoot {
-        project_root_id: None,
         id: id.into(),
         label: label.into(),
         path: canonical,
@@ -537,7 +536,6 @@ async fn project_workspace_roots(
         // canonicalization could otherwise switch to a different folder
         // if the selected path were replaced after validation.
         roots.push(WorkspaceRoot {
-            project_root_id: Some(root.id.clone()),
             id: if working {
                 "workspace".to_owned()
             } else {
@@ -1220,6 +1218,35 @@ fn read_bounded_file(mut file: fs::File) -> Result<Vec<u8>, BrowseError> {
     Ok(bytes)
 }
 
+/// Opens a regular file for a streamed preview. The length comes from the
+/// verified descriptor and bounds the response even if the file grows.
+fn open_workspace_preview_file(
+    root: &WorkspaceRoot,
+    relative: &Path,
+    denied: &[PathBuf],
+    own_workspace: Option<&Path>,
+) -> Result<(fs::File, u64), BrowseError> {
+    let lexical = root.path.join(relative);
+    if protected_by_denies(&lexical, denied, own_workspace) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This path is outside the conversation's verified workspace.",
+        ));
+    }
+    let file = open_workspace_file(root, relative)?;
+    let metadata = file.metadata().map_err(disk_error)?;
+    if !metadata.is_file() {
+        return Err((StatusCode::BAD_REQUEST, "Choose a regular file to preview."));
+    }
+    if metadata.len() > MAX_WORKSPACE_PREVIEW_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Files larger than 256 MB can't be previewed in Wonder. Open it on your Mac.",
+        ));
+    }
+    Ok((file, metadata.len()))
+}
+
 fn open_workspace_bounded_file(
     root: &WorkspaceRoot,
     relative: &Path,
@@ -1303,7 +1330,13 @@ pub(crate) async fn verified_project_preview_file(
     tokio::task::spawn_blocking(move || {
         let bytes =
             open_workspace_bounded_file(&root, &relative, &denied, Some(root.path.as_path()))
-                .map_err(|(status, detail)| (status, detail.to_owned()))?;
+                .map_err(|(status, detail)| {
+                    if status == StatusCode::PAYLOAD_TOO_LARGE {
+                        (status, "Notes can be sent for files up to 8 MB. Describe this part of the file in your message instead.".to_owned())
+                    } else {
+                        (status, detail.to_owned())
+                    }
+                })?;
         let name = relative.file_name().and_then(|name| name.to_str()).ok_or((
             StatusCode::BAD_REQUEST,
             "This file name cannot be annotated.".to_owned(),
@@ -1584,7 +1617,6 @@ pub(super) async fn workspace_roots(
                         .then(|| mime_for_path(&root.path))
                         .flatten();
                     WorkspaceRootResponse {
-                        project_root_id: root.project_root_id,
                         id: root.id,
                         label: root.label,
                         path: root.path.to_string_lossy().into_owned(),
@@ -1675,12 +1707,12 @@ pub(super) async fn workspace_file(
     let mime = mime_for_path(&root.path.join(&relative))
         .unwrap_or_else(|| "application/octet-stream".into());
     let root = root.clone();
-    let bytes = match tokio::task::spawn_blocking(move || {
-        open_workspace_bounded_file(&root, &relative, &denied, Some(root.path.as_path()))
+    let (file, length) = match tokio::task::spawn_blocking(move || {
+        open_workspace_preview_file(&root, &relative, &denied, Some(root.path.as_path()))
     })
     .await
     {
-        Ok(Ok(bytes)) => bytes,
+        Ok(Ok(opened)) => opened,
         Ok(Err((status, detail))) => return workspace_error(status, detail),
         Err(_) => {
             return workspace_error(
@@ -1689,7 +1721,23 @@ pub(super) async fn workspace_file(
             )
         }
     };
-    let mut response = bytes.into_response();
+    let reader = tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(file), length);
+    let stream = futures_util::stream::unfold(reader, |mut reader| async move {
+        let mut buffer = vec![0; PREVIEW_CHUNK_BYTES];
+        match tokio::io::AsyncReadExt::read(&mut reader, &mut buffer).await {
+            Ok(0) => None,
+            Ok(count) => {
+                buffer.truncate(count);
+                Some((Ok::<_, io::Error>(axum::body::Bytes::from(buffer)), reader))
+            }
+            Err(error) => Some((Err(error), reader)),
+        }
+    });
+    let mut response = axum::body::Body::from_stream(stream).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_LENGTH,
+        axum::http::HeaderValue::from(length),
+    );
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_str(&mime)
@@ -2385,7 +2433,6 @@ mod tests {
         let _socket = UnixListener::bind(root_dir.path().join("socket")).unwrap();
         let root_path = root_dir.path().canonicalize().unwrap();
         let root = WorkspaceRoot {
-            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: root_path.clone(),
@@ -2459,7 +2506,6 @@ mod tests {
         let sibling = sibling_dir.path().to_path_buf();
         fs::write(sibling.join("private.txt"), b"private").unwrap();
         let sibling_root = WorkspaceRoot {
-            project_root_id: None,
             id: "sibling".into(),
             label: "Sibling".into(),
             path: sibling.canonicalize().unwrap(),
@@ -2488,7 +2534,6 @@ mod tests {
         }
         fs::write(folder.path().join(".hidden"), b"").unwrap();
         let root = WorkspaceRoot {
-            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: folder.path().canonicalize().unwrap(),
@@ -2576,7 +2621,6 @@ mod tests {
         let file = folder.path().join("notes.txt");
         fs::write(&file, b"read-only").unwrap();
         let root = WorkspaceRoot {
-            project_root_id: None,
             id: "grant-0".into(),
             label: "notes.txt".into(),
             path: file.canonicalize().unwrap(),
@@ -2606,7 +2650,6 @@ mod tests {
         fs::write(outside.path().join("file.txt"), b"outside").unwrap();
         let root_path = root_dir.path().canonicalize().unwrap();
         let root = WorkspaceRoot {
-            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: root_path.clone(),
@@ -2716,7 +2759,6 @@ mod tests {
         )
         .unwrap();
         let root = WorkspaceRoot {
-            project_root_id: None,
             id: "root".into(),
             label: "Root".into(),
             path: folder.path().canonicalize().unwrap(),
@@ -2844,11 +2886,6 @@ mod tests {
         let roots: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         crate::tests::validate_http_contract("workspaceRoots", &roots);
         assert_eq!(roots["roots"][0]["id"], "workspace");
-        assert!(roots["roots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|root| root.get("projectRootId").is_none()));
         assert_eq!(roots["roots"][0]["label"], "Workspace");
         assert_eq!(roots["roots"][0]["kind"], "workingDirectory");
         assert_eq!(roots["roots"][0]["readOnly"], true);
@@ -2891,6 +2928,46 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(bytes, b"visible");
+        // Large previews stream from disk with their verified length; only
+        // files over the preview limit are refused.
+        let large: Vec<u8> = (0..9 * 1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        fs::write(selected_workspace.path().join("large.bin"), &large).unwrap();
+        let response = {
+            use axum::{body::Body, http::Request};
+            use tower::ServiceExt;
+            crate::router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/conversations/bot/workspace/file?root=workspace&path=large.bin")
+                        .header("x-wonder-loopback-capability", &state.loopback_capability)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_LENGTH],
+            large.len().to_string()
+        );
+        let streamed = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(streamed.as_ref() == large.as_slice());
+        fs::File::create(selected_workspace.path().join("huge.bin"))
+            .unwrap()
+            .set_len(MAX_WORKSPACE_PREVIEW_BYTES + 1)
+            .unwrap();
+        let (status, _) = workspace_route(
+            &state,
+            "/api/v1/conversations/bot/workspace/file?root=workspace&path=huge.bin",
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         let (status, headers, bytes) = media_route(
             &state,
             "/api/v1/conversations/bot/workspace/file?root=workspace&path=visible.txt",
@@ -3198,13 +3275,6 @@ mod tests {
         crate::tests::validate_http_contract("workspaceRoots", &roots);
         assert_eq!(roots["roots"].as_array().unwrap().len(), 2);
         assert_eq!(roots["roots"][0]["id"], "workspace");
-        assert_eq!(roots["roots"][0]["projectRootId"], project.primary_root_id);
-        let other_root = project
-            .roots
-            .iter()
-            .find(|root| root.canonical_path == other_canonical)
-            .unwrap();
-        assert_eq!(roots["roots"][1]["projectRootId"], other_root.id);
         assert_eq!(roots["roots"][0]["path"], source_canonical);
         assert_eq!(roots["roots"][1]["kind"], "projectRoot");
         let other_id = roots["roots"][1]["id"].as_str().unwrap();
@@ -3386,7 +3456,6 @@ mod tests {
 
         // A denied rename source must not be exposed by status or used in a diff.
         let git_root = WorkspaceRoot {
-            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: source.canonicalize().unwrap(),
@@ -3531,7 +3600,6 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         let prior_root = WorkspaceRoot {
-            project_root_id: None,
             id: "workspace".into(),
             label: "Workspace".into(),
             path: PathBuf::from(source_canonical),

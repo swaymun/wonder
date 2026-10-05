@@ -218,6 +218,14 @@ private struct ConversationScroller<Content: View>: View {
     @State private var visibleLatestReceipt: VisibleReadReceipt?
     @State private var readViewport: CGRect = .zero
     @State private var bottomVisible = false
+    /// The reader was at the end and has not scrolled away since.
+    @State private var followsBottom = false
+    @State private var lastNodeID: String?
+    @State private var userScrolling = false
+    /// Lazy rows can settle taller than estimated just after Wonder scrolls to
+    /// the end; correct only within that short window, never after user actions.
+    @State private var bottomSettleUntil = Date.distantPast
+    @State private var bottomCorrections = 0
     @Environment(\.scenePhase) private var phase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private let bottomID = "conversation-bottom"
@@ -236,9 +244,23 @@ private struct ConversationScroller<Content: View>: View {
         return receipt
     }
 
+    private func pinBottom() {
+        bottomSettleUntil = Date().addingTimeInterval(1.5)
+        bottomCorrections = 0
+        scrollRequest = ConversationScrollRequest(id: bottomID)
+    }
+
     private func restorePositionIfNeeded() {
         guard presented, !nodeIDs.isEmpty else { return }
+        defer { lastNodeID = nodeIDs.last }
         if restored {
+            // A new final row (a sent message or reply) keeps a reader who was
+            // at the end there. Rows inserted above it, such as expanded
+            // activity, keep the visible anchor instead.
+            if followsBottom, let last = nodeIDs.last, last != lastNodeID {
+                pinBottom()
+                return
+            }
             if let anchor = ChatFeedNode.survivingAnchor(for: position, entries: entries, nodeIDs: nodeIDs), anchor != position {
                 scrollRequest = ConversationScrollRequest(id: anchor)
             }
@@ -255,7 +277,8 @@ private struct ConversationScroller<Content: View>: View {
             }?.id
         }
         initialTarget = target ?? bottomID
-        scrollRequest = ConversationScrollRequest(id: target ?? bottomID, anchor: .top)
+        if target == nil { pinBottom() }
+        else { scrollRequest = ConversationScrollRequest(id: target!, anchor: .top) }
         if initialTarget == bottomID && bottomVisible { restored = true }
     }
 
@@ -289,7 +312,13 @@ private struct ConversationScroller<Content: View>: View {
                 if let first = nodeIDs.first(where: visibleIDs.contains), first != position { position = first }
             }
             .onPreferenceChange(ReadViewportKey.self) { viewport in
-                if readViewport != viewport { readViewport = viewport }
+                guard readViewport != viewport else { return }
+                // A composer notice or the keyboard can shrink the viewport after
+                // the end is shown; keep the reader at the end instead of
+                // leaving the latest reply below the fold.
+                let keepBottom = restored && followsBottom && viewport.maxY < readViewport.maxY - 1
+                readViewport = viewport
+                if keepBottom { pinBottom() }
             }
             .onPreferenceChange(InitialConversationTargetFrameKey.self) { target in
                 guard !restored, let target, target.id == initialTarget, !readViewport.isEmpty else { return }
@@ -302,6 +331,11 @@ private struct ConversationScroller<Content: View>: View {
                 let visible = frame.map { $0.maxY <= readViewport.maxY + 24 && $0.maxY >= readViewport.minY } ?? false
                 if bottomVisible != visible { bottomVisible = visible }
                 if !restored, initialTarget == bottomID, visible { restored = true }
+                if restored, visible { followsBottom = true }
+                else if restored, followsBottom, !userScrolling, bottomCorrections < 3, Date() < bottomSettleUntil {
+                    bottomCorrections += 1
+                    scrollRequest = ConversationScrollRequest(id: bottomID)
+                }
             }
             // A scroll request is not layout completion. Keep the real list
             // mounted but covered until its intended row/end is in the viewport.
@@ -315,6 +349,11 @@ private struct ConversationScroller<Content: View>: View {
                 }
             }
             .scrollDismissesKeyboard(.interactively)
+            // Only the reader's own scrolling decides whether to stay at the end.
+            .onScrollPhaseChange { _, next in
+                userScrolling = next == .interacting || next == .decelerating
+                if next == .idle, restored { followsBottom = bottomVisible }
+            }
             .overlay(alignment: .bottom) {
                 if restored && !bottomVisible && !entries.isEmpty {
                     Button {
@@ -1050,6 +1089,11 @@ struct ConversationView: View {
             if cameraScope != nil, cameraScope != next { showingCamera = false; cameraScope = nil }
             if editedFilesReview?.scope != next { editedFilesReview = nil }
         }
+        // Files and a reanchored note replace a saved-diff review rather than
+        // opening invisibly behind it.
+        .onChange(of: workspaceRequest?.id) { _, id in
+            if id != nil { editedFilesReview = nil }
+        }
         .onReceive(model.projects.$details) { details in
             let on = details[chat.id]?.planMode == true
             if planModeOn != on { planModeOn = on }
@@ -1136,6 +1180,7 @@ struct ConversationView: View {
                     Button("Review request", systemImage: "hand.raised") {
                         requestedScrollID = "approval-" + request.id
                         workspaceRequest = nil
+                        editedFilesReview = nil
                     }.font(.subheadline).frame(minHeight: 44).accessibilityIdentifier("review-approval-request")
                 }
                 QuestionDock(model: model, chat: chat)
@@ -3351,6 +3396,59 @@ struct WorkspaceBrowserRequest: Identifiable {
     }
 }
 
+struct WorkspaceFileLoad: Equatable {
+    let id: UUID
+    let name: String
+    var received: Int
+    var expected: Int?
+}
+
+/// Large previews arrive from the Mac over the network; show how far along
+/// they are instead of leaving the tap without feedback.
+private struct WorkspaceFileLoadRow: View {
+    let load: WorkspaceFileLoad
+    private func megabytes(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+    private var detail: String {
+        guard let expected = load.expected, expected > 0 else { return megabytes(load.received) }
+        return "\(megabytes(load.received)) of \(megabytes(expected))"
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Opening \(load.name)").font(.subheadline).lineLimit(2)
+            if let expected = load.expected, expected > 0 {
+                ProgressView(value: Double(min(load.received, expected)), total: Double(expected))
+            } else {
+                ProgressView()
+            }
+            Text(detail).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Opening \(load.name), \(detail)")
+        .accessibilityIdentifier("workspace-file-loading")
+    }
+}
+
+/// Files inside a conversation close from the composer's Files button. A sheet
+/// has no composer, so it carries its own Done control.
+struct WorkspaceSheet<Content: View>: View {
+    let close: () -> Void
+    @ViewBuilder let content: Content
+    var body: some View {
+        NavigationStack {
+            content
+                .navigationTitle("Files").navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done", action: close).accessibilityIdentifier("workspace-sheet-done")
+                    }
+                }
+        }
+    }
+}
+
 struct WorkspaceBrowser: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.scenePhase) private var scenePhase
@@ -3371,7 +3469,6 @@ struct WorkspaceBrowser: View {
     @State private var git: WorkspaceGitStatusResponse?
     @State private var viewMode = "all"
     @State private var showHidden = false
-    @State private var githubReview = false
     @State private var loadingRequests: Set<UUID> = []
     @State private var rootsLoadingID: UUID?
     @State private var locationGeneration = UUID()
@@ -3388,6 +3485,9 @@ struct WorkspaceBrowser: View {
     @State private var fileRequestID = UUID()
     @State private var attachmentRequestID = UUID()
     @State private var failure: String?
+    @State private var fileLoad: WorkspaceFileLoad?
+    /// Closing a preview rebuilds the list; return to the row that was opened.
+    @State private var returnEntryPath: String?
     @State private var selection: WorkspacePreviewSelection?
     @State private var documentSelection: WorkspacePreviewSelection?
     @State private var previewRevision: WorkspaceRevisionState?
@@ -3426,7 +3526,7 @@ struct WorkspaceBrowser: View {
         attachmentPhoto != nil || (attachmentSelection != nil && attachmentData != nil && attachmentDigest != nil) ||
         (selectedDiff != nil && diffText != nil)
     }
-    private var shouldPollListing: Bool { scenePhase == .active && !hasPreview && !githubReview }
+    private var shouldPollListing: Bool { scenePhase == .active && !hasPreview }
     private var previewName: String {
         selection?.name ?? documentSelection?.name ?? mediaSelection?.name ?? attachmentPhoto?.name ??
         attachmentSelection?.name ?? selectedDiff?.path ?? "Preview"
@@ -3440,41 +3540,57 @@ struct WorkspaceBrowser: View {
         return model.composers[chat.id]?.attachmentIDs.contains(addedAnnotationID) == true
     }
 
+    private var workspaceTitle: some View {
+        Text(viewMode == "all"
+             ? (directoryPath.isEmpty ? "Workspace" : "Workspace / " + directoryPath)
+             : "Modified")
+            .font(.headline)
+            .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+            .truncationMode(.middle)
+    }
+
+    @ViewBuilder private var workspaceActions: some View {
+        if viewMode == "all", selectedRoot?.isDirectory == true {
+            Button(action: toggleHiddenFiles) {
+                Image(systemName: showHidden ? "eye" : "eye.slash")
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .accessibilityLabel(showHidden ? "Hide hidden files" : "Show hidden files")
+            .accessibilityValue(showHidden ? "On" : "Off")
+            .accessibilityIdentifier("workspace-hidden-toggle")
+        }
+        Button(viewMode == "all" ? "Modified" : "Workspace") {
+            viewMode = viewMode == "all" ? "modified" : "all"
+        }
+        .font(.subheadline)
+        .lineLimit(1)
+        .frame(minHeight: 44)
+        .accessibilityIdentifier("workspace-view-toggle")
+    }
+
     private var workspaceControls: some View {
-        HStack(spacing: 12) {
-            Text(viewMode == "all"
-                 ? (directoryPath.isEmpty ? "Workspace" : "Workspace / " + directoryPath)
-                 : "Modified")
-                .font(.headline)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 8)
-            if viewMode == "all", selectedRoot?.isDirectory == true, directoryPath.isEmpty {
-                Button(action: toggleHiddenFiles) {
-                    Image(systemName: showHidden ? "eye" : "eye.slash")
-                        .frame(width: 44, height: 44)
+        Group {
+            // Large text needs the title on its own line so neither it nor
+            // the actions are cut down to a few letters.
+            if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 0) {
+                    workspaceTitle
+                    HStack(spacing: 12) { workspaceActions; Spacer(minLength: 0) }
                 }
-                .accessibilityLabel(showHidden ? "Hide hidden files" : "Show hidden files")
-                .accessibilityValue(showHidden ? "On" : "Off")
-                .accessibilityIdentifier("workspace-hidden-toggle")
+            } else {
+                HStack(spacing: 12) {
+                    workspaceTitle
+                    Spacer(minLength: 8)
+                    workspaceActions
+                }
             }
-            ProjectGitHubEntry(model: model, chat: chat, root: selectedRoot) { githubReview = true }
-            Button(viewMode == "all" ? "Modified" : "Workspace") {
-                viewMode = viewMode == "all" ? "modified" : "all"
-            }
-            .font(.subheadline)
-            .frame(minHeight: 44)
-            .accessibilityIdentifier("workspace-view-toggle")
         }
         .padding(.horizontal, 16)
     }
 
     var body: some View {
         Group {
-            if githubReview, let rootId = selectedRoot?.projectRootId,
-               let project = model.gitHubReviewProject(chat, rootId: rootId) {
-                ProjectGitHubReviewPanel(model: model, projectId: project.id, rootId: rootId) { githubReview = false }
-            } else if hasPreview {
+            if hasPreview {
                 inlinePreview
             } else {
                 VStack(spacing: 0) {
@@ -3835,7 +3951,9 @@ struct WorkspaceBrowser: View {
     @ViewBuilder private var allFilesView: some View {
         if loading && directory == nil && visibleAttachments.isEmpty { ProgressView("Loading files…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         else {
+            ScrollViewReader { proxy in
             List {
+                if let fileLoad { WorkspaceFileLoadRow(load: fileLoad) }
                 if let root = selectedRoot {
                     if !directoryPath.isEmpty {
                         Button { navigate(to: directory?.parentPath ?? "") } label: { Label("Back", systemImage: "chevron.left") }
@@ -3847,6 +3965,7 @@ struct WorkspaceBrowser: View {
                                 Button { open(entry) } label: {
                                     Label(entry.name, systemImage: entry.isDirectory ? "folder" : (entry.mimeType?.hasPrefix("image/") == true ? "photo" : (Self.isMedia(entry) ? "play.rectangle" : "doc.text")))
                                 }
+                                .id("workspace-row:" + entry.path)
                                 .accessibilityIdentifier("workspace-\(entry.isDirectory ? "directory" : "file")-entry:\(entry.path)")
                             }
                             if let next = directory?.nextOffset {
@@ -3877,6 +3996,10 @@ struct WorkspaceBrowser: View {
                 if let failure { Section { FailureDetails(message: failure) } }
             }
             .accessibilityIdentifier("workspace-file-list")
+            .onAppear {
+                if let path = returnEntryPath { proxy.scrollTo("workspace-row:" + path, anchor: .center) }
+            }
+            }
         }
     }
 
@@ -4212,7 +4335,10 @@ struct WorkspaceBrowser: View {
             return false
         }
     }
-    private func open(_ entry: WorkspaceEntry) { if entry.isDirectory { navigate(to: entry.path) } else { Task { await loadWorkspaceFile(entry) } } }
+    private func open(_ entry: WorkspaceEntry) {
+        if entry.isDirectory { returnEntryPath = nil; navigate(to: entry.path) }
+        else { returnEntryPath = entry.path; Task { await loadWorkspaceFile(entry) } }
+    }
     private func openRootFile(_ root: WorkspaceRoot) {
         let name = URL(fileURLWithPath: root.path).lastPathComponent
         let mime: String
@@ -4242,7 +4368,15 @@ struct WorkspaceBrowser: View {
                                                               name: entry.name, loader: loader)
                 return true
             }
-            let data = try await model.downloadWorkspaceFile(chat, root: root, entry: entry)
+            fileLoad = WorkspaceFileLoad(id: requestID, name: entry.name, received: 0, expected: entry.byteSize.map(Int.init))
+            defer { if fileLoad?.id == requestID { fileLoad = nil } }
+            let data = try await model.downloadWorkspaceFile(chat, root: root, entry: entry) { received, expected in
+                Task { @MainActor in
+                    guard fileLoad?.id == requestID else { return }
+                    fileLoad?.received = received
+                    if let expected { fileLoad?.expected = expected }
+                }
+            }
             let sha256 = await Task.detached(priority: .userInitiated) { ConversationFile.digest(data) }.value
             guard isCurrent(captured), requestID == fileRequestID else { return false }
             let carriedNote: String
@@ -4265,7 +4399,11 @@ struct WorkspaceBrowser: View {
             return true
         } catch {
             guard isCurrent(captured), requestID == fileRequestID else { return false }
-            failure = "This file could not be opened. It may have moved, been deleted, or need workspace access."
+            if case FileFailure.tooLarge = error {
+                failure = "This file is too large to preview here. With the latest Wonder on your Mac, files up to 256 MB open in Files; open larger files on your Mac."
+            } else {
+                failure = "This file could not be opened. It may have moved, been deleted, or need workspace access."
+            }
             return false
         }
     }
@@ -5464,7 +5602,9 @@ private struct ResponseEditedFilesReview: View {
                 } else if oversized, patchPath == selected.path {
                     ContentUnavailableView("Diff too large to preview", systemImage: "doc.text", description: Text("Review these saved changes on your Mac."))
                 } else if let patch, patchPath == selected.path {
-                    WorkspaceDiffPreview(path: selected.path, state: "Saved changes from this response", diff: patch, showState: false, onClose: close)
+                    WorkspaceDiffPreview(path: selected.path,
+                                         state: "Only the first part of this diff was saved. Review the full change on your Mac.",
+                                         diff: patch, showState: selected.partial, onClose: close)
                 } else { ProgressView("Loading diff…").frame(maxWidth: .infinity, maxHeight: .infinity) }
             } else {
                 List(request.summary.files) { file in
@@ -5516,7 +5656,7 @@ struct WorkspaceDiffPreview: View {
                     }
                 }
                 .safeAreaInset(edge: .bottom) {
-                    if showState { Text(state).font(.caption).foregroundStyle(.secondary).padding(.bottom, 8) }
+                    if showState { Text(state).font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8) }
                 }
         }
     }

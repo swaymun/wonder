@@ -683,7 +683,8 @@ struct ManagedBotListMutationState {
                 if ProcessInfo.processInfo.arguments.contains("-response-edits-preview") {
                     let paths = ["Sources/ChatView.swift", "Tests/ChatViewTests.swift", "Documentation/Changes.md", "Sources/Long folder name/Accessible layout.swift"]
                     let diffs = paths.map { path in
-                        ["path": path, "kind": "update", "additions": 2, "deletions": 1,
+                        // The last saved patch is shorter than its counts, like a host-capped diff.
+                        ["path": path, "kind": "update", "additions": path == paths.last ? 40 : 2, "deletions": 1,
                          "diff": "diff --git a/\(path) b/\(path)\n--- a/\(path)\n+++ b/\(path)\n@@ -12,2 +12,3 @@\n let title = \"Wonder\"\n-let label = \"Files\"\n+let label = \"Edited files\"\n+let accessible = true\n"] as [String: Any]
                     }
                     items[3]["payload"] = ["paths": paths, "diffs": diffs]
@@ -2314,33 +2315,6 @@ struct ManagedBotListMutationState {
             // Offline and unavailable hosts leave the useful fallback chips in place.
         }
     }
-    func gitHubReviewProject(_ chat: ChatSummary, rootId: String) -> ProjectSummary? {
-        let draft = chat.id.split(separator: ":", omittingEmptySubsequences: false)
-        let projectId = projectDetail(chat)?.projectId ??
-            (draft.count == 3 && draft[0] == "project-files" ? String(draft[1]) : nil)
-        return projects.projects.first { project in
-            project.id == projectId && project.isIncluded && project.folders.contains(where: { $0.id == rootId })
-        }
-    }
-
-    func makeGitHubReviewClient(_ scope: GitHubReviewScope) throws -> GitHubReviewClient {
-        #if WONDER_DIAGNOSTICS
-        if previewMode, ProcessInfo.processInfo.arguments.contains("-github-review-preview") {
-            return try DiagnosticGitHubReview.client(scope)
-        }
-        #endif
-        guard let connection, !accessEnded else { throw GitHubReviewFailure.scopeChanged }
-        return try GitHubReviewClient(api: api, connection: connection, scope: scope, signer: signingIdentity)
-    }
-    func matchesGitHubReviewClient(_ client: GitHubReviewClient, scope: GitHubReviewScope) -> Bool {
-        #if WONDER_DIAGNOSTICS
-        if previewMode, ProcessInfo.processInfo.arguments.contains("-github-review-preview") {
-            return client.matches(connection: DiagnosticGitHubReview.connection, scope: scope)
-        }
-        #endif
-        return !accessEnded && client.matches(connection: connection, scope: scope)
-    }
-
     func loadWorkspaceRoots(_ chat: ChatSummary) async throws -> WorkspaceRootsResponse {
         if previewMode {
             #if WONDER_DIAGNOSTICS
@@ -2406,9 +2380,19 @@ struct ManagedBotListMutationState {
         guard let endpoint = components.string else { throw PairingFailure.invalidLink }
         return try await api.request(endpoint, origin: saved.origin, credential: saved.credential)
     }
-    func downloadWorkspaceFile(_ chat: ChatSummary, root: WorkspaceRoot, entry: WorkspaceEntry) async throws -> Data {
+    func downloadWorkspaceFile(_ chat: ChatSummary, root: WorkspaceRoot, entry: WorkspaceEntry,
+                               progress: (@Sendable (_ received: Int, _ expected: Int?) -> Void)? = nil) async throws -> Data {
         if previewMode {
             #if WONDER_DIAGNOSTICS
+            // A large fixture arrives in steps, like a slow Wi-Fi transfer.
+            if ProcessInfo.processInfo.arguments.contains("-workspace-large-text-preview"), entry.name == "large.txt" {
+                let data = previewWorkspaceData(entry: entry)
+                for step in 0...8 {
+                    progress?(data.count * step / 8, data.count)
+                    try await Task.sleep(for: .milliseconds(300))
+                }
+                return data
+            }
             if entry.path == "Weekend.pdf",
                ProcessInfo.processInfo.arguments.contains("-malformed-pdf-preview") {
                 return Data("%PDF-1.7\ninvalid document".utf8)
@@ -2433,7 +2417,8 @@ struct ManagedBotListMutationState {
         var components = Self.workspaceComponents(conversationID: chat.id, operation: "file")
         components.queryItems = [URLQueryItem(name: "root", value: root.id), URLQueryItem(name: "path", value: entry.path)]
         guard let endpoint = components.string else { throw PairingFailure.invalidLink }
-        let data = try await api.downloadWorkspaceBytes(endpoint, connection: saved, byteSize: entry.byteSize.map(Int.init), sha256: nil, mimeType: entry.mimeType)
+        let data = try await api.downloadWorkspaceBytes(endpoint, connection: saved, byteSize: entry.byteSize.map(Int.init), sha256: nil,
+                                                        mimeType: entry.mimeType, progress: progress)
         guard scope == assignmentScope, !accessEnded else { throw CancellationError() }
         return data
     }
@@ -2497,8 +2482,7 @@ struct ManagedBotListMutationState {
         return try await api.request(endpoint, origin: saved.origin, credential: saved.credential)
     }
     private func previewWorkspaceRoots(_ chat: ChatSummary) -> WorkspaceRootsResponse {
-        let root = WorkspaceRoot(id: "workspace", label: "Workspace", path: "/preview", isDirectory: true, kind: "workingDirectory", readOnly: true,
-                                 projectRootId: projectDetail(chat) != nil || chat.id.hasPrefix("project-files:") ? "preview-folder" : nil)
+        let root = WorkspaceRoot(id: "workspace", label: "Workspace", path: "/preview", isDirectory: true, kind: "workingDirectory", readOnly: true)
         let attachments = files[chat.id] ?? []
         return WorkspaceRootsResponse(available: true, detail: nil, roots: [root], attachments: attachments)
     }
@@ -2534,7 +2518,7 @@ struct ManagedBotListMutationState {
             }
             if ProcessInfo.processInfo.arguments.contains("-workspace-large-text-preview") {
                 rootEntries.append(WorkspaceEntry(name: "large.txt", path: "large.txt", isDirectory: false,
-                                                  byteSize: 8 * 1024 * 1024, mimeType: "text/plain"))
+                                                  byteSize: 40 * 1024 * 1024, mimeType: "text/plain"))
             }
             #endif
             values = rootEntries
@@ -2552,7 +2536,7 @@ struct ManagedBotListMutationState {
     private func previewWorkspaceData(entry: WorkspaceEntry) -> Data {
         #if WONDER_DIAGNOSTICS
         if ProcessInfo.processInfo.arguments.contains("-workspace-large-text-preview"), entry.name == "large.txt" {
-            return Data(repeating: 65, count: 8 * 1024 * 1024)
+            return Data(repeating: 65, count: 40 * 1024 * 1024)
         }
         if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview"),
            let data = DiagnosticWorkspaceFileFixtures.data(name: entry.name) { return data }

@@ -221,8 +221,6 @@ public struct ConversationFile: Codable, Identifiable, Sendable {
 
 public struct WorkspaceRoot: Codable, Identifiable, Hashable, Sendable {
     public let id: String
-    /// Durable Project folder identity; browser aliases and paths are not consent targets.
-    public let projectRootId: String?
     public let label: String
     public let path: String
     public let isDirectory: Bool
@@ -230,8 +228,7 @@ public struct WorkspaceRoot: Codable, Identifiable, Hashable, Sendable {
     public let readOnly: Bool
     public let byteSize: UInt64?
     public let mimeType: String?
-    public init(id: String, label: String, path: String, isDirectory: Bool, kind: String, readOnly: Bool, byteSize: UInt64? = nil, mimeType: String? = nil, projectRootId: String? = nil) {
-        self.projectRootId = projectRootId
+    public init(id: String, label: String, path: String, isDirectory: Bool, kind: String, readOnly: Bool, byteSize: UInt64? = nil, mimeType: String? = nil) {
         self.id = id; self.label = label; self.path = path; self.isDirectory = isDirectory; self.kind = kind; self.readOnly = readOnly; self.byteSize = byteSize; self.mimeType = mimeType
     }
 }

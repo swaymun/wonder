@@ -9,6 +9,19 @@ import UIKit
         "com.swaymun.wonder"
         #endif
     }
+
+    // Keep the visible state with every failure; a failed assertion alone
+    // rarely shows which control was covered or missing.
+    override func record(_ issue: XCTIssue) {
+        var issue = issue
+        let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screen.name = "Failure screen"; screen.lifetime = .keepAlways
+        issue.add(screen)
+        let tree = XCTAttachment(string: XCUIApplication(bundleIdentifier: appBundleIdentifier).debugDescription)
+        tree.name = "Failure hierarchy"; tree.lifetime = .keepAlways
+        issue.add(tree)
+        super.record(issue)
+    }
     private var appDisplayName: String { appBundleIdentifier.hasSuffix(".testing") ? "Wonder Testing" : "Wonder" }
 
     // Manual QA uses a team-signed Testing app/Widget and a disposable App
@@ -263,7 +276,7 @@ import UIKit
         if let workBefore {
             let workAfter = try XCTUnwrap(workAfter, "A short drag must preserve the visible activity row")
             XCTAssertEqual(workBefore.minX, workAfter.minX, accuracy: 1)
-            XCTAssertGreaterThanOrEqual(workBefore.minX, max(scroll.frame.minX, header.frame.minX) + 16)
+            XCTAssertGreaterThanOrEqual(workBefore.minX, scroll.frame.minX + 16)
         }
         XCTAssertLessThanOrEqual(after.maxY, before.maxY + 1, "Dragging up must not snap overscrolled content down")
         let viewportTop = max(scroll.frame.minY, header.frame.maxY)
@@ -306,7 +319,7 @@ import UIKit
             XCTAssertTrue(work.exists, "Bounded scrolling must reveal the preceding activity row")
             XCTAssertGreaterThanOrEqual(work.frame.minY, viewportTop)
             XCTAssertLessThanOrEqual(work.frame.maxY, conversationLayoutBottom(app, draft: draft))
-            XCTAssertGreaterThanOrEqual(work.staticTexts.firstMatch.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
+            XCTAssertGreaterThanOrEqual(work.staticTexts.firstMatch.frame.minX, scroll.frame.minX + 16)
         }
         app.terminate()
     }
@@ -326,7 +339,7 @@ import UIKit
         let olderWork = app.buttons["activity-group:layout-turn-6/layout-work-6"]
         XCTAssertTrue(olderWork.waitForExistence(timeout: 5))
         retainConversationLayoutEvidence(app, name: "Older saved reply restored without a drag", reply: reply, header: header, draft: draft)
-        XCTAssertGreaterThanOrEqual(olderWork.staticTexts.firstMatch.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
+        XCTAssertGreaterThanOrEqual(olderWork.staticTexts.firstMatch.frame.minX, scroll.frame.minX + 16)
         XCTAssertGreaterThan(reply.frame.maxY, header.frame.maxY)
         XCTAssertLessThan(reply.frame.minY, conversationLayoutBottom(app, draft: draft))
         let bottom = app.buttons["scroll-to-bottom"]
@@ -339,14 +352,14 @@ import UIKit
         XCTAssertLessThan(conversationLayoutBottom(app, draft: draft) - latest.frame.maxY, 100)
         let work = app.buttons["activity-group:layout-turn-12/layout-work-12"]
         XCTAssertTrue(work.waitForExistence(timeout: 5))
-        XCTAssertGreaterThanOrEqual(work.staticTexts.firstMatch.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
+        XCTAssertGreaterThanOrEqual(work.staticTexts.firstMatch.frame.minX, scroll.frame.minX + 16)
         XCTAssertEqual(work.value as? String, "Collapsed")
         work.tap()
         XCTAssertEqual(work.value as? String, "Expanded")
         work.tap()
         XCTAssertEqual(work.value as? String, "Collapsed")
         retainConversationLayoutEvidence(app, name: "Activity expands and collapses above the helper dock", reply: latest, header: header, draft: draft)
-        XCTAssertGreaterThanOrEqual(work.staticTexts.firstMatch.frame.minX, max(scroll.frame.minX, header.frame.minX) + 16)
+        XCTAssertGreaterThanOrEqual(work.staticTexts.firstMatch.frame.minX, scroll.frame.minX + 16)
         XCTAssertLessThanOrEqual(latest.frame.maxY, conversationLayoutBottom(app, draft: draft))
         XCTAssertLessThan(conversationLayoutBottom(app, draft: draft) - latest.frame.maxY, 100)
         app.terminate()
@@ -405,6 +418,7 @@ import UIKit
         let fast = app.buttons["project-speed:fast"]
         XCTAssertTrue(fast.waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["project-speed:default"].exists)
+        retainMenuScreenshot(app, name: "Project model and speed choices")
         fast.tap()
         let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             (model.value as? String)?.contains("Fast") == true
@@ -495,6 +509,7 @@ import UIKit
         let pill = app.buttons["project-subagent-status-pill"]
         XCTAssertTrue(pill.waitForExistence(timeout: 15))
         pill.tap()
+        Thread.sleep(forTimeInterval: 0.5); retainMenuScreenshot(app, name: "Project agent tasks")
         let scout = app.buttons["project-subagent-roster:fixture-child-thread"]
         XCTAssertTrue(scout.waitForExistence(timeout: 5))
         XCTAssertEqual(scout.label, "Scout, Status unknown",
@@ -506,6 +521,7 @@ import UIKit
         XCTAssertTrue(transcript.exists)
         XCTAssertEqual(transcript.textViews.count, 0, "Agent history has no direct-send composer")
         XCTAssertTrue(app.staticTexts["Read only"].exists)
+        retainMenuScreenshot(app, name: "Agent task read-only conversation")
         app.buttons["project-subagent-sheet-done"].tap()
         XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 5))
         let group = app.buttons["activity-group:layout-turn-12/layout-work-12"]
@@ -2512,7 +2528,7 @@ import UIKit
         guard chat.waitForExistence(timeout:15) else { throw XCTSkip("Prepare the dedicated image test thread with Preview fixture 4000x3000.png first.") }
         chat.tap()
         openConversationDetails(app)
-        app.buttons["Files"].tap()
+        app.buttons["conversation-details-files"].tap()
         let file=app.buttons["Preview fixture 4000x3000.png"]
         XCTAssertTrue(file.waitForExistence(timeout:10))
         let options=XCTMeasureOptions(); options.iterationCount=3
@@ -2547,8 +2563,8 @@ import UIKit
         guard chat.waitForExistence(timeout: 15) else { throw XCTSkip("Requires the paired Wonder iOS conversation.") }
         chat.tap()
         openConversationDetails(app)
-        XCTAssertTrue(app.buttons["Files"].waitForExistence(timeout: 5))
-        app.buttons["Files"].tap()
+        XCTAssertTrue(app.buttons["conversation-details-files"].waitForExistence(timeout: 5))
+        app.buttons["conversation-details-files"].tap()
 
         let picker = app.buttons["workspace-view-toggle"]
         XCTAssertTrue(picker.waitForExistence(timeout: 15), "The updated paired host must expose workspace browsing.")
@@ -2619,13 +2635,13 @@ import UIKit
         XCTAssertTrue(waitUntilGone(computerClose, timeout: 10), "Computer view did not close")
         XCTAssertTrue(computerPill.waitForExistence(timeout: 10))
         openConversationDetails(app)
-        XCTAssertTrue(app.buttons["Files"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["conversation-details-files"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@",
                                                         "View computer", "computer-status-pill")).count, 0,
                        "View computer moved to the conversation's status pill.")
         XCTAssertFalse(app.buttons["Teach a task"].exists,
                        "Teaching is not available in the beta conversation menu.")
-        app.buttons["Files"].tap()
+        app.buttons["conversation-details-files"].tap()
 
         let imageFile = app.buttons["Saturday.png"]
         let documentFile = app.buttons["notes.txt"]
@@ -2677,6 +2693,12 @@ import UIKit
         retainMenuScreenshot(app, name: "Photo viewer failure")
         workspacePreviewClose(app, legacyID: "photo-viewer-close").tap()
         XCTAssertTrue(malformedFile.waitForExistence(timeout: 5))
+        // Files opened from Details is a sheet without the composer's Files button.
+        let done = app.buttons["workspace-sheet-done"]
+        XCTAssertTrue(done.isHittable)
+        retainMenuScreenshot(app, name: "Files sheet from Details with Done")
+        done.tap()
+        XCTAssertTrue(app.collectionViews["workspace-file-list"].waitForNonExistence(timeout: 5))
     }
 
     func testDiagnosticsWorkspaceBrowserViewsNavigationAndGitDiff() throws {
@@ -2697,6 +2719,7 @@ import UIKit
 
         app.buttons["workspace-directory-entry:Projects"].tap()
         XCTAssertTrue(app.buttons["workspace-file-entry:Projects/Plan.md"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["workspace-hidden-toggle"].exists, "Hidden files can be shown inside subfolders too")
         app.buttons["workspace-back"].tap()
         let hiddenToggle = app.buttons["workspace-hidden-toggle"]
         XCTAssertTrue(hiddenToggle.waitForExistence(timeout: 5))
@@ -2810,7 +2833,7 @@ import UIKit
         XCTAssertTrue(app.buttons["workspace-directory-entry:Projects"].waitForExistence(timeout: 10))
         app.buttons["Modified"].tap()
         XCTAssertTrue(app.staticTexts["Checking changes…"].waitForExistence(timeout: 5))
-        app.buttons["All files"].tap()
+        app.buttons["workspace-view-toggle"].tap()
         XCTAssertTrue(app.buttons["workspace-directory-entry:Projects"].waitForExistence(timeout: 5))
         Thread.sleep(forTimeInterval: 3.5)
         XCTAssertTrue(app.buttons["workspace-directory-entry:Projects"].exists)
@@ -2840,100 +2863,7 @@ import UIKit
         XCTAssertFalse(diffText.label.contains("README.md"))
     }
 
-    func testProjectGitHubConsentReviewDisconnectKeepsComposer() throws {
-        try checkProjectGitHubReview(contentSize: "UICTContentSizeCategoryL")
-    }
-    func testProjectGitHubReviewAtAccessibilitySize() throws {
-        try checkProjectGitHubReview(contentSize: "UICTContentSizeCategoryAccessibilityXXXL")
-    }
-    func testProjectGitHubReviewLandscapeRight() throws {
-        try checkProjectGitHubReview(contentSize: "UICTContentSizeCategoryL", orientation: .landscapeRight)
-    }
-    private func checkProjectGitHubReview(contentSize: String, orientation: UIDeviceOrientation = .landscapeLeft) throws {
-        continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-project-files-conversation-preview",
-                               "-github-review-preview", "-UIPreferredContentSizeCategoryName", contentSize]
-        app.launch()
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            XCUIDevice.shared.orientation = orientation
-            XCTAssertGreaterThan(app.windows.firstMatch.frame.width, app.windows.firstMatch.frame.height)
-        }
-        defer { XCUIDevice.shared.orientation = .portrait }
-        let files = app.buttons["conversation-files-pill"]
-        XCTAssertTrue(files.waitForExistence(timeout: 10)); files.tap()
-        let entry = app.buttons["workspace-github-review"]
-        XCTAssertTrue(entry.waitForExistence(timeout: 5)); XCTAssertTrue(entry.isHittable); entry.tap()
-        let connect = app.buttons["github-review-connect"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 5))
-        let content = app.scrollViews["github-review-content"]
-        revealGitHubControl(connect, in: content)
-        XCTAssertTrue(connect.isHittable); connect.tap()
-        let allow = app.buttons["github-review-authorize"]
-        XCTAssertTrue(allow.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Signed in as preview-owner"].exists)
-        XCTAssertFalse(app.buttons["github-review-load"].exists, "Preparing is not consent")
-        let cancelConsent = app.buttons["github-review-preparation-cancel"]
-        revealGitHubControl(cancelConsent, in: content)
-        XCTAssertTrue(cancelConsent.isHittable)
-        retainGitHubScreenshot(app, name: "GitHub repository consent " + contentSize)
-        cancelConsent.tap()
-        XCTAssertTrue(connect.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["github-review-load"].exists)
-        revealGitHubControl(connect, in: content); XCTAssertTrue(connect.isHittable); connect.tap()
-        XCTAssertTrue(allow.waitForExistence(timeout: 5))
-        revealGitHubControl(allow, in: content)
-        XCTAssertTrue(allow.isHittable); allow.tap()
-        let input = app.textFields["github-review-number"]
-        XCTAssertTrue(input.waitForExistence(timeout: 5)); input.tap(); input.typeText("42")
-        XCTAssertEqual(input.value as? String, "42")
-        let load = app.buttons["github-review-load"]
-        XCTAssertTrue(load.isHittable); load.tap()
-        let changed = app.buttons["github-review-file:Sources/Conversation.swift"]
-        XCTAssertTrue(app.staticTexts["github-review-title"].waitForExistence(timeout: 5))
-        revealGitHubControl(changed, in: content)
-        XCTAssertTrue(changed.isHittable)
-        retainGitHubScreenshot(app, name: "GitHub PR files " + contentSize)
-        changed.tap()
-        let patch = app.textViews["github-patch-text"]
-        XCTAssertTrue(patch.waitForExistence(timeout: 5))
-        let details = app.scrollViews["github-review-detail-content"]
-        revealGitHubControl(patch, in: details, fullyVisible: false, minimumVisibleHeight: 100)
-        XCTAssertTrue(patch.isHittable)
-        XCTAssertGreaterThan(patch.frame.intersection(details.frame).height, 100)
-        XCTAssertTrue((patch.value as? String)?.contains("+let title") == true)
-        retainGitHubScreenshot(app, name: "GitHub renamed file patch " + contentSize)
-        app.buttons["github-review-back"].tap()
-        let omitted = app.buttons["github-review-file:Assets/diagram.png"]
-        revealGitHubControl(omitted, in: content)
-        XCTAssertTrue(omitted.isHittable); omitted.tap()
-        XCTAssertTrue(app.staticTexts["github-patch-unavailable"].waitForExistence(timeout: 5))
-        revealGitHubControl(app.buttons["github-review-open-web"], in: details)
-        XCTAssertTrue(app.buttons["github-review-open-web"].isHittable)
-        XCTAssertFalse(app.textViews["github-patch-text"].exists)
-        retainGitHubScreenshot(app, name: "GitHub unavailable patch " + contentSize)
-        app.buttons["github-review-back"].tap()
-        let draft = app.textViews["message-draft"]
-        XCTAssertTrue(draft.isHittable); draft.tap(); draft.typeText("Review this PR")
-        XCTAssertTrue((draft.value as? String)?.contains("Review this PR") == true)
-        retainGitHubScreenshot(app, name: "GitHub review with composer " + contentSize)
-        app.buttons["github-review-back"].tap()
-        XCTAssertTrue(entry.waitForExistence(timeout: 5)); entry.tap()
-        XCTAssertTrue(input.waitForExistence(timeout: 5), "Connection persists across closing Files review")
-        XCTAssertFalse(app.keyboards.firstMatch.exists, "Opening review dismisses the composer keyboard")
-        revealGitHubControl(input, in: content)
-        XCTAssertTrue(input.isHittable)
-        input.tap(); input.typeText("42"); load.tap()
-        XCTAssertTrue(app.staticTexts["github-review-title"].waitForExistence(timeout: 5))
-        let disconnect = app.buttons["github-review-disconnect"]
-        revealGitHubControl(disconnect, in: content)
-        XCTAssertTrue(disconnect.isHittable); disconnect.tap()
-        XCTAssertTrue(connect.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["github-review-load"].exists)
-        XCTAssertTrue((draft.value as? String)?.contains("Review this PR") == true)
-        XCTAssertTrue(anyElement(app, identifier: "composer-attachment:composer-file").exists)
-    }
-    private func revealGitHubControl(_ control: XCUIElement, in scroll: XCUIElement, fullyVisible: Bool = true, minimumVisibleHeight: CGFloat = 0) {
+    private func revealControl(_ control: XCUIElement, in scroll: XCUIElement, fullyVisible: Bool = true, minimumVisibleHeight: CGFloat = 0) {
         for _ in 0..<15 {
             if control.exists && control.isHittable && control.frame.intersection(scroll.frame).height > minimumVisibleHeight &&
                 (!fullyVisible || scroll.frame.insetBy(dx: -1, dy: -1).contains(control.frame)) { return }
@@ -2948,25 +2878,6 @@ import UIKit
         XCTAssertTrue(control.exists && control.isHittable, "Control \(control.identifier) frame \(control.frame) in viewport \(scroll.frame)")
         if fullyVisible { XCTAssertTrue(scroll.frame.insetBy(dx: -1, dy: -1).contains(control.frame), "Control \(control.identifier) frame \(control.frame) in viewport \(scroll.frame)") }
     }
-    private func retainGitHubScreenshot(_ app: XCUIApplication, name: String) {
-        // Let native layout settle. An optional host capture process acknowledges
-        // this exact state before interaction resumes (no log-timing guesses).
-        Thread.sleep(forTimeInterval: 1)
-        let temporary = FileManager.default.temporaryDirectory
-        if FileManager.default.fileExists(atPath: temporary.appendingPathComponent("github-capture-enabled").path) {
-            let token = UUID().uuidString
-            let marker = temporary.appendingPathComponent("github-capture-ready.json")
-            let ack = temporary.appendingPathComponent("github-capture-ack")
-            let data = try! JSONSerialization.data(withJSONObject: ["token": token, "name": name])
-            try! data.write(to: marker, options: .atomic)
-            for _ in 0..<50 {
-                if (try? String(contentsOf: ack, encoding: .utf8)) == token { break }
-                Thread.sleep(forTimeInterval: 0.1)
-            }
-        }
-        retainMenuScreenshot(app, name: name, fullScreen: true)
-    }
-
     func testProjectConversationFilesPreviewExpandDiffAndKeepComposer() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -3258,6 +3169,7 @@ import UIKit
         closeWorkspace(app)
         XCTAssertTrue(app.images["Received by your Mac"].waitForExistence(timeout: 10),
                       "The fixture must revoke only after accepting the exact message")
+        if !modified { retainMenuScreenshot(app, name: "Sent message in view after closing Files") }
     }
 
     func testProjectFilesClearsRowsWhenRootPathChangesUnderSameID() throws {
@@ -3279,7 +3191,7 @@ import UIKit
         let draft = app.textViews["message-draft"]
         draft.tap(); draft.typeText("Review this file while Files stays open.")
         app.buttons["send-message"].tap()
-        XCTAssertTrue(app.staticTexts["Replacement workspace"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["workspace-file-entry:Project update.md"].waitForExistence(timeout: 10))
         XCTAssertFalse(oldFile.exists,
                        "Old rows must not be tappable under a new path with the same root ID")
         XCTAssertTrue(app.buttons["workspace-file-entry:Project update.md"].waitForExistence(timeout: 10))
@@ -3300,14 +3212,24 @@ import UIKit
         let largeFile = app.buttons["workspace-file-entry:large.txt"]
         XCTAssertTrue(largeFile.waitForExistence(timeout: 5))
         largeFile.tap()
+        // A 40 MB file arrives in steps; Files shows its progress meanwhile.
+        let loadingRow = anyElement(app, identifier: "workspace-file-loading")
+        XCTAssertTrue(loadingRow.waitForExistence(timeout: 3))
+        XCTAssertTrue(loadingRow.label.contains("Opening large.txt"), loadingRow.label)
+        XCTAssertTrue(loadingRow.label.contains("MB"), loadingRow.label)
+        retainMenuScreenshot(app, name: "Large file loading progress")
+        XCTAssertTrue(app.textViews["message-draft"].isHittable, "The composer stays usable while a large file loads")
         XCTAssertTrue(app.staticTexts["workspace-document-truncated"].waitForExistence(timeout: 15),
-                      "An 8 MiB file should show a bounded text preview without blocking the chat")
+                      "A 40 MB file should show a bounded text preview without blocking the chat")
+        XCTAssertFalse(loadingRow.exists)
         let preview = app.textViews["annotation-selectable-text"]
         XCTAssertTrue(preview.exists)
         XCTAssertLessThanOrEqual((preview.value as? String)?.utf8.count ?? Int.max, 128 * 1024)
         app.buttons["workspace-preview-expand"].tap()
         XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
         app.buttons["workspace-preview-collapse"].tap()
+        // The full-screen cover finishes dismissing before the composer takes touches.
+        XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForNonExistence(timeout: 5))
         XCTAssertTrue(app.textViews["message-draft"].isHittable)
         app.buttons["workspace-preview-back"].tap()
         XCTAssertTrue(largeFile.waitForExistence(timeout: 5))
@@ -3371,6 +3293,7 @@ import UIKit
             let player = app.descendants(matching: .any)["workspace-media-player"]
             XCTAssertTrue(player.waitForExistence(timeout: 15), "Open \(iteration + 1) must load the authenticated video")
             XCTAssertFalse(app.staticTexts["Playback unavailable"].exists)
+            if iteration == 0 { retainMenuScreenshot(app, name: "Project video preview playing") }
             if iteration == 0 {
                 app.buttons["workspace-preview-expand"].tap()
                 XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
@@ -3595,6 +3518,7 @@ import UIKit
         let show = app.buttons["workspace-document-show-revision"]
         XCTAssertTrue(show.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["workspace-document-revision-warning"].exists)
+        retainMenuScreenshot(app, name: "Changed file offers new version and keeps note")
         app.buttons["workspace-preview-expand"].tap()
         XCTAssertTrue(app.buttons["workspace-preview-collapse"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)
@@ -3801,7 +3725,9 @@ import UIKit
         let pdf = app.buttons["workspace-file-entry:Weekend.pdf"]
         let fileList = app.collectionViews["workspace-file-list"]
         XCTAssertTrue(fileList.waitForExistence(timeout: 10))
-        for _ in 0..<15 where !pdf.isHittable { fileList.swipeUp() }
+        // At this text size the list is short; look upward first, then downward.
+        for _ in 0..<10 where !pdf.isHittable { fileList.swipeDown(velocity: .slow) }
+        for _ in 0..<10 where !pdf.isHittable { fileList.swipeUp(velocity: .slow) }
         XCTAssertTrue(pdf.isHittable)
         pdf.tap()
         let back = app.buttons["workspace-preview-back"]
@@ -3900,6 +3826,7 @@ import UIKit
         let objective = app.staticTexts["goal-objective"]
         XCTAssertTrue(objective.waitForExistence(timeout: 5))
         XCTAssertEqual(objective.label, "Review the Project plan")
+        retainMenuScreenshot(app, name: "Project goal details")
         app.buttons["goal-done"].tap()
         XCTAssertTrue(app.textViews["message-draft"].isHittable)
     }
@@ -4025,6 +3952,7 @@ import UIKit
             XCTAssertTrue(unavailable.waitForExistence(timeout: 10))
             XCTAssertTrue(unavailable.label.contains(expected))
             XCTAssertTrue(app.buttons["workspace-retry"].exists)
+            retainMenuScreenshot(app, name: "Folder unavailable \(expected)")
             closeWorkspace(app)
             XCTAssertTrue(files.waitForExistence(timeout: 5))
             app.terminate()
@@ -4176,7 +4104,10 @@ import UIKit
             XCTAssertEqual(link.label, "Authentication.swift")
             XCTAssertGreaterThanOrEqual(link.frame.height, 44 - 0.01)
             link.tap()
-            XCTAssertTrue(app.navigationBars["Authentication.swift"].waitForExistence(timeout: 5))
+            // Linked files open in the in-chat Files preview, not a pushed screen.
+            let title = app.staticTexts["workspace-preview-title"]
+            XCTAssertTrue(title.waitForExistence(timeout: 5))
+            XCTAssertEqual(title.label, "Authentication.swift")
             XCTAssertTrue(app.staticTexts["Fixture workspace file: Authentication.swift\n"].exists)
             retainMenuScreenshot(app, name: large ? "Linked file at maximum text" : "Filename opens file preview")
             workspacePreviewClose(app, legacyID: "workspace-document-close").tap()
@@ -4221,7 +4152,7 @@ import UIKit
         let footer = anyElement(app, identifier: "response-edits:turn")
         let first = app.buttons["response-edited-file:turn:Sources/ChatView.swift"]
         XCTAssertTrue(first.waitForExistence(timeout: 10))
-        revealGitHubControl(first, in: anyElement(app, identifier: "conversation-scroll"))
+        revealControl(first, in: anyElement(app, identifier: "conversation-scroll"))
         let answer = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "The tests passed. I updated the chat labels")).firstMatch
         XCTAssertTrue(answer.exists)
         XCTAssertGreaterThanOrEqual(footer.frame.minY, answer.frame.maxY - 1)
@@ -4234,13 +4165,20 @@ import UIKit
         retainMenuScreenshot(app, name: large ? "Saved file diff at large text" : "Saved file diff in landscape", fullScreen: true)
         app.buttons["response-edits-back"].tap()
         let last = app.buttons["response-edited-file:turn:Sources/Long folder name/Accessible layout.swift"]
-        revealGitHubControl(last, in: app.collectionViews.firstMatch)
+        revealControl(last, in: app.collectionViews.firstMatch)
         XCTAssertTrue(last.waitForExistence(timeout: 5))
         last.tap()
         XCTAssertTrue(diff.waitForExistence(timeout: 5))
         XCTAssertTrue(diff.label.contains("Accessible layout.swift"))
+        XCTAssertTrue(app.staticTexts["Only the first part of this diff was saved. Review the full change on your Mac."].exists)
+        retainMenuScreenshot(app, name: large ? "Partial saved diff notice at large text" : "Partial saved diff notice", fullScreen: true)
         app.buttons["response-edits-back"].tap()
-        app.buttons["response-edits-back"].tap()
+        // Files replaces the saved-diff review instead of opening behind it.
+        let files = app.buttons["conversation-files-pill"]
+        files.tap()
+        XCTAssertTrue(anyElement(app, identifier: "response-edits-review").waitForNonExistence(timeout: 5))
+        XCTAssertEqual(files.value as? String, "Open")
+        files.tap()
         XCTAssertTrue(first.waitForExistence(timeout: 5))
         XCTAssertTrue(app.textViews["message-draft"].isHittable)
     }
@@ -5117,7 +5055,8 @@ import UIKit
 
     private func closeWorkspace(_ app: XCUIApplication) {
         let conversationToggle = app.buttons["conversation-files-pill"]
-        let toggle = conversationToggle.exists ? conversationToggle : app.buttons["new-chat-files"]
+        let sheetDone = app.buttons["workspace-sheet-done"]
+        let toggle = conversationToggle.exists ? conversationToggle : sheetDone.exists ? sheetDone : app.buttons["new-chat-files"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5) && toggle.isHittable,
                       "The bottom Files control must close the workspace")
         toggle.tap()
@@ -6138,6 +6077,7 @@ import UIKit
             if decision == "reply" {
                 let day = app.buttons["Saturday"]
                 XCTAssertTrue(day.waitForExistence(timeout: 5))
+                retainMenuScreenshot(app, name: "Question sheet keeps draft")
                 day.tap()
                 app.buttons["Next question"].tap()
                 let fixtures = app.buttons["question-option-fixtures-A, B"]

@@ -15,7 +15,6 @@ import WonderPairing
     /// The host accepts Claude approval modes and plan mode.
     @Published private(set) var supportsModes = false
     @Published private(set) var supportsArchive = false
-    @Published private(set) var supportsGitHubReview = false
     /// Pinned threads across this Mac's included projects.
     @Published private(set) var pinned: [PinnedProjectThread] = []
     /// Conversations the Mac reported gone while a saved copy was still open.
@@ -70,7 +69,6 @@ import WonderPairing
             ProcessInfo.processInfo.arguments.contains("-project-files-conversation-preview")) {
             // A read-only new-chat destination for the Files UI fixture.
             supportsProjects = true
-            supportsGitHubReview = ProcessInfo.processInfo.arguments.contains("-github-review-preview")
             var folders = [ProjectFolder(id: "preview-folder", path: "/preview", name: "Preview",
                                          isPrimary: true, isAvailable: true)]
             if ProcessInfo.processInfo.arguments.contains("-project-files-multiple-folders-preview") {
@@ -104,7 +102,7 @@ import WonderPairing
             createdDuringThreadRead = [:]
             projects = []; families = []; loadingProjects = false; failure = nil
             threads = [:]; details = [:]; supportsProjects = nil; options = nil
-            supportsModes = false; supportsArchive = false; supportsGitHubReview = false; pinned = []; unavailable = []; manuallyUnread = []; recentlyOpened = RecentlyOpenedConversations()
+            supportsModes = false; supportsArchive = false; pinned = []; unavailable = []; manuallyUnread = []; recentlyOpened = RecentlyOpenedConversations()
             archivedReferences = []
             pendingPins = [:]; detailRevisions = [:]; updatingDetails = []; readRevisions = [:]
             restoreCache()
@@ -151,7 +149,6 @@ import WonderPairing
             families = response.families
             supportsModes = (response.modesVersion ?? 0) >= 1
             supportsArchive = (response.archiveVersion ?? 0) >= 1
-            supportsGitHubReview = response.githubReviewVersion == 1
             // A pin changed while this request was in flight; the next refresh reports it.
             if pinRevision == pinRevisionAtStart, pendingPins.isEmpty, updatingDetails.isEmpty {
                 archivedReferences.subtract((response.pinned ?? []).map(\.thread.reference))

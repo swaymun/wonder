@@ -274,17 +274,6 @@
         "response": { "$ref": "#/$defs/projectSummary" }
       }
     },
-      "/api/v1/projects/{projectId}/github-review/{rootId}": {
-      "get": {"response": {"$ref": "#/$defs/projectGitHubReviewStatus"}},
-      "put": {"request": {"$ref": "#/$defs/authorizeProjectGitHubReviewRequest"}, "successStatus": 204},
-      "delete": {"request": {"$ref": "#/$defs/revokeProjectGitHubReviewRequest"}, "successStatus": 204}
-    },
-    "/api/v1/projects/{projectId}/github-review/{rootId}/prepare": {
-      "post": {"response": {"$ref": "#/$defs/prepareProjectGitHubReviewResponse"}}
-    },
-    "/api/v1/projects/{projectId}/github-review/{rootId}/pulls/{number}": {
-      "get": {"response": {"$ref": "#/$defs/projectGitHubReviewResponse"}}
-    },
     "/api/v1/projects/{projectId}/threads": {
       "get": { "response": { "$ref": "#/$defs/projectThreadsPage" } },
       "post": {
@@ -1534,7 +1523,6 @@
       "required": ["id", "label", "path", "isDirectory", "kind", "readOnly"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "projectRootId": { "type": "string", "minLength": 1 },
         "label": { "type": "string", "minLength": 1 },
         "path": { "type": "string", "minLength": 1 },
         "isDirectory": { "type": "boolean" },
@@ -2372,131 +2360,6 @@
       },
       "additionalProperties": false
     },
-      "projectGitHubReviewStatus": {
-      "type": "object",
-      "required": ["hostInstallationId", "projectId", "rootId", "rootsRevision", "authorizationRevision", "connected", "repository", "repositoryId", "accountId"],
-      "properties": {
-        "hostInstallationId": {"type": "string", "minLength": 1},
-        "projectId": {"type": "string", "minLength": 1},
-        "rootId": {"type": "string", "minLength": 1},
-        "rootsRevision": {"type": "integer", "minimum": 1},
-        "authorizationRevision": {"type": "integer", "minimum": 0},
-        "connected": {"type": "boolean"},
-        "repository": {"type": ["string", "null"]},
-        "repositoryId": {"type": ["integer", "null"], "minimum": 1},
-        "accountId": {"type": ["integer", "null"], "minimum": 1}
-      },
-      "additionalProperties": false
-    },
-    "githubConnectionIdentity": {
-      "type": "object",
-      "required": ["accountId", "accountLogin", "repositoryId", "repository"],
-      "properties": {
-        "accountId": {"type": "integer", "minimum": 1},
-        "accountLogin": {"type": "string", "minLength": 1},
-        "repositoryId": {"type": "integer", "minimum": 1},
-        "repository": {"type": "string", "minLength": 1}
-      },
-      "additionalProperties": false
-    },
-    "prepareProjectGitHubReviewResponse": {
-      "type": "object",
-      "required": ["hostInstallationId", "projectId", "rootId", "rootsRevision", "authorizationRevision", "identity"],
-      "properties": {
-        "hostInstallationId": {"type": "string", "minLength": 1},
-        "projectId": {"type": "string", "minLength": 1},
-        "rootId": {"type": "string", "minLength": 1},
-        "rootsRevision": {"type": "integer", "minimum": 1},
-        "authorizationRevision": {"type": "integer", "minimum": 0},
-        "identity": {"$ref": "#/$defs/githubConnectionIdentity"}
-      },
-      "additionalProperties": false
-    },
-    "authorizeProjectGitHubReviewRequest": {
-      "type": "object",
-      "required": ["rootsRevision", "authorizationRevision", "accountId", "repositoryId", "repository", "confirmReadAccess"],
-      "properties": {
-        "rootsRevision": {"type": "integer", "minimum": 1},
-        "authorizationRevision": {"type": "integer", "minimum": 0},
-        "accountId": {"type": "integer", "minimum": 1},
-        "repositoryId": {"type": "integer", "minimum": 1},
-        "repository": {"type": "string", "minLength": 1},
-        "confirmReadAccess": {"const": true},
-        "actionNonce": {"type": ["string", "null"]},
-        "issuedAtMs": {"type": ["integer", "null"], "minimum": 0},
-        "signature": {"type": ["string", "null"]}
-      },
-      "additionalProperties": false
-    },
-    "revokeProjectGitHubReviewRequest": {
-      "type": "object",
-      "required": ["authorizationRevision"],
-      "properties": {
-        "authorizationRevision": {"type": "integer", "minimum": 0},
-        "actionNonce": {"type": ["string", "null"]},
-        "issuedAtMs": {"type": ["integer", "null"], "minimum": 0},
-        "signature": {"type": ["string", "null"]}
-      },
-      "additionalProperties": false
-    },
-    "githubPullRequestIdentity": {
-      "type": "object",
-      "required": ["apiHost", "repositoryId", "repository", "headRepositoryId", "headRepository", "number", "base", "head"],
-      "properties": {
-        "apiHost": {"const": "api.github.com"},
-        "repositoryId": {"type": "integer", "minimum": 1},
-        "repository": {"type": "string", "minLength": 1},
-        "headRepositoryId": {"type": "integer", "minimum": 1},
-        "headRepository": {"type": "string", "minLength": 1},
-        "number": {"type": "integer", "minimum": 1},
-        "base": {"type": "string", "pattern": "^[a-fA-F0-9]{40}$"},
-        "head": {"type": "string", "pattern": "^[a-fA-F0-9]{40}$"}
-      },
-      "additionalProperties": false
-    },
-    "githubReviewFile": {
-      "type": "object",
-      "required": ["path", "previousPath", "sha", "status", "additions", "deletions", "patchState", "patch"],
-      "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "previousPath": {"type": ["string", "null"]},
-        "sha": {"type": "string", "pattern": "^[a-fA-F0-9]{40}$"},
-        "status": {"enum": ["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"]},
-        "additions": {"type": "integer", "minimum": 0},
-        "deletions": {"type": "integer", "minimum": 0},
-        "patchState": {"enum": ["suppliedCountsMatch", "empty", "unavailable", "partial", "oversized"]},
-        "patch": {"type": ["string", "null"]}
-      },
-      "additionalProperties": false
-    },
-    "githubPullRequestSnapshot": {
-      "type": "object",
-      "required": ["projectId", "rootId", "rootsRevision", "accountId", "identity", "mergeBase", "title", "state", "fetchedAt", "enumerationComplete", "files"],
-      "properties": {
-        "projectId": {"type": "string", "minLength": 1},
-        "rootId": {"type": "string", "minLength": 1},
-        "rootsRevision": {"type": "integer", "minimum": 1},
-        "accountId": {"type": "integer", "minimum": 1},
-        "identity": {"$ref": "#/$defs/githubPullRequestIdentity"},
-        "mergeBase": {"type": "string", "pattern": "^[a-fA-F0-9]{40}$"},
-        "title": {"type": "string"},
-        "state": {"enum": ["open", "closed"]},
-        "fetchedAt": {"type": "string", "minLength": 1},
-        "enumerationComplete": {"const": true},
-        "files": {"type": "array", "maxItems": 3000, "items": {"$ref": "#/$defs/githubReviewFile"}}
-      },
-      "additionalProperties": false
-    },
-    "projectGitHubReviewResponse": {
-      "type": "object",
-      "required": ["hostInstallationId", "authorizationRevision", "snapshot"],
-      "properties": {
-        "hostInstallationId": {"type": "string", "minLength": 1},
-        "authorizationRevision": {"type": "integer", "minimum": 0},
-        "snapshot": {"$ref": "#/$defs/githubPullRequestSnapshot"}
-      },
-      "additionalProperties": false
-    },
     "projectsResponse": {
       "type": "object",
       "required": ["projects", "families", "modesVersion", "pinned"],
@@ -2513,7 +2376,6 @@
         },
         "modesVersion": { "const": 1 },
         "archiveVersion": { "const": 1 },
-        "githubReviewVersion": { "const": 1 },
         "pinned": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/pinnedProjectThread" } }
       },
       "additionalProperties": false

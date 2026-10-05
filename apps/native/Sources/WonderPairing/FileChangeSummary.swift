@@ -65,6 +65,8 @@ public struct ResponseEditedFile: Identifiable, Sendable {
     public var additions: Int?
     public var deletions: Int?
     public var patches: [String]
+    /// The host caps each saved patch; its line counts still describe the full edit.
+    public var partial = false
     public var id: String { path }
     public var name: String { FileChangeSummary.filename(path) }
 }
@@ -113,15 +115,26 @@ public struct ResponseEditedFiles: Sendable {
                     }
                     let added = count("additions"), removed = count("deletions")
                     let patches = matching.compactMap { $0["diff"]?.string }.filter { !$0.isEmpty }
+                    let partial = matching.contains { fields in
+                        guard let text = fields["diff"]?.string else { return false }
+                        let lines = text.split(separator: "\n")
+                        func short(_ key: String, _ marker: String) -> Bool {
+                            guard let expected = fields[key]?.number, expected.isFinite else { return false }
+                            let shown = lines.filter { $0.hasPrefix(marker) && !$0.hasPrefix(String(repeating: marker, count: 3)) }.count
+                            return Double(shown) < expected
+                        }
+                        return short("additions", "+") || short("deletions", "-")
+                    }
                     if let index = indices[turn]?[path] {
                         var file = files[turn]![index]
                         file.additions = file.additions.flatMap { prior in added.map { prior + $0 } }
                         file.deletions = file.deletions.flatMap { prior in removed.map { prior + $0 } }
                         file.patches += patches
+                        file.partial = file.partial || partial
                         files[turn]![index] = file
                     } else {
                         indices[turn, default: [:]][path] = files[turn, default: []].count
-                        files[turn, default: []].append(ResponseEditedFile(path: path, additions: added, deletions: removed, patches: patches))
+                        files[turn, default: []].append(ResponseEditedFile(path: path, additions: added, deletions: removed, patches: patches, partial: partial))
                     }
                 }
             }

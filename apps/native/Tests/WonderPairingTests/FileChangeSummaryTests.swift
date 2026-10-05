@@ -103,4 +103,14 @@ final class FileChangeSummaryTests: XCTestCase {
         XCTAssertEqual(files.map(\.additions), [1, 2])
         XCTAssertEqual(files.map(\.deletions), [1, 0])
     }
+
+    func testResponseFooterMarksPatchCappedByHostAsPartial() throws {
+        let value = item(["diffs": .array([
+            .object(["path": .string("Large.swift"), "diff": .string("@@ -1,2 +1,2 @@\n-old\n+new"), "additions": .number(900), "deletions": .number(1)]),
+            .object(["path": .string("Small.swift"), "diff": .string("@@ -1 +1 @@\n-a\n+b"), "additions": .number(1), "deletions": .number(1)])])])
+        let row = ReadRow(id: "saved", author: "Bot", text: "", isUser: false, timestamp: "1000", turnId: "turn", item: value)
+        let files = try XCTUnwrap(ResponseEditedFiles.footers(entries: ChatFeedEntry.grouping([row]), activeTurnIDs: [])["saved"]).files
+        XCTAssertEqual(files.map(\.partial), [true, false])
+        XCTAssertEqual(files[0].additions, 900)
+    }
 }

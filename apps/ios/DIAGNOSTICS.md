@@ -190,35 +190,6 @@ actual chat shell with preview connections and rotates both ways.
 `testDiagnosticsComputerVideoQualityReconnectsAndReleasesControl` exercises the
 quality menu's reconnect and lease release without starting a real Mac stream.
 
-## Project GitHub review fixture
-
-The Diagnostics-only `-github-review-preview` argument, combined with
-`-read-preview -send-preview -files-preview -project-files-conversation-preview`,
-uses an offline repository/account and PR 42. It prepares without granting,
-supports explicit consent/cancel/disconnect, and supplies one renamed text patch
-and one unavailable image patch. It never contacts GitHub, changes a real grant,
-sends a message, or starts model work.
-
-Run `WonderUITests/WonderUITests/testProjectGitHubConsentReviewDisconnectKeepsComposer`,
-`WonderUITests/WonderUITests/testProjectGitHubReviewAtAccessibilitySize`, and
-`WonderUITests/WonderUITests/testProjectGitHubReviewLandscapeRight` with full
-`-only-testing:` filters. On iPad the fixtures assert a landscape window;
-the two standard-size tests rotate in opposite directions. They check consent
-cancellation, PR number entry, renamed/unavailable patches, draft/attachment
-retention, closing/reopening and disconnect. The owner contract is
-`WonderDiagnosticsTests/WonderDiagnosticsTests/testGitHubReviewOwnerFencesBackgroundAndChangedPairing`.
-It holds responses across backgrounding and a real session-token change.
-
-Validate screenshot content before using rotated XCTest attachments as evidence.
-For independent host `simctl io DEVICE screenshot` captures, the UI test runner's
-temporary directory can contain `github-capture-enabled`: at each settled stage
-the helper writes `github-capture-ready.json` with a fresh token/name and waits
-up to five seconds for `github-capture-ack` containing that token. Capture before
-acknowledging; remove those three temporary files when done. This optional test
-coordination exists only in the test target and carries synthetic fixture data.
-These fixtures do not prove live authorization, installed-host compatibility,
-VoiceOver traversal, hardware behavior or release availability.
-
 ## Bot startup and appearance regression
 
 `testConnectedAppsKeepNamesAndIconsAcrossFamilies` uses the existing synthetic

@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-        C41000000000000000000002 /* ProjectGitHubReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = C41000000000000000000001 /* ProjectGitHubReview.swift */; };
 		000000000000000000000014 /* WonderApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000A /* WonderApp.swift */; };
 		000000000000000000000015 /* Identity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000B /* Identity.swift */; };
 		000000000000000000000016 /* ConnectionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000C /* ConnectionModel.swift */; };
@@ -124,7 +123,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-        C41000000000000000000001 /* ProjectGitHubReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectGitHubReview.swift; sourceTree = "<group>"; };
 		000000000000000000000005 /* Wonder.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = Wonder.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		00000000000000000000000A /* WonderApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WonderApp.swift; sourceTree = "<group>"; };
 		00000000000000000000000B /* Identity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identity.swift; sourceTree = "<group>"; };
@@ -277,7 +275,6 @@
 				A10000000000000000000003 /* MacFileAccess.swift */,
 				A10000000000000000000007 /* DictationViews.swift */,
 				B20000000000000000000007 /* ProjectsModel.swift */,
-                C41000000000000000000001 /* ProjectGitHubReview.swift */,
 				B20000000000000000000005 /* ProjectViews.swift */,
 				B20000000000000000000003 /* NewChatView.swift */,
 				B20000000000000000000001 /* AppShell.swift */,
@@ -615,7 +612,6 @@
 				A10000000000000000000004 /* MacFileAccess.swift in Sources */,
 				A10000000000000000000008 /* DictationViews.swift in Sources */,
 				B20000000000000000000008 /* ProjectsModel.swift in Sources */,
-                C41000000000000000000002 /* ProjectGitHubReview.swift in Sources */,
 				B20000000000000000000006 /* ProjectViews.swift in Sources */,
 				B20000000000000000000004 /* NewChatView.swift in Sources */,
 				B20000000000000000000002 /* AppShell.swift in Sources */,

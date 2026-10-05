@@ -163,8 +163,13 @@ public final class PairingAPI: Sendable {
         try file.verify(data, mime: http.mimeType)
         return data
     }
-    public func downloadWorkspaceBytes(_ path: String, connection: SavedConnection, byteSize: Int?, sha256: String?, mimeType: String?) async throws -> Data {
-        guard byteSize.map({ $0 >= 0 && $0 <= 8 * 1024 * 1024 }) != false else { throw FileFailure.tooLarge }
+    /// Workspace previews stream from the paired Mac; large PDFs and images
+    /// take time over Wi-Fi, so callers can show progress.
+    public static let workspacePreviewLimit = 256 * 1024 * 1024
+    public func downloadWorkspaceBytes(_ path: String, connection: SavedConnection, byteSize: Int?, sha256: String?, mimeType: String?,
+                                       progress: (@Sendable (_ received: Int, _ expected: Int?) -> Void)? = nil) async throws -> Data {
+        let limit = Self.workspacePreviewLimit
+        guard byteSize.map({ $0 >= 0 && $0 <= limit }) != false else { throw FileFailure.tooLarge }
         let origin = try PairingLink.origin(connection.origin)
         guard let url = URL(string: origin + path) else { throw PairingFailure.invalidLink }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
@@ -172,13 +177,32 @@ public final class PairingAPI: Sendable {
         request.setValue(origin, forHTTPHeaderField: "Origin")
         request.setValue("__Host-wonder_session=\(connection.credential.sessionToken)", forHTTPHeaderField: "Cookie")
         let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw PairingFailure.response((response as? HTTPURLResponse)?.statusCode ?? 0) }
-        if let length = http.value(forHTTPHeaderField: "Content-Length").flatMap(Int.init), length > 8 * 1024 * 1024 { throw FileFailure.tooLarge }
-        var data = Data()
-        for try await byte in bytes {
-            guard data.count < 8 * 1024 * 1024 else { throw FileFailure.tooLarge }
-            data.append(byte)
+        defer { bytes.task.cancel() }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw status == 413 ? FileFailure.tooLarge : PairingFailure.response(status)
         }
+        let length = http.value(forHTTPHeaderField: "Content-Length").flatMap(Int.init)
+        if let length, length > limit { throw FileFailure.tooLarge }
+        let expected = length ?? byteSize
+        var data = Data()
+        data.reserveCapacity(min(expected ?? 0, limit))
+        // Append in chunks; a byte-at-a-time Data append is too slow for large files.
+        let chunkSize = 1024 * 1024
+        var chunk = [UInt8](); chunk.reserveCapacity(chunkSize)
+        progress?(0, expected)
+        for try await byte in bytes {
+            chunk.append(byte)
+            if chunk.count == chunkSize {
+                guard data.count + chunk.count <= limit else { throw FileFailure.tooLarge }
+                data.append(contentsOf: chunk); chunk.removeAll(keepingCapacity: true)
+                progress?(data.count, expected)
+                try Task.checkCancellation()
+            }
+        }
+        guard data.count + chunk.count <= limit else { throw FileFailure.tooLarge }
+        data.append(contentsOf: chunk)
+        progress?(data.count, expected)
         guard byteSize == nil || byteSize == data.count,
               sha256 == nil || sha256 == ConversationFile.digest(data) else { throw FileFailure.integrity }
         if let mimeType { try ConversationFile.validateContent(data, mime: mimeType) }
@@ -240,48 +264,6 @@ public final class PairingAPI: Sendable {
         if path == "/api/v1/group-chats/propose" { return 330 }
         if path.hasSuffix("/control/acquire") { return 135 }
         return 15
-    }
-
-    /// Only the typed Project GitHub client calls this transport. Keep large PR
-    /// replies bounded while streaming, using the existing redirect-free session.
-    func githubReviewRequest<T: Decodable & Sendable>(_ path: String, connection: SavedConnection,
-        method: String = "GET", body: Data? = nil, snapshot: Bool = false) async throws -> T {
-        try Task.checkCancellation()
-        guard path.hasPrefix("/api/v1/projects/"), path.contains("/github-review/"),
-              let url = URL(string: try PairingLink.origin(connection.origin) + path) else {
-            throw PairingFailure.invalidLink
-        }
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
-                                 timeoutInterval: 90)
-        request.httpMethod = method; request.httpBody = body; request.httpShouldHandleCookies = false
-        request.setValue(connection.origin, forHTTPHeaderField: "Origin")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("__Host-wonder_session=\(connection.credential.sessionToken)", forHTTPHeaderField: "Cookie")
-        request.setValue(connection.credential.csrfToken, forHTTPHeaderField: "x-wonder-csrf")
-        let (bytes, response) = try await session.bytes(for: request)
-        defer { bytes.task.cancel() }
-        guard let http = response as? HTTPURLResponse else { throw GitHubReviewFailure.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else { throw GitHubReviewFailure.response(http.statusCode) }
-        guard http.statusCode == (method == "PUT" || method == "DELETE" ? 204 : 200) else {
-            throw GitHubReviewFailure.invalidResponse
-        }
-        let limit = snapshot ? 16 * 1024 * 1024 : 64 * 1024
-        guard response.expectedContentLength <= limit else { throw GitHubReviewFailure.oversized }
-        var data = Data()
-        try await withTaskCancellationHandler {
-            for try await byte in bytes {
-                guard data.count < limit else { throw GitHubReviewFailure.oversized }
-                data.append(byte)
-            }
-        } onCancel: {
-            bytes.task.cancel()
-        }
-        try Task.checkCancellation()
-        let value: T
-        do { value = try JSONDecoder().decode(T.self, from: data.isEmpty ? Data("{}".utf8) : data) }
-        catch { throw GitHubReviewFailure.invalidResponse }
-        try Task.checkCancellation()
-        return value
     }
 
     public func request<T: Decodable & Sendable>(_ path: String, origin: String, body: Data? = nil,

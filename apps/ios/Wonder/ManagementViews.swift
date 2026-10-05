@@ -111,11 +111,11 @@ struct ConversationDetails: View {
                         Text(chat.title).font(.headline)
                     }
                 }
-                Section { Button("Files", systemImage: "doc") { files = true } }
+                Section { Button("Files", systemImage: "doc") { files = true }.accessibilityIdentifier("conversation-details-files") }
             }
             .navigationTitle("Details").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .sheet(isPresented: $files) { WorkspaceBrowser(model: model, chat: chat, attachmentIDs: nil) }
+            .sheet(isPresented: $files) { WorkspaceSheet(close: { files = false }) { WorkspaceBrowser(model: model, chat: chat, attachmentIDs: nil) } }
         }
     }
 }

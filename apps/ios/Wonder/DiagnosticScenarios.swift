@@ -321,6 +321,13 @@ enum DiagnosticSubagentFixture {
         if approvalSettingsFixture && ProcessInfo.processInfo.arguments.contains("-diagnostics-approval-reset") {
             approvalDefaults.removePersistentDomain(forName: "wonder.diagnostics.approval-settings")
         }
+        // Project fixtures share this synthetic host. Their saved Project
+        // catalog must not turn the Bot fixture chat into a missing Project.
+        if !projectReadFixture {
+            let host = Data(hostID.utf8).base64EncodedString()
+            UserDefaults.standard.removeObject(forKey: "wonder.projects." + host)
+            UserDefaults.standard.removeObject(forKey: "wonder.projects.recent." + host)
+        }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [DiagnosticSubagentURLProtocol.self]
         let root = FileManager.default.temporaryDirectory
@@ -1082,7 +1089,9 @@ struct DiagnosticSubagentFixtureView: View {
                 }
             }.navigationTitle("Rendering fixtures").onChange(of:selection) { _, _ in expanded=false }
             .sheet(item: $workspaceRequest) { request in
-                WorkspaceBrowser(model: lifecycleModel, chat: lifecycleChat, attachmentIDs: request.attachmentIDs, initialFilePath: request.initialFilePath)
+                WorkspaceSheet(close: { workspaceRequest = nil }) {
+                    WorkspaceBrowser(model: lifecycleModel, chat: lifecycleChat, attachmentIDs: request.attachmentIDs, initialFilePath: request.initialFilePath)
+                }
             }
         }
     }

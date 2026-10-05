@@ -1,13 +1,13 @@
 //! Wonder's authenticated loopback API boundary.
-mod diagnostics;
-#[cfg(feature = "experimental-relay")]
-pub mod relay;
 mod automation_schedule;
 #[cfg(test)]
 mod automation_tests;
 #[cfg(test)]
 mod bot_management_tests;
+mod diagnostics;
 mod pairing_web;
+#[cfg(feature = "experimental-relay")]
+pub mod relay;
 use automation_schedule::next_automation_run;
 pub mod bot_management;
 mod bot_onboarding;
@@ -28,8 +28,6 @@ mod connected_apps;
 pub mod dispatch;
 pub mod file_access;
 mod filesystem;
-pub mod github_review;
-mod github_review_routes;
 mod goals;
 mod group_attachments;
 mod group_collaboration;
@@ -886,20 +884,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects/candidates", get(projects::candidates))
         .route("/api/v1/projects/{project_id}", patch(projects::update))
         .route(
-            "/api/v1/projects/{project_id}/github-review/{root_id}",
-            get(github_review_routes::status)
-                .put(github_review_routes::authorize)
-                .delete(github_review_routes::revoke),
-        )
-        .route(
-            "/api/v1/projects/{project_id}/github-review/{root_id}/prepare",
-            post(github_review_routes::prepare),
-        )
-        .route(
-            "/api/v1/projects/{project_id}/github-review/{root_id}/pulls/{number}",
-            get(github_review_routes::snapshot),
-        )
-        .route(
             "/api/v1/projects/{project_id}/threads",
             get(projects::threads).post(projects::create_thread),
         )
@@ -1089,7 +1073,6 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/automations/{automation_id}/runs",
             get(list_automation_runs),
         )
-
         .route("/api/v1/events", get(events_socket))
         .route("/api/v1/sync/checkpoint", get(sync::checkpoint))
         .route("/api/v1/events/challenge", get(event_challenge))
@@ -13029,24 +13012,23 @@ mod tests {
     use super::{
         app_server_notification_key, artifact_event_detail, artifact_mime_type, attachment_path,
         attachment_relative_path, automation_conversation_id, bot_handle, build_approval_response,
-        canonical_approval_body, computer_use_screenshot_url,
-        conversation_thread_projection, conversation_thread_projection_with_items,
-        decode_local_href, default_session_expiration, drain_pending_app_server_notifications,
-        dynamic_tool_response, extract_text, find_client_message, host_readiness_state,
-        inherited_child_resume_params, is_valid_public_origin, matches_public_origin,
-        next_automation_run, now_ms, pairing_offer_response, project_app_server_notification,
-        public_origin_from_status_log, publish_app_server_notification, read_workspace_artifact,
-        resolve_channel_route, rollback_bot_artifacts, route_auth, router, run_computer_use,
-        runtime_app_summary, runtime_mcp_server_summary, runtime_skill_summary,
-        sanitize_ansi_and_secrets, sanitize_typed_item, sanitized_relative_path,
-        search_result_deep_link, should_execute_dynamic_tool,
-        steer_response_turn_id, steer_turn_params, turn_input, valid_attachment_ids,
-        valid_attachment_mime_type, valid_attachment_name, valid_channel_description,
-        valid_channel_member_count, valid_device_label, validate_bot_runtime_settings,
-        workspace_file_path, AppServerThreadItem, AppState, ApprovalResolution, ChannelRoute,
-        ChoiceOption, HostEventEnvelope, ModelOption, PermissionProfileOption, RouteAuth,
-        RuntimeCatalog, StoredChannelMember, WonderEvent, CHANNEL_WORKER_CONCURRENCY,
-        MAX_ATTACHMENT_BYTES, MAX_WORKSPACE_ARTIFACT_BYTES,
+        canonical_approval_body, computer_use_screenshot_url, conversation_thread_projection,
+        conversation_thread_projection_with_items, decode_local_href, default_session_expiration,
+        drain_pending_app_server_notifications, dynamic_tool_response, extract_text,
+        find_client_message, host_readiness_state, inherited_child_resume_params,
+        is_valid_public_origin, matches_public_origin, next_automation_run, now_ms,
+        pairing_offer_response, project_app_server_notification, public_origin_from_status_log,
+        publish_app_server_notification, read_workspace_artifact, resolve_channel_route,
+        rollback_bot_artifacts, route_auth, router, run_computer_use, runtime_app_summary,
+        runtime_mcp_server_summary, runtime_skill_summary, sanitize_ansi_and_secrets,
+        sanitize_typed_item, sanitized_relative_path, search_result_deep_link,
+        should_execute_dynamic_tool, steer_response_turn_id, steer_turn_params, turn_input,
+        valid_attachment_ids, valid_attachment_mime_type, valid_attachment_name,
+        valid_channel_description, valid_channel_member_count, valid_device_label,
+        validate_bot_runtime_settings, workspace_file_path, AppServerThreadItem, AppState,
+        ApprovalResolution, ChannelRoute, ChoiceOption, HostEventEnvelope, ModelOption,
+        PermissionProfileOption, RouteAuth, RuntimeCatalog, StoredChannelMember, WonderEvent,
+        CHANNEL_WORKER_CONCURRENCY, MAX_ATTACHMENT_BYTES, MAX_WORKSPACE_ARTIFACT_BYTES,
     };
     use base64::Engine as _;
     use sha2::{Digest, Sha256};

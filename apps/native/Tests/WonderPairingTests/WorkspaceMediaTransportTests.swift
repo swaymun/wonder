@@ -136,3 +136,60 @@ final class WorkspaceMediaTransportTests: XCTestCase {
         player.pause()
     }
 }
+
+private final class LargePreviewProtocol: URLProtocol, @unchecked Sendable {
+    static let body: Data = {
+        let count = 9 * 1024 * 1024 + 17
+        var bytes = [UInt8](repeating: 0, count: count)
+        for index in 0..<count { bytes[index] = UInt8(index % 251) }
+        return Data(bytes)
+    }()
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "large-preview.invalid" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let large = request.url?.query?.contains("too-large") == true
+        let status = large ? 413 : 200
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Length": large ? "0" : "\(Self.body.count)", "Content-Type": "application/pdf"])!,
+            cacheStoragePolicy: .notAllowed)
+        if !large { client?.urlProtocol(self, didLoad: Self.body) }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+final class WorkspacePreviewDownloadTests: XCTestCase {
+    func testLargePreviewDownloadsCompletelyWithProgressAndRefusesHostLimit() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LargePreviewProtocol.self]
+        let api = PairingAPI(configuration: configuration)
+        let connection = SavedConnection(origin: "https://large-preview.invalid", credential: Credential(
+            sessionToken: "synthetic", deviceId: "phone", csrfToken: "csrf", hostInstallationId: "host", expiresAtMs: nil))
+        let reports = LockedReports()
+        let body = LargePreviewProtocol.body
+        let data = try await api.downloadWorkspaceBytes("/api/v1/conversations/c/workspace/file?path=a.bin", connection: connection,
+            byteSize: body.count, sha256: nil, mimeType: nil) { received, expected in reports.add(received, expected) }
+        XCTAssertEqual(data, body)
+        let seen = reports.values
+        XCTAssertEqual(seen.last?.0, body.count)
+        XCTAssertTrue(seen.allSatisfy { $0.1 == body.count })
+        XCTAssertGreaterThan(seen.count, 9, "Large files report progress while they load")
+        do {
+            _ = try await api.downloadWorkspaceBytes("/api/v1/conversations/c/workspace/file?path=too-large", connection: connection,
+                                                     byteSize: nil, sha256: nil, mimeType: nil)
+            XCTFail("A host size refusal must not look like a missing file")
+        } catch FileFailure.tooLarge {}
+        do {
+            _ = try await api.downloadWorkspaceBytes("/x", connection: connection,
+                byteSize: PairingAPI.workspacePreviewLimit + 1, sha256: nil, mimeType: nil)
+            XCTFail("Oversized listings are refused before transfer")
+        } catch FileFailure.tooLarge {}
+    }
+}
+
+private final class LockedReports: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [(Int, Int?)] = []
+    func add(_ received: Int, _ expected: Int?) { lock.lock(); stored.append((received, expected)); lock.unlock() }
+    var values: [(Int, Int?)] { lock.lock(); defer { lock.unlock() }; return stored }
+}

@@ -37,6 +37,7 @@ wonder-relay = { path = "../wonder-relay", optional = true }
 tower = { workspace = true, optional = true }
 
 jsonschema = { version = "0.53.0", default-features = false }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 p256.workspace = true
