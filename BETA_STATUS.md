@@ -17,10 +17,22 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (88) uploaded and Apple reports processing complete. The signed archive/export passed production identity, APNs, App Group, Keychain and diagnostic-exclusion checks. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | Blue Release 1.0 (31) uploaded, processed and is available in automatic Owner Beta. Signed archive/export identity, entitlements, Widget, symbols and diagnostic exclusions passed. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.111 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed. Version, the simplified Settings sidebar and read-only readiness checks passed. Current fresh-Mac pairing, private permissions and draft-upgrade acceptance remain open. |
-| Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 619 selected public source files matched bytes and executable modes before release records were updated. Third-party components retain their own licenses. |
+| iPhone and iPad | Production Release 1.0 (89) uploaded and Apple reports processing complete. Built from clean source with Diagnostics fixtures absent from the exported binary. Tester availability and TestFlight installation remain unverified. |
+| Wonder Testing | Blue Release 1.0 (32) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 89. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.112 is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; `/healthz` and `/readyz` passed after install. Mac Settings screens were not re-checked in this update. Fresh-Mac pairing and private-permission acceptance remain open. |
+| Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 614 selected public source files matched bytes and executable modes. Third-party components retain their own licenses. |
+
+Testing 32, production 89 and Mac 1.0.112 add the October 4 review fixes:
+Files replaces an open saved-diff review; saved diffs capped by the host are
+labeled as partial; Files opened from Bot chat Details closes with Done; chats
+stay at their end through composer notices and new messages; the Files header
+fits large text, hidden files can be shown inside folders, and closing a preview
+returns to its row. Workspace previews now stream up to 256 MB with load
+progress (the Mac host must be 1.0.112). GitHub pull-request review was removed
+at the owner's request; Mac migration 0088 deletes saved repository grants.
+Evidence is simulator-only (iPhone 17 Pro and iPad Pro 13-inch, iOS 26.5, offline
+fixtures); real Wi-Fi transfer of large files, hardware keyboard and VoiceOver
+remain unverified.
 
 Native-only progressive dictation is included in Testing 31 and production 88,
 built from clean internal `0980b910` and corresponding public source `11ccabb`.
@@ -57,7 +69,7 @@ Both exported Release apps exclude the edited-files diagnostic fixture.
 TestFlight-installed interaction remains unverified.
 
 The chronological qualification notes below retain the limits of earlier checks.
-The October 4 releases include the later Settings, native GitHub review and
+The October 4 releases include the later Settings and
 Project Apps recovery and local edited-files source. Simulator checks include iPhone/iPad landscape;
 actual TestFlight-installed behavior remains unverified.
 
@@ -65,8 +77,7 @@ The earlier Mac 1.0.110 qualification kept the native host, menu bar and Setting
 original sun icon, a restrained yellow/apricot sidebar and warm light/dark colors,
 shorter readiness and Access copy, and one automatic-update policy in About.
 The redundant provider-check and restart controls and desktop Chats are removed.
-The installed host is ready, preserves Project IDs and advertises GitHub review
-support. Global Codex Usage/Apps and scoped Project Files reads pass; unloaded
+The installed host is ready, preserves Project IDs. (GitHub review support was later removed in 1.0.112.) Global Codex Usage/Apps and scoped Project Files reads pass; unloaded
 Project Apps now returns the specific unavailable response. Manual update checking
 completes with “No newer compatible update is available.” The disconnected Tailscale check showed reconnect recovery; a later read-only
 check found Tailscale Running and Settings Ready. No new privacy grant or live
