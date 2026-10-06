@@ -7,10 +7,6 @@ forward rules for an older feature or workflow.
 
 ## Working method
 
-- Start each task by restating the request as your own goals in plain words: the
-  outcome, the done check and any constraint the user named. For noisy reports or
-  long threads, restate the underlying problem before changing code so a misreading
-  costs one message instead of a wrong fix.
 - Define done as a check that can pass or fail, plus the evidence that proves it:
   command output, the stored value, or a capture of the real app. Label each claim
   as measured, inferred or guessed. Never hand the user a check you could run.
