@@ -5,6 +5,35 @@ Keep the experience understandable without knowledge of the App Server protocol.
 Apply guidance to the current implementation; verify callers before carrying
 forward rules for an older feature or workflow.
 
+## Working method
+
+- Start each task by restating the request as your own goals in plain words: the
+  outcome, the done check and any constraint the user named. For noisy reports or
+  long threads, restate the underlying problem before changing code so a misreading
+  costs one message instead of a wrong fix.
+- Define done as a check that can pass or fail, plus the evidence that proves it:
+  command output, the stored value, or a capture of the real app. Label each claim
+  as measured, inferred or guessed. Never hand the user a check you could run.
+- Reproduce a defect on the affected surface before fixing it, then fix the root
+  cause. After two fixes sharing one premise fail the same check, question that
+  premise instead of writing a third fix.
+- When a "which approach" question can be answered by running something (behavior,
+  layout, timing, performance), prototype and let the result decide. Ask only for
+  product or preference calls and actions this file does not already authorize.
+- Proceed on reversible work and report what you did. Give real judgment: decline
+  scope or an approach that does not earn its place rather than agreeing by default.
+- For repetitive edits, audits or checks, write the script or codemod that does or
+  proves the work and keep it rerunnable instead of working by hand.
+- You own delegated work. Review a subagent's diff and evidence yourself; give
+  follow-up work to a fresh agent with the consolidated brief rather than trusting
+  a "done" summary.
+- For long or unattended runs, keep a short decision log under `.local/` and report
+  the decisions that changed the outcome.
+- When the user corrects a repeated mistake, fix it at the strongest layer that
+  works: one owner in the architecture, then types, then a lint or CI check whose
+  error names the fix, then a test. Add a rule here only for judgment calls, and
+  drop a rule once something enforces it.
+
 ## Product UI
 
 - Treat project threads, direct chats and existing Group Chats as one conversation
