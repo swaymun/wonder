@@ -103,6 +103,11 @@ forward rules for an older feature or workflow.
   requested.** Use relevant unit/model/contract checks and focused simulator UI
   checks by default. Physical sessions, mirroring and device availability must not
   block completion or TestFlight uploads. Report hardware-only behavior as unverified.
+- For Mac UI checks and other computer use, prefer the installed Codex Computer
+  Use MCP server `cua_repl` (manifest under
+  `~/.codex/plugins/cache/openai-bundled/unified-computer-use/<version>/.mcp.json`;
+  tools `js`, `js_reset`, `turn_ended`) over Claude computer use. GPUI windows do
+  not repaint while occluded, so bring the window forward before capturing.
 - Read [apps/ios/DIAGNOSTICS.md](apps/ios/DIAGNOSTICS.md) for conversation rendering,
   recording or performance work. Use this checkout and keep private builds, traces,
   crash reports and matching dSYMs under `.local/`. Keep operating instructions in
@@ -141,6 +146,13 @@ forward rules for an older feature or workflow.
 - Keep blue `com.swaymun.wonder.testing` and orange `com.swaymun.wonder` identities,
   pairing, drafts and Keychain access separate. Do not install development or
   Diagnostics builds over orange Wonder. The Mac has no separate testing variant.
+- **After a completed change to the shipped Mac companion (`apps/desktop`,
+  `apps/menubar`, the daemon or bundled helpers), a Developer ID signed, notarized
+  and stapled Mac release installed to `/Applications/Wonder.app` is likewise
+  standing-authorized when needed.** Follow [RELEASING.md](RELEASING.md#mac-artifact)
+  with the next monotonic build version, notarize with the App Store Connect API
+  key above, install with `scripts/install-signed-app.py` and record the version in
+  `BETA_STATUS.md`. Publishing a GitHub release or appcast still needs approval.
 - Use `profile:diagnostics` only for a specifically requested Diagnostics build.
   Read [apps/ios/TESTING.md](apps/ios/TESTING.md) and
   [fastlane/USAGE.md](fastlane/USAGE.md) for channel/signing details.

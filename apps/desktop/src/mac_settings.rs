@@ -1,5 +1,10 @@
 use gpui_kit::{
-    component::{button::*, checkbox::Checkbox, *},
+    component::{
+        button::*,
+        menu::{DropdownMenu, PopupMenuItem},
+        switch::Switch,
+        *,
+    },
     prelude::FluentBuilder,
     *,
 };
@@ -16,11 +21,7 @@ mod setup_window;
 
 actions!(
     wonder_settings,
-    [
-        StatusSettings,
-        DeviceSettings,
-        AccessSettings,
-    ]
+    [StatusSettings, DeviceSettings, AccessSettings,]
 );
 
 #[derive(Clone, Copy, PartialEq)]
@@ -269,6 +270,7 @@ pub struct MacSettings {
     permission_drag_id: String,
     permission_drag_window: Option<WindowHandle<Root>>,
     last_clock: Instant,
+    last_auto_pair: Option<Instant>,
 }
 impl MacSettings {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -314,6 +316,7 @@ impl MacSettings {
             permission_drag_id: String::new(),
             permission_drag_window: None,
             last_clock: Instant::now(),
+            last_auto_pair: None,
         }
     }
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -425,8 +428,44 @@ impl MacSettings {
             self.last_clock = Instant::now();
             changed = true;
         }
+        self.keep_pairing_code(cx);
         if changed {
             cx.notify();
+        }
+    }
+    /// While pairing is on screen, keep a live code available: replace a missing
+    /// or expired offer, backing off after failures.
+    fn keep_pairing_code(&mut self, cx: &mut Context<Self>) {
+        let offer = &self.state["offer"];
+        let needs_code = !offer.is_object() || expired(offer) || offer["expired"] == true;
+        let open = |handle: Option<WindowHandle<Root>>| {
+            handle.is_some_and(|handle| {
+                cx.windows()
+                    .iter()
+                    .any(|window| window.window_id() == handle.window_id())
+            })
+        };
+        let visible = if self.flag("setupCompleted") {
+            self.page == Page::Devices && open(cx.global::<crate::DesktopShell>().settings)
+        } else {
+            self.state["setupStep"].as_u64() == Some(2) && open(self.setup_window)
+        };
+        let backoff = if text(&self.state, "pairingError").is_empty() {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(30)
+        };
+        if needs_code
+            && visible
+            && self.connected
+            && self.pending.is_none()
+            && self.flag("remoteReady")
+            && !self.flag("pairingBusy")
+            && array(&self.state, "pending").is_empty()
+            && self.last_auto_pair.is_none_or(|at| at.elapsed() >= backoff)
+        {
+            self.last_auto_pair = Some(Instant::now());
+            self.send(json!({"action":"pair"}), cx);
         }
     }
     fn send(&mut self, mut command: Value, cx: &mut Context<Self>) {
@@ -493,169 +532,202 @@ impl MacSettings {
         key: &str,
         action: &'static str,
         cx: &Context<Self>,
-    ) -> Checkbox {
-        Checkbox::new(id)
-            .label(label)
+    ) -> Switch {
+        Switch::new(id)
+            .accessibility_label(label)
             .checked(self.flag(key))
             .disabled(self.disabled())
             .on_click(cx.listener(move |this, checked, _, cx| {
                 this.send(json!({"action":action,"enabled":checked}), cx)
             }))
     }
-    fn general(&self, cx: &Context<Self>) -> Div {
-        let summary = ReadinessSummary::from_snapshot(&self.state, self.connected);
-        let mut status = stack()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .size(px(8.))
-                            .rounded_full()
-                            .bg(if summary.fully_ready {
-                                cx.theme().success
-                            } else {
-                                cx.theme().warning
-                            }),
-                    )
-                    .child(
-                        note(summary.title)
-                            .role(Role::Heading)
-                            .text_base()
-                            .font_weight(FontWeight::SEMIBOLD),
-                    ),
-            )
-            .child(note(text(&self.state, "hostName")).text_color(cx.theme().muted_foreground))
-            .when(!summary.fully_ready, |view| {
-                view.child(note(summary.detail))
-            });
-        let mut actions = div().flex().gap_2().pt_2();
-        actions = match summary.action {
-            ReadinessAction::Retry => actions.child(
-                Button::new("retry-readiness")
-                    .label("Try again")
-                    .primary()
-                    .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
-            ),
-            ReadinessAction::Repair => actions.child(
-                self.action(
-                    "repair-runtime",
-                    "Set up agents",
-                    json!({"action":"repair"}),
-                    self.flag("serviceBusy"),
-                    cx,
-                )
-                .primary(),
-            ),
-            ReadinessAction::Reopen => actions,
-            ReadinessAction::ConnectMac => actions.child(
-                self.action(
-                    "connect-mac",
-                    "Finish remote sign-in",
-                    json!({"action":"connect-mac"}),
-                    false,
-                    cx,
-                )
-                .primary(),
-            ),
-            ReadinessAction::OpenTailscale => actions.child(
-                self.action(
-                    "open-tailscale",
-                    "Open Tailscale",
-                    json!({"action":"tailscale-open"}),
-                    false,
-                    cx,
-                )
-                .primary(),
-            ),
-            ReadinessAction::PairDevice => actions.child(
-                Button::new("open-devices")
-                    .label("Open Devices")
-                    .primary()
-                    .on_click(cx.listener(|this, _, _, cx| this.select_page(Page::Devices, cx))),
-            ),
-            ReadinessAction::ReviewAccess => actions.child(
-                Button::new("open-access")
-                    .label("Review Access")
-                    .primary()
-                    .on_click(cx.listener(|this, _, _, cx| this.select_page(Page::Access, cx))),
-            ),
-            ReadinessAction::None => actions,
-        };
-        status = status.child(actions);
-        if self.flag("claudeAuthRequired") {
-            status = status.child(self.action(
-                "claude-sign-in",
-                "Sign in to Claude",
-                json!({"action":"claude-sign-in"}),
-                self.flag("serviceBusy"),
-                cx,
-            ));
-        }
-        let startup = messages(
-            stack().child(self.toggle("login", "Launch at login", "login", "login", cx)),
-            &self.state,
-            &["loginMessage"],
+    fn login_row(&self, id: &'static str, cx: &Context<Self>) -> Div {
+        let detail = text(&self.state, "loginMessage");
+        let mut rows = vec![form_row(
+            "Launch at login",
+            (!detail.is_empty()).then(|| detail.to_owned()),
+            self.toggle(id, "Launch at login", "login", "login", cx),
             cx,
         )
-        .when(self.flag("loginApproval"), |v| {
-            v.child(self.action(
-                "login-settings",
-                "Open Login Settings…",
-                json!({"action":"login-settings"}),
+        .into_any_element()];
+        if self.flag("loginApproval") {
+            rows.push(
+                form_row(
+                    "Login Items",
+                    None,
+                    self.action(
+                        format!("{id}-settings"),
+                        "Open Login Settings…",
+                        json!({"action":"login-settings"}),
+                        false,
+                        cx,
+                    )
+                    .small(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+        group(cx, rows)
+    }
+    /// Auto, Light and Dark as one compact icon toggle at the foot of the sidebar.
+    fn appearance(&self, cx: &Context<Self>) -> Div {
+        use crate::appearance::Preference;
+        let current = *cx.global::<Preference>();
+        div()
+            .flex()
+            .self_start()
+            .gap_0p5()
+            .p_0p5()
+            .mx_2()
+            .mb_3()
+            .rounded(px(8.))
+            .bg(cx.theme().foreground.opacity(0.06))
+            .children(
+                [
+                    (Preference::System, "Match System"),
+                    (Preference::Light, "Light"),
+                    (Preference::Dark, "Dark"),
+                ]
+                .map(|(preference, label)| {
+                    let button = Button::new(SharedString::from(format!("appearance-{label}")))
+                        .ghost()
+                        .small()
+                        .selected(preference == current)
+                        .w(px(30.))
+                        .h(px(24.))
+                        .tooltip(label)
+                        .accessibility_label(format!("Appearance: {label}"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.error = crate::appearance::select(preference, window, cx).err();
+                            cx.notify();
+                        }));
+                    match preference {
+                        Preference::System => button.child(
+                            div()
+                                .size(px(13.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(cx.theme().foreground)
+                                .child(
+                                    div()
+                                        .w(px(5.5))
+                                        .h_full()
+                                        .rounded_l(px(6.))
+                                        .bg(cx.theme().foreground),
+                                ),
+                        ),
+                        Preference::Light => button.icon(IconName::Sun),
+                        Preference::Dark => button.icon(IconName::Moon),
+                    }
+                }),
+            )
+    }
+    fn general(&self, cx: &Context<Self>) -> Div {
+        let summary = ReadinessSummary::from_snapshot(&self.state, self.connected);
+        let action = match summary.action {
+            ReadinessAction::Retry => Some(
+                Button::new("retry-readiness")
+                    .label("Try again")
+                    .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+            ),
+            ReadinessAction::Repair => Some(self.action(
+                "repair-runtime",
+                "Set up agents",
+                json!({"action":"repair"}),
+                self.flag("serviceBusy"),
+                cx,
+            )),
+            ReadinessAction::ConnectMac => Some(self.action(
+                "connect-mac",
+                "Finish remote sign-in",
+                json!({"action":"connect-mac"}),
                 false,
                 cx,
-            ))
-        });
-        stack().gap_5().child(status).child(startup).child(
+            )),
+            ReadinessAction::OpenTailscale => Some(self.action(
+                "open-tailscale",
+                "Open Tailscale",
+                json!({"action":"tailscale-open"}),
+                false,
+                cx,
+            )),
+            ReadinessAction::PairDevice => Some(
+                Button::new("open-devices")
+                    .label("Open Devices")
+                    .on_click(cx.listener(|this, _, _, cx| this.select_page(Page::Devices, cx))),
+            ),
+            ReadinessAction::ReviewAccess => Some(
+                Button::new("open-access")
+                    .label("Review Access")
+                    .on_click(cx.listener(|this, _, _, cx| this.select_page(Page::Access, cx))),
+            ),
+            ReadinessAction::Reopen | ReadinessAction::None => None,
+        };
+        let status = card(cx).child(
             div()
                 .flex()
                 .items_center()
-                .justify_between()
                 .gap_3()
-                .child(note("Appearance"))
-                .child(self.appearance(cx)),
-        )
-    }
-    fn appearance(&self, cx: &Context<Self>) -> tab::TabBar {
-        tab::TabBar::new("appearance")
-            .segmented()
-            .children(["System", "Light", "Dark"])
-            .selected_index(
-                crate::appearance::Preference::ALL
-                    .iter()
-                    .position(|p| p == cx.global::<crate::appearance::Preference>())
-                    .unwrap_or(0),
-            )
-            .on_click(cx.listener(|this, index: &usize, window, cx| {
-                this.error = crate::appearance::select(
-                    crate::appearance::Preference::ALL[*index],
-                    window,
-                    cx,
-                )
-                .err();
-                cx.notify();
-            }))
-    }
-    fn about(&self, cx: &Context<Self>) -> Div {
-        let mut view = stack()
-            .gap_4()
-            .child(row("Version", text(&self.state, "version")));
-        if self.flag("updatesAvailable") {
-            view = view
-                .child(self.action(
-                    "check-updates",
-                    "Check for Updates…",
-                    json!({"action":"check-updates"}),
-                    !self.flag("canCheckUpdates"),
-                    cx,
+                .p_4()
+                .child(div().size(px(10.)).flex_shrink_0().rounded_full().bg(
+                    if summary.fully_ready {
+                        cx.theme().success
+                    } else {
+                        cx.theme().warning
+                    },
                 ))
                 .child(
-                    Checkbox::new("automatic-update-policy")
-                        .label("Install updates automatically")
+                    stack()
+                        .gap_0p5()
+                        .flex_1()
+                        .child(
+                            note(summary.title)
+                                .role(Role::Heading)
+                                .text_base()
+                                .font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(muted(text(&self.state, "hostName"), cx))
+                        .when(!summary.fully_ready, |view| {
+                            view.child(note(summary.detail).pt_1())
+                        }),
+                )
+                .children(action.map(|button| button.primary().small())),
+        );
+        let mut view = stack().gap_5().child(status);
+        if self.flag("claudeAuthRequired") {
+            view = view.child(group(
+                cx,
+                vec![form_row(
+                    "Claude",
+                    Some("Sign in so agents can start work.".into()),
+                    self.action(
+                        "claude-sign-in",
+                        "Sign In…",
+                        json!({"action":"claude-sign-in"}),
+                        self.flag("serviceBusy"),
+                        cx,
+                    )
+                    .small(),
+                    cx,
+                )
+                .into_any_element()],
+            ));
+        }
+        view.child(self.login_row("login", cx))
+    }
+    fn about(&self, cx: &Context<Self>) -> Div {
+        let mut rows = vec![
+            form_row("Version", None, muted(text(&self.state, "version"), cx), cx)
+                .into_any_element(),
+        ];
+        if self.flag("updatesAvailable") {
+            rows.push(
+                form_row(
+                    "Install updates automatically",
+                    None,
+                    Switch::new("automatic-update-policy")
+                        .accessibility_label("Install updates automatically")
                         .checked(
                             self.flag("automaticUpdates") && self.flag("automaticUpdateDownloads"),
                         )
@@ -666,17 +738,50 @@ impl MacSettings {
                                 cx,
                             );
                         })),
-                );
+                    cx,
+                )
+                .into_any_element(),
+            );
+            rows.push(
+                form_row(
+                    "Updates",
+                    None,
+                    self.action(
+                        "check-updates",
+                        "Check for Updates…",
+                        json!({"action":"check-updates"}),
+                        !self.flag("canCheckUpdates"),
+                        cx,
+                    )
+                    .small(),
+                    cx,
+                )
+                .into_any_element(),
+            );
         } else {
-            view = view.child(self.action(
-                "download-update",
-                "Download Latest Version…",
-                json!({"action":"download-update"}),
-                false,
-                cx,
-            ));
+            rows.push(
+                form_row(
+                    "Updates",
+                    None,
+                    self.action(
+                        "download-update",
+                        "Download Latest Version…",
+                        json!({"action":"download-update"}),
+                        false,
+                        cx,
+                    )
+                    .small(),
+                    cx,
+                )
+                .into_any_element(),
+            );
         }
-        messages(view, &self.state, &["updatesMessage"], cx)
+        messages(
+            stack().gap_3().child(group(cx, rows)),
+            &self.state,
+            &["updatesMessage"],
+            cx,
+        )
     }
     fn connection(&self, cx: &Context<Self>) -> Div {
         stack()
@@ -685,27 +790,30 @@ impl MacSettings {
                 "Connect this Mac and your phone to the same Tailscale network.",
             ))
             .child(note(text(&self.state, "remoteDetail")))
-            .child(self.action(
-                "tailscale-open",
-                "Open Tailscale",
-                json!({"action":"tailscale-open"}),
-                false,
-                cx,
-            ))
-            .child(self.action(
-                "tailscale-configure",
-                "Enable private connection",
-                json!({"action":"tailscale-configure"}),
-                self.flag("serviceBusy"),
-                cx,
-            ))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(self.action(
+                        "tailscale-open",
+                        "Open Tailscale",
+                        json!({"action":"tailscale-open"}),
+                        false,
+                        cx,
+                    ))
+                    .child(self.action(
+                        "tailscale-configure",
+                        "Enable private connection",
+                        json!({"action":"tailscale-configure"}),
+                        self.flag("serviceBusy"),
+                        cx,
+                    )),
+            )
     }
     fn devices(&self, cx: &Context<Self>) -> Div {
-        let mut view = stack().gap_4().child(first_section(
-            "This Mac",
-            stack().gap_1().child(note(text(&self.state, "hostName"))),
-            cx,
-        ));
+        let devices = array(&self.state, "devices");
+        let pending = array(&self.state, "pending");
+        let mut view = stack().gap_4();
         view = messages(view, &self.state, &["pairingError", "pairingMessage"], cx);
         if !text(&self.state, "pairingError").is_empty() {
             view = view.child(self.action(
@@ -716,107 +824,174 @@ impl MacSettings {
                 cx,
             ));
         }
-        let mut trusted = stack().gap_1();
-        let devices = array(&self.state, "devices");
-        if !devices.iter().any(|phone| phone["revoked"] != true) {
-            trusted = trusted.child(note(if self.flag("pairingFresh") {
-                "No paired devices yet."
-            } else {
-                "Paired devices are unavailable."
-            }));
-        }
-        for phone in devices.iter().filter(|phone| phone["revoked"] != true) {
-            trusted = trusted.child(self.device(phone, cx));
-        }
-        view = view.child(settings_section("Paired devices", trusted, cx));
-        let pending = array(&self.state, "pending");
         for phone in pending {
             let id = text(phone, "id");
             let disabled = self.flag("pairingBusy") || !self.flag("pairingFresh") || expired(phone);
-            let request = stack().id(SharedString::from(format!("pairing-{id}"))).child(heading(format!("Connect {}?",text(phone,"label"))))
-                .child(note("Match this code on your device before connecting."))
-                .child(note(text(phone,"verification")).text_xl().font_weight(FontWeight::SEMIBOLD))
-                .child(note(expiry(phone)))
-                .child(div().flex().gap_2()
-                    .child(self.action(format!("approve-{id}"),"Connect",json!({"action":"approve","key":id,"verification":phone["verification"]}),disabled,cx).primary())
-                    .child(self.action(format!("reject-{id}"),"Reject",json!({"action":"reject","key":id,"verification":phone["verification"]}),disabled,cx)));
-            view = view.child(request);
-        }
-        if pending.is_empty() {
-            let offer = &self.state["offer"];
-            if offer.is_object() {
-                if expired(offer) || offer["expired"] == true {
-                    view = view.child(note("Pairing code expired. Create a new code below."));
-                } else {
-                    if let Some(qr) = &self.qr {
-                        view = view.child(
-                            div()
-                                .bg(rgb(0xffffff))
-                                .p_3()
-                                .w(px(204.))
-                                .child(img(qr.clone()).size(px(180.))),
-                        );
-                    }
-                    view = view
-                        .child(note(
-                            "Scan in Wonder on your iPhone or iPad, or copy and paste the pairing link.",
-                        ))
-                        .child(note(text(offer, "origin")))
+            view = view.child(
+                card(cx).id(SharedString::from(format!("pairing-{id}"))).child(
+                    stack()
+                        .gap_2()
+                        .p_4()
                         .child(
-                            note(text(offer, "code"))
-                                .text_xl()
+                            note(format!("Connect {}?", text(phone, "label")))
+                                .role(Role::Heading)
                                 .font_weight(FontWeight::SEMIBOLD),
                         )
-                        .child(note(expiry(offer)))
+                        .child(muted("Check that this code matches your device.", cx))
                         .child(
-                            Button::new("copy-pairing")
-                                .label("Copy pairing link")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        text(&this.state["offer"], "url").to_owned(),
-                                    ));
-                                })),
-                        );
-                }
-            }
-            view = view.child(
-                self.action(
-                    "pair",
-                    "Pair Device",
-                    json!({"action":"pair"}),
-                    self.flag("pairingBusy") || !self.flag("remoteReady"),
-                    cx,
-                )
-                .primary(),
+                            note(text(phone, "verification"))
+                                .text_2xl()
+                                .font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(muted(expiry(phone), cx))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .pt_1()
+                                .child(
+                                    self.action(
+                                        format!("approve-{id}"),
+                                        "Connect",
+                                        json!({"action":"approve","key":id,"verification":phone["verification"]}),
+                                        disabled,
+                                        cx,
+                                    )
+                                    .primary(),
+                                )
+                                .child(self.action(
+                                    format!("reject-{id}"),
+                                    "Reject",
+                                    json!({"action":"reject","key":id,"verification":phone["verification"]}),
+                                    disabled,
+                                    cx,
+                                )),
+                        ),
+                ),
             );
         }
-        let revoked = devices
+        let offer = &self.state["offer"];
+        let live = offer.is_object() && !expired(offer) && offer["expired"] != true;
+        if pending.is_empty() && self.flag("remoteReady") {
+            let qr = self.qr.clone().filter(|_| live);
+            view = view.child(
+                card(cx).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .p_4()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .size(px(148.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(rgb(0xffffff))
+                                .rounded(px(8.))
+                                .children(qr.map(|qr| img(qr).size(px(132.)))),
+                        )
+                        .child(
+                            stack()
+                                .gap_1p5()
+                                .flex_1()
+                                .child(note(
+                                    "Pair an iPhone or iPad by scanning this code in Wonder.",
+                                ))
+                                .child(
+                                    note(if live {
+                                        text(offer, "code")
+                                    } else {
+                                        "––––"
+                                    })
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(muted(
+                                    if live {
+                                        expiry(offer).replace("Expires in", "New code in")
+                                    } else {
+                                        "Creating a code…".into()
+                                    },
+                                    cx,
+                                ))
+                                .child(
+                                    Button::new("copy-pairing")
+                                        .label("Copy Pairing Link")
+                                        .small()
+                                        .self_start()
+                                        .disabled(!live)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                text(&this.state["offer"], "url").to_owned(),
+                                            ));
+                                        })),
+                                ),
+                        ),
+                ),
+            );
+        }
+        let mut trusted: Vec<AnyElement> = Vec::new();
+        let active: Vec<&Value> = devices
+            .iter()
+            .filter(|phone| phone["revoked"] != true)
+            .collect();
+        if active.is_empty() {
+            trusted.push(
+                form_row(
+                    if self.flag("pairingFresh") {
+                        "No paired devices yet"
+                    } else {
+                        "Paired devices are unavailable"
+                    },
+                    None,
+                    div(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+        for phone in active {
+            trusted.push(self.device(phone, cx).into_any_element());
+        }
+        view = view.child(
+            section("Paired devices", None, group(cx, trusted), cx).when(
+                !self.flag("remoteReady") && pending.is_empty(),
+                |view| {
+                    view.child(
+                        muted(
+                            "Pairing needs remote access. Connect Tailscale on this Mac first.",
+                            cx,
+                        )
+                        .px_3(),
+                    )
+                },
+            ),
+        );
+        let revoked: Vec<&Value> = devices
             .iter()
             .filter(|phone| phone["revoked"] == true)
-            .count();
-        if revoked > 0 {
-            view = view.child(
-                Button::new("revoked-devices")
-                    .label(format!(
-                        "{} revoked devices ({revoked})",
-                        if self.revoked_expanded {
-                            "Hide"
-                        } else {
-                            "Show"
-                        }
-                    ))
-                    .ghost()
-                    .self_start()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.revoked_expanded = !this.revoked_expanded;
-                        cx.notify();
-                    })),
-            );
+            .collect();
+        if !revoked.is_empty() {
+            let mut list = vec![disclosure(
+                "revoked-devices",
+                format!("Revoked devices ({})", revoked.len()),
+                None,
+                self.revoked_expanded,
+                cx.listener(|this, _, _, cx| {
+                    this.revoked_expanded = !this.revoked_expanded;
+                    cx.notify();
+                }),
+                cx,
+            )
+            .into_any_element()];
             if self.revoked_expanded {
-                for phone in devices.iter().filter(|phone| phone["revoked"] == true) {
-                    view = view.child(self.device(phone, cx));
+                for phone in revoked {
+                    list.push(self.device(phone, cx).into_any_element());
                 }
             }
+            view = view.child(group(cx, list));
         }
         view
     }
@@ -824,36 +999,14 @@ impl MacSettings {
         let id = text(phone, "id").to_owned();
         let label = text(phone, "label").to_owned();
         let seen = last_seen(phone);
-        let mut view = stack()
-            .py_3()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        let view = div()
+            .flex()
+            .flex_col()
             .id(SharedString::from(format!("device-{id}")));
-        let mut line = div().flex().items_center().justify_between().gap_3().child(
-            stack()
-                .flex_1()
-                .child(note(label.clone()))
-                .child(note(seen.clone()).text_color(cx.theme().muted_foreground)),
-        );
-        if phone["revoked"] != true {
-            let target = id.clone();
-            line = line.child(
-                Button::new(SharedString::from(format!("device-details-{id}")))
-                    .label("Details")
-                    .accessibility_label(format!("Details for {label}, {seen}"))
-                    .disabled(self.disabled() || self.flag("pairingBusy"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.device_details = if this.device_details.as_deref() == Some(&target) {
-                            None
-                        } else {
-                            Some(target.clone())
-                        };
-                        cx.notify();
-                    })),
-            );
-        }
         if phone["revoked"] == true {
-            line = line.child(
+            return view.child(form_row(
+                label.clone(),
+                Some(seen),
                 self.action(
                     format!("forget-{id}"),
                     "",
@@ -863,165 +1016,238 @@ impl MacSettings {
                 )
                 .icon(IconName::Close)
                 .ghost()
+                .small()
                 .accessibility_label(format!("Remove {label} from revoked devices"))
                 .tooltip("Remove from list"),
-            );
+                cx,
+            ));
         }
-        view = view.child(line);
-        if self.device_details.as_deref() == Some(&id) {
-            let target = id.clone();
-            let name = label.clone();
-            view = view.child(
-                stack()
-                    .gap_2()
-                    .child(row("Device name", &label))
-                    .child(row("Paired", &date_label(text(phone, "pairedAt"))))
-                    .child(row("Last connected", &date_label(text(phone, "lastSeen"))))
-                    .child(row(
-                        "Remote access",
-                        if self.flag("remoteReady") {
-                            "Available"
-                        } else {
-                            "Unavailable"
-                        },
-                    ))
-                    .child(
-                        Button::new(format!("revoke-{id}"))
-                            .label("Revoke device")
-                            .self_start()
-                            .disabled(
-                                self.disabled()
-                                    || self.flag("pairingBusy")
-                                    || !self.flag("pairingFresh"),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.revoke = Some((target.clone(), name.clone()));
-                                cx.notify();
-                            })),
-                    ),
-            );
+        let expanded = self.device_details.as_deref() == Some(&id);
+        let target = id.clone();
+        let mut view = view.child(disclosure(
+            format!("device-details-{id}"),
+            label.clone(),
+            Some(seen),
+            expanded,
+            cx.listener(move |this, _, _, cx| {
+                this.revoke = None;
+                this.device_details = if this.device_details.as_deref() == Some(&target) {
+                    None
+                } else {
+                    Some(target.clone())
+                };
+                cx.notify();
+            }),
+            cx,
+        ));
+        if !expanded {
+            return view;
         }
-        if self
+        let details = stack().gap_1p5().px_3().pb_3().pl(px(36.));
+        let confirming = self
             .revoke
             .as_ref()
-            .is_some_and(|(selected, _)| selected == &id)
-        {
-            view=view.child(stack().py_2().child(heading(format!("Revoke {label}?")))
-                .child(note("This ends the device’s sessions and prevents it from reconnecting. Pair it again to restore access."))
-                .child(div().flex().gap_2().child(self.action("confirm-revoke","Revoke device",json!({"action":"revoke","key":id}),self.flag("pairingBusy"),cx))
-                    .child(Button::new("cancel-revoke").label("Cancel").on_click(cx.listener(|this,_,_,cx|{this.revoke=None;cx.notify();})))));
-        }
+            .is_some_and(|(selected, _)| selected == &id);
+        let details = if confirming {
+            details
+                .child(note(format!("Revoke {label}?")).font_weight(FontWeight::SEMIBOLD))
+                .child(muted(
+                    "It disconnects now and needs to pair again to return.",
+                    cx,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .pt_1()
+                        .child(
+                            Button::new("cancel-revoke")
+                                .label("Cancel")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.revoke = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            self.action(
+                                "confirm-revoke",
+                                "Revoke",
+                                json!({"action":"revoke","key":id}),
+                                self.flag("pairingBusy"),
+                                cx,
+                            )
+                            .danger()
+                            .small(),
+                        ),
+                )
+        } else {
+            let name = label.clone();
+            let target = id.clone();
+            details
+                .child(detail_row(
+                    "Paired",
+                    &date_label(text(phone, "pairedAt")),
+                    cx,
+                ))
+                .child(detail_row(
+                    "Last connected",
+                    &date_label(text(phone, "lastSeen")),
+                    cx,
+                ))
+                .child(
+                    Button::new(format!("revoke-{id}"))
+                        .label("Revoke…")
+                        .small()
+                        .self_start()
+                        .mt_1()
+                        .accessibility_label(format!("Revoke {label}"))
+                        .disabled(
+                            self.disabled()
+                                || self.flag("pairingBusy")
+                                || !self.flag("pairingFresh"),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.revoke = Some((target.clone(), name.clone()));
+                            cx.notify();
+                        })),
+                )
+        };
+        view = view.child(details);
         view
     }
     fn mac_permissions(&self, setup: bool, cx: &Context<Self>) -> Div {
-        let mut rows = stack().gap_1();
+        let mut rows: Vec<AnyElement> = Vec::new();
         for (action, label, key) in [
-            ("screen", "Screen recording", "screen"),
-            ("input", "Computer control", "input"),
+            ("screen", "Screen Recording", "screen"),
+            ("input", "Accessibility", "input"),
             ("computer-full-disk", "Full Disk Access", "fullDisk"),
         ] {
-            let status = if key == "fullDisk" {
-                "Check in Settings"
-            } else {
-                match text(&self.state, key) {
-                    "Enabled" => "Allowed",
-                    "Unavailable" => "Unavailable",
-                    "Checking…" => "Checking…",
-                    "Needs attention" => "Needs attention",
-                    _ => "Not allowed",
-                }
+            let purpose = match key {
+                "screen" => "See your screen from a paired device",
+                "input" => "Control the mouse and keyboard",
+                _ => "Open files anywhere on this Mac",
             };
-            rows = rows.child(
-                div()
-                    .id(action)
+            let status = if key == "fullDisk" {
+                ""
+            } else {
+                text(&self.state, key)
+            };
+            let trailing = match status {
+                "Enabled" => div()
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(note(label).flex_1())
-                    .child(note(status).text_color(if status == "Allowed" {
-                        cx.theme().success
-                    } else {
-                        cx.theme().muted_foreground
-                    }))
-                    .child(
-                        self.action(
-                            format!("manage-{action}"),
-                            "Manage",
-                            json!({"action":action,"setup":setup}),
-                            self.flag("permissionsBusy") || status == "Unavailable",
-                            cx,
-                        )
-                        .accessibility_label(format!("Manage {label}")),
-                    ),
+                    .gap_1()
+                    .text_color(cx.theme().success)
+                    .child(Icon::new(IconName::CircleCheck).small())
+                    .child(note("Allowed")),
+                "Unavailable" | "Checking…" => div().child(muted(status, cx)),
+                _ => div().child(
+                    self.action(
+                        format!("manage-{action}"),
+                        if key == "fullDisk" {
+                            "Open Settings…"
+                        } else {
+                            "Allow…"
+                        },
+                        json!({"action":action,"setup":setup}),
+                        self.flag("permissionsBusy"),
+                        cx,
+                    )
+                    .small()
+                    .accessibility_label(format!("Manage {label}")),
+                ),
+            };
+            rows.push(
+                div()
+                    .id(action)
+                    .child(form_row(label, Some(purpose.into()), trailing, cx))
+                    .into_any_element(),
             );
         }
-        let paired_control = messages(
-            stack()
-                .child(self.toggle(
-                    "allow-control-from-paired-devices",
-                    "Allow control from paired devices",
-                    "allowControlFromPairedDevices",
-                    "allow-control-from-paired-devices",
-                    cx,
-                ))
-                .child(note(
-                    "Paired devices can control this Mac without another approval. Turn this off or unpair a device to revoke access; Stop ends the current session.",
-                )),
-            &self.state,
-            &["controlPreferencesMessage"],
-            cx,
+        let permissions = section("Permissions", None, group(cx, rows), cx).children(
+            (!text(&self.state, "permissionsMessage").is_empty())
+                .then(|| muted(text(&self.state, "permissionsMessage"), cx).px_3()),
         );
-        let section = first_section("Mac access", rows, cx)
-            .child(paired_control)
-            .children(
-                (!text(&self.state, "permissionsMessage").is_empty())
-                    .then(|| note(text(&self.state, "permissionsMessage"))),
-            );
-        section.when(!setup, |view| view.child(self.shared_display_choice(cx)))
+        let control_detail = match text(&self.state, "controlPreferencesMessage") {
+            "" => "Paired devices can control this Mac without asking each time.",
+            message => message,
+        };
+        let mut control = vec![form_row(
+            "Allow control from paired devices",
+            Some(control_detail.into()),
+            self.toggle(
+                "allow-control-from-paired-devices",
+                "Allow control from paired devices",
+                "allowControlFromPairedDevices",
+                "allow-control-from-paired-devices",
+                cx,
+            ),
+            cx,
+        )
+        .into_any_element()];
+        if !setup {
+            control.push(self.shared_display_row(cx).into_any_element());
+        }
+        stack().gap_5().child(permissions).child(section(
+            "Remote control",
+            None,
+            group(cx, control),
+            cx,
+        ))
+    }
+    fn shared_display_row(&self, cx: &Context<Self>) -> Div {
+        let displays = array(&self.state, "sharedDisplays");
+        let saved = text(&self.state, "preferredDisplayID").to_owned();
+        let saved_connected = displays.iter().any(|display| text(display, "id") == saved);
+        let mut options = vec![(String::new(), "Main display".to_owned())];
+        options.extend(displays.iter().map(|display| {
+            (
+                text(display, "id").to_owned(),
+                text(display, "name").to_owned(),
+            )
+        }));
+        let current = if saved_connected {
+            saved.clone()
+        } else {
+            String::new()
+        };
+        let current_label = options
+            .iter()
+            .find(|(id, _)| *id == current)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_default();
+        let model = cx.entity().downgrade();
+        let picker = Button::new("shared-display")
+            .label(current_label.clone())
+            .small()
+            .dropdown_caret(true)
+            .disabled(self.disabled())
+            .accessibility_label(format!("Screen to share: {current_label}"))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                for (id, name) in options.clone() {
+                    let model = model.clone();
+                    let checked = id == current;
+                    menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                        move |_, _, cx| {
+                            let _ = model.update(cx, |this, cx| {
+                                this.send(json!({"action":"shared-display","key":id}), cx)
+                            });
+                        },
+                    ));
+                }
+                menu
+            });
+        form_row(
+            "Screen to share",
+            (!saved.is_empty() && !saved_connected)
+                .then(|| "Your saved screen is disconnected, so the main display is shared until it returns.".into()),
+            picker,
+            cx,
+        )
     }
     fn shared_display_choice(&self, cx: &Context<Self>) -> Div {
-        let displays = array(&self.state, "sharedDisplays");
-        let saved = text(&self.state, "preferredDisplayID");
-        let saved_connected = displays.iter().any(|display| text(display, "id") == saved);
-        let mut choices = stack().gap_1().child(
-            self.action(
-                "share-main-display",
-                "Use main display automatically",
-                json!({"action":"shared-display","key":""}),
-                false,
-                cx,
-            )
-            .selected(saved.is_empty() || !saved_connected)
-            .accessibility_label("Use main display automatically"),
-        );
-        for display in displays {
-            let identifier = text(display, "id");
-            let name = text(display, "name");
-            let label = if display["main"] == true {
-                format!("{name} (currently main)")
-            } else {
-                name.to_owned()
-            };
-            choices = choices.child(
-                self.action(
-                    format!("share-display-{identifier}"),
-                    label.clone(),
-                    json!({"action":"shared-display","key":identifier}),
-                    false,
-                    cx,
-                )
-                .selected(saved == identifier)
-                .accessibility_label(format!("Share {label}")),
-            );
-        }
-        first_section("Screen to share", choices, cx)
-            .child(note("If your chosen screen is unavailable, Wonder uses the main display."))
-            .when(!saved.is_empty() && !saved_connected, |view| {
-                view.child(note("The saved screen is disconnected, so Wonder will use the main display until it returns."))
-            })
+        group(cx, vec![self.shared_display_row(cx).into_any_element()])
     }
     fn permissions(&self, cx: &Context<Self>) -> Div {
         self.mac_permissions(false, cx)
@@ -1064,9 +1290,7 @@ impl MacSettings {
             2=>view.when(!self.flag("remoteReady"), |v| v.child(note("Connect Tailscale on both devices before pairing. You can finish setup and pair later.")).child(self.connection(cx)))
                 .child(self.devices(cx)),
             _=>view.child(note("Wonder stays in your menu bar so your chats and Projects remain available."))
-                .child(self.toggle("setup-login","Launch at login","login","login",cx))
-                .child(note(text(&self.state,"loginMessage")))
-                .when(self.flag("loginApproval"), |v| v.child(self.action("setup-login-settings","Open Login Settings…",json!({"action":"login-settings"}),false,cx)))
+                .child(self.login_row("setup-login", cx))
                 .child(note("Remote access needs this Mac to be awake and online. Closing setup keeps Wonder running; Quit Wonder stops active agent work and remote access.")),
         };
         view
@@ -1131,49 +1355,67 @@ impl MacSettings {
 impl Render for MacSettings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pages = [
-            (Page::Status, "General"),
-            (Page::Devices, "Devices"),
-            (Page::Access, "Access"),
-            (Page::About, "About"),
+            (Page::Status, "General", IconName::Settings),
+            (Page::Devices, "Devices", IconName::Network),
+            (Page::Access, "Access", IconName::Eye),
+            (Page::About, "About", IconName::Info),
         ];
         let selected = pages
             .iter()
-            .position(|(page, _)| *page == self.page)
+            .position(|(page, _, _)| *page == self.page)
             .unwrap_or(0);
         let (sunrise, sunset) = if cx.theme().is_dark() {
-            (rgb(0x382b1d), rgb(0x4b3020))
+            (rgb(0x2d241b), rgb(0x382a1e))
         } else {
-            (rgb(0xfff3c5), rgb(0xffd6a3))
+            (rgb(0xfff7de), rgb(0xffe9c8))
         };
         let nav = stack()
-            .gap_1()
-            .w(px(154.))
+            .gap_0p5()
+            .w(px(176.))
+            .flex_shrink_0()
             .h_full()
-            .p_3()
+            .px_3()
+            .pt_4()
             .bg(linear_gradient(
-                160.,
+                170.,
                 linear_color_stop(sunrise, 0.),
                 linear_color_stop(sunset, 1.),
             ))
             .child(
-                stack()
+                div()
+                    .flex()
+                    .items_center()
                     .gap_2()
                     .px_2()
-                    .pt_2()
-                    .pb_5()
-                    .child(img(self.brand_icon.clone()).size(px(44.)).rounded(px(10.)))
-                    .child(note("Wonder").text_lg().font_weight(FontWeight::SEMIBOLD)),
+                    .pb_4()
+                    .child(img(self.brand_icon.clone()).size(px(28.)).rounded(px(7.)))
+                    .child(note("Wonder").text_base().font_weight(FontWeight::SEMIBOLD)),
             )
-            .children(pages.iter().enumerate().map(|(index, (page, label))| {
-                let page = *page;
-                Button::new(SharedString::from(format!("settings-page-{index}")))
-                    .ghost()
-                    .label(*label)
-                    .selected(self.page == page)
-                    .w_full()
-                    .justify_start()
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
-            }));
+            .children(
+                pages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (page, label, icon))| {
+                        let page = *page;
+                        Button::new(SharedString::from(format!("settings-page-{index}")))
+                            .ghost()
+                            .selected(self.page == page)
+                            .w_full()
+                            .h(px(30.))
+                            .accessibility_label(*label)
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(Icon::new(icon.clone()).small())
+                                    .child(*label),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx)))
+                    }),
+            )
+            .child(div().flex_1())
+            .child(self.appearance(cx));
         let content = if !self.received {
             stack().child(note(if self.error.is_some() {
                 "Settings are unavailable."
@@ -1221,9 +1463,9 @@ impl Render for MacSettings {
                                 .child(
                                     note(pages[selected].1)
                                         .role(Role::Heading)
-                                        .text_lg()
+                                        .text_xl()
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .pb_3(),
+                                        .pb_4(),
                                 )
                                 .when(self.error.is_some(), |v| {
                                     v.child(
@@ -1241,7 +1483,7 @@ impl Render for MacSettings {
                                     self.pending.is_some()
                                         || self.flag("serviceBusy")
                                         || self.flag("pairingBusy"),
-                                    |v| v.child(note("Updating…")),
+                                    |v| v.child(muted("Updating…", cx).pb_2()),
                                 )
                                 .when(
                                     self.error.is_some() || !text(&self.state, "error").is_empty(),
@@ -1279,36 +1521,133 @@ pub fn route_setup(cx: &mut App) -> bool {
     false
 }
 
-fn settings_section(title: &str, content: Div, cx: &App) -> Div {
-    first_section(title, content, cx)
-        .border_t_1()
-        .border_color(cx.theme().border)
-}
-fn first_section(title: &str, content: Div, _: &App) -> Div {
+/// A titled settings group, optionally with an action beside its title.
+fn section(title: &str, action: Option<Button>, content: Div, cx: &App) -> Div {
     stack()
-        .gap_2()
-        .pt_3()
+        .gap_1p5()
         .child(
-            note(title.to_owned())
-                .role(Role::Heading)
-                .font_weight(FontWeight::SEMIBOLD),
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_3()
+                .min_h(px(24.))
+                .child(
+                    note(title.to_owned())
+                        .role(Role::Heading)
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .children(action),
         )
         .child(content)
 }
+/// A rounded surface; `group` adds separators between its rows.
+fn card(cx: &App) -> Div {
+    div().flex().flex_col().min_w_0().rounded(px(10.)).bg(cx
+        .theme()
+        .secondary
+        .opacity(if cx.theme().is_dark() { 0.55 } else { 0.4 }))
+}
+fn group(cx: &App, rows: Vec<AnyElement>) -> Div {
+    card(cx).children(rows.into_iter().enumerate().map(|(index, row)| {
+        div()
+            .when(index > 0, |row| {
+                row.border_t_1().border_color(separator(cx))
+            })
+            .child(row)
+    }))
+}
+fn separator(cx: &App) -> Hsla {
+    cx.theme().border.opacity(0.8)
+}
+/// One settings row: label (and optional detail) on the left, control on the right.
+fn form_row(
+    label: impl Into<SharedString>,
+    detail: Option<String>,
+    trailing: impl IntoElement,
+    cx: &App,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .px_3()
+        .py_2()
+        .min_h(px(44.))
+        .child(
+            stack()
+                .gap_0p5()
+                .flex_1()
+                .child(note(label.into()))
+                .children(detail.map(|detail| muted(detail, cx).text_xs())),
+        )
+        .child(div().flex_shrink_0().child(trailing))
+}
+/// A full-width row that expands or collapses the content below it.
+fn disclosure(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    detail: Option<String>,
+    expanded: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Button {
+    let label = label.into();
+    Button::new(id.into())
+        .ghost()
+        .w_full()
+        .h_auto()
+        .min_h(px(44.))
+        .py_2()
+        .px_3()
+        .rounded(px(10.))
+        .accessibility_label(match &detail {
+            Some(detail) => format!("{label}, {detail}"),
+            None => label.to_string(),
+        })
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_3()
+                .items_center()
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .small()
+                    .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    stack()
+                        .gap_0p5()
+                        .flex_1()
+                        .min_w_0()
+                        .child(note(label.clone()))
+                        .children(detail.map(|detail| muted(detail, cx).text_xs())),
+                ),
+        )
+        .on_click(on_click)
+}
+fn detail_row(label: &str, value: &str, cx: &App) -> Div {
+    div()
+        .flex()
+        .justify_between()
+        .gap_3()
+        .child(muted(label.to_owned(), cx).text_xs())
+        .child(note(value.to_owned()).text_xs())
+}
+#[track_caller]
+fn muted(value: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
+    note(value).text_color(cx.theme().muted_foreground)
+}
 fn stack() -> Div {
     div().flex().flex_col().gap_3().min_w_0()
-}
-fn heading(value: impl Into<SharedString>) -> Stateful<Div> {
-    let value = value.into();
-    note(value)
-        .role(Role::Heading)
-        .mt_3()
-        .pt_4()
-        .pb_2()
-        .border_t_1()
-        .border_color(rgb(0x808080).opacity(0.18))
-        .text_base()
-        .font_weight(FontWeight::SEMIBOLD)
 }
 #[track_caller]
 fn note(value: impl Into<SharedString>) -> Stateful<Div> {

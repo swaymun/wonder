@@ -20,6 +20,7 @@ pub(super) fn open(model: Entity<MacSettings>, cx: &mut App) {
         },
         |window, cx| {
             window.set_window_title("Set up Wonder");
+            crate::appearance::follow_system(window);
             let view = cx.new(|cx| {
                 let subscription = cx.observe(&target, |_, _, cx| cx.notify());
                 SetupWindow {

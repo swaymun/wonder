@@ -53,6 +53,18 @@ pub fn sync(window: Option<&mut Window>, cx: &mut App) {
     }
 }
 
+/// Keep the System preference in step with macOS while a window is open.
+pub fn follow_system(window: &mut Window) {
+    window
+        .observe_window_appearance(|window, cx| {
+            if *cx.global::<Preference>() == Preference::System {
+                Theme::sync_system_appearance(Some(window), cx);
+                cx.refresh_windows();
+            }
+        })
+        .detach();
+}
+
 // Wonder's authored palettes apply to the existing native component system.
 pub fn init(cx: &mut App) {
     let light = config(false);

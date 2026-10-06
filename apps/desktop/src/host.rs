@@ -42,6 +42,7 @@ fn open_settings(cx: &mut App) {
         },
         |window, cx| {
             window.set_window_title("Wonder Settings");
+            appearance::follow_system(window);
             window.focus(&model.read(cx).focus.clone(), cx);
             cx.new(|cx| Root::new(model, window, cx))
         },
