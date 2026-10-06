@@ -4,8 +4,8 @@ On October 6, Wonder Testing Release 1.0 (42) and production Release 1.0 (98)
 uploaded and processed successfully. Read-only App Store Connect checks confirmed
 both builds in internal Owner Beta with its existing tester. TestFlight installation
 remains unverified. Mac 1.0.123 is Developer ID signed, notarized and stapled;
-installation and post-update checks are pending. Installed Mac 1.0.122 remains
-healthy and ready. No external beta review, public enrollment or new public Mac
+installed 1.0.123 passes health, readiness, signature and Gatekeeper checks.
+Existing Project, conversation and paired-device records are preserved. No external beta review, public enrollment or new public Mac
 binary release was requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
@@ -19,7 +19,7 @@ Keep the Mac awake and online while using it remotely.
 | --- | --- |
 | iPhone and iPad | Production Release 1.0 (98) uploaded, processed and in internal Owner Beta with its existing tester. External state is Ready for Beta Submission; no review submitted. Built from clean, pushed source (`12dbcb72`) with Diagnostics fixtures absent from the exported binary. TestFlight installation remains unverified. |
 | Wonder Testing | Blue Release 1.0 (42) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 98. Build 41 is superseded by 42. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.123 is Developer ID signed, notarized, stapled and Gatekeeper accepted. Installation and post-update preservation checks are pending; installed 1.0.122 still passes `/healthz` and `/readyz`. Fresh-Mac pairing and private-permission acceptance remain open. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.123 is Developer ID signed, notarized, stapled and Gatekeeper accepted. Installed to `/Applications/Wonder.app`; `/healthz`, `/readyz`, the visible Ready state, signature and staple checks passed. All Project, conversation and paired-device identifiers from the pre-update snapshot remain present. Installer rollback bundles were removed. Fresh-Mac pairing and private-permission acceptance remain open. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives and the Mac app came from clean, pushed `12dbcb72`; selected source is exported and audited separately from private release evidence. Third-party components retain their own licenses. |
 
 Testing 42, production 98 and Mac 1.0.123 add automatic takeover of idle Claude
