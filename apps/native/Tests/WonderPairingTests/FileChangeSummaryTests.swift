@@ -115,6 +115,68 @@ final class FileChangeSummaryTests: XCTestCase {
     }
 }
 
+extension FileChangeSummaryTests {
+    func testConversationEditsAccumulateCompletedResponsesInFirstEditOrder() throws {
+        func edit(_ id: String, _ turn: String, _ path: String, _ patch: String) -> ReadRow {
+            let value = ReadItem(id: id, type: "fileChange", state: "completed", text: nil, createdAt: "1000",
+                payload: ["diffs": .array([.object(["path": .string(path), "diff": .string(patch)])])])
+            return ReadRow(id: id, author: "Bot", text: "", isUser: false, timestamp: "1000", turnId: turn, item: value)
+        }
+        func reply(_ id: String, _ turn: String) -> ReadRow {
+            ReadRow(id: id, author: "Bot", text: "Done", isUser: false, timestamp: "2000", turnId: turn)
+        }
+        let rows = [edit("a", "one", "A.swift", "-old\n+new"), reply("r1", "one"),
+                    edit("b", "two", "B.swift", "+added"), edit("c", "two", "A.swift", "+more"), reply("r2", "two"),
+                    edit("d", "three", "C.swift", "+running")]
+        let entries = ChatFeedEntry.grouping(rows)
+        let all = try XCTUnwrap(ResponseEditedFiles.conversation(entries: entries, activeTurnIDs: ["three"]))
+        XCTAssertEqual(all.files.map(\.path), ["A.swift", "B.swift"], "A running response's edits are not receipts yet")
+        XCTAssertEqual(all.files[0].patches, ["-old\n+new", "+more"])
+        XCTAssertEqual(all.files[0].additions, 2)
+        XCTAssertEqual(all.files[0].deletions, 1)
+        XCTAssertNil(ResponseEditedFiles.conversation(entries: ChatFeedEntry.grouping([reply("r", "x")]), activeTurnIDs: []))
+    }
+}
+
+final class SyntaxHighlighterTests: XCTestCase {
+    private func roles(_ path: String, _ lines: [String]) -> [[String: SyntaxRole]] {
+        guard var highlighter = SyntaxHighlighter(path: path) else { return [] }
+        return lines.map { line in
+            let spans = highlighter.spans(line)
+            XCTAssertEqual(spans.map(\.text).joined(), line, "Highlighting never changes the text")
+            return Dictionary(spans.compactMap { span in span.role.map { (span.text, $0) } }, uniquingKeysWith: { first, _ in first })
+        }
+    }
+
+    func testSwiftLineColoursKeywordsStringsTypesAttributesNumbersAndComments() {
+        let line = roles("Sources/View.swift", [#"@MainActor let title: String = "Hi // not" + 42 // note"#])[0]
+        XCTAssertEqual(line["@MainActor"], .attribute)
+        XCTAssertEqual(line["let"], .keyword)
+        XCTAssertEqual(line["String"], .type)
+        XCTAssertEqual(line[#""Hi // not""#], .string)
+        XCTAssertEqual(line["42"], .number)
+        XCTAssertEqual(line["// note"], .comment)
+    }
+
+    func testBlockCommentsCarryAcrossLinesUntilReset() {
+        var highlighter = SyntaxHighlighter(path: "main.ts")!
+        _ = highlighter.spans("const a = 1 /* starts")
+        XCTAssertEqual(highlighter.spans("still inside */ let b").first, SyntaxSpan(text: "still inside */", role: .comment))
+        _ = highlighter.spans("/* open")
+        highlighter.reset()
+        XCTAssertEqual(highlighter.spans("let c").first?.role, .keyword)
+    }
+
+    func testLanguageSpecificQuotesAndComments() {
+        XCTAssertEqual(roles("lib.rs", ["fn f<'a>(x: &'a str) -> char { 'z' }"])[0]["'z'"], .string)
+        XCTAssertNil(roles("lib.rs", ["fn f<'a>(x: &'a str)"])[0]["'a>(x: &'"], "A lifetime is not a string")
+        XCTAssertEqual(roles("run.sh", ["echo $# # count"])[0]["# count"], .comment)
+        XCTAssertEqual(roles("query.sql", ["SELECT id FROM users"])[0]["SELECT"], .keyword)
+        XCTAssertEqual(roles("Index.html", [#"<div class="x">text</div>"#])[0]["div"], .keyword)
+        XCTAssertNil(SyntaxHighlighter(path: "notes.txt"))
+    }
+}
+
 final class DiffLineTests: XCTestCase {
     func testUnifiedDiffNumbersLinesFromHunkHeaders() {
         let lines = DiffLine.parse("--- a/A.swift\n+++ b/A.swift\n@@ -10,3 +10,3 @@\n keep\n-old\n+new\n tail\n")

@@ -3407,13 +3407,13 @@ struct ConversationTimeline {
     let retainedTurnIDs: Set<String>
     let attachmentIDs: [String]
     let turns: [String: ReadTurn]
-    let editedFiles: [String: ResponseEditedFiles]
+    let conversationEdits: ResponseEditedFiles?
 
     init(chatID: String, rows: [ReadRow], activeTurnIDs: Set<String>, activeTurnID: String?, focusedRowID: String?, turns: [ReadTurn]?) {
         self.rows = rows
         previous = Dictionary(zip(rows.dropFirst(), rows).map { ($0.0.id, $0.1) }, uniquingKeysWith: { first, _ in first })
         entries = ChatFeedEntry.grouping(rows, activeTurnIDs: activeTurnIDs, focusedRowID: focusedRowID)
-        editedFiles = ResponseEditedFiles.footers(entries: entries, activeTurnIDs: activeTurnIDs)
+        conversationEdits = ResponseEditedFiles.conversation(entries: entries, activeTurnIDs: activeTurnIDs)
         latestActivityEntryIDs = ChatFeedEntry.latestActivityEntryIDs(entries)
         latestActiveActivityEntryID = ChatFeedEntry.latestActivityEntryID(entries, turnID: activeTurnID)
         var byID: [String: ReadTurn] = [:]

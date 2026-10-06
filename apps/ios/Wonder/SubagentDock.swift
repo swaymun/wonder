@@ -221,9 +221,6 @@ struct ProjectSubagentTranscriptView: View {
             .navigationTitle(child.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Text("Read only").font(.caption).foregroundStyle(.secondary)
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                         .accessibilityIdentifier("project-subagent-sheet-done")
@@ -351,6 +348,52 @@ struct FilesDock: View {
         .accessibilityValue(isPresented ? "Open" : "Closed")
         .accessibilityAddTraits(isPresented ? .isSelected : [])
         .accessibilityHint(isPresented ? "Return to the conversation" : "Browse this conversation's files and changes")
+    }
+}
+
+/// Every saved edit in the conversation; opens and closes their review.
+struct EditedFilesDock: View {
+    let summary: ResponseEditedFiles
+    let isPresented: Bool
+    let toggle: () -> Void
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    private var additions: Int? {
+        summary.files.allSatisfy { $0.additions != nil } ? summary.files.reduce(0) { $0 + ($1.additions ?? 0) } : nil
+    }
+    private var deletions: Int? {
+        summary.files.allSatisfy { $0.deletions != nil } ? summary.files.reduce(0) { $0 + ($1.deletions ?? 0) } : nil
+    }
+    private var title: String {
+        summary.files.count == 1 ? "Edited \(summary.files[0].name)" : "Edited \(summary.files.count) files"
+    }
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text")
+                // Large text keeps the composer row on screen; the label still reads the counts.
+                if typeSize.isAccessibilitySize {
+                } else if additions == nil && deletions == nil {
+                    Text(summary.files.count.formatted())
+                } else {
+                    if let additions { Text("+\(additions)").foregroundStyle(DiffColors.added(scheme)) }
+                    if let deletions { Text("−\(deletions)").foregroundStyle(DiffColors.removed(scheme)) }
+                }
+            }
+            .monospacedDigit()
+            .lineLimit(1)
+            .fixedSize()
+            .modifier(ComposerStatusPill())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("response-edits-pill")
+        .accessibilityLabel(([title] + [additions.map { "\($0) added lines" }, deletions.map { "\($0) removed lines" }].compactMap { $0 })
+            .joined(separator: ", "))
+        .accessibilityValue(isPresented ? "Open" : "Closed")
+        .accessibilityAddTraits(isPresented ? .isSelected : [])
+        .accessibilityHint(isPresented ? "Return to the conversation" : "Show the files edited in this chat")
     }
 }
 

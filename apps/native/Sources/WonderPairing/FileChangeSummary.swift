@@ -144,6 +144,31 @@ public struct ResponseEditedFiles: Sendable {
             return (entry, Self(turnID: turn, files: files))
         }, uniquingKeysWith: { first, _ in first })
     }
+
+    /// Every completed edit in the conversation, one file per path in the order
+    /// it was first edited. Each file keeps its responses' patches in order; line
+    /// counts add up the edits rather than diffing the file's first and last state.
+    public static func conversation(entries: [ChatFeedEntry], activeTurnIDs: Set<String>) -> Self? {
+        let footers = footers(entries: entries, activeTurnIDs: activeTurnIDs)
+        let responses = entries.compactMap { footers[$0.id] }
+        guard let last = responses.last else { return nil }
+        var files: [ResponseEditedFile] = []
+        var indices: [String: Int] = [:]
+        for file in responses.flatMap(\.files) {
+            guard let index = indices[file.path] else {
+                indices[file.path] = files.count
+                files.append(file)
+                continue
+            }
+            var merged = files[index]
+            merged.additions = merged.additions.flatMap { prior in file.additions.map { prior + $0 } }
+            merged.deletions = merged.deletions.flatMap { prior in file.deletions.map { prior + $0 } }
+            merged.patches += file.patches
+            merged.partial = merged.partial || file.partial
+            files[index] = merged
+        }
+        return Self(turnID: last.turnID, files: files)
+    }
 }
 
 /// One line of a unified diff, numbered for display. Hunk headers without

@@ -918,6 +918,7 @@ struct ConversationView: View {
         let answeredQuestions = answeredQuestionsOutsideTimeline(timeline)
         let disclosureRevision = disclosureEntries
         let implementablePlanID = planToImplement(in: timeline)
+        let latestEdits = prepared.conversationEdits ?? editedFilesReview?.summary
         #if WONDER_DIAGNOSTICS
         if workspaceRequest == nil {
             let _ = DiagnosticJournal.shared.record(DiagnosticEvent(operation: "timeline.prepare", durationMs: (ProcessInfo.processInfo.systemUptime - timelineStart) * 1000, count: UInt64(timeline.count)))
@@ -926,8 +927,7 @@ struct ConversationView: View {
         VStack(spacing: 0) {
             Group {
             if let review = editedFilesReview, review.scope == model.assignmentScope {
-                ResponseEditedFilesReview(request: review) { editedFilesReview = nil }
-                    .id(review.summary.turnID)
+                ResponseEditedFilesReview(summary: latestEdits ?? review.summary, selectedPath: review.selectedPath)
             } else if let request = workspaceRequest {
                 WorkspaceBrowser(model: model, chat: chat, attachmentIDs: request.attachmentIDs,
                                  initialFilePath: request.initialFilePath, preferredRootID: request.preferredRootID,
@@ -967,11 +967,6 @@ struct ConversationView: View {
                                     implementablePlanID: implementablePlanID
                                 )
                                 groupWork(for: entry.rows.first)
-                                if let edits = prepared.editedFiles[entry.id] {
-                                    ResponseEditedFilesFooter(summary: edits) { file in
-                                        editedFilesReview = EditedFilesReviewRequest(summary: edits, selectedPath: file?.path, scope: model.assignmentScope)
-                                    }
-                                }
                                 ForEach(readOnly ? [] : settledQuestions(for: entry, timeline: timeline)) { question in
                                     AsyncQuestionRow(model: model, chat: chat, question: question)
                                 }
@@ -1053,7 +1048,7 @@ struct ConversationView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             if !readOnly {
-                composer
+                composer(latestEdits: latestEdits)
                     .background(Color(uiColor: .systemBackground))
             }
         }
@@ -1311,7 +1306,7 @@ struct ConversationView: View {
             Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44)
         }
     }
-    private var composer: some View {
+    private func composer(latestEdits: ResponseEditedFiles?) -> some View {
             let attachments = composerAttachments
             return VStack(alignment: .leading, spacing: 8) {
                 DictationControls(controller: model.dictation, model: model, chat: chat)
@@ -1357,6 +1352,14 @@ struct ConversationView: View {
                             FilesDock(isPresented: workspaceRequest != nil) {
                                 if workspaceRequest == nil { workspaceRequest = WorkspaceBrowserRequest() }
                                 else { workspaceRequest = nil }
+                            }
+                            if let latestEdits {
+                                EditedFilesDock(summary: latestEdits, isPresented: editedFilesReview != nil) {
+                                    if editedFilesReview == nil {
+                                        workspaceRequest = nil
+                                        editedFilesReview = EditedFilesReviewRequest(summary: latestEdits, selectedPath: nil, scope: model.assignmentScope)
+                                    } else { editedFilesReview = nil }
+                                }
                             }
                             Spacer(minLength: 0)
                             if let goal = model.goals[chat.id], (chat.botId != nil || model.isProject(chat)),
@@ -5581,120 +5584,54 @@ private struct EditedFilesReviewRequest {
     let scope: String
 }
 
-/// "N files +A −D" below a response; opens and closes its saved changes.
-private struct EditedFilesPill: View {
-    let summary: ResponseEditedFiles
-    let isOpen: Bool
-    let toggle: () -> Void
-    @Environment(\.colorScheme) private var scheme
-    private var additions: Int? {
-        summary.files.allSatisfy { $0.additions != nil } ? summary.files.reduce(0) { $0 + ($1.additions ?? 0) } : nil
-    }
-    private var deletions: Int? {
-        summary.files.allSatisfy { $0.deletions != nil } ? summary.files.reduce(0) { $0 + ($1.deletions ?? 0) } : nil
-    }
-    private var title: String {
-        summary.files.count == 1 ? "Edited \(summary.files[0].name)" : "Edited \(summary.files.count) files"
-    }
-    @Environment(\.dynamicTypeSize) private var typeSize
-    private var counts: some View {
-        HStack(spacing: 8) {
-            if let additions { Text("+\(additions)").foregroundStyle(DiffColors.added(scheme)) }
-            if let deletions { Text("−\(deletions)").foregroundStyle(DiffColors.removed(scheme)) }
-            Image(systemName: isOpen ? "chevron.up" : "chevron.down")
-                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-        }.fixedSize()
-    }
-    var body: some View {
-        Button(action: toggle) {
-            Group {
-                if typeSize.isAccessibilitySize {
-                    // Large text: the name gets its own line instead of a crushed capsule.
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(title).lineLimit(2).truncationMode(.middle)
-                        counts
-                    }
-                    .padding(12)
-                    .background(Color(uiColor: .secondarySystemFill), in: RoundedRectangle(cornerRadius: 16))
-                } else {
-                    HStack(spacing: 8) {
-                        Image(systemName: "doc.text").foregroundStyle(.secondary)
-                        Text(title).lineLimit(1).truncationMode(.middle)
-                        counts
-                    }
-                    .padding(.horizontal, 12).frame(minHeight: 36)
-                    .background(Color(uiColor: .secondarySystemFill), in: Capsule())
-                }
-            }
-            .font(.subheadline.monospacedDigit())
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .frame(minHeight: 44)
-        .accessibilityLabel(([title] + [additions.map { "\($0) added lines" }, deletions.map { "\($0) removed lines" }].compactMap { $0 })
-            .joined(separator: ", "))
-        .accessibilityValue(isOpen ? "Open" : "Closed")
-        .accessibilityHint(isOpen ? "Return to the chat" : "Show the changes saved with this response")
-    }
-}
-
 enum DiffColors {
     static func added(_ scheme: ColorScheme) -> Color { scheme == .dark ? .green : Color(red: 0.1, green: 0.42, blue: 0.2) }
     static func removed(_ scheme: ColorScheme) -> Color { scheme == .dark ? .red : Color(red: 0.75, green: 0.12, blue: 0.16) }
 }
 
-private struct ResponseEditedFilesFooter: View {
-    let summary: ResponseEditedFiles
-    let open: (ResponseEditedFile?) -> Void
-    var body: some View {
-        EditedFilesPill(summary: summary, isOpen: false) { open(nil) }
-            .padding(.top, 4)
-            .frame(maxWidth: 640, alignment: .leading)
-            .accessibilityIdentifier("response-edits-open:" + summary.turnID)
-    }
-}
-
-/// Saved changes of one response. Its pill closes it; each file expands in
-/// place to its diff, unified or side by side.
+/// Every saved edit in the conversation. The composer's edits pill closes it;
+/// each file expands in place to its diff, unified or side by side.
 private struct ResponseEditedFilesReview: View {
-    let request: EditedFilesReviewRequest
-    let close: () -> Void
+    let summary: ResponseEditedFiles
     @State private var expanded: Set<String>
-    @State private var prepared: [String: PreparedDiff] = [:]
+    /// Keyed by path; a file's diff is prepared again when later edits add patches.
+    @State private var prepared: [String: (patches: Int, diff: PreparedDiff)] = [:]
     @AppStorage("wonder.diff.layout") private var layout = DiffLayout.automatic
     @Environment(\.horizontalSizeClass) private var sizeClass
-    init(request: EditedFilesReviewRequest, close: @escaping () -> Void) {
-        self.request = request; self.close = close
-        let first = request.selectedPath ?? (request.summary.files.count == 1 ? request.summary.files.first?.path : nil)
+    init(summary: ResponseEditedFiles, selectedPath: String?) {
+        self.summary = summary
+        let first = selectedPath ?? (summary.files.count == 1 ? summary.files.first?.path : nil)
         _expanded = State(initialValue: first.map { [$0] } ?? [])
     }
     private var split: Bool { layout.split(sizeClass) }
+    private var pending: [ResponseEditedFile] {
+        summary.files.filter { expanded.contains($0.path) && !$0.patches.isEmpty && prepared[$0.path]?.patches != $0.patches.count }
+    }
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                EditedFilesPill(summary: request.summary, isOpen: true, toggle: close)
-                    .accessibilityIdentifier("response-edits-close")
                 Spacer(minLength: 0)
                 DiffLayoutPicker(layout: $layout, split: split)
             }
             .padding(.horizontal, 16)
-            DiffDocument(sections: request.summary.files.map { file in
-                DiffDocument.Section(id: file.path, title: FileChangeSummary.relativePath(file.path) != nil ? file.path : file.name,
+            DiffDocument(sections: summary.files.map { file in
+                let ready = prepared[file.path].flatMap { $0.patches == file.patches.count ? $0.diff : nil }
+                return DiffDocument.Section(id: file.path, title: FileChangeSummary.relativePath(file.path) != nil ? file.path : file.name,
                                      additions: file.additions, deletions: file.deletions,
-                                     expanded: expanded.contains(file.path), diff: prepared[file.path],
-                                     note: file.patches.isEmpty ? "This response saved the filename but no text diff."
+                                     expanded: expanded.contains(file.path), diff: ready,
+                                     note: file.patches.isEmpty ? DiffDocument.filenameOnlyNote
                                          : file.partial ? "Only the first part of this diff was saved. Review the full change on your Mac." : nil,
-                                     identifier: "response-edited-file:" + request.summary.turnID + ":" + file.path)
+                                     identifier: "response-edited-file:" + file.path)
             }, split: split) { path in
                 if expanded.contains(path) { expanded.remove(path) } else { expanded.insert(path) }
             }
         }
-        .task(id: expanded) {
-            for file in request.summary.files where expanded.contains(file.path) && prepared[file.path] == nil && !file.patches.isEmpty {
-                let patches = file.patches
-                let diff = await Task.detached(priority: .userInitiated) { PreparedDiff(patches: patches) }.value
+        .task(id: pending.map { $0.path + "#\($0.patches.count)" }) {
+            for file in pending {
+                let patches = file.patches, path = file.path
+                let diff = await Task.detached(priority: .userInitiated) { PreparedDiff(patches: patches, path: path) }.value
                 guard !Task.isCancelled else { return }
-                prepared[file.path] = diff
+                prepared[path] = (patches.count, diff)
             }
         }
         .accessibilityElement(children: .contain)
@@ -5730,7 +5667,10 @@ struct PreparedDiff: Sendable {
     let longestLine: Int
     let numberDigits: Int
     let oversized: Bool
-    init(patches: [String]) {
+    /// Coloured code for added, removed and context lines, keyed by line id.
+    /// Empty for file types without a highlighter.
+    let highlighted: [Int: AttributedString]
+    init(patches: [String], path: String? = nil) {
         let size = patches.reduce(0) { $0 + $1.utf8.count }
         oversized = size > 512 * 1024
         text = oversized ? "" : patches.enumerated().map { index, patch in
@@ -5743,6 +5683,49 @@ struct PreparedDiff: Sendable {
         rows = SplitDiffRow.pair(lines)
         longestLine = lines.reduce(0) { max($0, $1.text.count) }
         numberDigits = max(2, String(lines.reduce(0) { max($0, $1.oldNumber ?? 0, $1.newNumber ?? 0) }).count)
+        let parsed = lines
+        highlighted = path.flatMap { SyntaxHighlighter(path: $0) }.map { Self.highlight(parsed, with: $0) } ?? [:]
+    }
+
+    private static func highlight(_ lines: [DiffLine], with highlighter: SyntaxHighlighter) -> [Int: AttributedString] {
+        var highlighter = highlighter
+        var result: [Int: AttributedString] = [:]
+        for line in lines {
+            let sign: String
+            switch line.kind {
+            case .added: sign = "+ "
+            case .removed: sign = "− "
+            case .context: sign = "  "
+            case .hunk, .note: highlighter.reset(); continue
+            }
+            var text = AttributedString(sign)
+            for span in highlighter.spans(line.text) {
+                var run = AttributedString(span.text)
+                if let role = span.role { run.foregroundColor = SyntaxColors.color(role) }
+                text += run
+            }
+            result[line.id] = text
+        }
+        return result
+    }
+}
+
+/// Xcode-like colours that follow light and dark appearance.
+enum SyntaxColors {
+    static func color(_ role: SyntaxRole) -> Color {
+        let (light, dark): (UInt32, UInt32) = switch role {
+        case .keyword: (0x9B2393, 0xFF7AB2)
+        case .string: (0xC41A16, 0xFF8170)
+        case .comment: (0x5D6C79, 0x7F8C98)
+        case .number: (0x1C00CF, 0xD9C97C)
+        case .type: (0x0B4F79, 0x6BDFFF)
+        case .attribute: (0x815F03, 0xFFA14F)
+        }
+        return Color(uiColor: UIColor { traits in
+            let value = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(red: CGFloat((value >> 16) & 0xFF) / 255, green: CGFloat((value >> 8) & 0xFF) / 255,
+                           blue: CGFloat(value & 0xFF) / 255, alpha: 1)
+        })
     }
 }
 
@@ -5758,6 +5741,7 @@ private struct DiffDocument: View {
         let note: String?
         let identifier: String
     }
+    static let filenameOnlyNote = "Only the filename was saved for this edit."
     let sections: [Section]
     let split: Bool
     var showsHeaders = true
@@ -5800,7 +5784,7 @@ private struct DiffDocument: View {
         .accessibilityIdentifier(section.identifier)
     }
     @ViewBuilder private func content(_ section: Section, column: CGFloat) -> some View {
-        if let note = section.note, section.diff == nil || section.note?.hasPrefix("This response") == true {
+        if let note = section.note, section.diff == nil || note == Self.filenameOnlyNote {
             Text(note).font(.footnote).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 8)
         } else if let diff = section.diff {
             if diff.oversized {
@@ -5814,11 +5798,11 @@ private struct DiffDocument: View {
                     .accessibilityIdentifier("workspace-diff-text")
                 if split {
                     ForEach(diff.rows) { row in
-                        SplitDiffRowView(row: row, digits: diff.numberDigits, column: column).accessibilityHidden(true)
+                        SplitDiffRowView(row: row, digits: diff.numberDigits, column: column, highlighted: diff.highlighted).accessibilityHidden(true)
                     }
                 } else {
                     ForEach(diff.lines) { line in
-                        DiffLineView(line: line, digits: diff.numberDigits).accessibilityHidden(true)
+                        DiffLineView(line: line, digits: diff.numberDigits, highlighted: diff.highlighted[line.id]).accessibilityHidden(true)
                     }
                 }
                 if let note = section.note {
@@ -5834,12 +5818,13 @@ private struct DiffDocument: View {
 private struct DiffLineView: View {
     let line: DiffLine
     let digits: Int
+    let highlighted: AttributedString?
     @Environment(\.colorScheme) private var scheme
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             DiffNumber(value: line.kind == .added ? nil : line.oldNumber, digits: digits)
             DiffNumber(value: line.kind == .removed ? nil : line.newNumber, digits: digits)
-            DiffText(line: line)
+            DiffText(line: line, highlighted: highlighted)
         }
         .background(DiffBackground.color(line.kind, scheme))
     }
@@ -5849,10 +5834,11 @@ private struct SplitDiffRowView: View {
     let row: SplitDiffRow
     let digits: Int
     let column: CGFloat
+    let highlighted: [Int: AttributedString]
     @Environment(\.colorScheme) private var scheme
     var body: some View {
         if let line = row.left, line == row.right, line.kind == .hunk || line.kind == .note {
-            DiffText(line: line).frame(width: column * 2, alignment: .leading)
+            DiffText(line: line, highlighted: nil).frame(width: column * 2, alignment: .leading)
                 .background(DiffBackground.color(line.kind, scheme))
         } else {
             HStack(alignment: .top, spacing: 1) {
@@ -5865,7 +5851,7 @@ private struct SplitDiffRowView: View {
     private func side(_ line: DiffLine?, number: Int?) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             DiffNumber(value: line == nil ? nil : number, digits: digits)
-            if let line { DiffText(line: line) } else { Color.clear.frame(maxWidth: .infinity, minHeight: 1) }
+            if let line { DiffText(line: line, highlighted: highlighted[line.id]) } else { Color.clear.frame(maxWidth: .infinity, minHeight: 1) }
         }
         .frame(width: column - 0.5, alignment: .leading)
         .frame(maxHeight: .infinity, alignment: .top)
@@ -5887,9 +5873,13 @@ private struct DiffNumber: View {
 
 private struct DiffText: View {
     let line: DiffLine
-    var body: some View {
+    let highlighted: AttributedString?
+    private var plain: AttributedString {
         let sign: String = switch line.kind { case .added: "+"; case .removed: "−"; default: " " }
-        Text((line.kind == .hunk || line.kind == .note ? "" : sign + " ") + line.text)
+        return AttributedString((line.kind == .hunk || line.kind == .note ? "" : sign + " ") + line.text)
+    }
+    var body: some View {
+        Text(highlighted ?? plain)
             .font(.system(.footnote, design: .monospaced))
             .foregroundStyle(line.kind == .hunk || line.kind == .note ? Color.secondary : Color.primary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -5948,8 +5938,8 @@ struct WorkspaceDiffPreview: View {
                 if showState { Text(state).font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8) }
             }
             .task(id: diff) {
-                let diff = diff
-                prepared = await Task.detached(priority: .userInitiated) { PreparedDiff(patches: [diff]) }.value
+                let diff = diff, path = path
+                prepared = await Task.detached(priority: .userInitiated) { PreparedDiff(patches: [diff], path: path) }.value
             }
         }
     }

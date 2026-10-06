@@ -177,6 +177,7 @@ apps/native/Sources/WonderPairing/SavedConnections.swift
 apps/native/Sources/WonderPairing/Search.swift
 apps/native/Sources/WonderPairing/SendIntent.swift
 apps/native/Sources/WonderPairing/SigningIdentity.swift
+apps/native/Sources/WonderPairing/SyntaxHighlighting.swift
 apps/native/Sources/WonderPairing/WorkspaceMediaResourceLoader.swift
 apps/native/Tests/WonderComputerViewTests/ComputerReceiverTests.swift
 apps/native/Tests/WonderPairingTests/ActivityDisclosurePolicyTests.swift

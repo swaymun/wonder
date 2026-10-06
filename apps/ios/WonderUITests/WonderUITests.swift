@@ -563,7 +563,6 @@ import UIKit
         let transcript = app.scrollViews["project-subagent-transcript"]
         XCTAssertTrue(transcript.exists)
         XCTAssertEqual(transcript.textViews.count, 0, "Agent history has no direct-send composer")
-        XCTAssertTrue(app.staticTexts["Read only"].exists)
         retainMenuScreenshot(app, name: "Agent task read-only conversation")
         app.buttons["project-subagent-sheet-done"].tap()
         XCTAssertTrue(app.textViews["message-draft"].waitForExistence(timeout: 5))
@@ -609,7 +608,7 @@ import UIKit
         XCTAssertTrue(scout.waitForExistence(timeout: 5))
         XCTAssertEqual(scout.label, "Scout, Running")
         scout.tap()
-        XCTAssertTrue(app.staticTexts["Read only"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["project-subagent-sheet-done"].waitForExistence(timeout: 10))
         app.buttons["project-subagent-sheet-done"].tap()
         app.buttons["new-chat"].tap()
         openSidebarIfNeeded(app)
@@ -4192,7 +4191,7 @@ import UIKit
         retainMenuScreenshot(app, name: "Markdown reply", fullScreen: true)
     }
 
-    func testResponseEditedFilesBelowAnswerAndDiffKeepComposerInLandscape() throws {
+    func testResponseEditedFilesPillBesideFilesAndDiffKeepComposerInLandscape() throws {
         try checkResponseEditedFiles(landscape: true, large: false)
     }
 
@@ -4210,22 +4209,24 @@ import UIKit
         app.launch()
         XCUIDevice.shared.orientation = landscape ? .landscapeLeft : .portrait
         if landscape { XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5)); XCTAssertGreaterThan(app.frame.width, app.frame.height) }
-        let pill = app.buttons["response-edits-open:turn"]
+        // The latest response's edits sit in the composer row, after Computer and Files.
+        let pill = app.buttons["response-edits-pill"]
         XCTAssertTrue(pill.waitForExistence(timeout: 10))
-        revealControl(pill, in: anyElement(app, identifier: "conversation-scroll"))
-        let answer = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "The tests passed. I updated the chat labels")).firstMatch
-        XCTAssertTrue(answer.exists)
-        XCTAssertGreaterThanOrEqual(pill.frame.minY, answer.frame.maxY - 1)
+        XCTAssertTrue(pill.isHittable)
+        let files = app.buttons["conversation-files-pill"]
+        XCTAssertGreaterThanOrEqual(pill.frame.minX, files.frame.maxX - 1)
+        XCTAssertLessThanOrEqual(pill.frame.maxX, app.frame.maxX, "The edits pill stays on screen at every text size")
+        XCTAssertLessThanOrEqual(pill.frame.maxY, app.textViews["message-draft"].frame.minY + 1)
+        XCTAssertEqual(pill.value as? String, "Closed")
         XCTAssertTrue(pill.label.hasPrefix("Edited "), pill.label)
         XCTAssertTrue(pill.label.contains("added lines"), pill.label)
         retainMenuScreenshot(app, name: large ? "Edited files pill at large text" : "Edited files pill in landscape", fullScreen: true)
         pill.tap()
-        // The review opens with its own pill, which closes it again; files expand in place.
-        let close = app.buttons["response-edits-close"]
-        XCTAssertTrue(close.waitForExistence(timeout: 5))
-        XCTAssertEqual(close.value as? String, "Open")
+        // The same pill closes the review again; files expand in place.
+        XCTAssertTrue(anyElement(app, identifier: "response-edits-review").waitForExistence(timeout: 5))
+        XCTAssertEqual(pill.value as? String, "Open")
         XCTAssertFalse(app.buttons["response-edits-back"].exists, "The review has no back arrow")
-        let first = app.buttons["response-edited-file:turn:Sources/ChatView.swift"]
+        let first = app.buttons["response-edited-file:Sources/ChatView.swift"]
         XCTAssertTrue(first.waitForExistence(timeout: 5))
         first.tap()
         XCTAssertEqual(first.value as? String, "Expanded")
@@ -4237,7 +4238,7 @@ import UIKit
         first.tap()
         XCTAssertEqual(first.value as? String, "Collapsed")
         let document = anyElement(app, identifier: "diff-document")
-        let last = app.buttons["response-edited-file:turn:Sources/Long folder name/Accessible layout.swift"]
+        let last = app.buttons["response-edited-file:Sources/Long folder name/Accessible layout.swift"]
         for _ in 0..<8 where !last.isHittable { document.swipeUp() }
         XCTAssertTrue(last.waitForExistence(timeout: 5))
         last.tap()
@@ -4255,13 +4256,12 @@ import UIKit
             retainMenuScreenshot(app, name: large ? "Side-by-side diff at large text" : "Side-by-side diff", fullScreen: true)
             layout.buttons.element(boundBy: 0).tap()
         }
-        close.tap()
+        pill.tap()
         XCTAssertTrue(anyElement(app, identifier: "response-edits-review").waitForNonExistence(timeout: 5))
-        XCTAssertTrue(pill.waitForExistence(timeout: 5))
+        XCTAssertEqual(pill.value as? String, "Closed")
         // Files replaces the saved-diff review instead of opening behind it.
         pill.tap()
-        XCTAssertTrue(close.waitForExistence(timeout: 5))
-        let files = app.buttons["conversation-files-pill"]
+        XCTAssertTrue(anyElement(app, identifier: "response-edits-review").waitForExistence(timeout: 5))
         files.tap()
         XCTAssertTrue(anyElement(app, identifier: "response-edits-review").waitForNonExistence(timeout: 5))
         XCTAssertEqual(files.value as? String, "Open")
