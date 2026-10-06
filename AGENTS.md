@@ -152,7 +152,9 @@ forward rules for an older feature or workflow.
   standing-authorized when needed.** Follow [RELEASING.md](RELEASING.md#mac-artifact)
   with the next monotonic build version, notarize with the App Store Connect API
   key above, install with `scripts/install-signed-app.py` and record the version in
-  `BETA_STATUS.md`. Publishing a GitHub release or appcast still needs approval.
+  `BETA_STATUS.md`. Once the installed app passes its health checks, delete the
+  installer's rollback bundles (`~/.wonder/Backups/signed-update-*`); do not keep
+  old app backups. Publishing a GitHub release or appcast still needs approval.
 - Use `profile:diagnostics` only for a specifically requested Diagnostics build.
   Read [apps/ios/TESTING.md](apps/ios/TESTING.md) and
   [fastlane/USAGE.md](fastlane/USAGE.md) for channel/signing details.
