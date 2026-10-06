@@ -211,30 +211,9 @@ struct ManagedBotListMutationState {
             nativeHistoryFailures.insert(chat.id)
         }
     }
-    /// Claude conversations also open in Claude on the Mac, which shows replies
-    /// to Wonder's messages only after the chat is reopened there.
+    /// Claude conversations open in Claude Code in a terminal on the Mac, which
+    /// keeps Wonder's messages waiting until it is exited there.
     @Published private(set) var nativeOpenElsewhere: Set<String> = []
-    @Published private(set) var deliveringNow: Set<String> = []
-    /// Sends a message waiting while the chat is open, idle, in Claude on the
-    /// Mac: the Mac closes that chat there first, so reopening it continues
-    /// after this message.
-    func deliverNow(_ chat: ChatSummary) async {
-        guard isProject(chat), let saved = connection, !accessEnded, !deliveringNow.contains(chat.id) else { return }
-        let scope = assignmentScope
-        deliveringNow.insert(chat.id)
-        defer { if scope == assignmentScope { deliveringNow.remove(chat.id) } }
-        struct Empty: Decodable, Sendable {}
-        do {
-            let _: Empty = try await api.request("/api/v1/project-conversations/\(Self.escape(chat.id))/deliver-now",
-                origin: saved.origin, body: Data("{}".utf8), credential: saved.credential)
-        } catch PairingFailure.response(409) {
-            guard scope == assignmentScope else { return }
-            controlErrors[chat.id] = "Claude is working on this chat on your Mac, or it is open in a terminal there. Your message sends when Claude finishes or the chat is closed."
-        } catch {
-            guard scope == assignmentScope else { return }
-            controlErrors[chat.id] = "The message couldn’t be sent now. It still waits for Claude on your Mac."
-        }
-    }
     /// The newest native turn seen per conversation, from the cheap activity check.
     private var nativeActivity: [String: String] = [:]
     private var nativeActivityUnsupported: Set<String> = []

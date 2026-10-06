@@ -897,10 +897,6 @@ pub fn router(state: AppState) -> Router {
             get(projects::conversation).patch(projects::update_conversation),
         )
         .route(
-            "/api/v1/project-conversations/{conversation_id}/deliver-now",
-            post(projects::deliver_now),
-        )
-        .route(
             "/api/v1/project-conversations/{conversation_id}/subagents",
             get(project_subagents::list),
         )
@@ -1838,6 +1834,9 @@ async fn process_app_server_notification(
         }
     }
     if method == "turn/completed" {
+        if let Some(message) = message.as_ref() {
+            projects::release_to_desktop(state, &message.conversation_id);
+        }
         if let Some(message) = message.as_ref().filter(|_| ownership.is_none()) {
             let artifacts = record_workspace_artifacts(state, message)
                 .await

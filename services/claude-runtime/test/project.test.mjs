@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { Sessions } from "../sessions.mjs";
 import { ClaudeBridge } from "../bridge.mjs";
@@ -21,7 +22,7 @@ async function fixture(t, { transcripts = {} } = {}) {
   const sessions = await new Sessions(join(root, "sessions")).initialize();
   const frames = [], inputs = [], capturedOptions = [];
   const sdk = {
-    tool: () => ({}), createSdkMcpServer: () => ({}),
+    tool: (name, _description, _schema, handler) => ({ name, handler }), createSdkMcpServer: ({ tools }) => ({ tools }),
     listSessions: async ({ dir }) => Object.entries(transcripts).filter(([, s]) => s.cwd === dir)
       .map(([sessionId, s]) => ({ sessionId, summary: s.title, lastModified: s.updatedAt, cwd: s.cwd })),
     getSessionInfo: async (id, { dir }) => transcripts[id]?.cwd === dir ? { sessionId: id, cwd: dir, lastModified: 1 } : undefined,
@@ -33,7 +34,10 @@ async function fixture(t, { transcripts = {} } = {}) {
           inputs.push(input);
           yield { type: "system", subtype: "init", session_id: options.sessionId ?? options.resume };
           await gate.current?.promise;
-          yield { type: "result", subtype: "success" };
+          yield { type: "result", subtype: "success" }; // A leftover background notice.
+          yield { type: "assistant", user_message_uuid: input.uuid,
+            message: { id: "reply", content: [{ type: "text", text: "Answered the new prompt." }] } };
+          yield { type: "result", subtype: "success", user_message_uuid: input.uuid };
           return;
         }
       })();
@@ -64,6 +68,9 @@ test("project turns use the native coding preset and name the transcript entry a
   assert.deepEqual(options.mcpServers, {});
   assert.equal(options.sessionId, thread.sessionId);
   assert.equal(f.inputs[0].uuid, turn.id);
+  const saved = f.sessions.get(thread.id).turns[0];
+  assert.equal(saved.status, "completed");
+  assert.ok(saved.items.some(item => item.type === "agentMessage" && item.text === "Answered the new prompt."));
   // A project cannot be moved to another folder by a later turn.
   await assert.rejects(f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "x" }],
     wonderProject: { cwd: f.secondary } }), /keeps its working folder/);
@@ -371,4 +378,29 @@ test("turns and agent tasks from before a compaction stay visible", async t => {
   await writeFile(join(folder, `${id}.jsonl`), rows.concat([{ type: "user", uuid: "u3", parentUuid: "u2", message: { content: "More" } }]).map(r => JSON.stringify(r)).join("\n") + "\n");
   assert.deepEqual((await files.earlierMessages(id, cwd, "u3")).map(m => m.uuid), ["u1", "a1", "a2", "r1", "r2", "u2"]);
   assert.deepEqual(await files.earlierMessages("not-a-uuid", cwd, "u2"), []);
+});
+
+// Project dispatch must retain the registered adapter, not replace its MCP
+// servers with an empty inventory. The peer is local and runs no model work.
+test("Projects retain the host-owned native computer adapter", async t => {
+  const f = await fixture(t);
+  f.gate.current = Promise.withResolvers();
+  const { thread } = await f.bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku",
+    wonderPolicy: f.policy, wonderProject: f.project });
+  await f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Fixture" }],
+    config: { "mcp_servers.cua_repl": { enabled: true, command: process.execPath,
+      args: [fileURLToPath(new URL("fixtures/native-cua-peer.mjs", import.meta.url)), join(f.root, "peer.jsonl")],
+      enabled_tools: ["js", "js_reset", "turn_ended"] } } });
+  try {
+    while (!f.capturedOptions.length) await new Promise(resolve => setImmediate(resolve));
+    const options = f.capturedOptions[0];
+    assert.equal(options.systemPrompt.preset, "claude_code");
+    assert.match(options.systemPrompt.append, /fresh runtime/);
+    assert.ok(options.mcpServers.cua_repl.tools.some(tool => tool.name === "js"));
+    const input = { code: "fixture" };
+    const ctx = { toolUseID: "owned", mcpServer: { name: "cua_repl", source: "sdk" } };
+    assert.equal((await options.canUseTool("mcp__cua_repl__js", input, ctx)).behavior, "allow");
+    assert.equal((await options.canUseTool("mcp__cua_repl__js", input,
+      { ...ctx, mcpServer: { name: "cua_repl", source: "user" } })).behavior, "deny");
+  } finally { f.gate.current.resolve(); await f.bridge.active.get(thread.id)?.finished; }
 });

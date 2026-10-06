@@ -1,12 +1,12 @@
 # Wonder beta status
 
-The signed public Mac beta remains available. On October 4, Wonder Testing
-Release 1.0 (31) uploaded, processed and passed the read-only lane check
-for automatic Owner Beta availability. Production Release 1.0 (88) uploaded
-and processed successfully. TestFlight installation and production tester
-availability remain unverified. Mac 1.0.111 is signed, notarized and installed
-locally with Mac dictation removed. No external beta review, public enrollment
-or new public Mac binary release was requested.
+On October 6, Wonder Testing Release 1.0 (42) and production Release 1.0 (98)
+uploaded and processed successfully. Read-only App Store Connect checks confirmed
+both builds in internal Owner Beta with its existing tester. TestFlight installation
+remains unverified. Mac 1.0.123 is Developer ID signed, notarized and stapled;
+installation and post-update checks are pending. Installed Mac 1.0.122 remains
+healthy and ready. No external beta review, public enrollment or new public Mac
+binary release was requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -17,10 +17,27 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (95) uploaded and Apple reports processing complete. Built from clean, pushed source (`797c1ebf`) with Diagnostics fixtures absent from the exported binary. Tester availability and TestFlight installation remain unverified. |
-| Wonder Testing | Blue Release 1.0 (38) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 95. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local 1.0.122 (redesigned Settings with an automatically refreshing pairing code and a single named main display in the screen menu) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; `/healthz` and `/readyz` passed after install. Settings pages were checked against a local test bridge, and General on the installed app. Fresh-Mac pairing and private-permission acceptance remain open. |
-| Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives came from the same clean, pushed source; all 614 selected public source files matched bytes and executable modes. Third-party components retain their own licenses. |
+| iPhone and iPad | Production Release 1.0 (98) uploaded, processed and in internal Owner Beta with its existing tester. External state is Ready for Beta Submission; no review submitted. Built from clean, pushed source (`12dbcb72`) with Diagnostics fixtures absent from the exported binary. TestFlight installation remains unverified. |
+| Wonder Testing | Blue Release 1.0 (42) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 98. Build 41 is superseded by 42. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.123 is Developer ID signed, notarized, stapled and Gatekeeper accepted. Installation and post-update preservation checks are pending; installed 1.0.122 still passes `/healthz` and `/readyz`. Fresh-Mac pairing and private-permission acceptance remain open. |
+| Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives and the Mac app came from clean, pushed `12dbcb72`; selected source is exported and audited separately from private release evidence. Third-party components retain their own licenses. |
+
+Testing 42, production 98 and Mac 1.0.123 add automatic takeover of idle Claude
+desktop chats when sending from Wonder. Busy desktop turns and chats open in a
+terminal still wait. Queued background-task notices no longer complete the new
+prompt without an answer; session failures still surface as failures. Claude
+Projects now have a separate, saved **Run outside sandbox** option, off by default
+and effective only with Full access outside Plan mode, and use the connected Mac
+computer-use integration. No existing conversation was opted in automatically.
+
+Verification: 353 daemon tests passed (one existing ignored test), 66 Claude bridge
+tests passed, 13 storage checks and 11 native Project checks passed. The terminal
+waiting and command-access settings tests each passed on both iPhone and iPad
+simulators (four tests, zero failures), including the iPad's Accessibility XXL
+setting. Fresh simulator screenshots are in the private master workbook. Live
+handoff, actual unsandboxed commands, provider-driven computer actions, physical
+devices and TestFlight installation remain unverified; no live model work was
+started for these checks.
 
 Testing 37, production 94 and Mac 1.0.119 add new Claude chats started in Wonder to the Claude desktop app, deliver messages sent from Wonder to a Claude session started on the Mac (a leftover task notice no longer ends the turn early) and hold them while that chat is open in Claude on the Mac; Send now closes the idle desktop chat first, list Claude agent tasks (including
 those launched before a compaction), keep earlier Claude turns after a

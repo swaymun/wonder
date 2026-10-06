@@ -3352,8 +3352,57 @@ import UIKit
         retainMenuScreenshot(app, name: "Project turn running on the Mac")
     }
 
-    // A Claude chat open in Claude on the Mac keeps its own copy of the
-    // conversation, so a message waits; Send now is an explicit choice.
+    // A Claude chat open in Claude Code in a terminal keeps its own copy of
+    // the conversation, so a message waits until it is exited there.
+    // The access menu owns the opt-in interaction; changing it saves through
+    // the existing settings endpoint and never sends a message.
+    func testProjectUnsandboxedCommandsRequireFullAccess() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
+        app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
+            "-diagnostics-chat-layout-unsaved", "-diagnostics-project-read"]
+        app.launch()
+        openSidebarIfNeeded(app)
+        let row = app.buttons["pinned-thread:claude:read-fixture"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+        let access = app.buttons["project-composer-access"]
+        XCTAssertTrue(access.waitForExistence(timeout: 15)); access.tap()
+        let option = app.buttons["project-unsandboxed-commands"]
+        func revealOption() {
+            let menu = app.collectionViews.containing(.button, identifier: "access-choice-fullAccess").firstMatch
+            for _ in 0..<10 {
+                guard menu.exists else { return }
+                let visible = menu.frame.intersection(app.frame)
+                if option.exists && visible.contains(option.frame) { return }
+                let origin = app.coordinate(withNormalizedOffset: .zero)
+                origin.withOffset(CGVector(dx: visible.midX, dy: visible.midY))
+                    .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: visible.midX, dy: visible.minY + 20)))
+                Thread.sleep(forTimeInterval: 0.4)
+            }
+        }
+        revealOption()
+        XCTAssertTrue(option.waitForExistence(timeout: 5))
+        XCTAssertFalse(option.isEnabled)
+        app.buttons["access-choice-fullAccess"].tap()
+        let full = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Bypass permissions"), object: access)
+        XCTAssertEqual(XCTWaiter.wait(for: [full], timeout: 10), .completed)
+        access.tap()
+        revealOption()
+        XCTAssertTrue(option.waitForExistence(timeout: 5) && option.isEnabled)
+        option.tap()
+        access.tap()
+        revealOption()
+        XCTAssertTrue(option.waitForExistence(timeout: 5))
+        XCTAssertTrue(option.label.contains("On"), option.label)
+        XCTAssertTrue(app.frame.contains(option.frame), "The saved option must be fully on screen")
+        retainMenuScreenshot(app, name: "Project commands outside the sandbox enabled")
+        option.tap()
+        access.tap()
+        revealOption()
+        XCTAssertTrue(option.waitForExistence(timeout: 5))
+        XCTAssertFalse(option.label.contains(": On"), option.label)
+    }
+
     func testMessageWaitsWhileClaudeChatIsOpenOnMac() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -3361,10 +3410,8 @@ import UIKit
         app.launch()
         let notice = anyElement(app, identifier: "open-elsewhere")
         XCTAssertTrue(notice.waitForExistence(timeout: 10))
-        let sendNow = app.buttons["open-elsewhere-send-now"]
-        XCTAssertTrue(sendNow.waitForExistence(timeout: 5) && sendNow.isHittable)
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "open in Claude on your Mac")).firstMatch.exists)
-        retainMenuScreenshot(app, name: "Message waiting while open in Claude on the Mac")
+        XCTAssertTrue(notice.label.contains("in a terminal on your Mac"), notice.label)
+        retainMenuScreenshot(app, name: "Message waiting while open in a terminal on the Mac")
     }
 
     func testProjectVideoPreviewStreamsAndReopensWithoutSending() throws {

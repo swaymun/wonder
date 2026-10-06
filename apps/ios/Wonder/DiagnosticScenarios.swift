@@ -405,6 +405,8 @@ enum DiagnosticSubagentFixture {
             state.childStatus = "completed"
             state.projectSubagentRosterFails = false
             state.projectServiceTier = "default"
+            state.projectAccessMode = "read_only"
+            state.projectUnsandboxed = false
             state.goalPresent = goalFixture
             state.goalObjective = "Prepare a reliable beta launch with the Scout helper."
             state.goalStatus = goalFixtureStatus
@@ -446,6 +448,8 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var projectUnread = true
         var projectArchived = false
         var projectServiceTier = "default"
+        var projectAccessMode = "read_only"
+        var projectUnsandboxed = false
         var archiveFailures = 1
         var questionResolved = false
         var connectedAppsUnavailable = false
@@ -562,13 +566,16 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                         if fail { finish(status: 503, body: Data("The archive could not be confirmed. Try again.".utf8)); return }
                     }
                     if let unread = fields["hasUnread"] as? Bool { Self.state.lock.withLock { Self.state.projectUnread = unread } }
+                    if let access = fields["accessMode"] as? String { Self.state.lock.withLock { Self.state.projectAccessMode = access } }
+                    if let enabled = fields["unsandboxedCommands"] as? Bool { Self.state.lock.withLock { Self.state.projectUnsandboxed = enabled } }
                     if let tier = fields["serviceTier"] as? String { Self.state.lock.withLock { Self.state.projectServiceTier = tier } }
                 }
                 finish(status: 200, body: json([
                     "conversationId": conversation, "projectId": "read-project", "projectName": "Read status",
                     "title": "Read status fixture", "family": family, "model": archiveFixture || speedFixture || DiagnosticSubagentFixture.projectFilesSendFixture ? "gpt-fixture" : "claude:sonnet", "effort": "high",
                     "serviceTier": speedFixture ? Self.state.lock.withLock { Self.state.projectServiceTier } as Any : NSNull(),
-                    "accessMode": "read_only", "workingFolder": "/fixture", "workingFolderName": "fixture",
+                    "accessMode": Self.state.lock.withLock { Self.state.projectAccessMode },
+                    "unsandboxedCommands": Self.state.lock.withLock { Self.state.projectUnsandboxed }, "workingFolder": "/fixture", "workingFolderName": "fixture",
                     "isPinned": true, "hasUnread": Self.state.lock.withLock { Self.state.projectUnread },
                     "hasNativeSession": archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture, "folderInProject": true, "claudeApproval": "ask", "planMode": false,
                     "isArchived": Self.state.lock.withLock { Self.state.projectArchived }

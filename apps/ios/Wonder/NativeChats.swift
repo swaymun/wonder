@@ -23,32 +23,18 @@ struct FailureDetails: View {
     }
 }
 
-/// A Claude chat open in Claude on the Mac keeps its conversation in memory
-/// there, so Wonder holds a message until Claude closes the chat (about 30
-/// minutes after its last use) or the owner sends it now, which closes the
-/// idle chat there first; reopening it continues after Wonder's turn.
+/// A Claude chat open in Claude Code in a terminal keeps its conversation in
+/// memory there, so Wonder holds a message until it is exited. Chats open in
+/// the Claude desktop app are taken over when a message is sent.
 private struct OpenOnMacNotice: View {
-    @ObservedObject var model: ConnectionModel
-    let chat: ChatSummary
     let waiting: Bool
     var body: some View {
         if waiting {
-            VStack(alignment: .leading, spacing: 4) {
-                Label("Waiting: this chat is open in Claude on your Mac. Your message sends when Claude closes it there, about 30 minutes after you last used it.",
-                      systemImage: "desktopcomputer")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("open-elsewhere")
-                Button {
-                    Task { await model.deliverNow(chat) }
-                } label: {
-                    if model.deliveringNow.contains(chat.id) { ProgressView() } else { Text("Send now") }
-                }
-                .font(.caption.weight(.semibold)).frame(minHeight: 44)
-                .disabled(model.deliveringNow.contains(chat.id))
-                .accessibilityHint("Closes this chat in Claude on your Mac and sends it here. Reopen the chat there to continue with this message.")
-                .accessibilityIdentifier("open-elsewhere-send-now")
-            }
+            Label("Waiting: this chat is open in Claude Code in a terminal on your Mac. Your message sends when you exit it there.",
+                  systemImage: "terminal")
+                .font(.caption).foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("open-elsewhere")
         }
     }
 }
@@ -1329,8 +1315,7 @@ struct ConversationView: View {
                         TemporaryNotice(key: error) { FailureDetails("Message not saved", message: error) }
                     }
                     if !model.turnRunsElsewhere(chat.id), model.nativeOpenElsewhere.contains(chat.id) {
-                        OpenOnMacNotice(model: model, chat: chat,
-                                        waiting: model.snapshots[chat.id]?.hasUnassignedPreTurnWork == true)
+                        OpenOnMacNotice(waiting: model.snapshots[chat.id]?.hasUnassignedPreTurnWork == true)
                     }
                     if model.turnRunsElsewhere(chat.id) {
                         Label("Working in \(model.agentFamily(chat).title) on your Mac. A message you send now waits until it finishes.",

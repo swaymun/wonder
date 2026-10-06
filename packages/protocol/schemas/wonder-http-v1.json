@@ -2541,6 +2541,7 @@
         "serviceTier": { "type": ["string", "null"] },
         "accessMode": { "$ref": "#/$defs/projectAccessMode" },
         "claudeApproval": { "$ref": "#/$defs/claudeApproval" },
+        "unsandboxedCommands": { "type": "boolean" },
         "planMode": { "type": "boolean" },
         "workingFolder": { "type": "string" },
         "workingFolderName": { "type": "string" },
@@ -2565,6 +2566,7 @@
         "serviceTier": { "type": ["string", "null"], "minLength": 1 },
         "accessMode": { "$ref": "#/$defs/projectAccessMode" },
         "claudeApproval": { "$ref": "#/$defs/claudeApproval" },
+        "unsandboxedCommands": { "type": "boolean" },
         "planMode": { "type": "boolean" }
       },
       "additionalProperties": false

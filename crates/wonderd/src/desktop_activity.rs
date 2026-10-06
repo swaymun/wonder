@@ -70,6 +70,24 @@ pub(crate) async fn claude_live_sessions() -> HashMap<String, bool> {
         .unwrap_or_default()
 }
 
+/// Whether the session is open in Claude Code outside the desktop app, such as
+/// a terminal, where Wonder cannot take the chat over.
+pub(crate) async fn claude_open_in_terminal(session: &str) -> bool {
+    let Some(dir) = claude_sessions_dir() else {
+        return false;
+    };
+    let session = session.to_owned();
+    tokio::task::spawn_blocking(move || open_in_terminal_in(&dir, &session))
+        .await
+        .unwrap_or(false)
+}
+
+fn open_in_terminal_in(dir: &Path, session: &str) -> bool {
+    live_records_in(dir).into_iter().any(|record| {
+        record.session == session && (!record.desktop || !desktop_claude_process(record.pid))
+    })
+}
+
 /// Session IDs whose live Claude Code process reports itself busy.
 #[cfg(test)]
 pub(crate) fn busy_sessions_in(dir: &Path) -> HashSet<String> {
@@ -107,9 +125,9 @@ pub(crate) enum StopRefusal {
 }
 
 /// Stops the idle process the Claude desktop app keeps for this chat, so a
-/// message from Wonder becomes part of the conversation: the app starts the
-/// chat again from its transcript when it is next opened. A busy chat, or one
-/// open in Claude Code in a terminal, is never stopped.
+/// turn from Wonder becomes part of the conversation: the app starts the chat
+/// again from its transcript when it is next used. A busy chat, or one open in
+/// Claude Code in a terminal, is never stopped. `Ok` when nothing holds it.
 pub(crate) async fn stop_idle_desktop_session(session: &str) -> Result<(), StopRefusal> {
     let Some(dir) = claude_sessions_dir() else {
         return Ok(());
@@ -378,6 +396,9 @@ mod tests {
             Err(StopRefusal::Terminal)
         );
         assert_eq!(stop_idle_desktop_session_in(&idle, "absent"), Ok(()));
+        // Only a chat Wonder cannot take over is reported as held on the Mac.
+        assert!(open_in_terminal_in(&idle, "idle"));
+        assert!(!open_in_terminal_in(&idle, "absent"));
         // An idle session is still open in that app.
         assert_eq!(
             live_sessions_in(&idle),

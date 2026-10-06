@@ -117,7 +117,7 @@ test("approval modes and plan mode decide each tool once", async t => {
   const review = await policy("ask", true).beforeTool({ tool_name: "ExitPlanMode", tool_input: { plan: "x" } });
   assert.equal(review.hookSpecificOutput.permissionDecision, "deny");
   assert.match(review.hookSpecificOutput.permissionDecisionReason, /owner reviews the plan in Wonder/);
-  assert.match(policy("ask").denial("Write"), /outside this Bot's allowed tools/);
+  assert.match(policy("ask").denial("Write"), /outside this conversation’s allowed tools/);
 });
 test("unsupported approval modes fail closed instead of widening access", () => {
   const scope = { cwd: "/tmp", readRoots: [], writeRoots: [], deniedRoots: [] };
@@ -126,4 +126,22 @@ test("unsupported approval modes fail closed instead of widening access", () => 
     // Accepting edits or running commands automatically refines Workspace only.
     { mode: "read_only", approvalMode: "auto" }, { mode: "full_access", approvalMode: "accept_edits" }])
     assert.throws(() => new ToolPolicy({ ...scope, ...bad }), /unsupported/);
+});
+
+// Contract owner: the command policy. A model flag or stored opt-in alone must
+// never bypass the sandbox; only a Full access Project outside Plan can do so.
+test("unsandboxed commands require the explicit Project opt-in and Full access", async () => {
+  const base = { cwd: "/tmp", mode: "full_access", approvalMode: "full_access", project: true,
+    readRoots: ["/"], writeRoots: [], deniedRoots: [], unsandboxedCommands: true };
+  const input = { command: "printf fixture", dangerouslyDisableSandbox: true };
+  const allowed = new ToolPolicy(base);
+  assert.equal(await allowed.decision("Bash", input), "allow");
+  assert.deepEqual(await allowed.commandInput(input), input);
+  assert.equal((await allowed.beforeTool({ tool_name: "Bash", tool_input: input })).hookSpecificOutput.permissionDecision, "ask");
+  for (const change of [{ unsandboxedCommands: false }, { project: false }, { internal: true },
+    { planMode: true }, { mode: "read_only" }, { mode: "workspace", approvalMode: "auto" }]) {
+    const restricted = new ToolPolicy({ ...base, ...change });
+    assert.equal(restricted.runsUnsandboxed, false);
+    assert.equal(await restricted.decision("Bash", input), "deny");
+  }
 });

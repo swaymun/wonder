@@ -346,6 +346,8 @@ public struct ProjectConversationDetail: Codable, Hashable, Sendable {
     public let notice: String?
     /// nil on hosts without project modes; see `ProjectsResponse.modesVersion`.
     public let claudeApproval: ClaudeApproval?
+    /// Present only when the host supports an explicit command-sandbox opt-out.
+    public let unsandboxedCommands: Bool?
     /// Codex collaboration plan mode, or Claude's plan permission mode.
     public let planMode: Bool?
     public var access: ProjectAccess {

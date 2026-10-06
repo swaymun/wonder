@@ -170,9 +170,8 @@ async fn tick(state: &AppState) -> Result<(), String> {
         }
         if crate::projects::is_project(state, &message.conversation_id).await {
             if crate::projects::held_on_mac(state, &message.conversation_id).await {
-                continue; // Stays queued until the Mac app finishes or closes the chat.
+                continue; // Stays queued until the Mac finishes or releases the chat.
             }
-            crate::projects::clear_deliver_now(state, &message.conversation_id);
             crate::projects::dispatch(state.clone(), message).await;
         } else {
             crate::dispatch_to_codex(state.clone(), message).await;

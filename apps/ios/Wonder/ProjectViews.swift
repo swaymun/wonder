@@ -91,6 +91,8 @@ struct ProjectAccessMenu: View {
     let access: ProjectAccess
     var isDisabled = false
     let identifier: String
+    var unsandboxedCommands: Bool? = nil
+    var setUnsandboxedCommands: ((Bool) -> Void)? = nil
     let choose: (ProjectAccessChoice) -> Void
     var body: some View {
         let selected = ProjectAccessChoice.selected(for: access, family: family, supportsModes: supportsModes)
@@ -103,6 +105,16 @@ struct ProjectAccessMenu: View {
                 }
                 .tint(choice.isElevated ? Color.orange : nil)
                 .accessibilityIdentifier("access-choice-" + choice.rawValue)
+            }
+            if family == .claude, let enabled = unsandboxedCommands, let set = setUnsandboxedCommands {
+                Divider()
+                Button { set(!enabled) } label: {
+                    Text(enabled ? "Run outside sandbox: On" : "Run outside sandbox")
+                    Text("Full Mac and network access.")
+                    if enabled { Image(systemName: "checkmark") }
+                }
+                .disabled(access.accessMode != .fullAccess || access.planMode)
+                .accessibilityIdentifier("project-unsandboxed-commands")
             }
         } label: {
             Image(systemName: "shield").font(.system(size: 18)).frame(width: 44, height: 44)
@@ -247,7 +259,9 @@ struct ProjectComposerSettings: View {
     }
     private var accessMenu: some View {
         ProjectAccessMenu(family: detail?.family ?? .codex, supportsModes: library.supportsModes, access: detail?.access ?? ProjectAccess(),
-                          isDisabled: saving || detail == nil || model.accessEnded, identifier: "project-composer-access") { choice in
+                          isDisabled: saving || detail == nil || model.accessEnded, identifier: "project-composer-access",
+                          unsandboxedCommands: detail?.unsandboxedCommands,
+                          setUnsandboxedCommands: { enabled in Task { _ = await save(["unsandboxedCommands": enabled]) } }) { choice in
             guard let detail else { return }
             let next = choice.result(from: detail.access, family: detail.family, supportsModes: library.supportsModes)
             Task { _ = await save(detail.access.changes(to: next, family: detail.family, supportsModes: library.supportsModes)) }

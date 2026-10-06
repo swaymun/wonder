@@ -165,6 +165,7 @@ export class TurnProjection {
       if (!this.internal) this.onChild(message);
       return;
     }
+    if ([message.user_message_uuid, ...(message.user_message_uuids ?? [])].includes(this.promptUuid)) this.promptSeen = true;
     if (message.type === "stream_event") this.stream(message.event);
     if (message.type === "assistant") {
       const id = message.message?.id;
@@ -178,13 +179,17 @@ export class TurnProjection {
       for (const block of message.message.content) if (block.type === "tool_result") this.toolResult(block, message.tool_use_result);
     }
     if (message.type === "result") {
-      // A resumed session can first finish work queued before this prompt
-      // (for example a background-task notice). Only the result that answers
-      // this prompt ends the turn.
+      // A resumed session can first finish work queued before this prompt,
+      // such as a background-task notice left by a desktop run. Claude starts
+      // that turn itself, so its result names no prompt. Only the result that
+      // answers this prompt, or one after a reply to it began, ends the turn.
       const answered = [message.user_message_uuid, ...(message.user_message_uuids ?? [])].filter(Boolean);
-      if (this.promptUuid && answered.length && !answered.includes(this.promptUuid)) return;
-      this.structuredOutput = message.structured_output;
       const success = message.subtype === "success" && !message.is_error;
+      // Session-level startup/crash errors carry no prompt identity. Surface
+      // them instead of leaving the user waiting forever for a reply.
+      if (this.promptUuid && !answered.includes(this.promptUuid)
+        && (answered.length || (success && !this.promptSeen))) return;
+      this.structuredOutput = message.structured_output;
       this.finish(success ? "completed" : "failed", success ? undefined : (message.errors?.[0] ?? message.result ?? "Claude could not complete this response."));
     }
   }

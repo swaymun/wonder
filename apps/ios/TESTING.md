@@ -215,3 +215,26 @@ References: [Apple SpeechAnalyzer introduction](https://developer.apple.com/vide
 [asset management](https://developer.apple.com/documentation/speech/assetinventory),
 and [Claude's documented start/stop dictation UX](https://support.claude.com/en/articles/12626668-use-quick-entry-with-claude-desktop-on-mac).
 Claude's public instructions establish behavior, not its private speech model or implementation.
+
+## Claude Project handoff and command access
+
+Sending to an idle Claude desktop chat closes its process before Wonder resumes
+from the transcript. A desktop turn in progress or an open terminal session still
+holds the message. Successful queued background notices do not complete the new
+Wonder prompt; session-level failures surface as failures.
+
+For an existing Claude Project chat, Access → Bypass permissions enables the
+separate **Run outside sandbox** option. It defaults off, is saved
+per chat, and applies only to Full access outside Plan mode. With it on, commands
+can access Mac files, network and system services, including paths otherwise
+protected by the command sandbox. Switching to a narrower mode suspends it;
+turn it off to revoke the saved opt-in. Other access modes keep their sandbox.
+New chats start with it off. Project computer use uses the installed native
+`cua_repl` adapter when the host enables it, with provider authorization and
+turn cleanup preserved.
+
+The simulator cases `testMessageWaitsWhileClaudeChatIsOpenOnMac` and
+`testProjectUnsandboxedCommandsRequireFullAccess` use isolated fixtures and send
+no model work. Runtime tests cover notice/result ordering, error completion,
+command access and adapter ownership. Actual desktop handoff, unsandboxed build
+execution and Project computer control require an explicitly authorized live turn.

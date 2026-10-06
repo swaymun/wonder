@@ -94,9 +94,6 @@ pub struct ProjectRuntime {
     /// Runtime generation that accepted each running turn. A changed or dead
     /// generation means the turn must be reconciled from native history.
     generations: std::sync::Mutex<HashMap<String, String>>,
-    /// Conversations whose owner chose to send while the chat is open, idle,
-    /// in Claude on the Mac. Cleared when that message is dispatched.
-    deliver_now: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl ProjectRuntime {
@@ -126,7 +123,6 @@ impl ProjectRuntime {
             receipt_scans: std::sync::Mutex::new(HashMap::new()),
             notices: std::sync::Mutex::new(HashMap::new()),
             generations: std::sync::Mutex::new(HashMap::new()),
-            deliver_now: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -327,6 +323,7 @@ pub(crate) struct ProjectConversationDetail {
     service_tier: Option<String>,
     access_mode: String,
     claude_approval: String,
+    unsandboxed_commands: bool,
     plan_mode: bool,
     working_folder: String,
     working_folder_name: String,
@@ -359,6 +356,7 @@ async fn conversation_detail(
         service_tier: conversation.service_tier.clone(),
         access_mode: conversation.access_mode.clone(),
         claude_approval: conversation.claude_approval.clone(),
+        unsandboxed_commands: conversation.unsandboxed_commands,
         plan_mode: conversation.plan_mode,
         working_folder: conversation.cwd.clone(),
         working_folder_name: folder_name(&conversation.cwd),
@@ -1842,6 +1840,7 @@ pub(crate) struct UpdateConversationRequest {
     access_mode: Option<String>,
     claude_approval: Option<String>,
     plan_mode: Option<bool>,
+    unsandboxed_commands: Option<bool>,
 }
 
 // Serde's ordinary nested Option treats both null and an omitted field as None.
@@ -1939,6 +1938,7 @@ pub(crate) async fn update_conversation(
             || request.access_mode.is_some()
             || request.claude_approval.is_some()
             || request.plan_mode.is_some()
+            || request.unsandboxed_commands.is_some()
         {
             return error(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -2001,6 +2001,25 @@ pub(crate) async fn update_conversation(
     {
         return error(StatusCode::UNPROCESSABLE_ENTITY, message);
     }
+    if request.unsandboxed_commands.is_some() && existing.family != AgentFamily::Claude {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "This option is available for Claude Projects.",
+        );
+    }
+    if request.unsandboxed_commands == Some(true)
+        && (request
+            .access_mode
+            .as_deref()
+            .unwrap_or(&existing.access_mode)
+            != "full_access"
+            || request.plan_mode.unwrap_or(existing.plan_mode))
+    {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Choose Full access and leave Plan mode before enabling commands outside the sandbox.",
+        );
+    }
     let patch = ProjectConversationPatch {
         title: request.title.as_deref(),
         pinned: request.is_pinned,
@@ -2014,6 +2033,7 @@ pub(crate) async fn update_conversation(
         },
         access_mode: request.access_mode.as_deref(),
         claude_approval: request.claude_approval.as_deref(),
+        unsandboxed_commands: request.unsandboxed_commands,
         plan_mode: request.plan_mode,
     };
     let now = now_text();
@@ -2550,6 +2570,7 @@ struct ClaudeModes<'a> {
     access_mode: &'a str,
     approval: &'a str,
     plan: bool,
+    unsandboxed_commands: bool,
 }
 
 impl Default for ClaudeModes<'_> {
@@ -2558,6 +2579,7 @@ impl Default for ClaudeModes<'_> {
             access_mode: "workspace",
             approval: "ask",
             plan: false,
+            unsandboxed_commands: false,
         }
     }
 }
@@ -2568,6 +2590,7 @@ impl<'a> From<&'a StoredProjectConversation> for ClaudeModes<'a> {
             access_mode: &conversation.access_mode,
             approval: &conversation.claude_approval,
             plan: conversation.plan_mode,
+            unsandboxed_commands: conversation.unsandboxed_commands,
         }
     }
 }
@@ -2595,7 +2618,8 @@ fn claude_policy_value(
         ),
     };
     json!({"mode": mode, "approvalMode": approval, "planMode": modes.plan, "workspace": cwd,
-        "readRoots": ["/"], "writeRoots": writes, "deniedRoots": denied_roots})
+        "readRoots": ["/"], "writeRoots": writes, "deniedRoots": denied_roots,
+        "unsandboxedCommands": modes.unsandboxed_commands && mode == "full_access" && !modes.plan})
 }
 
 fn claude_policy(
@@ -2694,9 +2718,12 @@ pub(crate) async fn is_project(state: &AppState, conversation: &str) -> bool {
 
 /// Whether a Wonder message must wait for the Mac app. Claude Code keeps an
 /// open chat's conversation in memory: it neither sees a turn written by
-/// Wonder nor continues after it, so a Claude chat open in Claude on the Mac
-/// (busy, or idle unless the owner chose to send now) holds the message.
-/// Codex holds it only while its desktop app is running a turn.
+/// Wonder nor continues after it. A message from Wonder takes the chat over:
+/// the idle process the Claude desktop app keeps for it is closed, and the app
+/// continues from the transcript, including Wonder's turn, when the chat is
+/// next used there. Only a running turn, or a chat open in Claude Code in a
+/// terminal, holds the message. Codex holds it only while its desktop app is
+/// running a turn.
 pub(crate) async fn held_on_mac(state: &AppState, conversation: &str) -> bool {
     let Ok(Some(stored)) = state.store.project_conversation(conversation).await else {
         return false;
@@ -2705,79 +2732,30 @@ pub(crate) async fn held_on_mac(state: &AppState, conversation: &str) -> bool {
         return false;
     };
     match stored.family {
-        AgentFamily::Claude => match crate::desktop_activity::claude_live_sessions()
+        AgentFamily::Claude => crate::desktop_activity::stop_idle_desktop_session(native)
             .await
-            .get(native)
-        {
-            Some(true) => true,
-            Some(false) => !state
-                .projects
-                .deliver_now
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains(conversation),
-            None => false,
-        },
+            .is_err(),
         AgentFamily::Codex => crate::desktop_activity::codex_thread_busy(native).await,
     }
 }
 
-pub(crate) fn clear_deliver_now(state: &AppState, conversation: &str) {
-    state
-        .projects
-        .deliver_now
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(conversation);
-}
-
-/// The owner sends a waiting message even though the chat is open, idle, in
-/// Claude on the Mac; Wonder runs it in its own Claude process.
-pub(crate) async fn deliver_now(
-    State(state): State<AppState>,
-    Extension(_authority): Extension<OwnerAuthority>,
-    Path(conversation): Path<String>,
-) -> Response {
-    let Ok(Some(stored)) = state.store.project_conversation(&conversation).await else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if stored.family == AgentFamily::Claude {
-        if let Some(native) = stored.native_session_id.as_deref() {
-            // Stopping the idle desktop process lets the app continue the chat
-            // from its transcript, including this message, when it is reopened.
-            match crate::desktop_activity::stop_idle_desktop_session(native).await {
-                Ok(()) => {}
-                Err(crate::desktop_activity::StopRefusal::Busy) => {
-                    return (
-                        StatusCode::CONFLICT,
-                        "Claude is working on this chat on your Mac. It sends when that finishes.",
-                    )
-                        .into_response()
-                }
-                Err(crate::desktop_activity::StopRefusal::Terminal) => {
-                    return (
-                        StatusCode::CONFLICT,
-                        "This chat is open in Claude Code in a terminal on your Mac. Exit it there to send.",
-                    )
-                        .into_response()
-                }
-                Err(crate::desktop_activity::StopRefusal::StillRunning) => {
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "Claude on your Mac didn't close the chat. Try again.",
-                    )
-                        .into_response()
-                }
-            }
+/// After Wonder's turn, a Claude desktop process opened for the chat during
+/// it still holds the conversation from before; closing it while idle lets
+/// the app continue from the transcript instead of branching.
+pub(crate) fn release_to_desktop(state: &AppState, conversation: &str) {
+    let state = state.clone();
+    let conversation = conversation.to_owned();
+    tokio::spawn(async move {
+        let Ok(Some(stored)) = state.store.project_conversation(&conversation).await else {
+            return;
+        };
+        if stored.family != AgentFamily::Claude {
+            return;
         }
-    }
-    state
-        .projects
-        .deliver_now
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(conversation);
-    StatusCode::ACCEPTED.into_response()
+        if let Some(native) = stored.native_session_id.as_deref() {
+            let _ = crate::desktop_activity::stop_idle_desktop_session(native).await;
+        }
+    });
 }
 
 pub(crate) async fn ready(state: &AppState) -> bool {
@@ -3123,7 +3101,7 @@ async fn dispatch_inner(
         "inputSha256": hex::encode(Sha256::digest(serde_json::to_vec(&input).unwrap_or_default())),
     })
     .to_string();
-    let params = match conversation.family {
+    let mut params = match conversation.family {
         AgentFamily::Codex => codex_turn_params(
             &thread_id,
             &message.client_message_id,
@@ -3145,7 +3123,7 @@ async fn dispatch_inner(
             "wonderProject": claude_project(&project, &conversation.cwd)})
         }
     };
-    let resume = match conversation.family {
+    let mut resume = match conversation.family {
         AgentFamily::Codex => {
             let (sandbox, approval, _) = codex_policy(&conversation.access_mode, &roots);
             json!({"threadId":thread_id,"excludeTurns":true,"cwd":conversation.cwd,"model":model,"serviceTier":service_tier,
@@ -3155,6 +3133,11 @@ async fn dispatch_inner(
             "cwd":conversation.cwd,"model":model,"serviceTier":service_tier,"wonderPolicy":permission,
             "wonderProject":claude_project(&project, &conversation.cwd)}),
     };
+    if conversation.family == AgentFamily::Claude {
+        crate::computer_runtime::configure_project(state, !conversation.plan_mode, &mut params)
+            .await?;
+        resume["config"] = params["config"].clone();
+    }
     crate::update_handoff::remember_settings(state, &thread_id, &resume, &params).await?;
     state
         .store
@@ -5807,6 +5790,7 @@ pub(crate) mod tests {
             service_tier: None,
             access_mode: "workspace".into(),
             claude_approval: "accept_edits".into(),
+            unsandboxed_commands: false,
             plan_mode: true,
             working_folder: "/work/app".into(),
             working_folder_name: "app".into(),
@@ -6296,6 +6280,7 @@ pub(crate) mod tests {
         for bad in [
             json!({"claudeApproval": "auto"}),
             json!({"claudeApproval": "yolo"}),
+            json!({"unsandboxedCommands": true}),
         ] {
             let rejected = call(&state, "PATCH", &detail_path, bad).await;
             assert_eq!(
@@ -7109,6 +7094,7 @@ pub(crate) mod tests {
                     access_mode,
                     approval,
                     plan,
+                    unsandboxed_commands: true,
                 },
                 "/work/app",
             )
@@ -7132,6 +7118,10 @@ pub(crate) mod tests {
         ] {
             for plan in [false, true] {
                 let value = policy(access, approval, plan);
+                assert_eq!(
+                    value["unsandboxedCommands"],
+                    access == "full_access" && !plan
+                );
                 assert_eq!(value["mode"], mode, "{access}/{approval}");
                 assert_eq!(value["approvalMode"], expected, "{access}/{approval}");
                 assert_eq!(value["planMode"], plan);

@@ -1530,11 +1530,6 @@ pub(super) async fn history_activity(
         }
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let live_claude = if thread.starts_with("claude-") {
-        crate::desktop_activity::claude_live_sessions().await
-    } else {
-        HashMap::new()
-    };
     let Ok(runtime) = crate::claude::for_thread(&state, &thread).await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -1575,12 +1570,13 @@ pub(super) async fn history_activity(
             status = marked;
         }
     }
-    // A Claude session open in Claude on the Mac does not show replies written
-    // from Wonder until it is reopened there.
+    // A Claude session open in Claude Code in a terminal keeps Wonder's
+    // messages waiting; the desktop app's chats are taken over on send.
     let open_elsewhere = match state.store.project_conversation(&conversation).await {
-        Ok(Some(stored)) => stored
-            .native_session_id
-            .is_some_and(|native| live_claude.contains_key(&native)),
+        Ok(Some(stored)) if thread.starts_with("claude-") => match stored.native_session_id {
+            Some(native) => crate::desktop_activity::claude_open_in_terminal(&native).await,
+            None => false,
+        },
         _ => false,
     };
     Json(serde_json::json!({

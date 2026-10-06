@@ -124,8 +124,21 @@ test("a result for earlier queued work does not end the prompt's turn", () => {
   projection.accept({ type: "result", subtype: "success", is_error: false, user_message_uuids: ["turn-1"] });
   assert.equal(projection.terminal, true);
   assert.equal(projection.result.status, "completed");
-  // Without a reported prompt identity, the first result still ends the turn.
+  // A notice turn Claude started itself names no prompt; it ends the turn
+  // only after the reply to this prompt began.
   const plain = new TurnProjection({ threadId: "t", turnId: "turn-2", promptUuid: "turn-2", emit: () => {} });
   plain.accept({ type: "result", subtype: "success", is_error: false });
+  assert.equal(plain.terminal, false);
+  plain.accept({ type: "assistant", user_message_uuid: "turn-2", message: { id: "m", content: [{ type: "text", text: "Done." }] }, parent_tool_use_id: null });
+  plain.accept({ type: "result", subtype: "success", is_error: false });
   assert.equal(plain.terminal, true);
+});
+
+// The projection owns terminal errors: startup failures have no prompt UUID.
+test("a session-level error fails an unanswered Project prompt", () => {
+  const projection = new TurnProjection({ threadId: "t", turnId: "turn", promptUuid: "turn", emit: () => {} });
+  projection.accept({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["Worker failed"] });
+  assert.equal(projection.terminal, true);
+  assert.equal(projection.result.status, "failed");
+  assert.equal(projection.result.error.message, "Worker failed");
 });

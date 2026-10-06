@@ -41,6 +41,15 @@ pub(super) async fn configure(
     };
     let instructions = params["developerInstructions"].as_str().unwrap_or_default();
     params["developerInstructions"] = serde_json::json!(format!("{instructions}\n\n{policy} The old wonder_computer_use tool is retired; do not call it, even if it appears in older conversation metadata. If native computer tools are unavailable or return an error, report that accurately. Never claim a rejected action succeeded or substitute another computer-control implementation."));
+    configure_project(state, enabled, params).await
+}
+
+/// Projects use the same installed, host-owned computer adapter as other chats.
+pub(super) async fn configure_project(
+    state: &AppState,
+    enabled: bool,
+    params: &mut serde_json::Value,
+) -> Result<(), String> {
     if !params["config"].is_object() {
         params["config"] = serde_json::json!({});
     }
@@ -49,7 +58,7 @@ pub(super) async fn configure(
     // Reuse the installed provider manifest, including its matching runtime
     // paths and environment, instead of copying a desktop implementation.
     let home = state.launch_config.lock().await.runtime_home.clone();
-    let server = if enabled {
+    let server = if enabled && state.computer_use_enabled {
         match home {
             Some(home) => installed_cua(&home).await?,
             None => None,
@@ -206,6 +215,16 @@ mod tests {
             "/provider/node"
         );
         assert_eq!(params["config"]["mcp_servers.cua_repl"]["enabled"], true);
+        let mut project = serde_json::json!({});
+        configure_project(&state, true, &mut project).await.unwrap();
+        assert_eq!(
+            project["config"]["mcp_servers.cua_repl"]["command"],
+            "/provider/node"
+        );
+        configure_project(&state, false, &mut project)
+            .await
+            .unwrap();
+        assert_eq!(project["config"]["mcp_servers.cua_repl"]["enabled"], false);
         state.computer_use_enabled = false;
         configure(&state, "bot", &claude, &mut params)
             .await

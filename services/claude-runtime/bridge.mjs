@@ -411,8 +411,8 @@ export class ClaudeBridge {
       run.authorizedTools.set(key, calls);
       return { behavior: "allow", updatedInput: input }; // The daemon owns these tools' approval and scope checks.
     }
-    // Bash is allowed only here, wrapped in the host-owned command sandbox, in
-    // every approval mode; the PreToolUse hook never allows it directly.
+    // Bash is allowed only here. The host-owned policy decides whether the
+    // owner explicitly enabled unsandboxed Project commands.
     const allow = async () => ({ behavior: "allow", updatedInput: name === "Bash" ? await policy.commandInput(input) : input });
     if (decision === "allow" || (name.startsWith("mcp__") && policy.bypassesApproval)) return allow();
     const response = await this.serverCall("item/commandExecution/requestApproval", { ...base,
@@ -459,9 +459,9 @@ export class ClaudeBridge {
       const model = selectedModel(options.model);
       const project = options.wonderProject;
       const base = baseOptions(lease.runtime, { connectors: !project && options.wonderConnectors === true && !options.wonderPlanning && !policy.internal });
-      const computer = project ? null : options.config?.["mcp_servers.cua_repl"];
+      const computer = options.config?.["mcp_servers.cua_repl"];
       let computerUnavailable = false;
-      if (computer?.enabled === true && !options.wonderPlanning && !policy.internal) {
+      if (computer?.enabled === true && !options.wonderPlanning && !policy.planMode && !policy.internal) {
         try {
           run.nativeCua = await createNativeCua({ sdk, server: computer, environment: base.env,
             sessionId: session.sdkSessionId, threadId: session.id, turnId: run.turn.id, signal: run.abort.signal,
@@ -500,11 +500,13 @@ export class ClaudeBridge {
       if (project) {
         // Normal Claude Code behavior and project configuration, still bounded
         // by Wonder's PreToolUse/canUseTool policy and command sandbox.
-        Object.assign(sdkOptions, { systemPrompt: { type: "preset", preset: "claude_code" },
+        Object.assign(sdkOptions, { systemPrompt: { type: "preset", preset: "claude_code",
+          ...(run.nativeCua ? { append: "Use the native cua_repl tools for computer use. This turn has a fresh runtime: follow its first-call instructions before using it." }
+            : computerUnavailable ? { append: "Native computer use could not connect for this turn. Report it as unavailable; do not substitute another implementation." } : {}) },
           settingSources: ["user", "project", "local"], additionalDirectories: project.additionalDirectories,
           // Planning ends by proposing its plan through ExitPlanMode, which the
           // policy turns into a plan for the owner to review in Wonder.
-          tools: [...BUILTINS, "Glob", "Grep", ...(policy.planMode ? ["ExitPlanMode"] : [])], mcpServers: {}, strictMcpConfig: false,
+          tools: [...BUILTINS, "Glob", "Grep", ...(policy.planMode ? ["ExitPlanMode"] : [])], strictMcpConfig: false,
           settings: { ...sdkOptions.settings, disableClaudeAiConnectors: true } });
         delete sdkOptions.hooks.PostToolUse;
       }
