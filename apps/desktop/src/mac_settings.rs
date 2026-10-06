@@ -1200,14 +1200,29 @@ impl MacSettings {
         let displays = array(&self.state, "sharedDisplays");
         let saved = text(&self.state, "preferredDisplayID").to_owned();
         let saved_connected = displays.iter().any(|display| text(display, "id") == saved);
-        let mut options = vec![(String::new(), "Main display".to_owned())];
-        options.extend(displays.iter().map(|display| {
-            (
-                text(display, "id").to_owned(),
-                text(display, "name").to_owned(),
-            )
-        }));
-        let current = if saved_connected {
+        // The main display is listed once, first and by name; choosing it keeps
+        // the automatic main-display choice ("").
+        let main = displays.iter().find(|display| display["main"] == true);
+        let main_id = main.map(|display| text(display, "id")).unwrap_or_default();
+        let mut options = vec![(
+            String::new(),
+            main.map(|display| text(display, "name"))
+                .filter(|name| !name.is_empty())
+                .unwrap_or("Main display")
+                .to_owned(),
+        )];
+        options.extend(
+            displays
+                .iter()
+                .filter(|display| display["main"] != true)
+                .map(|display| {
+                    (
+                        text(display, "id").to_owned(),
+                        text(display, "name").to_owned(),
+                    )
+                }),
+        );
+        let current = if saved_connected && saved != main_id {
             saved.clone()
         } else {
             String::new()
