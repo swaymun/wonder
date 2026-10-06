@@ -124,6 +124,10 @@ forward rules for an older feature or workflow.
   Use the documents skill to edit and render-check the workbook. If the workbook
   is unavailable or a screenshot cannot be captured, report the gap without
   claiming verification; preserve available evidence for a later update.
+- Prove iOS behavior with `scripts/wonderctl` scenarios on the Mac mini
+  (`--host mac-mini`, on `iphone` and `duo`) rather than local simulators or
+  screenshot-driven computer use; see [apps/ios/CONTROL.md](apps/ios/CONTROL.md).
+  Extend the feature map when you add user-visible behavior.
 - **For now, physical iPhone/iPad testing is optional and runs only when explicitly
   requested.** Use relevant unit/model/contract checks and focused simulator UI
   checks by default. Physical sessions, mirroring and device availability must not

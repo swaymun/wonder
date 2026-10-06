@@ -1,0 +1,10 @@
+# Open Files from a conversation and preview README.md.
+launch --fixture read-preview --fixture send-preview --fixture files-preview --fixture project-files-conversation-preview --fixture workspace-document-preview
+wait --id conversation-files-pill
+tap --id conversation-files-pill
+wait --id workspace-file-list
+tap --id workspace-file-entry:README.md --timeout 5
+wait --id workspace-preview-back
+shot readme-preview
+tap --id workspace-preview-back
+wait --id workspace-file-list

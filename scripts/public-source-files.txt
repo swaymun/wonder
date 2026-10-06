@@ -28,6 +28,7 @@ apps/desktop/src/mac_settings/permission_drag.rs
 apps/desktop/src/mac_settings/setup_window.rs
 apps/desktop/src/menu_bar.rs
 apps/ios/CONNECTOR_ICONS.md
+apps/ios/CONTROL.md
 apps/ios/DIAGNOSTICS.md
 apps/ios/ExportOptions.plist
 apps/ios/PushShared/PushPreview.swift
@@ -120,6 +121,9 @@ apps/ios/WonderWidget/Info.plist
 apps/ios/WonderWidget/ProjectWidgetSnapshot.swift
 apps/ios/WonderWidget/WonderProjectWidget.swift
 apps/ios/WonderWidget/WonderWidget.entitlements
+apps/ios/control/scenarios/automations-create.wctl
+apps/ios/control/scenarios/composer-draft.wctl
+apps/ios/control/scenarios/workspace-readme.wctl
 apps/menubar/Launcher/main.swift
 apps/menubar/Package.resolved
 apps/menubar/Package.swift
@@ -567,6 +571,7 @@ scripts/verify-package-lifecycle.sh
 scripts/verify-package-release-gates.py
 scripts/verify-package-release-gates.sh
 scripts/verify-release-docs.py
+scripts/wonderctl
 services/claude-runtime/.gitignore
 services/claude-runtime/bridge.mjs
 services/claude-runtime/main.mjs

@@ -1,0 +1,8 @@
+# Type into the preview conversation's prefilled draft; the text and Send control appear.
+launch --fixture read-preview --fixture send-preview --fixture project-files-conversation-preview
+wait --id message-draft
+tap --id message-draft
+type "Hello from wonderctl"
+wait --contains "from wonderctl"
+wait --id send-message
+shot composer-draft
