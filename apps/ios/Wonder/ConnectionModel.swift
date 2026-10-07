@@ -688,6 +688,15 @@ struct ManagedBotListMutationState {
                 """
                 if let value = try? JSONDecoder().decode(AttentionRequest.self, from: Data(json.utf8)) { attention = [value] }
             }
+            if arguments.contains("-attention-arrives-preview") {
+                // The request arrives while the conversation is already open.
+                let arriving = attention
+                attention = []
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(3))
+                    self?.attention = arriving
+                }
+            }
             if ProcessInfo.processInfo.arguments.contains("-activity-preview") {
                 let failed = ProcessInfo.processInfo.arguments.contains("-activity-failure-preview")
                 let commandFailed = ProcessInfo.processInfo.arguments.contains("-activity-command-failure-preview")

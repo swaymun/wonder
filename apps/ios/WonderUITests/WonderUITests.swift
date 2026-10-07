@@ -812,6 +812,7 @@ import UIKit
         for size in ["UICTContentSizeCategoryL", "UICTContentSizeCategoryAccessibilityXXXL"] {
             app.launchArguments = ["-read-preview", "-send-preview", "-computer-approval-preview", "-UIPreferredContentSizeCategoryName", size]
             app.launch()
+            openAttentionDock(app)
             let allow = app.buttons["approval-accept-fixture-computer"]
             XCTAssertTrue(allow.waitForExistence(timeout: 10))
             XCTAssertTrue(app.buttons["approval-decline-fixture-computer"].exists)
@@ -824,22 +825,31 @@ import UIKit
         }
     }
 
-    func testReviewRequestReturnsFromFilesToThePendingApproval() throws {
+    // A pending permission is pinned above the composer as the same dock as
+    // questions, never as an inline card or a link, and opens in its sheet.
+    func testPendingApprovalOpensFromTheComposerDock() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
-        app.launchArguments = ["-read-preview", "-send-preview", "-files-preview", "-computer-approval-preview"]
+        app.launchArguments = ["-read-preview", "-send-preview", "-computer-approval-preview"]
         app.launch()
-        let review = app.buttons["review-approval-request"]
-        XCTAssertTrue(review.waitForExistence(timeout: 10))
-        let files = app.buttons["conversation-files-pill"]
-        XCTAssertTrue(files.waitForExistence(timeout: 5))
-        files.tap()
-        XCTAssertTrue(app.collectionViews["workspace-file-list"].waitForExistence(timeout: 10))
-        review.tap()
-        XCTAssertFalse(app.collectionViews["workspace-file-list"].exists)
+        let dock = app.buttons["question-dock-open"]
+        XCTAssertTrue(dock.waitForExistence(timeout: 10))
+        XCTAssertTrue(dock.label.contains("Permission requested"))
+        XCTAssertFalse(app.buttons["review-approval-request"].exists)
+        XCTAssertFalse(app.buttons["approval-accept-fixture-computer"].exists, "Approvals are not placed in the conversation")
+        let draft = app.descendants(matching: .any)["message-draft"]
+        XCTAssertTrue(draft.exists)
+        XCTAssertLessThanOrEqual(dock.frame.maxY, draft.frame.minY, "The dock sits above the composer")
+        dock.tap()
         let approval = app.buttons["approval-accept-fixture-computer"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5))
-        XCTAssertTrue(approval.isHittable, "Review request should reveal the pending approval")
+        XCTAssertTrue(approval.isHittable)
+    }
+
+    private func openAttentionDock(_ app: XCUIApplication) {
+        let dock = app.buttons["question-dock-open"]
+        XCTAssertTrue(dock.waitForExistence(timeout: 10))
+        dock.tap()
     }
 
     func testEveryApprovalFamilyHasPhoneControls() throws {
@@ -859,6 +869,7 @@ import UIKit
             for (kind, choice, detail) in cases {
                 app.launchArguments = ["-read-preview", "-send-preview", "-phone-approval-preview", kind, "-UIPreferredContentSizeCategoryName", size]
                 app.launch()
+                openAttentionDock(app)
                 let action = app.buttons["approval-\(choice)-fixture-\(kind)"]
                 XCTAssertTrue(action.waitForExistence(timeout: 10), "Missing phone action for " + kind)
                 XCTAssertTrue(app.buttons["approval-decline-fixture-\(kind)"].exists)

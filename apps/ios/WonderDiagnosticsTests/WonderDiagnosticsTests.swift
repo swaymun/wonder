@@ -3871,7 +3871,7 @@ extension WonderDiagnosticsTests {
         MessageRecoveryURLProtocol.enqueue(path: listPath, body: try JSONEncoder().encode([expired]))
         await model.loadAsyncQuestions(chat)
         XCTAssertEqual(model.savedAsyncReplies[expired.id]?.answers, ["Keep this reply"])
-        XCTAssertNotNil(model.attentionErrors[expired.id], "The expired row must remain reachable in QuestionDock")
+        XCTAssertNotNil(model.attentionErrors[expired.id], "The expired row must remain reachable in AttentionDock")
         XCTAssertFalse(model.retryableAsyncReplies.contains(expired.id))
         MessageRecoveryURLProtocol.enqueue(path: listPath, body: try JSONEncoder().encode([expired]))
         await model.replyAsync(expired, chat: chat, answers: [], skip: true, retry: true)

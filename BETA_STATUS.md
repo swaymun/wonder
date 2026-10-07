@@ -1,8 +1,8 @@
 # Wonder beta status
 
-On October 7, Wonder Testing Release 1.0 (44) and production Release 1.0 (100)
-uploaded and processed successfully. Testing 44 is available in internal Owner
-Beta; production 100's tester availability was not checked. TestFlight installation
+On October 7, Wonder Testing Release 1.0 (45) and production Release 1.0 (101)
+uploaded and processed successfully. Testing 45 is available in internal Owner
+Beta; production 101's tester availability was not checked. TestFlight installation
 remains unverified. Mac 1.0.125 is Developer ID signed, notarized and stapled, its
 DMG passed Gatekeeper and artifact checks, and it is installed over 1.0.124 with
 passing signature, Gatekeeper, `/healthz` and `/readyz` checks. No external beta
@@ -17,10 +17,17 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (100) uploaded and processed; tester availability not checked. Built from clean, pushed source (`80a50906`). TestFlight installation remains unverified. |
-| Wonder Testing | Blue Release 1.0 (44) uploaded, processed and available in automatic Owner Beta, from the same source as production 100. Build 43 is superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.125 (from `6c99f64e`; the later `80a50906` changes only iPhone text) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `1c944ff976787069eabdd6b79bc36f2340fd4749abf55e8d8cb4ac7d8319f978`. |
+| iPhone and iPad | Production Release 1.0 (101) uploaded and processed; tester availability not checked. Built from clean, pushed source (`73e52c48`). TestFlight installation remains unverified. |
+| Wonder Testing | Blue Release 1.0 (45) uploaded, processed and available in automatic Owner Beta, from the same source as production 101. Build 44 is superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.125 (from `6c99f64e`; later commits change only the iPhone app) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `1c944ff976787069eabdd6b79bc36f2340fd4749abf55e8d8cb4ac7d8319f978`. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). The iOS archives and the Mac app came from clean, pushed internal source. Third-party components retain their own licenses. |
+
+Testing 45 and production 101 show permission requests in the same dock above
+the composer as questions: a card naming the command or question, with Review
+opening one sheet. The inline approval card and the blue "Review request" link are
+gone, and subagent questions moved into the dock. The dock scenario
+(`approval-dock.wctl`) and five approval and question UI tests passed on the
+iPhone simulator on the Mac mini.
 
 Testing 44, production 100 and Mac 1.0.125 run Claude Project commands without a
 sandbox, as Claude Code does. The Access choice is **Ask**, **Auto** (the default)
@@ -35,10 +42,11 @@ reason.
 
 Verification: 350 daemon, 66 Claude bridge and 11 native project Swift tests
 passed; clippy and formatting are clean. The access menu scenario passed on the
-iPhone simulator on the Mac mini. The live no-sandbox access script
-(`access-acceptance.mjs`) was not run, so Auto's classifier and phone approval
-cards are unverified live; physical devices and TestFlight installation remain
-unverified.
+iPhone simulator on the Mac mini. The live Sonnet access script
+(`access-acceptance.mjs`) passed in Auto (Claude Code's classifier ran git, a
+local port and the network unprompted, without a sandbox) and in Full access (no
+prompts). No live request escalated to a phone approval; physical devices and
+TestFlight installation remain unverified.
 
 Before that, Testing 43, production 99 and Mac 1.0.124 ran Claude Project commands in Claude
 Code's own sandbox and replace the separate **Run outside sandbox** switch with one

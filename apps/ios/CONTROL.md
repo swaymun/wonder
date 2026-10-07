@@ -75,6 +75,7 @@ fixture's prefilled content.
 | Files and document preview | `workspace-readme.wctl` | `-files-preview`, `-project-files-conversation-preview` |
 | Composer draft | `composer-draft.wctl` | `-send-preview`, `-project-files-conversation-preview` |
 | Claude access levels (Ask, Auto, Full access) | `claude-access-picker.wctl` | `-diagnostics-project-read` with the subagent and chat-layout fixtures |
+| Permission and question dock above the composer | `approval-dock.wctl` | `-phone-approval-preview command` arriving via `-attention-arrives-preview`; `-question-preview` |
 
 Fixtures cover app behavior without a paired Mac. Pairing, Tailscale and live
 model work still need the live tests in [TESTING.md](TESTING.md).

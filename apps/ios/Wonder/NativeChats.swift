@@ -639,9 +639,6 @@ struct ConversationView: View {
         guard let botID = chat.botId else { return nil }
         return model.managedBots.first { $0.id == botID }
     }
-    private var pendingAttentionRequests: [AttentionRequest] {
-        model.requests(for: chat).filter { !$0.isQuestion }
-    }
     private func messageAttachments(for row: ReadRow, metadata: [String: ConversationFile]) -> [MessageAttachmentPresentation] {
         return row.attachmentIds.map { id in
             MessageAttachmentPresentation(id: id, file: metadata[id])
@@ -991,18 +988,6 @@ struct ConversationView: View {
                                 FolderRequestsView(model: model, botID: botID)
                                     .modifier(ConversationColumn())
                             }
-                            if !readOnly {
-                            ForEach(model.subagents[chat.id] ?? []) { child in
-                                let childChat = child.chatSummary(botId: chat.botId)
-                                ForEach((model.asyncQuestions[child.id] ?? []).filter { $0.state == "pending" }) { question in
-                                    AsyncQuestionRow(model: model, chat: childChat, question: question)
-                                        .modifier(ConversationColumn())
-                                }
-                            }
-                            ForEach(pendingAttentionRequests) { request in
-                                AttentionRow(model: model, request: request).modifier(ConversationColumn()).id("approval-" + request.id)
-                            }
-                            }
                             Color.clear.frame(height: 1).modifier(ConversationColumn())
                                 .background { GeometryReader { geometry in
                                     Color.clear.preference(key: BottomFrameKey.self, value: geometry.frame(in: .global))
@@ -1296,14 +1281,7 @@ struct ConversationView: View {
             let attachments = composerAttachments
             return VStack(alignment: .leading, spacing: 8) {
                 DictationControls(controller: model.dictation, model: model, chat: chat)
-                if let request = model.requests(for: chat).first(where: { !$0.isQuestion }) {
-                    Button("Review request", systemImage: "hand.raised") {
-                        requestedScrollID = "approval-" + request.id
-                        workspaceRequest = nil
-                        editedFilesReview = nil
-                    }.font(.subheadline).frame(minHeight: 44).accessibilityIdentifier("review-approval-request")
-                }
-                QuestionDock(model: model, chat: chat)
+                AttentionDock(model: model, chat: chat)
                 if (!chat.isArchived || model.isSubagent(chat)) && (chat.botId != nil || model.groups[chat.id] != nil || model.isProject(chat)) {
                     if model.nativeHistoryFailures.contains(chat.id) {
                         HistoryRetryNotice { await model.reloadNativeHistory(chat) }
@@ -2737,7 +2715,8 @@ struct AttentionRow: View {
         VStack(alignment: .leading, spacing: 12) {
             if let saved = model.savedDecisions[request.id] {
                 Text("A reply is saved. Check whether it was received.")
-                Button("Check saved reply") { Task { await model.resolve(request, decision: saved.decision) } }.frame(minHeight: 44)
+                Button("Check saved reply") { Task { await model.resolve(request, decision: saved.decision) } }
+                    .buttonStyle(.bordered).tint(.primary).frame(minHeight: 44)
             } else if request.isQuestion {
                 VStack(alignment: .leading, spacing: 8) {
                 QuestionNavigation(index: $questionIndex, count: request.params.questions?.count ?? 0)
@@ -2788,7 +2767,7 @@ struct AttentionRow: View {
                 if let url = request.elicitationURL {
                     Link(destination: url) {
                         Label("Open " + (url.host ?? "service"), systemImage: "arrow.up.right.square")
-                    }.frame(minHeight: 44).accessibilityIdentifier("approval-service-link")
+                    }.buttonStyle(.bordered).tint(.primary).frame(minHeight: 44).accessibilityIdentifier("approval-service-link")
                     Text("Complete the request in your browser, then return here to continue.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -6802,7 +6781,7 @@ struct AsyncQuestionRow: View {
                     if model.retryableAsyncReplies.contains(question.id) || model.savedAsyncReplies[question.id] != nil {
                         Button(model.retryableAsyncReplies.contains(question.id) ? "Check saved reply" : "Check status") {
                             Task { await model.replyAsync(question, chat: chat, answers: [], skip: true, retry: true) }
-                        }
+                        }.buttonStyle(.bordered).tint(.primary)
                     }
                 }
                 if let saved = model.savedAsyncReplies[question.id] {
@@ -6825,29 +6804,42 @@ struct AsyncQuestionRow: View {
 
 /// A stable notice keeps questions reachable without replacing the message
 /// draft. The sheet owns scrolling, including long forms at large text sizes.
-struct QuestionDock: View {
+/// Pending permission requests and questions, pinned above the composer.
+/// Each opens in one sheet; none of them is placed in the conversation.
+struct AttentionDock: View {
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
     @State private var showingSheet = false
     @State private var requestIndex = 0
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let requests = model.requests(for: chat).filter(\.isQuestion)
+            let now = UInt64(context.date.timeIntervalSince1970 * 1000)
+            // Permissions block work, so they come first.
+            let requests = model.requests(for: chat).sorted { !$0.isQuestion && $1.isQuestion }
             let async = (model.asyncQuestions[chat.id] ?? []).filter {
-                $0.canAnswer(now: UInt64(context.date.timeIntervalSince1970 * 1000)) || model.attentionErrors[$0.id] != nil
+                $0.canAnswer(now: now) || model.attentionErrors[$0.id] != nil
+            }.map { (chat, $0) } + (model.subagents[chat.id] ?? []).flatMap { child in
+                (model.asyncQuestions[child.id] ?? []).filter { $0.state == "pending" }
+                    .map { (child.chatSummary(botId: chat.botId), $0) }
             }
             let count = requests.count + async.count
             if count > 0 {
                 Button { showingSheet = true } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "questionmark.bubble").foregroundStyle(.secondary)
-                        Text(count == 1 ? "Question to review" : "\(count) questions to review")
-                            .font(.subheadline.weight(.semibold))
+                    HStack(spacing: 10) {
+                        Image(systemName: requests.first.map { $0.isQuestion ? "questionmark.bubble" : "hand.raised" } ?? "questionmark.bubble")
+                            .font(.body.weight(.semibold)).foregroundStyle(.secondary).frame(width: 24)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(Self.title(requests: requests, questions: async.count))
+                                .font(.subheadline.weight(.semibold))
+                            if let summary = requests.first.flatMap(Self.summary) ?? async.first?.1.questions.first?.title {
+                                Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
                         Spacer(minLength: 8)
-                        Image(systemName: "chevron.up").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Text("Review").font(.subheadline.weight(.semibold))
                     }
-                    .foregroundStyle(.primary).padding(.horizontal, 12).frame(minHeight: 44)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                    .foregroundStyle(.primary).padding(.horizontal, 14).padding(.vertical, 8).frame(minHeight: 52)
+                    .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -6860,22 +6852,36 @@ struct QuestionDock: View {
                                 ForEach(Array(requests.enumerated()).filter { $0.offset == min(requestIndex, count - 1) }, id: \.element.id) { _, request in
                                     AttentionRow(model: model, request: request)
                                 }
-                                ForEach(Array(async.enumerated()).filter { $0.offset + requests.count == min(requestIndex, count - 1) }, id: \.element.id) { _, question in
-                                    AsyncQuestionRow(model: model, chat: chat, question: question)
+                                ForEach(Array(async.enumerated()).filter { $0.offset + requests.count == min(requestIndex, count - 1) }, id: \.element.1.id) { _, item in
+                                    AsyncQuestionRow(model: model, chat: item.0, question: item.1)
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(16)
                         }
-                        .navigationTitle(count == 1 ? "Question" : "Questions")
+                        .navigationTitle(requests.contains { !$0.isQuestion } ? "Review" : count == 1 ? "Question" : "Questions")
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar { Button("Done") { showingSheet = false } }
-                        .onChange(of: count) { _, value in requestIndex = min(requestIndex, max(0, value - 1)) }
+                        .onChange(of: count) { _, value in
+                            requestIndex = min(requestIndex, max(0, value - 1))
+                            if value == 0 { showingSheet = false }
+                        }
                     }
                     .presentationDetents([.large])
                 }
             }
         }
+    }
+    static func title(requests: [AttentionRequest], questions: Int) -> String {
+        let count = requests.count + questions
+        if count > 1 { return "\(count) requests to review" }
+        return requests.first.map { $0.isQuestion ? "Question to review" : "Permission requested" } ?? "Question to review"
+    }
+    /// One line saying what is being asked, when the request carries it.
+    static func summary(_ request: AttentionRequest) -> String? {
+        if request.isQuestion { return request.params.questions?.first?.question }
+        return [request.params.command, request.computerAction?.detail, request.params.reason, request.params.message]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.first { !$0.isEmpty }
     }
 }
 
