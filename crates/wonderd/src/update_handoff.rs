@@ -2,11 +2,51 @@
 //! user Stop never create a continuation, and uncertain submissions never retry.
 use crate::AppState;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use wonder_app_server::RpcClient;
 use wonder_store::UpdateHandoff;
 
 const CONTINUE: &str = "Continue the work paused for a Wonder update in this conversation. Read the previous tool results and check current state before proceeding. Do not repeat completed actions or replay the original request.";
+
+/// Whether a paused Claude turn's frozen policy grants the same access as the
+/// policy Wonder builds now from the conversation's current choices. Only what
+/// the owner chose is compared; fields a newer Wonder adds or drops must not
+/// strand paused work, and the continuation then runs with the fresh policy.
+/// A protected folder added by the update narrows access and is accepted.
+pub(crate) fn same_claude_access(frozen: &Value, fresh: &Value) -> bool {
+    fn roots<'a>(policy: &'a Value, key: &str) -> Option<BTreeSet<&'a str>> {
+        policy[key].as_array()?.iter().map(Value::as_str).collect()
+    }
+    let plan = |policy: &Value| policy["planMode"].as_bool().unwrap_or(false);
+    ["mode", "approvalMode", "workspace"]
+        .iter()
+        .all(|key| frozen[*key].is_string() && frozen[*key] == fresh[*key])
+        && plan(frozen) == plan(fresh)
+        && ["readRoots", "writeRoots"]
+            .iter()
+            .all(|key| roots(frozen, key).is_some() && roots(frozen, key) == roots(fresh, key))
+        && matches!((roots(frozen, "deniedRoots"), roots(fresh, "deniedRoots")),
+            (Some(frozen), Some(fresh)) if frozen.is_subset(&fresh))
+}
+
+/// Why a paused turn was not continued. A blocked continuation cannot succeed
+/// without the owner, so its response is settled instead of left running.
+enum Failure {
+    Blocked(String),
+    Retry(String),
+}
+
+impl From<String> for Failure {
+    fn from(error: String) -> Self {
+        Self::Retry(error)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(error: &str) -> Self {
+        Self::Retry(error.to_owned())
+    }
+}
 
 pub(crate) async fn remember_settings(
     state: &AppState,
@@ -427,29 +467,96 @@ pub(crate) async fn recover(state: &AppState) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
     {
-        if let Err(error) = recover_one(state, &handoff).await {
-            if state
-                .store
-                .note_update_handoff_error(&handoff, &error)
-                .await
-                .map_err(|e| e.to_string())?
-            {
-                let _ = state.logger.record(
-                    "warn",
-                    "update_continuation_pending",
-                    json!({"threadId":handoff.thread_id,"error":error}),
-                );
-                crate::publish_event_with_context(state, wonder_api::WonderEvent::TerminalError {
-                message: "Wonder could not safely continue work paused for the update. Open this conversation on your Mac to check its state before continuing.".into()
-            }, crate::EventContext { conversation_id:Some(handoff.conversation_id.clone()),message_id:handoff.message_id.clone(),
-                thread_id:Some(handoff.thread_id.clone()),turn_id:Some(handoff.stopped_turn_id.clone()), ..Default::default() }).await.map_err(|e| e.to_string())?;
+        let error = match recover_one(state, &handoff).await {
+            Ok(()) => continue,
+            Err(Failure::Blocked(reason)) => {
+                block(state, &handoff, &reason).await?;
+                continue;
             }
+            Err(Failure::Retry(error)) => error,
+        };
+        if state
+            .store
+            .note_update_handoff_error(&handoff, &error)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            let _ = state.logger.record(
+                "warn",
+                "update_continuation_pending",
+                json!({"threadId":handoff.thread_id,"error":error}),
+            );
+            crate::publish_event_with_context(state, wonder_api::WonderEvent::TerminalError {
+            message: "Wonder could not safely continue work paused for the update. Open this conversation on your Mac to check its state before continuing.".into()
+        }, crate::EventContext { conversation_id:Some(handoff.conversation_id.clone()),message_id:handoff.message_id.clone(),
+            thread_id:Some(handoff.thread_id.clone()),turn_id:Some(handoff.stopped_turn_id.clone()), ..Default::default() }).await.map_err(|e| e.to_string())?;
         }
     }
     Ok(())
 }
 
-async fn validate_execution(state: &AppState, handoff: &UpdateHandoff) -> Result<(), String> {
+/// Ends a paused response whose continuation needs the owner: keep its partial
+/// reply, mark it stopped, and say what to do. Sending a message continues.
+async fn block(state: &AppState, handoff: &UpdateHandoff, reason: &str) -> Result<(), String> {
+    let _ = state.logger.record(
+        "warn",
+        "update_continuation_blocked",
+        json!({"threadId":handoff.thread_id,"error":reason}),
+    );
+    state
+        .store
+        .cancel_update_handoff(&handoff.thread_id, &handoff.stopped_turn_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    settle_partial_assistant(state, handoff).await?;
+    let message = match &handoff.message_id {
+        Some(id) => state
+            .store
+            .message_by_id(id)
+            .await
+            .map_err(|e| e.to_string())?,
+        None => None,
+    };
+    if let Some(message) = message {
+        if state
+            .store
+            .interrupt_message_if_active(&message.id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            crate::publish_message_state(
+                state,
+                &message,
+                crate::DeliveryState::Interrupted,
+                Some(&handoff.thread_id),
+                Some(&handoff.stopped_turn_id),
+            )
+            .await;
+        }
+    }
+    crate::publish_event_with_context(
+        state,
+        wonder_api::WonderEvent::TerminalError {
+            message: format!("Wonder updated while this response was running and stopped it instead of continuing. {reason} Check this conversation's access, then send a message to continue."),
+        },
+        crate::EventContext {
+            conversation_id: Some(handoff.conversation_id.clone()),
+            message_id: handoff.message_id.clone(),
+            thread_id: Some(handoff.thread_id.clone()),
+            turn_id: Some(handoff.stopped_turn_id.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Returns the current Claude policy the continuation must run with.
+async fn validate_execution(
+    state: &AppState,
+    handoff: &UpdateHandoff,
+) -> Result<Option<Value>, String> {
     let message_id = handoff
         .message_id
         .as_deref()
@@ -460,6 +567,7 @@ async fn validate_execution(state: &AppState, handoff: &UpdateHandoff) -> Result
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Missing paused message")?;
+    let mut fresh = None;
     if let Some(bot) = crate::bot_for_conversation(state, &handoff.conversation_id)
         .await
         .map_err(|e| e.to_string())?
@@ -490,13 +598,15 @@ async fn validate_execution(state: &AppState, handoff: &UpdateHandoff) -> Result
         if resume["cwd"].as_str() != Some(bot.execution_directory())
             || resume["runtimeWorkspaceRoots"]
                 != json!(crate::permission_modes::runtime_roots(state, &bot).await?)
-            || (bot.agent_family == wonder_store::AgentFamily::Claude
-                && resume["wonderPolicy"] != crate::claude::policy(state, &bot).await?)
         {
-            return Err(
-                "Bot access changed while work was paused. Review its access before continuing."
-                    .into(),
-            );
+            return Err("Bot access changed while work was paused.".into());
+        }
+        if bot.agent_family == wonder_store::AgentFamily::Claude {
+            let policy = crate::claude::policy(state, &bot).await?;
+            if !same_claude_access(&resume["wonderPolicy"], &policy) {
+                return Err("Bot access changed while work was paused.".into());
+            }
+            fresh = Some(policy);
         }
         crate::ensure_execution_permission_cache(state, &bot).await?;
     }
@@ -506,15 +616,18 @@ async fn validate_execution(state: &AppState, handoff: &UpdateHandoff) -> Result
         .await
         .map_err(|e| e.to_string())?
     {
-        crate::projects::validate_update_policy(
+        if let Some(policy) = crate::projects::validate_update_policy(
             state,
             &conversation,
             &serde_json::from_str(&handoff.resume_params).map_err(|e| e.to_string())?,
             &serde_json::from_str(&handoff.turn_params).map_err(|e| e.to_string())?,
         )
-        .await?;
+        .await?
+        {
+            fresh = Some(policy);
+        }
     }
-    Ok(())
+    Ok(fresh)
 }
 
 async fn validate_parent_execution(state: &AppState, conversation: &str) -> Result<(), String> {
@@ -538,19 +651,22 @@ async fn validate_parent_execution(state: &AppState, conversation: &str) -> Resu
             .rev()
             .find(|h| h.message_id.is_some())
             .ok_or("The parent's paused execution is unavailable")?;
-        return validate_execution(state, &handoff).await;
+        return validate_execution(state, &handoff).await.map(|_| ());
     }
     Err("The paused agent's parent chain is incomplete".into())
 }
 
-async fn recover_one(state: &AppState, handoff: &UpdateHandoff) -> Result<(), String> {
+async fn recover_one(state: &AppState, handoff: &UpdateHandoff) -> Result<(), Failure> {
+    let mut policy = None;
     let rpc = if let Some(child) =
         crate::subagents::runtime_for_conversation(state, &handoff.conversation_id).await?
     {
         if child.ownership.thread_id != handoff.thread_id {
             return Err("Agent task ownership changed".into());
         }
-        validate_parent_execution(state, &handoff.conversation_id).await?;
+        validate_parent_execution(state, &handoff.conversation_id)
+            .await
+            .map_err(Failure::Blocked)?;
         child.rpc
     } else {
         let binding = state
@@ -579,11 +695,17 @@ async fn recover_one(state: &AppState, handoff: &UpdateHandoff) -> Result<(), St
                     .map_err(|e| e.to_string())?;
                 return Ok(());
             }
-            validate_execution(state, handoff).await?;
+            policy = validate_execution(state, handoff)
+                .await
+                .map_err(Failure::Blocked)?;
         }
         crate::claude::for_thread(state, &handoff.thread_id).await?
     };
-    let resume: Value = serde_json::from_str(&handoff.resume_params).map_err(|e| e.to_string())?;
+    let mut resume: Value =
+        serde_json::from_str(&handoff.resume_params).map_err(|e| e.to_string())?;
+    if let Some(policy) = &policy {
+        resume["wonderPolicy"] = policy.clone();
+    }
     let resumed = result(&rpc, "thread/resume", resume).await?;
     if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(&handoff.thread_id) {
         return Err("The runtime reopened a different conversation".into());
@@ -629,6 +751,9 @@ async fn recover_one(state: &AppState, handoff: &UpdateHandoff) -> Result<(), St
         let mut params: Value =
             serde_json::from_str(&handoff.turn_params).map_err(|e| e.to_string())?;
         params["clientUserMessageId"] = json!(handoff.resume_client_id);
+        if let (Some(policy), Some(frozen)) = (policy, params.get_mut("wonderPolicy")) {
+            *frozen = policy;
+        }
         params["input"] = json!([{"type":"text","text":CONTINUE}]);
         if !state
             .store
@@ -945,16 +1070,19 @@ mod tests {
         restart(&state).await;
         recover(&state).await.unwrap();
         assert!(starts(&dir).is_empty());
-        assert_eq!(
-            state.store.pending_update_handoffs().await.unwrap().len(),
-            2
-        );
+        // Neither waits to retry: both need the owner.
+        assert!(state
+            .store
+            .pending_update_handoffs()
+            .await
+            .unwrap()
+            .is_empty());
         state.app_server.lock().await.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn revoked_write_root_is_not_restored_by_update_continuation() {
-        let (dir, state, _) = fixture().await;
+        let (dir, state, message) = fixture().await;
         let extra = dir.path().join("shared");
         fs::create_dir(&extra).unwrap();
         let extra = fs::canonicalize(extra)
@@ -994,11 +1122,50 @@ mod tests {
         restart(&state).await;
         recover(&state).await.unwrap();
         assert!(starts(&dir).is_empty());
-        assert_eq!(
-            state.store.pending_update_handoffs().await.unwrap().len(),
-            1
-        );
+        // A continuation that needs the owner is settled, not left running.
+        assert!(state
+            .store
+            .pending_update_handoffs()
+            .await
+            .unwrap()
+            .is_empty());
+        let message = state
+            .store
+            .message_by_id(&message.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.state, "interrupted");
         state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn claude_access_compares_owner_choices_not_policy_format() {
+        let frozen = json!({"mode":"full_access","approvalMode":"full_access","planMode":false,
+            "workspace":"/media","readRoots":["/"],"writeRoots":["/app"],"deniedRoots":["/secret"],
+            "unsandboxedCommands":true});
+        let fresh = json!({"mode":"full_access","approvalMode":"full_access","planMode":false,
+            "workspace":"/media","readRoots":["/"],"writeRoots":["/app"],"deniedRoots":["/secret"]});
+        // A field a newer Wonder dropped, or a protected folder it added, does not strand work.
+        assert!(same_claude_access(&frozen, &fresh));
+        let mut narrower = fresh.clone();
+        narrower["deniedRoots"] = json!(["/secret", "/new"]);
+        assert!(same_claude_access(&frozen, &narrower));
+        // Any change to what the owner chose blocks the continuation.
+        for (key, value) in [
+            ("mode", json!("workspace")),
+            ("approvalMode", json!("auto")),
+            ("planMode", json!(true)),
+            ("workspace", json!("/other")),
+            ("writeRoots", json!(["/app", "/b"])),
+            ("readRoots", json!(["/app"])),
+            ("deniedRoots", json!([])),
+        ] {
+            let mut changed = fresh.clone();
+            changed[key] = value;
+            assert!(!same_claude_access(&frozen, &changed), "{key}");
+        }
+        assert!(!same_claude_access(&json!(null), &fresh));
     }
 
     #[tokio::test]

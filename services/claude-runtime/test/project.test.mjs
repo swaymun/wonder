@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { Sessions } from "../sessions.mjs";
 import { ClaudeBridge } from "../bridge.mjs";
-import { SANDBOX_GUIDANCE, ToolPolicy } from "../permissions.mjs";
+import { ToolPolicy } from "../permissions.mjs";
 import { backgroundTasks, claudeSessionBusy, nativeTurns } from "../project-history.mjs";
 import { ClaudeSessionFiles, projectFolderName } from "../session-file.mjs";
 
@@ -62,7 +62,9 @@ test("project turns use the native coding preset and name the transcript entry a
   await new Promise(resolve => setImmediate(resolve));
   await f.bridge.active.get(thread.id)?.finished;
   const options = f.capturedOptions[0];
-  assert.deepEqual(options.systemPrompt, { type: "preset", preset: "claude_code", append: SANDBOX_GUIDANCE });
+  // Projects run without a sandbox, so there is no sandbox guidance to add.
+  assert.deepEqual(options.systemPrompt, { type: "preset", preset: "claude_code" });
+  assert.deepEqual(options.sandbox, { enabled: false });
   assert.deepEqual(options.settingSources, ["user", "project", "local"]);
   assert.deepEqual(options.additionalDirectories, [f.secondary]);
   assert.deepEqual(options.mcpServers, {});
@@ -76,11 +78,11 @@ test("project turns use the native coding preset and name the transcript entry a
     wonderProject: { cwd: f.secondary } }), /keeps its working folder/);
 });
 
-// Contract: the owner's approval and plan modes reach every turn. Automatic
-// commands still run through canUseTool inside Claude Code's sandbox (the hook
-// only asks); leaving the sandbox or reaching a new host asks the owner; and
-// planning refuses writes and proposals to continue on its own.
-test("project approval and plan modes reach the SDK while commands stay sandboxed until the owner approves", async t => {
+// Contract: the owner's approval and plan modes reach every turn as Claude
+// Code's own permission mode, with no sandbox. Whatever Claude Code would ask
+// reaches the owner; Full access never asks; Read only keeps a sandbox whose
+// new hosts ask; and planning refuses writes and proposals to continue.
+test("project approval and plan modes reach the SDK and Claude Code's prompts reach the owner", async t => {
   const f = await fixture(t);
   await assert.rejects(f.bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku", wonderProject: f.project,
     wonderPolicy: { ...f.policy, mode: "read_only", approvalMode: "auto" } }), /unsupported/);
@@ -107,8 +109,8 @@ test("project approval and plan modes reach the SDK while commands stay sandboxe
     finally { f.gate.current.resolve(); await f.bridge.active.get(thread.id)?.finished; }
   };
   const inside = { file_path: join(f.primary, "a.txt"), content: "x" }, ctx = id => ({ toolUseID: id });
-  const sandboxed = (options, result) => {
-    assert.equal(options.sandbox.enabled, true);
+  const ran = (options, result) => {
+    assert.deepEqual(options.sandbox, { enabled: false });
     assert.deepEqual(result, { behavior: "allow", updatedInput: { command: "echo hi" } });
   };
   const outside = { command: "git push", dangerouslyDisableSandbox: true };
@@ -121,16 +123,25 @@ test("project approval and plan modes reach the SDK while commands stay sandboxe
   };
 
   await turn({ approvalMode: "auto" }, async ({ options, hook, approve }) => {
-    assert.equal(options.permissionMode, "default");
-    const before = f.frames.length;
-    sandboxed(options, await options.canUseTool("Bash", { command: "echo hi" }, ctx("auto-bash")));
-    assert.equal(f.frames.length, before, "automatic commands do not ask");
-    // Auto never leaves the sandbox on its own: the owner decides on their phone.
-    const declined = await approve(options.canUseTool("Bash", outside, ctx("auto-outside")), "decline",
-      params => assert.match(params.reason, /outside the sandbox/));
+    // Claude Code's classifier approves routine commands; an escalation asks the owner.
+    assert.equal(options.permissionMode, "auto");
+    assert.deepEqual(await hook("Bash", { command: "echo hi" }), undefined);
+    ran(options, await approve(options.canUseTool("Bash", { command: "echo hi" }, ctx("auto-bash")), "accept",
+      params => assert.equal(params.command, "echo hi")));
+    const declined = await approve(options.canUseTool("Bash", { command: "git push" }, ctx("auto-push")), "decline");
     assert.equal(declined.behavior, "deny");
+    assert.match(declined.message, /owner declined/);
+    assert.equal((await hook("Write", inside)).permissionDecision, "allow");
+    assert.equal((await options.canUseTool("Write", inside, ctx("auto-write"))).behavior, "allow");
+    const web = options.canUseTool("WebFetch", { url: "https://example.com" }, ctx("auto-web"));
+    assert.equal((await approve(web, "decline")).behavior, "deny");
+  });
+  await turn({ mode: "read_only", approvalMode: "ask", writeRoots: [] }, async ({ options, approve }) => {
+    assert.equal(options.sandbox.enabled, true);
+    // Leaving Read only's sandbox is the owner's decision.
+    const declined = await approve(options.canUseTool("Bash", outside, ctx("ro-outside")), "decline",
+      params => assert.match(params.reason, /outside the sandbox/));
     assert.match(declined.message, /outside the sandbox/);
-    assert.equal((await approve(options.canUseTool("Bash", outside, ctx("auto-outside-2")), "accept")).behavior, "allow");
     // A new host is allowed once, for the session, or saved to Claude Code's project settings.
     assert.deepEqual(await network("example.com", "accept")({ options, approve }), { behavior: "allow", updatedInput: { host: "example.com" } });
     assert.equal((await network("example.org", "acceptForSession")({ options, approve })).updatedPermissions[0].destination, "session");
@@ -139,16 +150,11 @@ test("project approval and plan modes reach the SDK while commands stay sandboxe
     const refused = await network("evil.example", "decline")({ options, approve });
     assert.equal(refused.behavior, "deny");
     assert.match(refused.message, /did not allow evil\.example/);
-    assert.equal((await hook("Bash", { command: "echo hi" })).permissionDecision, "ask");
-    assert.equal((await hook("Write", inside)).permissionDecision, "allow");
-    assert.equal((await options.canUseTool("Write", inside, ctx("auto-write"))).behavior, "allow");
-    const web = options.canUseTool("WebFetch", { url: "https://example.com" }, ctx("auto-web"));
-    assert.equal((await approve(web, "decline")).behavior, "deny");
   });
   await turn({ approvalMode: "accept_edits" }, async ({ options, approve }) => {
     assert.equal(options.permissionMode, "default");
     assert.equal((await options.canUseTool("Edit", inside, ctx("edit"))).behavior, "allow");
-    sandboxed(options, await approve(options.canUseTool("Bash", { command: "echo hi" }, ctx("ask-bash")), "accept"));
+    ran(options, await approve(options.canUseTool("Bash", { command: "echo hi" }, ctx("ask-bash")), "accept"));
   });
   await turn({ approvalMode: "auto", planMode: true }, async ({ options, hook, approve }) => {
     assert.equal(options.permissionMode, "plan");
@@ -162,9 +168,8 @@ test("project approval and plan modes reach the SDK while commands stay sandboxe
     const exit = await options.canUseTool("ExitPlanMode", { plan: "# Plan" }, ctx("plan-exit"));
     assert.equal(exit.behavior, "deny");
     assert.match(exit.message, /owner reviews the plan in Wonder/);
-    // Even in Auto, planning asks before running a command, and it stays sandboxed.
-    sandboxed(options, await approve(options.canUseTool("Bash", { command: "echo hi" }, ctx("plan-bash")), "accept"));
-    assert.equal((await options.canUseTool("Bash", outside, ctx("plan-outside"))).behavior, "deny");
+    // Even in Auto, planning asks before running a command.
+    ran(options, await approve(options.canUseTool("Bash", { command: "echo hi" }, ctx("plan-bash")), "accept"));
   });
   await turn({ approvalMode: "ask" }, async ({ options }) => {
     assert.equal(options.permissionMode, "default");

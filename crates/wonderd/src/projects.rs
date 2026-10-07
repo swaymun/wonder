@@ -2638,12 +2638,13 @@ struct CodexTurn<'a> {
 }
 
 /// Reuse normal execution's root checks before restoring frozen update policy.
+/// Returns the current Claude policy to resume with.
 pub(crate) async fn validate_update_policy(
     state: &AppState,
     conversation: &StoredProjectConversation,
     resume: &Value,
     turn: &Value,
-) -> Result<(), String> {
+) -> Result<Option<Value>, String> {
     let project = state
         .store
         .project(&conversation.project_id)
@@ -2662,12 +2663,15 @@ pub(crate) async fn validate_update_policy(
     {
         return Err("The paused project folder is no longer authorized".into());
     }
-    let compatible = match conversation.family {
+    let (compatible, fresh) = match conversation.family {
         AgentFamily::Codex => {
             let (_, approval, policy) = codex_policy(&conversation.access_mode, &roots);
-            resume["runtimeWorkspaceRoots"] == json!(roots)
-                && turn["sandboxPolicy"] == policy
-                && turn["approvalPolicy"] == approval
+            (
+                resume["runtimeWorkspaceRoots"] == json!(roots)
+                    && turn["sandboxPolicy"] == policy
+                    && turn["approvalPolicy"] == approval,
+                None,
+            )
         }
         AgentFamily::Claude => {
             let mut policy = claude_policy(
@@ -2679,13 +2683,17 @@ pub(crate) async fn validate_update_policy(
             policy["workspace"] = json!(media_workspace(state, &conversation.conversation_id)
                 .await
                 .ok_or("The paused attachment folder is unavailable")?);
-            resume["wonderPolicy"] == policy && turn["wonderPolicy"] == policy
+            (
+                crate::update_handoff::same_claude_access(&resume["wonderPolicy"], &policy)
+                    && crate::update_handoff::same_claude_access(&turn["wonderPolicy"], &policy),
+                Some(policy),
+            )
         }
     };
     if !compatible {
-        return Err("Project access changed while work was paused. Review the conversation before continuing.".into());
+        return Err("Project access changed while work was paused.".into());
     }
-    Ok(())
+    Ok(fresh)
 }
 
 pub(crate) async fn is_project(state: &AppState, conversation: &str) -> bool {

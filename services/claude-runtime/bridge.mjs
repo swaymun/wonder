@@ -504,7 +504,7 @@ export class ClaudeBridge {
         canUseTool: (name, input, context) => this.permission(session, run, policy, name, input, context),
         hooks: { PreToolUse: [{ hooks: [(input) => policy.beforeTool(input)] }],
           PostToolUse: [{ hooks: [async () => run.initialized ? { continue: false, stopReason: "The optional question was posted. Initialization is complete." } : {}] }] },
-        permissionMode: policy.planMode ? "plan" : "default", sandbox: policy.sandbox(), includePartialMessages: true,
+        permissionMode: policy.permissionMode, sandbox: policy.sandbox(), includePartialMessages: true,
         // Ordinary tasks run until completion, cancellation, or the subscription limit.
         // A fixed tool-turn cap otherwise abandons valid long-running work.
         persistSession: true, verbatimPrompts: true,

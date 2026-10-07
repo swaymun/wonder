@@ -1,12 +1,12 @@
 # Wonder beta status
 
-On October 6, Wonder Testing Release 1.0 (42) and production Release 1.0 (98)
-uploaded and processed successfully. Read-only App Store Connect checks confirmed
-both builds in internal Owner Beta with its existing tester. TestFlight installation
-remains unverified. Mac 1.0.123 is Developer ID signed, notarized and stapled;
-installed 1.0.123 passes health, readiness, signature and Gatekeeper checks.
-Existing Project, conversation and paired-device records are preserved. No external beta review, public enrollment or new public Mac
-binary release was requested.
+On October 7, Wonder Testing Release 1.0 (44) and production Release 1.0 (100)
+uploaded and processed successfully. Testing 44 is available in internal Owner
+Beta; production 100's tester availability was not checked. TestFlight installation
+remains unverified. Mac 1.0.125 is Developer ID signed, notarized and stapled, its
+DMG passed Gatekeeper and artifact checks, and it is installed over 1.0.124 with
+passing signature, Gatekeeper, `/healthz` and `/readyz` checks. No external beta
+review, public enrollment or new public Mac binary release was requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -17,10 +17,45 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (98) uploaded, processed and in internal Owner Beta with its existing tester. External state is Ready for Beta Submission; no review submitted. Built from clean, pushed source (`12dbcb72`) with Diagnostics fixtures absent from the exported binary. TestFlight installation remains unverified. |
-| Wonder Testing | Blue Release 1.0 (42) uploaded, processed and available in automatic Owner Beta. Built from the same clean source as production 98. Build 41 is superseded by 42. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.123 is Developer ID signed, notarized, stapled and Gatekeeper accepted. Installed to `/Applications/Wonder.app`; `/healthz`, `/readyz`, the visible Ready state, signature and staple checks passed. All Project, conversation and paired-device identifiers from the pre-update snapshot remain present. Installer rollback bundles were removed. Fresh-Mac pairing and private-permission acceptance remain open. |
-| Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). Both current iOS archives and the Mac app came from clean, pushed `12dbcb72`; selected source is exported and audited separately from private release evidence. Third-party components retain their own licenses. |
+| iPhone and iPad | Production Release 1.0 (100) uploaded and processed; tester availability not checked. Built from clean, pushed source (`80a50906`). TestFlight installation remains unverified. |
+| Wonder Testing | Blue Release 1.0 (44) uploaded, processed and available in automatic Owner Beta, from the same source as production 100. Build 43 is superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.125 (from `6c99f64e`; the later `80a50906` changes only iPhone text) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `1c944ff976787069eabdd6b79bc36f2340fd4749abf55e8d8cb4ac7d8319f978`. |
+| Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). The iOS archives and the Mac app came from clean, pushed internal source. Third-party components retain their own licenses. |
+
+Testing 44, production 100 and Mac 1.0.125 run Claude Project commands without a
+sandbox, as Claude Code does. The Access choice is **Ask**, **Auto** (the default)
+or **Full access**, with Plan separate, and selects Claude Code's own permission
+mode: Ask uses its default rules, Auto its classifier, and anything Claude Code
+would ask reaches the phone; Full access never asks. Chats still on the retired
+Read only, and Bots, keep the sandbox. Work paused by a Mac update now resumes
+unless the owner's access choices changed; one that cannot resume is marked
+stopped with a message saying to check access and send a message, instead of
+spinning. Mac 1.0.124 left every paused Claude Project turn spinning for this
+reason.
+
+Verification: 350 daemon, 66 Claude bridge and 11 native project Swift tests
+passed; clippy and formatting are clean. The access menu scenario passed on the
+iPhone simulator on the Mac mini. The live no-sandbox access script
+(`access-acceptance.mjs`) was not run, so Auto's classifier and phone approval
+cards are unverified live; physical devices and TestFlight installation remain
+unverified.
+
+Before that, Testing 43, production 99 and Mac 1.0.124 ran Claude Project commands in Claude
+Code's own sandbox and replace the separate **Run outside sandbox** switch with one
+Access choice: **Ask**, **Auto (sandboxed)** (the new default) or **Full access**
+(no sandbox), with Plan separate. Sandboxed commands can push to GitHub, use
+package registries, bind local ports and use git's fsmonitor, but cannot read the
+rest of the home folder; other websites and unsandboxed retries ask on the phone.
+Chats that were Full access with sandboxed commands moved to Auto, so none gained
+access. Bots keep a closed network.
+
+Verification: 349 daemon, 157 storage, 66 Claude bridge and 260 native Swift tests
+passed; clippy and formatting are clean. Live Haiku runs through the bridge passed
+twice in Auto (git push to a deleted scratch branch, fsmonitor, local port,
+blocked `~/.ssh` and `~/Documents`, website approval) and once in Full access, and
+the Bot file-scope probe passed. The access menu scenario passed on the iPhone and
+iPhone Duo simulators. Phone approval cards were not exercised live; physical
+devices and TestFlight installation remain unverified.
 
 Testing 42, production 98 and Mac 1.0.123 add automatic takeover of idle Claude
 desktop chats when sending from Wonder. Busy desktop turns and chats open in a

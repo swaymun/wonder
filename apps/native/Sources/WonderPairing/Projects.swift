@@ -150,10 +150,11 @@ public enum ClaudeApproval: String, Codable, CaseIterable, Identifiable, Sendabl
     /// Edits project files without asking; asks before commands. No longer
     /// offered, but threads that chose it keep it.
     case acceptEdits = "accept_edits"
-    /// Edits and runs sandboxed commands in the project without asking.
+    /// Edits the project without asking; Claude Code's classifier approves
+    /// routine commands and asks about risky ones.
     case auto
     public var id: String { rawValue }
-    /// New Claude threads start in Auto, which keeps commands in the sandbox.
+    /// New Claude threads start in Auto.
     public static let standard = ClaudeApproval.auto
 }
 
@@ -250,8 +251,8 @@ public struct ProjectAccess: Hashable, Sendable {
 }
 
 /// One row of a project thread's access menu. Codex offers its three access
-/// levels. Claude offers Ask, Auto (sandboxed) and Full access (no sandbox),
-/// plus Plan. Hosts without project modes keep the original three levels.
+/// levels. Claude offers Ask, Auto and Full access, plus Plan; as in Claude
+/// Code, none of them sandboxes commands. Hosts without project modes keep the original three levels.
 public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
     case readOnly, workspace, manual, acceptEdits, auto, plan, fullAccess
     public var id: String { rawValue }
@@ -297,7 +298,7 @@ public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
         case .workspace: return supportsModes ? "Auto" : ProjectAccessMode.workspace.title(for: family)
         case .manual: return "Ask"
         case .acceptEdits: return "Accept edits"
-        case .auto: return "Auto (sandboxed)"
+        case .auto: return "Auto"
         case .plan: return "Plan"
         case .fullAccess: return "Full access"
         }
@@ -308,12 +309,12 @@ public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .readOnly: return ProjectAccessMode.readOnly.detail(for: family)
         case .workspace: return ProjectAccessMode.workspace.detail(for: family)
-        case .manual: return "Sandboxed. Asks before edits and commands."
+        case .manual: return "Asks before edits and most commands."
         case .acceptEdits: return "Edits files without asking. Asks before commands."
-        case .auto: return "Works without asking. Asks only for new websites."
+        case .auto: return "Works without asking. Asks before risky actions."
         case .plan: return "Plans the work without changing files."
         case .fullAccess: return family == .claude
-            ? "No sandbox. Never asks."
+            ? "Never asks."
             : ProjectAccessMode.fullAccess.detail(for: family)
         }
     }

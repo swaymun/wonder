@@ -448,11 +448,11 @@ final class ProjectComposerContractTests: XCTestCase {
             ProjectAccessChoice.choices(family: family, supportsModes: modes, current: current).map { $0.title(for: family, supportsModes: modes) }
         }
         XCTAssertEqual(titles(.codex, modes: true), ["Read only", "Auto", "Full access"])
-        XCTAssertEqual(titles(.claude, modes: true), ["Ask", "Auto (sandboxed)", "Full access"])
+        XCTAssertEqual(titles(.claude, modes: true), ["Ask", "Auto", "Full access"])
         XCTAssertEqual(titles(.claude, modes: true, current: ProjectAccess(accessMode: .readOnly)),
-                       ["Read only", "Ask", "Auto (sandboxed)", "Full access"])
+                       ["Read only", "Ask", "Auto", "Full access"])
         XCTAssertEqual(titles(.claude, modes: true, current: ProjectAccess(claudeApproval: .acceptEdits, planMode: true)),
-                       ["Accept edits", "Ask", "Auto (sandboxed)", "Full access"])
+                       ["Accept edits", "Ask", "Auto", "Full access"])
         XCTAssertEqual(ProjectAccessChoice.planChoice(family: .claude, supportsModes: true), .plan)
         XCTAssertNil(ProjectAccessChoice.planChoice(family: .codex, supportsModes: true))
         XCTAssertNil(ProjectAccessChoice.planChoice(family: .claude, supportsModes: false))

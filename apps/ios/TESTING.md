@@ -223,24 +223,23 @@ from the transcript. A desktop turn in progress or an open terminal session stil
 holds the message. Successful queued background notices do not complete the new
 Wonder prompt; session-level failures surface as failures.
 
-A Claude Project chat's Access menu offers **Ask**, **Auto (sandboxed)** (the
-default for new chats) and **Full access**, with Plan separate. Ask and Auto run
-commands in Claude Code's sandbox: the project, `/tmp` and toolchain caches are
-writable, the rest of `$HOME` (including `~/.ssh` and other repositories) is
-unreadable, local ports and sockets work, and common developer hosts such as
-GitHub and the npm, crates.io and PyPI registries are reachable. Any other host,
-and any retry outside the sandbox, asks the owner on the phone; "Save a network
-rule" writes the host to the project's `.claude/settings.local.json`. Full access
-has no sandbox. Bots and other chats keep a closed network. Project computer use
+A Claude Project chat's Access menu offers **Ask**, **Auto** (the default for
+new chats) and **Full access**, with Plan separate. As in Claude Code, Project
+commands run without a sandbox; the mode decides what asks. Ask uses Claude
+Code's default rules (routine read-only commands run, others ask), Auto uses
+Claude Code's classifier and asks only for what it escalates, and Full access
+never asks. Whatever Claude Code would ask reaches the owner on the phone.
+Threads still on the retired Read only keep a sandbox that enforces it. Bots
+and other chats keep a closed network. Project computer use
 uses the installed native `cua_repl` adapter when the host enables it, with
 provider authorization and turn cleanup preserved.
 
 The simulator cases `testMessageWaitsWhileClaudeChatIsOpenOnMac` and
-`testProjectClaudeAccessPickerSavesSandboxLevels` use isolated fixtures and send
+`testProjectClaudeAccessPickerSavesAccessLevels` use isolated fixtures and send
 no model work. Runtime tests cover notice/result ordering, error completion,
 command access, sandbox configuration, approvals and adapter ownership.
-`scripts/claude-sdk-smoke/sandbox-acceptance.mjs auto|full` proves the sandbox
-live (git push to a deleted scratch branch, fsmonitor, a local port, blocked
-`~/.ssh`, a host approval) with Haiku requests; run it only when authorized.
+`scripts/claude-sdk-smoke/access-acceptance.mjs auto|full` proves live that
+Project commands run without a sandbox (git, a local port, the network) and that
+Auto uses Claude Code's classifier, with Sonnet requests; run it only when authorized.
 Actual desktop handoff and Project computer control require an explicitly
 authorized live turn.

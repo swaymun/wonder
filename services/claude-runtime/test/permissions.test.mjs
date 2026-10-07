@@ -44,34 +44,33 @@ test("read-only mode cannot be widened by full-access approval or internal initi
   assert.equal(await policy.decision("Bash", {}), "deny");
   assert.equal(await policy.decision("mcp__wonder__wonder_update_profile", {}), "deny");
 });
-// Contract: the sandbox Claude Code applies to commands follows the owner's
-// mode. Projects confine $HOME to the project and toolchains, can reach common
-// developer hosts, bind local ports and keep protected folders closed; Bots
-// keep a closed network and their own scope. Live OS behavior is proven by
-// scripts/claude-sdk-smoke/sandbox-acceptance.mjs.
-test("command sandbox follows the owner's mode and keeps protected folders closed", async t => {
+// Contract: Projects run commands without a sandbox, as Claude Code does,
+// except Read only, whose sandbox confines $HOME to the project and toolchains,
+// reaches common developer hosts and keeps protected folders closed. Bots keep
+// a closed network and their own scope. Live behavior is proven by
+// scripts/claude-sdk-smoke/access-acceptance.mjs.
+test("Projects run commands without a sandbox; Read only and Bots keep it", async t => {
   const root = await mkdtemp(join(tmpdir(), "wonder-sandbox-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home"), app = join(home, "app"), data = join(home, ".wonder"), bot = join(data, "bots", "b1"), ssh = join(home, ".ssh");
   await Promise.all([app, bot, ssh].map(path => mkdir(path, { recursive: true })));
   const projectPolicy = modes => new ToolPolicy({ cwd: app, readRoots: ["/"], writeRoots: modes.mode === "read_only" ? [] : [app],
     deniedRoots: [data, ssh], project: true, projectRoots: [app], home, ...modes });
-  const auto = projectPolicy({ mode: "workspace", approvalMode: "auto" }).sandbox();
-  assert.equal(auto.enabled, true);
-  assert.equal(auto.allowUnsandboxedCommands, true);
-  assert.ok(auto.network.allowedDomains.includes("github.com"));
-  assert.equal(auto.network.allowLocalBinding, true);
-  assert.equal(auto.network.allowAllUnixSockets, true);
-  for (const denied of [home, data, ssh]) assert.ok(auto.filesystem.denyRead.includes(denied));
-  for (const readable of [app, join(home, ".cargo"), join(home, ".gitconfig")]) assert.ok(auto.filesystem.allowRead.includes(readable));
-  for (const writable of [app, "/tmp", join(home, ".cargo/registry")]) assert.ok(auto.filesystem.allowWrite.includes(writable));
-  assert.ok(!auto.filesystem.allowWrite.some(path => path === home || path.endsWith(".cargo/bin") || path.endsWith(".cargo")));
-  assert.ok(!auto.filesystem.allowRead.some(path => path === home || path.startsWith(ssh) || path.startsWith(data)));
+  for (const modes of [{ mode: "workspace", approvalMode: "ask" }, { mode: "workspace", approvalMode: "auto" },
+    { mode: "workspace", approvalMode: "auto", planMode: true }, { mode: "full_access", approvalMode: "full_access" }])
+    assert.deepEqual(projectPolicy(modes).sandbox(), { enabled: false }, JSON.stringify(modes));
+  // Read only is enforced by the sandbox, with the developer-friendly Project layout.
   const readOnly = projectPolicy({ mode: "read_only", approvalMode: "ask" }).sandbox();
+  assert.equal(readOnly.enabled, true);
+  assert.equal(readOnly.allowUnsandboxedCommands, true);
+  assert.ok(readOnly.network.allowedDomains.includes("github.com"));
+  assert.equal(readOnly.network.allowLocalBinding, true);
+  for (const denied of [home, data, ssh]) assert.ok(readOnly.filesystem.denyRead.includes(denied));
+  for (const readable of [app, join(home, ".cargo"), join(home, ".gitconfig")]) assert.ok(readOnly.filesystem.allowRead.includes(readable));
+  assert.ok(!readOnly.filesystem.allowRead.some(path => path === home || path.startsWith(ssh) || path.startsWith(data)));
+  assert.ok(readOnly.filesystem.allowWrite.includes("/tmp"));
   assert.ok(!readOnly.filesystem.allowWrite.includes(app));
   assert.ok(readOnly.filesystem.denyWrite.includes(app));
-  assert.deepEqual(projectPolicy({ mode: "full_access", approvalMode: "full_access" }).sandbox(), { enabled: false });
-  assert.equal(projectPolicy({ mode: "full_access", approvalMode: "full_access", planMode: true }).sandbox().enabled, true);
   assert.equal(projectPolicy({ mode: "full_access", approvalMode: "full_access", internal: true }).sandbox().enabled, true);
 
   // A Bot works inside Wonder's protected data folder without opening the rest of it.
@@ -115,24 +114,37 @@ test("approval modes and plan mode decide each tool once", async t => {
   const edits = { write: "allow", edit: "allow", notebook: "allow" };
   assert.deepEqual(await decisions(policy("ask")), asks);
   assert.deepEqual(await decisions(policy("accept_edits")), { ...asks, ...edits });
-  assert.deepEqual(await decisions(policy("auto")), { ...asks, ...edits, bash: "allow" });
+  // Auto asks only when Claude Code's classifier escalates; see the hook below.
+  assert.deepEqual(await decisions(policy("auto")), { ...asks, ...edits });
   // Full access: no file scope, no sandbox and no prompts.
   assert.deepEqual(await decisions(policy("full_access")), { ...asks, ...edits, outside: "allow", bash: "allow", unsandboxed: "allow", web: "allow" });
   // Planning: no write in any approval mode, no automatic command or web access.
-  const planning = { ...asks, write: "deny", edit: "deny", notebook: "deny", unsandboxed: "deny", exit: "deny" };
+  const planning = { ...asks, write: "deny", edit: "deny", notebook: "deny", exit: "deny" };
   for (const approvalMode of ["ask", "accept_edits", "auto", "full_access"])
     assert.deepEqual(await decisions(policy(approvalMode, true)), planning, approvalMode);
-  assert.equal(policy("auto").autoRunsCommands, true);
+  assert.equal(policy("auto").autoRunsCommands, false);
+  assert.equal(policy("full_access").autoRunsCommands, true);
   assert.equal(policy("auto", true).autoRunsCommands, false);
+  // Claude Code's own mode runs underneath: Auto uses its classifier.
+  assert.deepEqual(["ask", "accept_edits", "auto", "full_access"].map(mode => policy(mode).permissionMode), ["default", "default", "auto", "default"]);
+  assert.equal(policy("auto", true).permissionMode, "plan");
+  // A sandboxed Bot in Auto still runs commands without asking.
+  const bot = new ToolPolicy({ cwd, mode: "workspace", approvalMode: "auto", readRoots: [cwd], writeRoots: [cwd], deniedRoots: [] });
+  assert.equal(bot.autoRunsCommands, true);
+  assert.equal(bot.permissionMode, "default");
+  assert.equal((await bot.beforeTool({ tool_name: "Bash", tool_input: { command: "ls" } })).hookSpecificOutput.permissionDecision, "ask");
   assert.equal(policy("full_access").bypassesApproval, true);
   assert.equal(policy("full_access", true).bypassesApproval, false);
 
-  // The hook never allows Bash itself, and never lets a write through in plan mode.
+  // The hook never allows Bash itself: Claude Code decides commands and web
+  // access unless nothing asks, and never lets a write through in plan mode.
   for (const approvalMode of ["ask", "accept_edits", "auto", "full_access"]) {
-    const bash = await policy(approvalMode).beforeTool({ tool_name: "Bash", tool_input: { command: "ls" } });
-    assert.equal(bash.hookSpecificOutput.permissionDecision, "ask", approvalMode);
-    const planBash = await policy(approvalMode, true).beforeTool({ tool_name: "Bash", tool_input: { command: "ls" } });
-    assert.equal(planBash.hookSpecificOutput.permissionDecision, "ask", approvalMode);
+    for (const tool of [["Bash", { command: "ls" }], ["WebFetch", { url: "https://example.com" }]]) {
+      const hook = await policy(approvalMode).beforeTool({ tool_name: tool[0], tool_input: tool[1] });
+      assert.deepEqual(hook, approvalMode === "full_access"
+        ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: tool[0] === "Bash" ? "ask" : "allow" } } : {}, `${approvalMode} ${tool[0]}`);
+      assert.deepEqual(await policy(approvalMode, true).beforeTool({ tool_name: tool[0], tool_input: tool[1] }), {}, approvalMode);
+    }
     const planned = await policy(approvalMode, true).beforeTool({ tool_name: "Write", tool_input: write });
     assert.equal(planned.hookSpecificOutput.permissionDecision, "deny", approvalMode);
     assert.match(planned.hookSpecificOutput.permissionDecisionReason, /Plan mode: describe the change instead of editing/);
@@ -156,7 +168,7 @@ test("unsupported approval modes fail closed instead of widening access", () => 
 // host always asks the owner in a sandboxed Project and is impossible for Bots;
 // Full access has no sandbox. Claude Code settings files cannot be edited
 // silently, and Claude's file tools share the sandbox's view of $HOME.
-test("leaving the sandbox asks the owner and Full access has none", async t => {
+test("Projects ask through Claude Code instead of a sandbox and settings edits still ask", async t => {
   const root = await mkdtemp(join(tmpdir(), "wonder-escape-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home"), app = join(home, "app");
@@ -166,11 +178,14 @@ test("leaving the sandbox asks the owner and Full access has none", async t => {
     readRoots: ["/"], writeRoots: [app], deniedRoots: [] };
   const outside = { command: "git push", dangerouslyDisableSandbox: true };
   const decide = async (change, name, input) => new ToolPolicy({ ...base, ...change }).decision(name, input);
-  assert.equal(await decide({}, "Bash", { command: "ls" }), "allow");
+  // What reaches canUseTool from Claude Code asks the owner; Full access never asks.
+  assert.equal(await decide({}, "Bash", { command: "ls" }), "ask");
   assert.equal(await decide({}, "Bash", outside), "ask");
-  assert.equal(await decide({ approvalMode: "ask" }, "Bash", outside), "ask");
+  assert.equal(await decide({ planMode: true }, "Bash", outside), "ask");
   assert.equal(await decide({ mode: "full_access", approvalMode: "full_access" }, "Bash", outside), "allow");
-  for (const change of [{ planMode: true }, { project: false }, { internal: true }, { mode: "full_access", approvalMode: "full_access", planMode: true }])
+  // Read only keeps its sandbox and may leave it only with approval; Bots never leave it.
+  assert.equal(await decide({ mode: "read_only", approvalMode: "ask", writeRoots: [] }, "Bash", outside), "ask");
+  for (const change of [{ project: false }, { internal: true }, { mode: "read_only", approvalMode: "ask", writeRoots: [], planMode: true }])
     assert.equal(await decide(change, "Bash", outside), "deny");
   assert.equal(await decide({}, "SandboxNetworkAccess", { host: "example.com" }), "ask");
   assert.equal(await decide({ project: false }, "SandboxNetworkAccess", { host: "example.com" }), "deny");
@@ -178,8 +193,12 @@ test("leaving the sandbox asks the owner and Full access has none", async t => {
   assert.equal(await decide({}, "Write", settings), "ask");
   assert.equal(await decide({}, "Write", { file_path: join(app, "notes.md"), content: "" }), "allow");
   assert.equal(await decide({ mode: "full_access", approvalMode: "full_access" }, "Write", settings), "allow");
+  // As in Claude Code, Read covers the disk except protected folders; only
+  // a sandboxed Read only Project confines $HOME.
   const documents = { file_path: join(home, "Documents", "private.txt") };
-  assert.equal(await decide({}, "Read", documents), "deny");
-  assert.equal(await decide({}, "Read", { file_path: join(home, ".cargo") }), "allow");
+  assert.equal(await decide({}, "Read", documents), "allow");
+  const readOnly = { mode: "read_only", approvalMode: "ask", writeRoots: [] };
+  assert.equal(await decide(readOnly, "Read", documents), "deny");
+  assert.equal(await decide(readOnly, "Read", { file_path: join(home, ".cargo") }), "allow");
   assert.equal(await decide({ mode: "full_access", approvalMode: "full_access" }, "Read", documents), "allow");
 });

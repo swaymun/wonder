@@ -3352,10 +3352,10 @@ import UIKit
         retainMenuScreenshot(app, name: "Project turn running on the Mac")
     }
 
-    // Claude's access menu offers Ask, Auto (sandboxed) and Full access, with
+    // Claude's access menu offers Ask, Auto and Full access, with
     // Plan separate. Each choice saves through the existing settings endpoint,
     // shows the saved level and never sends a message.
-    func testProjectClaudeAccessPickerSavesSandboxLevels() throws {
+    func testProjectClaudeAccessPickerSavesAccessLevels() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
@@ -3377,11 +3377,11 @@ import UIKit
         access.tap()
         let auto = app.buttons["access-choice-auto"]
         XCTAssertTrue(auto.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.frame.contains(auto.frame), "The sandboxed level must be fully on screen")
-        retainMenuScreenshot(app, name: "Claude access picker with sandbox levels")
+        XCTAssertTrue(app.frame.contains(auto.frame), "Auto must be fully on screen")
+        retainMenuScreenshot(app, name: "Claude access picker")
         auto.tap()
-        let sandboxed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Auto (sandboxed)"), object: access)
-        XCTAssertEqual(XCTWaiter.wait(for: [sandboxed], timeout: 10), .completed)
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Auto"), object: access)
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 10), .completed)
     }
 
     // A Claude chat open in Claude Code in a terminal keeps its own copy of

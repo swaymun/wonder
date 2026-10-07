@@ -66,8 +66,14 @@ export class ToolPolicy {
     Object.assign(this, { cwd, workspace, mode, approvalMode, planMode, readRoots, writeRoots, deniedRoots, projectRoots, internal, structuredOutput, project, home });
     this.tools = new Set(tools);
   }
-  // A Project in Full access outside Plan runs with no sandbox at all.
-  get unsandboxed() { return this.project && !this.internal && this.mode === "full_access" && !this.planMode; }
+  // Projects follow Claude Code: no sandbox, and its permission mode decides
+  // what asks. Read only, no longer offered, keeps the sandbox that enforces it.
+  get unsandboxed() { return this.project && !this.internal && this.mode !== "read_only"; }
+  // Claude Code's own rules decide commands and web access, including its
+  // read-only command checks and Auto's classifier. Whatever it would ask
+  // reaches the owner through canUseTool.
+  get defersToClaudeCode() { return this.unsandboxed && !this.bypassesApproval; }
+  get permissionMode() { return this.planMode ? "plan" : this.unsandboxed && this.approvalMode === "auto" ? "auto" : "default"; }
   // Sandboxed Projects confine $HOME to the project and toolchains, for
   // commands and for Claude's own file tools alike.
   get confinesHome() { return this.project && !this.internal && !this.unsandboxed; }
@@ -123,7 +129,8 @@ export class ToolPolicy {
       // A PreToolUse allow skips the SDK's own plan-mode check, so plan mode is enforced here.
       const target = input.file_path ?? input.notebook_path;
       if (this.planMode || !await this.permits(target, true)) return "deny";
-      if (!this.unsandboxed && typeof target === "string" && SETTINGS_FILES.includes(basename(target)) && basename(dirname(target)) === ".claude") return "ask";
+      // These settings can add permission rules, so changing them asks unless nothing asks.
+      if ((!this.unsandboxed || !this.bypassesApproval) && typeof target === "string" && SETTINGS_FILES.includes(basename(target)) && basename(dirname(target)) === ".claude") return "ask";
       return this.approvalMode === "ask" ? "ask" : "allow";
     }
     if (name === "Bash") {
@@ -139,8 +146,9 @@ export class ToolPolicy {
   }
   // Bypass permissions: nothing asks, except while planning.
   get bypassesApproval() { return this.approvalMode === "full_access" && !this.planMode; }
-  // Commands run without asking in Auto and Bypass modes, never while planning.
-  get autoRunsCommands() { return ["auto", "full_access"].includes(this.approvalMode) && !this.planMode; }
+  // Commands run without asking in Bypass, and in Auto only inside the sandbox;
+  // never while planning.
+  get autoRunsCommands() { return !this.planMode && (this.approvalMode === "full_access" || (this.approvalMode === "auto" && !this.unsandboxed)); }
   // Text returned to Claude when a tool call is refused.
   denial(name) {
     if (this.planMode && EDIT_TOOLS.includes(name)) return PLAN_EDIT_DENIED;
@@ -162,6 +170,7 @@ export class ToolPolicy {
   }
   async beforeTool(event) {
     const decision = await this.decision(event.tool_name, event.tool_input ?? {});
+    if (decision === "ask" && this.defersToClaudeCode && ["Bash", "WebFetch", "WebSearch"].includes(event.tool_name)) return {};
     // Always pass Bash through canUseTool, including automatic approval, so
     // every execution applies the host-owned command policy.
     const result = { hookEventName: "PreToolUse", permissionDecision: event.tool_name === "Bash" && decision !== "deny" ? "ask" : decision };
