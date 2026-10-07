@@ -565,7 +565,7 @@ import WonderPairing
         if let effort = draft.effort { fields["effort"] = effort }
         if let serviceTier = draft.serviceTier { fields["serviceTier"] = serviceTier }
         if supportsModes {
-            if family == .claude, let approval = draft.claudeApproval { fields["claudeApproval"] = approval.rawValue }
+            if family == .claude { fields["claudeApproval"] = (draft.claudeApproval ?? .standard).rawValue }
             if draft.planMode == true { fields["planMode"] = true }
         }
         if let folder = draft.folderId { fields["folderId"] = folder }

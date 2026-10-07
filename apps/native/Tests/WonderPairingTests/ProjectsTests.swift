@@ -441,14 +441,21 @@ final class ProjectComposerContractTests: XCTestCase {
 
     // Contract: each provider offers its own access rows, older hosts keep the
     // original three, and every choice changes only fields the host accepts.
+    // Claude offers Ask, Auto (sandboxed, the default) and Full access, with
+    // Plan separate; a retired setting stays visible on threads that use it.
     func testAccessMenusPerProviderAndHost() {
         func titles(_ family: AgentFamily, modes: Bool, current: ProjectAccess = ProjectAccess()) -> [String] {
             ProjectAccessChoice.choices(family: family, supportsModes: modes, current: current).map { $0.title(for: family, supportsModes: modes) }
         }
         XCTAssertEqual(titles(.codex, modes: true), ["Read only", "Auto", "Full access"])
-        XCTAssertEqual(titles(.claude, modes: true), ["Manual", "Accept edits", "Auto", "Plan", "Bypass permissions"])
+        XCTAssertEqual(titles(.claude, modes: true), ["Ask", "Auto (sandboxed)", "Full access"])
         XCTAssertEqual(titles(.claude, modes: true, current: ProjectAccess(accessMode: .readOnly)),
-                       ["Read only", "Manual", "Accept edits", "Auto", "Plan", "Bypass permissions"])
+                       ["Read only", "Ask", "Auto (sandboxed)", "Full access"])
+        XCTAssertEqual(titles(.claude, modes: true, current: ProjectAccess(claudeApproval: .acceptEdits, planMode: true)),
+                       ["Accept edits", "Ask", "Auto (sandboxed)", "Full access"])
+        XCTAssertEqual(ProjectAccessChoice.planChoice(family: .claude, supportsModes: true), .plan)
+        XCTAssertNil(ProjectAccessChoice.planChoice(family: .codex, supportsModes: true))
+        XCTAssertNil(ProjectAccessChoice.planChoice(family: .claude, supportsModes: false))
         XCTAssertEqual(titles(.codex, modes: false), ["Read only", "Edit project", "Full access"])
         XCTAssertEqual(titles(.claude, modes: false), ["Read only", "Ask for approval", "Full access"])
         XCTAssertTrue(ProjectAccessChoice.fullAccess.isElevated)
@@ -457,7 +464,8 @@ final class ProjectComposerContractTests: XCTestCase {
         func selected(_ family: AgentFamily, _ access: ProjectAccess, modes: Bool = true) -> ProjectAccessChoice {
             ProjectAccessChoice.selected(for: access, family: family, supportsModes: modes)
         }
-        XCTAssertEqual(selected(.claude, ProjectAccess()), .manual)
+        XCTAssertEqual(selected(.claude, ProjectAccess()), .auto, "New Claude threads start in Auto")
+        XCTAssertEqual(selected(.claude, ProjectAccess(claudeApproval: .ask)), .manual)
         XCTAssertEqual(selected(.claude, ProjectAccess(claudeApproval: .acceptEdits)), .acceptEdits)
         XCTAssertEqual(selected(.claude, ProjectAccess(claudeApproval: .auto)), .auto)
         XCTAssertEqual(selected(.claude, ProjectAccess(accessMode: .fullAccess, planMode: true)), .plan, "Plan mode wins over the other Claude rows")
@@ -472,15 +480,16 @@ final class ProjectComposerContractTests: XCTestCase {
         }
         XCTAssertEqual(patch(.acceptEdits, from: ProjectAccess(), .claude), ["claudeApproval": "accept_edits"])
         XCTAssertEqual(patch(.plan, from: ProjectAccess(), .claude), ["planMode": "true"])
-        XCTAssertEqual(patch(.manual, from: ProjectAccess(planMode: true), .claude), ["planMode": "false"])
+        XCTAssertEqual(patch(.manual, from: ProjectAccess(claudeApproval: .ask, planMode: true), .claude), ["planMode": "false"])
+        XCTAssertEqual(patch(.plan, from: ProjectAccess(planMode: true), .claude), ["planMode": "false"], "Choosing Plan again leaves it")
         XCTAssertEqual(patch(.fullAccess, from: ProjectAccess(planMode: true), .claude), ["accessMode": "full_access", "planMode": "false"])
-        XCTAssertEqual(patch(.auto, from: ProjectAccess(accessMode: .fullAccess), .claude),
+        XCTAssertEqual(patch(.auto, from: ProjectAccess(accessMode: .fullAccess, claudeApproval: .ask), .claude),
                        ["accessMode": "workspace", "claudeApproval": "auto"])
         XCTAssertEqual(patch(.fullAccess, from: ProjectAccess(planMode: true), .codex), ["accessMode": "full_access"], "A Codex access level leaves plan mode alone")
         XCTAssertEqual(patch(.manual, from: ProjectAccess(claudeApproval: .auto), .codex), [:], "Codex threads reject claudeApproval")
         XCTAssertEqual(patch(.fullAccess, from: ProjectAccess(), .claude, modes: false), ["accessMode": "full_access"])
         XCTAssertEqual(patch(.plan, from: ProjectAccess(), .claude, modes: false), [:], "Older hosts reject planMode")
-        XCTAssertEqual(patch(.manual, from: ProjectAccess(), .claude), [:], "Choosing the current row saves nothing")
+        XCTAssertEqual(patch(.auto, from: ProjectAccess(), .claude), [:], "Choosing the current row saves nothing")
     }
 
     // Contract: the draft, the created thread and the menu read the same fields.

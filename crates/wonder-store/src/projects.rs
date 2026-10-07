@@ -73,7 +73,6 @@ pub struct StoredProjectConversation {
     pub access_mode: String,
     /// How a Claude thread asks before acting; always `ask` for Codex threads.
     pub claude_approval: String,
-    pub unsandboxed_commands: bool,
     pub plan_mode: bool,
     pub is_pinned: bool,
     pub has_unread: bool,
@@ -116,7 +115,6 @@ pub struct ProjectConversationPatch<'a> {
     pub service_tier: Option<Option<&'a str>>,
     pub access_mode: Option<&'a str>,
     pub claude_approval: Option<&'a str>,
-    pub unsandboxed_commands: Option<bool>,
     pub plan_mode: Option<bool>,
 }
 
@@ -193,7 +191,6 @@ fn project_conversation(
         service_tier: row.get("service_tier"),
         access_mode: row.get("access_mode"),
         claude_approval: row.get("claude_approval"),
-        unsandboxed_commands: row.get::<i64, _>("unsandboxed_commands") != 0,
         plan_mode: row.get::<i64, _>("plan_mode") != 0,
         is_pinned: row.get::<i64, _>("is_pinned") != 0,
         has_unread: row.get::<i64, _>("has_unread") != 0,
@@ -772,7 +769,7 @@ impl Store {
         {
             return Err(invalid("Invalid conversation title"));
         }
-        if patch.claude_approval.is_some() || patch.unsandboxed_commands.is_some() {
+        if patch.claude_approval.is_some() {
             // A thread's family never changes, so this check cannot race.
             let family: Option<String> = sqlx::query_scalar(
                 "SELECT agent_family FROM project_conversations WHERE conversation_id=?",
@@ -784,12 +781,11 @@ impl Store {
                 return Err(invalid("Claude approval applies only to Claude threads"));
             }
         }
-        let updated = sqlx::query("UPDATE project_conversations SET title=COALESCE(?,title),is_pinned=COALESCE(?,is_pinned),has_unread=COALESCE(?,has_unread),model=COALESCE(?,model),effort=CASE WHEN ? THEN ? ELSE effort END,service_tier=CASE WHEN ? THEN ? ELSE service_tier END,access_mode=COALESCE(?,access_mode),claude_approval=COALESCE(?,claude_approval),plan_mode=COALESCE(?,plan_mode),unsandboxed_commands=COALESCE(?,unsandboxed_commands),updated_at=? WHERE conversation_id=? AND (?=0 OR (model IS ? AND effort IS ? AND service_tier IS ?))")
+        let updated = sqlx::query("UPDATE project_conversations SET title=COALESCE(?,title),is_pinned=COALESCE(?,is_pinned),has_unread=COALESCE(?,has_unread),model=COALESCE(?,model),effort=CASE WHEN ? THEN ? ELSE effort END,service_tier=CASE WHEN ? THEN ? ELSE service_tier END,access_mode=COALESCE(?,access_mode),claude_approval=COALESCE(?,claude_approval),plan_mode=COALESCE(?,plan_mode),updated_at=? WHERE conversation_id=? AND (?=0 OR (model IS ? AND effort IS ? AND service_tier IS ?))")
             .bind(patch.title.map(str::trim)).bind(patch.pinned.map(i64::from)).bind(patch.unread.map(i64::from))
             .bind(patch.model).bind(patch.effort.is_some()).bind(patch.effort.flatten())
             .bind(patch.service_tier.is_some()).bind(patch.service_tier.flatten()).bind(patch.access_mode)
             .bind(patch.claude_approval).bind(patch.plan_mode.map(i64::from))
-            .bind(patch.unsandboxed_commands.map(i64::from))
             .bind(now).bind(conversation).bind(expected.is_some())
             .bind(expected.and_then(|value| value.0))
             .bind(expected.and_then(|value| value.1))
@@ -995,6 +991,74 @@ mod tests {
             plan_mode: false,
             creation_request_id: request,
             now: "now",
+        }
+    }
+
+    // Contract: Full access no longer keeps a command sandbox. Upgrading must
+    // not widen a Claude thread that chose Full access with sandboxed commands:
+    // it moves to Auto; an explicit opt-out and every other thread keep their modes.
+    #[tokio::test]
+    async fn sandboxed_full_access_threads_move_to_auto_on_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("prior.sqlite").display()
+        );
+        let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+        let mut prior = sqlx::migrate!();
+        prior.migrations = std::borrow::Cow::Owned(
+            prior
+                .migrations
+                .iter()
+                .filter(|m| m.version < 90)
+                .cloned()
+                .collect(),
+        );
+        prior.run(&pool).await.unwrap();
+        let old = Store { pool };
+        project(&old, "p1", &["/work/app"]).await;
+        for (id, family, access, approval, opted_out) in [
+            (
+                "sandboxed",
+                AgentFamily::Claude,
+                "full_access",
+                "ask",
+                false,
+            ),
+            ("opted-out", AgentFamily::Claude, "full_access", "ask", true),
+            ("asking", AgentFamily::Claude, "workspace", "ask", false),
+            ("codex", AgentFamily::Codex, "full_access", "ask", false),
+        ] {
+            old.create_project_conversation(ProjectConversationInsert {
+                family,
+                access_mode: access,
+                claude_approval: approval,
+                ..conversation(id, "p1", None, None)
+            })
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE project_conversations SET unsandboxed_commands=? WHERE conversation_id=?",
+            )
+            .bind(i64::from(opted_out))
+            .bind(id)
+            .execute(&old.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::migrate!().run(&old.pool).await.unwrap();
+        for (id, access, approval) in [
+            ("sandboxed", "workspace", "auto"),
+            ("opted-out", "full_access", "ask"),
+            ("asking", "workspace", "ask"),
+            ("codex", "full_access", "ask"),
+        ] {
+            let stored = old.project_conversation(id).await.unwrap().unwrap();
+            assert_eq!(
+                (stored.access_mode.as_str(), stored.claude_approval.as_str()),
+                (access, approval),
+                "{id}"
+            );
         }
     }
 
@@ -1293,17 +1357,12 @@ mod tests {
                 .await
                 .is_err());
         }
-        assert!(
-            !created.unsandboxed_commands,
-            "Existing and new chats default to sandboxed commands"
-        );
         // Partial updates leave the other mode alone.
         let updated = store
             .update_project_conversation(
                 "m1",
                 ProjectConversationPatch {
                     claude_approval: Some("auto"),
-                    unsandboxed_commands: Some(true),
                     ..Default::default()
                 },
                 "later",
@@ -1311,15 +1370,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(updated.unsandboxed_commands);
-        assert!(
-            store
-                .project_conversation("m1")
-                .await
-                .unwrap()
-                .unwrap()
-                .unsandboxed_commands
-        );
         assert_eq!(
             (updated.claude_approval.as_str(), updated.plan_mode),
             ("auto", true)

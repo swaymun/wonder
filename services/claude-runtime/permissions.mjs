@@ -1,24 +1,42 @@
+import { realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
-import shellQuote from "shell-quote";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-let sandboxReady;
 // SDK schema parsing can reorder object properties. Correlation follows JSON
 // values while preserving array order and every argument's value.
 export function toolCallKey(name, input) {
   return JSON.stringify([name, input], (_key, value) => value && typeof value === "object" && !Array.isArray(value)
     ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
 }
-const commandSandbox = { filesystem: { denyRead: [], allowRead: [], allowWrite: ["/"], denyWrite: [] },
-  network: { allowedDomains: [], deniedDomains: [], allowLocalBinding: false, allowAllUnixSockets: false }, allowAppleEvents: false };
-export async function closeCommandSandbox() {
-  if (sandboxReady) { await sandboxReady; await SandboxManager.reset(); sandboxReady = null; }
-}
+
+// Hosts sandboxed Project commands reach without asking. Any other host asks
+// the owner, who can save it to the project's Claude Code settings.
+export const ALLOWED_DOMAINS = ["github.com", "*.github.com", "*.githubusercontent.com",
+  "registry.npmjs.org", "registry.yarnpkg.com", "repo.yarnpkg.com", "crates.io", "*.crates.io", "static.rust-lang.org",
+  "pypi.org", "files.pythonhosted.org", "proxy.golang.org", "sum.golang.org", "formulae.brew.sh", "ghcr.io",
+  "api.cloudflare.com", "api.anthropic.com", "api.openai.com"];
+// Toolchains and their caches in $HOME. The rest of $HOME stays unreadable to
+// sandboxed Project commands. Executable folders on PATH stay read-only so a
+// command cannot plant a program that later runs outside the sandbox.
+const HOME_READ = [".cargo", ".rustup", ".npm", ".nvm", ".yarn", ".bun", ".deno", ".volta", ".pyenv", ".rbenv", ".asdf",
+  ".gradle", ".m2", "go", ".swiftpm", ".cache", ".local/bin", ".local/lib", ".gitconfig", ".gitignore_global", ".config/git",
+  "Library/Caches", "Library/Developer", "Library/pnpm", ".pnpm-store",
+  // git's osxkeychain credential helper reads this file; other keychains stay closed.
+  "Library/Keychains/login.keychain-db"];
+const HOME_WRITE = [".cargo/registry", ".cargo/git", ".npm", ".yarn/berry/cache", ".bun/install/cache", ".cache",
+  "Library/Caches", "Library/pnpm/store", ".pnpm-store", ".gradle/caches", ".m2/repository", "go/pkg/mod",
+  "Library/Developer/Xcode/DerivedData"];
+// Claude Code reads these; an agent that edits them could widen its own sandbox.
+const SETTINGS_FILES = ["settings.json", "settings.local.json"];
+const real = path => { try { return realpathSync(path); } catch { return path; } };
+const both = paths => [...new Set(paths.flatMap(path => [path, real(path)]))];
 
 const APPROVAL_MODES = ["ask", "accept_edits", "auto", "full_access"];
 const EDIT_TOOLS = ["Edit", "Write", "NotebookEdit"];
 const DENIED = "This action is outside this conversation’s allowed tools or file access. Ask the owner to change access in Wonder.";
+// Appended to Claude Code's own sandbox guidance, which names CLI-only controls.
+export const SANDBOX_GUIDANCE = "Commands run in Wonder's sandbox. The owner steers this conversation from Wonder, not a terminal: they cannot use `/sandbox`, `!` commands or settings files. When the sandbox blocks a host or a command, retrying the command reaches the owner as an approval on their phone. To lift the sandbox for the whole conversation, the owner chooses Full access in the shield menu.";
 const PLAN_EDIT_DENIED = "Plan mode: describe the change instead of editing.";
 const PLAN_REVIEW_DENIED = "The owner reviews the plan in Wonder. Stop here and wait for their reply; do not edit or run anything for this plan yet.";
 
@@ -35,23 +53,32 @@ async function canonicalTarget(path) {
 }
 
 export class ToolPolicy {
-  constructor({ cwd, workspace = cwd, mode, approvalMode, planMode = false, readRoots, writeRoots, deniedRoots, internal = false, structuredOutput = false, tools = [], project = false, unsandboxedCommands = false }) {
+  // `projectRoots` lists a Project's folders; it is empty for Bots and chats.
+  constructor({ cwd, workspace = cwd, mode, approvalMode, planMode = false, readRoots, writeRoots, deniedRoots, projectRoots = [], internal = false, structuredOutput = false, tools = [], project = false, home = homedir() }) {
     if (!isAbsolute(cwd ?? "") || !["read_only", "workspace", "full_access"].includes(mode)
-      || !APPROVAL_MODES.includes(approvalMode) || typeof planMode !== "boolean" || typeof unsandboxedCommands !== "boolean"
+      || !APPROVAL_MODES.includes(approvalMode) || typeof planMode !== "boolean"
       // Accepting edits or running commands automatically refines Workspace only.
       || (["accept_edits", "auto"].includes(approvalMode) && mode !== "workspace")) throw new Error("Claude permission scope is missing or unsupported");
-    for (const roots of [readRoots, writeRoots, deniedRoots]) {
+    for (const roots of [readRoots, writeRoots, deniedRoots, projectRoots]) {
       if (!Array.isArray(roots) || roots.some(root => typeof root !== "string" || !isAbsolute(root))) throw new Error("Invalid Claude file scope");
     }
-    if (!isAbsolute(workspace)) throw new Error("Invalid Claude workspace");
-    Object.assign(this, { cwd, workspace, mode, approvalMode, planMode, readRoots, writeRoots, deniedRoots, internal, structuredOutput, project, unsandboxedCommands });
+    if (!isAbsolute(workspace) || !isAbsolute(home)) throw new Error("Invalid Claude workspace");
+    Object.assign(this, { cwd, workspace, mode, approvalMode, planMode, readRoots, writeRoots, deniedRoots, projectRoots, internal, structuredOutput, project, home });
     this.tools = new Set(tools);
   }
+  // A Project in Full access outside Plan runs with no sandbox at all.
+  get unsandboxed() { return this.project && !this.internal && this.mode === "full_access" && !this.planMode; }
+  // Sandboxed Projects confine $HOME to the project and toolchains, for
+  // commands and for Claude's own file tools alike.
+  get confinesHome() { return this.project && !this.internal && !this.unsandboxed; }
+  homeReadable() { return [...this.projectRoots, ...HOME_READ.map(path => join(this.home, path))]; }
   async permits(path, write = false) {
     if (typeof path !== "string" || !path.trim() || path.includes("\0")) return false;
     const lexical = resolve(this.cwd, path);
     let canonical;
     try { canonical = await canonicalTarget(lexical); } catch { return false; }
+    if (this.confinesHome && within(canonical, real(this.home))
+      && !this.homeReadable().some(root => within(lexical, root) || within(canonical, real(root)))) return false;
     for (const root of this.deniedRoots) {
       let resolvedRoot;
       try { resolvedRoot = await canonicalTarget(root); } catch { return false; }
@@ -94,12 +121,19 @@ export class ToolPolicy {
       return await this.permits(input.file_path ?? input.path ?? this.cwd) ? "allow" : "deny";
     if (EDIT_TOOLS.includes(name)) {
       // A PreToolUse allow skips the SDK's own plan-mode check, so plan mode is enforced here.
-      if (this.planMode || !await this.permits(input.file_path ?? input.notebook_path, true)) return "deny";
+      const target = input.file_path ?? input.notebook_path;
+      if (this.planMode || !await this.permits(target, true)) return "deny";
+      if (!this.unsandboxed && typeof target === "string" && SETTINGS_FILES.includes(basename(target)) && basename(dirname(target)) === ".claude") return "ask";
       return this.approvalMode === "ask" ? "ask" : "allow";
     }
-    // Only the host-owned Project setting can allow unsandboxed commands.
-    // Model arguments cannot widen access.
-    if (name === "Bash") return input.dangerouslyDisableSandbox && !this.runsUnsandboxed ? "deny" : (this.autoRunsCommands ? "allow" : "ask");
+    if (name === "Bash") {
+      // Leaving the sandbox is never automatic. Projects ask the owner; Bots and
+      // chats, which act on other people's messages, cannot leave it.
+      if (input.dangerouslyDisableSandbox && !this.unsandboxed) return this.project && !this.internal && !this.planMode ? "ask" : "deny";
+      return this.autoRunsCommands ? "allow" : "ask";
+    }
+    // A sandboxed command reached a host outside the allowlist.
+    if (name === "SandboxNetworkAccess") return this.project && !this.internal ? "ask" : "deny";
     if (["WebFetch", "WebSearch"].includes(name)) return this.bypassesApproval ? "allow" : "ask";
     return "deny";
   }
@@ -144,50 +178,42 @@ export class ToolPolicy {
     }
     return { hookSpecificOutput: result };
   }
-  get runsUnsandboxed() { return this.project && !this.internal && this.mode === "full_access" && this.bypassesApproval && this.unsandboxedCommands; }
-  async commandInput(input) {
-    if (this.runsUnsandboxed) return { ...input };
-    if (process.platform !== "darwin") throw new Error("Claude commands require the Mac file sandbox.");
-    const paths = async roots => [...new Set((await Promise.all(roots.map(async root => [resolve(root), await canonicalTarget(root)]))).flat())];
-    const owned = await canonicalTarget(this.workspace);
-    const filter = root => `(subpath ${JSON.stringify(root)})`;
-    const outside = roots => `(require-all ${roots.map(root => `(require-not ${filter(root)})`).join(" ")})`;
-    const rules = [];
-    if (this.mode !== "full_access" && !this.readRoots.includes("/")) {
-      const reads = await paths([...this.readRoots, ...this.writeRoots,
-        "/bin", "/sbin", "/usr", "/System", "/Library/Apple", "/Library/Developer", "/private/etc", "/dev"]);
-      rules.push(`(deny file-read* ${outside(reads)})`);
-      rules.push("(allow file-read-metadata (vnode-type DIRECTORY))");
-    }
-    if (this.mode !== "full_access") {
-      const writes = this.mode === "read_only" ? [] : await paths(this.writeRoots);
-      rules.push(`(deny file-write* file-write-create file-write-unlink ${outside([...writes, "/dev/null", "/dev/tty"])})`);
-    }
-    for (const root of await paths(this.deniedRoots)) {
-      const exception = owned !== root && within(owned, root) ? ` (require-not ${filter(owned)})` : "";
-      rules.push(`(deny file-read* file-write* file-write-create file-write-unlink (require-all ${filter(root)}${exception}))`);
-      // Prevent moving an enclosing folder to escape path-based restrictions.
-      for (let parent = root; parent !== "/"; parent = dirname(parent))
-        rules.push(`(deny file-write-unlink (literal ${JSON.stringify(parent)}))`);
-    }
-    // The pinned Anthropic runtime supplies process/network isolation. Append
-    // our exact file restrictions to its Seatbelt profile: macOS does not
-    // reliably allow nested restrictive sandboxes. Reject a changed wrapper
-    // shape instead of ever running an unguarded command.
-    sandboxReady ??= SandboxManager.initialize(commandSandbox, undefined, false);
-    await sandboxReady;
-    const isolated = await SandboxManager.wrapWithSandbox(input.command, "/bin/bash");
-    const argv = shellQuote.parse(isolated, {});
-    const index = argv.indexOf("/usr/bin/sandbox-exec");
-    if (argv.some(a => typeof a !== "string") || index < 0 || argv[index + 1] !== "-p"
-      || !argv[index + 2]?.startsWith("(version 1)\n(deny default") || argv[index + 3] !== "/bin/bash")
-      throw new Error("The Mac command sandbox returned an incompatible execution format.");
-    argv[index + 2] += "\n" + rules.join("\n");
-    return { ...input, command: shellQuote.quote(argv) };
-  }
+  // Claude Code's own command sandbox, configured from the host-owned policy.
+  // Project and user Claude Code settings merge into it, as in the CLI.
   sandbox() {
-    // Wonder wraps every approved Bash call with the pinned sandbox above.
-    // Do not put the SDK's changing sandbox outside that host-owned boundary.
-    return { enabled: false };
+    if (this.unsandboxed) return { enabled: false };
+    const owned = real(this.workspace);
+    const project = this.project && !this.internal;
+    const writes = this.mode === "read_only" ? [] : this.mode === "full_access" && !project ? ["/"] : this.writeRoots;
+    const tmp = [tmpdir(), "/tmp", "/private/tmp"];
+    // A Bot's own workspace may sit inside Wonder's protected data folder.
+    const reopened = both([this.workspace]).filter(path => this.deniedRoots.some(root => within(path, root) || within(path, real(root))));
+    const denyRead = both(project ? [this.home, ...this.deniedRoots]
+      : this.readRoots.includes("/") ? this.deniedRoots : ["/Users", "/Volumes", "/private/var", "/private/tmp", ...this.deniedRoots]);
+    const allowRead = both(project ? this.homeReadable() : this.readRoots.includes("/") ? [] : [...this.readRoots, ...this.writeRoots])
+      .filter(path => !this.deniedRoots.some(root => within(path, root) || within(path, real(root))) || reopened.includes(path))
+      .concat(reopened);
+    return {
+      enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false,
+      // Projects may retry a command outside the sandbox; decision() asks the
+      // owner. As in the CLI, this also honors the repository's committed
+      // `sandbox.excludedCommands`, which canUseTool cannot tell apart; the
+      // agent cannot add exclusions (settings edits ask, and commands cannot
+      // write them). Bots never leave the sandbox and ignore exclusions.
+      allowUnsandboxedCommands: project,
+      network: project
+        // Tests bind local ports; git's fsmonitor uses a socket and FSEvents.
+        ? { allowedDomains: ALLOWED_DOMAINS, allowLocalBinding: true, allowAllUnixSockets: true, allowMachLookup: ["com.apple.FSEvents"] }
+        : { allowedDomains: [], strictAllowlist: true },
+      filesystem: {
+        allowWrite: both([...writes, ...(project ? [...tmp, ...HOME_WRITE.map(path => join(this.home, path))] : [])]),
+        // Protected folders stay closed inside writable roots, except the one
+        // holding the owned workspace. Claude Code always lets commands write
+        // the working folder, so Read only denies it explicitly.
+        denyWrite: both([...this.deniedRoots.filter(root => !within(owned, root) && !within(owned, real(root))),
+          ...(this.mode === "read_only" ? [this.cwd, ...this.projectRoots] : [])]),
+        denyRead: [...new Set(denyRead)], allowRead: [...new Set(allowRead)],
+      },
+    };
   }
 }

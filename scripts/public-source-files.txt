@@ -366,6 +366,7 @@ crates/wonder-store/migrations/0086_automation_revisions.sql
 crates/wonder-store/migrations/0087_project_github_review_bindings.sql
 crates/wonder-store/migrations/0088_remove_project_github_review.sql
 crates/wonder-store/migrations/0089_project_unsandboxed_commands.sql
+crates/wonder-store/migrations/0090_project_sandbox_follows_access.sql
 crates/wonder-store/src/automations.rs
 crates/wonder-store/src/avatar.rs
 crates/wonder-store/src/bot_management.rs

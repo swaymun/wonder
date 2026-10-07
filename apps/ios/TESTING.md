@@ -223,18 +223,24 @@ from the transcript. A desktop turn in progress or an open terminal session stil
 holds the message. Successful queued background notices do not complete the new
 Wonder prompt; session-level failures surface as failures.
 
-For an existing Claude Project chat, Access → Bypass permissions enables the
-separate **Run outside sandbox** option. It defaults off, is saved
-per chat, and applies only to Full access outside Plan mode. With it on, commands
-can access Mac files, network and system services, including paths otherwise
-protected by the command sandbox. Switching to a narrower mode suspends it;
-turn it off to revoke the saved opt-in. Other access modes keep their sandbox.
-New chats start with it off. Project computer use uses the installed native
-`cua_repl` adapter when the host enables it, with provider authorization and
-turn cleanup preserved.
+A Claude Project chat's Access menu offers **Ask**, **Auto (sandboxed)** (the
+default for new chats) and **Full access**, with Plan separate. Ask and Auto run
+commands in Claude Code's sandbox: the project, `/tmp` and toolchain caches are
+writable, the rest of `$HOME` (including `~/.ssh` and other repositories) is
+unreadable, local ports and sockets work, and common developer hosts such as
+GitHub and the npm, crates.io and PyPI registries are reachable. Any other host,
+and any retry outside the sandbox, asks the owner on the phone; "Save a network
+rule" writes the host to the project's `.claude/settings.local.json`. Full access
+has no sandbox. Bots and other chats keep a closed network. Project computer use
+uses the installed native `cua_repl` adapter when the host enables it, with
+provider authorization and turn cleanup preserved.
 
 The simulator cases `testMessageWaitsWhileClaudeChatIsOpenOnMac` and
-`testProjectUnsandboxedCommandsRequireFullAccess` use isolated fixtures and send
+`testProjectClaudeAccessPickerSavesSandboxLevels` use isolated fixtures and send
 no model work. Runtime tests cover notice/result ordering, error completion,
-command access and adapter ownership. Actual desktop handoff, unsandboxed build
-execution and Project computer control require an explicitly authorized live turn.
+command access, sandbox configuration, approvals and adapter ownership.
+`scripts/claude-sdk-smoke/sandbox-acceptance.mjs auto|full` proves the sandbox
+live (git push to a deleted scratch branch, fsmonitor, a local port, blocked
+`~/.ssh`, a host approval) with Haiku requests; run it only when authorized.
+Actual desktop handoff and Project computer control require an explicitly
+authorized live turn.

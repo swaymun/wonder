@@ -406,7 +406,7 @@ enum DiagnosticSubagentFixture {
             state.projectSubagentRosterFails = false
             state.projectServiceTier = "default"
             state.projectAccessMode = "read_only"
-            state.projectUnsandboxed = false
+            state.projectClaudeApproval = "ask"
             state.goalPresent = goalFixture
             state.goalObjective = "Prepare a reliable beta launch with the Scout helper."
             state.goalStatus = goalFixtureStatus
@@ -449,7 +449,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var projectArchived = false
         var projectServiceTier = "default"
         var projectAccessMode = "read_only"
-        var projectUnsandboxed = false
+        var projectClaudeApproval = "ask"
         var archiveFailures = 1
         var questionResolved = false
         var connectedAppsUnavailable = false
@@ -567,7 +567,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     }
                     if let unread = fields["hasUnread"] as? Bool { Self.state.lock.withLock { Self.state.projectUnread = unread } }
                     if let access = fields["accessMode"] as? String { Self.state.lock.withLock { Self.state.projectAccessMode = access } }
-                    if let enabled = fields["unsandboxedCommands"] as? Bool { Self.state.lock.withLock { Self.state.projectUnsandboxed = enabled } }
+                    if let approval = fields["claudeApproval"] as? String { Self.state.lock.withLock { Self.state.projectClaudeApproval = approval } }
                     if let tier = fields["serviceTier"] as? String { Self.state.lock.withLock { Self.state.projectServiceTier = tier } }
                 }
                 finish(status: 200, body: json([
@@ -575,9 +575,9 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     "title": "Read status fixture", "family": family, "model": archiveFixture || speedFixture || DiagnosticSubagentFixture.projectFilesSendFixture ? "gpt-fixture" : "claude:sonnet", "effort": "high",
                     "serviceTier": speedFixture ? Self.state.lock.withLock { Self.state.projectServiceTier } as Any : NSNull(),
                     "accessMode": Self.state.lock.withLock { Self.state.projectAccessMode },
-                    "unsandboxedCommands": Self.state.lock.withLock { Self.state.projectUnsandboxed }, "workingFolder": "/fixture", "workingFolderName": "fixture",
+                    "workingFolder": "/fixture", "workingFolderName": "fixture",
                     "isPinned": true, "hasUnread": Self.state.lock.withLock { Self.state.projectUnread },
-                    "hasNativeSession": archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture, "folderInProject": true, "claudeApproval": "ask", "planMode": false,
+                    "hasNativeSession": archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture, "folderInProject": true, "claudeApproval": Self.state.lock.withLock { Self.state.projectClaudeApproval }, "planMode": false,
                     "isArchived": Self.state.lock.withLock { Self.state.projectArchived }
                 ])); return
             case "/api/v1/project-conversations/\(conversation)/subagents" where DiagnosticSubagentFixture.projectSubagentFixture:

@@ -323,7 +323,6 @@ pub(crate) struct ProjectConversationDetail {
     service_tier: Option<String>,
     access_mode: String,
     claude_approval: String,
-    unsandboxed_commands: bool,
     plan_mode: bool,
     working_folder: String,
     working_folder_name: String,
@@ -356,7 +355,6 @@ async fn conversation_detail(
         service_tier: conversation.service_tier.clone(),
         access_mode: conversation.access_mode.clone(),
         claude_approval: conversation.claude_approval.clone(),
-        unsandboxed_commands: conversation.unsandboxed_commands,
         plan_mode: conversation.plan_mode,
         working_folder: conversation.cwd.clone(),
         working_folder_name: folder_name(&conversation.cwd),
@@ -1780,7 +1778,12 @@ async fn attach_native(
             effort: None,
             service_tier: None,
             access_mode: "workspace",
-            claude_approval: "ask",
+            // New Claude threads start in Auto, which runs inside the sandbox.
+            claude_approval: if family == AgentFamily::Claude {
+                "auto"
+            } else {
+                "ask"
+            },
             plan_mode: false,
             creation_request_id: None,
             now: &now,
@@ -1840,7 +1843,6 @@ pub(crate) struct UpdateConversationRequest {
     access_mode: Option<String>,
     claude_approval: Option<String>,
     plan_mode: Option<bool>,
-    unsandboxed_commands: Option<bool>,
 }
 
 // Serde's ordinary nested Option treats both null and an omitted field as None.
@@ -1938,7 +1940,6 @@ pub(crate) async fn update_conversation(
             || request.access_mode.is_some()
             || request.claude_approval.is_some()
             || request.plan_mode.is_some()
-            || request.unsandboxed_commands.is_some()
         {
             return error(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -2001,25 +2002,6 @@ pub(crate) async fn update_conversation(
     {
         return error(StatusCode::UNPROCESSABLE_ENTITY, message);
     }
-    if request.unsandboxed_commands.is_some() && existing.family != AgentFamily::Claude {
-        return error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "This option is available for Claude Projects.",
-        );
-    }
-    if request.unsandboxed_commands == Some(true)
-        && (request
-            .access_mode
-            .as_deref()
-            .unwrap_or(&existing.access_mode)
-            != "full_access"
-            || request.plan_mode.unwrap_or(existing.plan_mode))
-    {
-        return error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "Choose Full access and leave Plan mode before enabling commands outside the sandbox.",
-        );
-    }
     let patch = ProjectConversationPatch {
         title: request.title.as_deref(),
         pinned: request.is_pinned,
@@ -2033,7 +2015,6 @@ pub(crate) async fn update_conversation(
         },
         access_mode: request.access_mode.as_deref(),
         claude_approval: request.claude_approval.as_deref(),
-        unsandboxed_commands: request.unsandboxed_commands,
         plan_mode: request.plan_mode,
     };
     let now = now_text();
@@ -2570,7 +2551,6 @@ struct ClaudeModes<'a> {
     access_mode: &'a str,
     approval: &'a str,
     plan: bool,
-    unsandboxed_commands: bool,
 }
 
 impl Default for ClaudeModes<'_> {
@@ -2579,7 +2559,6 @@ impl Default for ClaudeModes<'_> {
             access_mode: "workspace",
             approval: "ask",
             plan: false,
-            unsandboxed_commands: false,
         }
     }
 }
@@ -2590,14 +2569,15 @@ impl<'a> From<&'a StoredProjectConversation> for ClaudeModes<'a> {
             access_mode: &conversation.access_mode,
             approval: &conversation.claude_approval,
             plan: conversation.plan_mode,
-            unsandboxed_commands: conversation.unsandboxed_commands,
         }
     }
 }
 
 /// The bridge policy for one turn. Access decides the file scope; Claude's
 /// approval mode only refines Workspace, so Read only always asks and Full
-/// access never does. Unknown stored values fall back to the safest mode.
+/// access never does. The bridge derives the command sandbox from the same
+/// policy: Full access outside Plan has none. Unknown stored values fall back
+/// to the safest mode.
 fn claude_policy_value(
     roots: Vec<String>,
     denied_roots: &[String],
@@ -2618,8 +2598,7 @@ fn claude_policy_value(
         ),
     };
     json!({"mode": mode, "approvalMode": approval, "planMode": modes.plan, "workspace": cwd,
-        "readRoots": ["/"], "writeRoots": writes, "deniedRoots": denied_roots,
-        "unsandboxedCommands": modes.unsandboxed_commands && mode == "full_access" && !modes.plan})
+        "readRoots": ["/"], "writeRoots": writes, "deniedRoots": denied_roots})
 }
 
 fn claude_policy(
@@ -5790,7 +5769,6 @@ pub(crate) mod tests {
             service_tier: None,
             access_mode: "workspace".into(),
             claude_approval: "accept_edits".into(),
-            unsandboxed_commands: false,
             plan_mode: true,
             working_folder: "/work/app".into(),
             working_folder_name: "app".into(),
@@ -7094,7 +7072,6 @@ pub(crate) mod tests {
                     access_mode,
                     approval,
                     plan,
-                    unsandboxed_commands: true,
                 },
                 "/work/app",
             )
@@ -7118,10 +7095,6 @@ pub(crate) mod tests {
         ] {
             for plan in [false, true] {
                 let value = policy(access, approval, plan);
-                assert_eq!(
-                    value["unsandboxedCommands"],
-                    access == "full_access" && !plan
-                );
                 assert_eq!(value["mode"], mode, "{access}/{approval}");
                 assert_eq!(value["approvalMode"], expected, "{access}/{approval}");
                 assert_eq!(value["planMode"], plan);

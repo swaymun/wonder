@@ -147,11 +147,14 @@ public struct PinnedProjectThread: Codable, Hashable, Identifiable, Sendable {
 public enum ClaudeApproval: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Asks before edits and commands.
     case ask
-    /// Edits project files without asking; asks before commands.
+    /// Edits project files without asking; asks before commands. No longer
+    /// offered, but threads that chose it keep it.
     case acceptEdits = "accept_edits"
     /// Edits and runs sandboxed commands in the project without asking.
     case auto
     public var id: String { rawValue }
+    /// New Claude threads start in Auto, which keeps commands in the sandbox.
+    public static let standard = ClaudeApproval.auto
 }
 
 public struct ProjectPartialFailure: Codable, Hashable, Sendable {
@@ -238,8 +241,8 @@ public struct ProjectAccess: Hashable, Sendable {
         var fields: [String: Any] = [:]
         if accessMode != next.accessMode { fields["accessMode"] = next.accessMode.rawValue }
         guard supportsModes else { return fields }
-        if family == .claude, (claudeApproval ?? .ask) != (next.claudeApproval ?? .ask) {
-            fields["claudeApproval"] = (next.claudeApproval ?? .ask).rawValue
+        if family == .claude, (claudeApproval ?? .standard) != (next.claudeApproval ?? .standard) {
+            fields["claudeApproval"] = (next.claudeApproval ?? .standard).rawValue
         }
         if planMode != next.planMode { fields["planMode"] = next.planMode }
         return fields
@@ -247,16 +250,24 @@ public struct ProjectAccess: Hashable, Sendable {
 }
 
 /// One row of a project thread's access menu. Codex offers its three access
-/// levels; Claude offers its permission modes. Hosts without project modes keep
-/// the original three levels.
+/// levels. Claude offers Ask, Auto (sandboxed) and Full access (no sandbox),
+/// plus Plan. Hosts without project modes keep the original three levels.
 public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
     case readOnly, workspace, manual, acceptEdits, auto, plan, fullAccess
     public var id: String { rawValue }
 
-    /// Read only stays out of Claude's menu unless the thread already uses it.
+    /// Read only and Accept edits stay out of Claude's menu unless the thread
+    /// already uses them, so its current setting is always shown.
     public static func choices(family: AgentFamily, supportsModes: Bool, current: ProjectAccess) -> [Self] {
         guard supportsModes, family == .claude else { return [.readOnly, .workspace, .fullAccess] }
-        return (current.accessMode == .readOnly ? [.readOnly] : []) + [.manual, .acceptEdits, .auto, .plan, .fullAccess]
+        let legacy = selected(for: ProjectAccess(accessMode: current.accessMode, claudeApproval: current.claudeApproval),
+                              family: family, supportsModes: supportsModes)
+        return ([.readOnly, .acceptEdits].contains(legacy) ? [legacy] : []) + [.manual, .auto, .fullAccess]
+    }
+
+    /// Plan mode is separate from how much the thread may do.
+    public static func planChoice(family: AgentFamily, supportsModes: Bool) -> Self? {
+        supportsModes && family == .claude ? .plan : nil
     }
 
     public static func selected(for access: ProjectAccess, family: AgentFamily, supportsModes: Bool) -> Self {
@@ -272,7 +283,7 @@ public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
         case .readOnly: return .readOnly
         case .fullAccess: return .fullAccess
         case .workspace:
-            switch access.claudeApproval ?? .ask {
+            switch access.claudeApproval ?? .standard {
             case .ask: return .manual
             case .acceptEdits: return .acceptEdits
             case .auto: return .auto
@@ -284,11 +295,11 @@ public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .readOnly: return "Read only"
         case .workspace: return supportsModes ? "Auto" : ProjectAccessMode.workspace.title(for: family)
-        case .manual: return "Manual"
+        case .manual: return "Ask"
         case .acceptEdits: return "Accept edits"
-        case .auto: return "Auto"
+        case .auto: return "Auto (sandboxed)"
         case .plan: return "Plan"
-        case .fullAccess: return supportsModes && family == .claude ? "Bypass permissions" : "Full access"
+        case .fullAccess: return "Full access"
         }
     }
 
@@ -297,11 +308,13 @@ public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .readOnly: return ProjectAccessMode.readOnly.detail(for: family)
         case .workspace: return ProjectAccessMode.workspace.detail(for: family)
-        case .manual: return "Asks before edits and commands."
+        case .manual: return "Sandboxed. Asks before edits and commands."
         case .acceptEdits: return "Edits files without asking. Asks before commands."
-        case .auto: return "Edits files and runs commands in the project without asking."
+        case .auto: return "Works without asking. Asks only for new websites."
         case .plan: return "Plans the work without changing files."
-        case .fullAccess: return ProjectAccessMode.fullAccess.detail(for: family)
+        case .fullAccess: return family == .claude
+            ? "No sandbox. Never asks."
+            : ProjectAccessMode.fullAccess.detail(for: family)
         }
     }
 
@@ -317,7 +330,8 @@ public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
         case .acceptEdits: next.accessMode = .workspace; next.claudeApproval = .acceptEdits
         case .auto: next.accessMode = .workspace; next.claudeApproval = .auto
         case .fullAccess: next.accessMode = .fullAccess
-        case .plan: next.planMode = true; return next
+        // Plan is its own row: choosing it again leaves plan mode.
+        case .plan: next.planMode = !access.planMode; return next
         }
         // Claude's Plan is one of its permission modes: any other choice leaves it.
         if supportsModes && family == .claude { next.planMode = false }
@@ -346,8 +360,6 @@ public struct ProjectConversationDetail: Codable, Hashable, Sendable {
     public let notice: String?
     /// nil on hosts without project modes; see `ProjectsResponse.modesVersion`.
     public let claudeApproval: ClaudeApproval?
-    /// Present only when the host supports an explicit command-sandbox opt-out.
-    public let unsandboxedCommands: Bool?
     /// Codex collaboration plan mode, or Claude's plan permission mode.
     public let planMode: Bool?
     public var access: ProjectAccess {

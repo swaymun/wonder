@@ -91,30 +91,20 @@ struct ProjectAccessMenu: View {
     let access: ProjectAccess
     var isDisabled = false
     let identifier: String
-    var unsandboxedCommands: Bool? = nil
-    var setUnsandboxedCommands: ((Bool) -> Void)? = nil
     let choose: (ProjectAccessChoice) -> Void
     var body: some View {
         let selected = ProjectAccessChoice.selected(for: access, family: family, supportsModes: supportsModes)
+        let plan = ProjectAccessChoice.planChoice(family: family, supportsModes: supportsModes)
+        // With Plan shown separately, the level keeps its checkmark while planning.
+        let level = plan == nil ? selected : ProjectAccessChoice.selected(
+            for: ProjectAccess(accessMode: access.accessMode, claudeApproval: access.claudeApproval), family: family, supportsModes: supportsModes)
         Menu {
             ForEach(ProjectAccessChoice.choices(family: family, supportsModes: supportsModes, current: access)) { choice in
-                Button { choose(choice) } label: {
-                    Text(choice.title(for: family, supportsModes: supportsModes))
-                    Text(choice.detail(for: family))
-                    if choice == selected { Image(systemName: "checkmark") }
-                }
-                .tint(choice.isElevated ? Color.orange : nil)
-                .accessibilityIdentifier("access-choice-" + choice.rawValue)
+                row(choice, isSelected: choice == level)
             }
-            if family == .claude, let enabled = unsandboxedCommands, let set = setUnsandboxedCommands {
+            if let plan {
                 Divider()
-                Button { set(!enabled) } label: {
-                    Text(enabled ? "Run outside sandbox: On" : "Run outside sandbox")
-                    Text("Full Mac and network access.")
-                    if enabled { Image(systemName: "checkmark") }
-                }
-                .disabled(access.accessMode != .fullAccess || access.planMode)
-                .accessibilityIdentifier("project-unsandboxed-commands")
+                row(plan, isSelected: access.planMode)
             }
         } label: {
             Image(systemName: "shield").font(.system(size: 18)).frame(width: 44, height: 44)
@@ -126,6 +116,15 @@ struct ProjectAccessMenu: View {
         .accessibilityLabel("Access")
         .accessibilityValue(selected.title(for: family, supportsModes: supportsModes))
         .accessibilityIdentifier(identifier)
+    }
+    private func row(_ choice: ProjectAccessChoice, isSelected: Bool) -> some View {
+        Button { choose(choice) } label: {
+            Text(choice.title(for: family, supportsModes: supportsModes))
+            Text(choice.detail(for: family))
+            if isSelected { Image(systemName: "checkmark") }
+        }
+        .tint(choice.isElevated ? Color.orange : nil)
+        .accessibilityIdentifier("access-choice-" + choice.rawValue)
     }
 }
 
@@ -259,9 +258,7 @@ struct ProjectComposerSettings: View {
     }
     private var accessMenu: some View {
         ProjectAccessMenu(family: detail?.family ?? .codex, supportsModes: library.supportsModes, access: detail?.access ?? ProjectAccess(),
-                          isDisabled: saving || detail == nil || model.accessEnded, identifier: "project-composer-access",
-                          unsandboxedCommands: detail?.unsandboxedCommands,
-                          setUnsandboxedCommands: { enabled in Task { _ = await save(["unsandboxedCommands": enabled]) } }) { choice in
+                          isDisabled: saving || detail == nil || model.accessEnded, identifier: "project-composer-access") { choice in
             guard let detail else { return }
             let next = choice.result(from: detail.access, family: detail.family, supportsModes: library.supportsModes)
             Task { _ = await save(detail.access.changes(to: next, family: detail.family, supportsModes: library.supportsModes)) }

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { Sessions } from "../sessions.mjs";
 import { ClaudeBridge } from "../bridge.mjs";
-import { ToolPolicy, closeCommandSandbox } from "../permissions.mjs";
+import { SANDBOX_GUIDANCE, ToolPolicy } from "../permissions.mjs";
 import { backgroundTasks, claudeSessionBusy, nativeTurns } from "../project-history.mjs";
 import { ClaudeSessionFiles, projectFolderName } from "../session-file.mjs";
 
@@ -62,7 +62,7 @@ test("project turns use the native coding preset and name the transcript entry a
   await new Promise(resolve => setImmediate(resolve));
   await f.bridge.active.get(thread.id)?.finished;
   const options = f.capturedOptions[0];
-  assert.deepEqual(options.systemPrompt, { type: "preset", preset: "claude_code" });
+  assert.deepEqual(options.systemPrompt, { type: "preset", preset: "claude_code", append: SANDBOX_GUIDANCE });
   assert.deepEqual(options.settingSources, ["user", "project", "local"]);
   assert.deepEqual(options.additionalDirectories, [f.secondary]);
   assert.deepEqual(options.mcpServers, {});
@@ -77,10 +77,10 @@ test("project turns use the native coding preset and name the transcript entry a
 });
 
 // Contract: the owner's approval and plan modes reach every turn. Automatic
-// commands still run through canUseTool inside the host sandbox (the hook only
-// asks), and planning refuses writes and proposals to continue on its own.
-test("project approval and plan modes reach the SDK while every command stays sandboxed", { skip: process.platform !== "darwin" }, async t => {
-  t.after(closeCommandSandbox);
+// commands still run through canUseTool inside Claude Code's sandbox (the hook
+// only asks); leaving the sandbox or reaching a new host asks the owner; and
+// planning refuses writes and proposals to continue on its own.
+test("project approval and plan modes reach the SDK while commands stay sandboxed until the owner approves", async t => {
   const f = await fixture(t);
   await assert.rejects(f.bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku", wonderProject: f.project,
     wonderPolicy: { ...f.policy, mode: "read_only", approvalMode: "auto" } }), /unsupported/);
@@ -95,10 +95,11 @@ test("project approval and plan modes reach the SDK while every command stays sa
     const options = f.capturedOptions.at(-1);
     const hook = (tool_name, tool_input) => options.hooks.PreToolUse[0].hooks[0]({ tool_name, tool_input }).then(r => r.hookSpecificOutput);
     // Resolves the next approval request the owner would see.
-    const approve = async (call, decision) => {
+    const approve = async (call, decision, check = () => {}) => {
       await settle();
       const request = f.frames.at(-1);
       assert.equal(request.method, "item/commandExecution/requestApproval");
+      check(request.params);
       await f.bridge.receive({ id: request.id, result: { decision } });
       return call;
     };
@@ -106,17 +107,38 @@ test("project approval and plan modes reach the SDK while every command stays sa
     finally { f.gate.current.resolve(); await f.bridge.active.get(thread.id)?.finished; }
   };
   const inside = { file_path: join(f.primary, "a.txt"), content: "x" }, ctx = id => ({ toolUseID: id });
-  const sandboxed = result => {
-    assert.equal(result.behavior, "allow");
-    assert.match(result.updatedInput.command, /sandbox-exec/);
-    assert.notEqual(result.updatedInput.command, "echo hi");
+  const sandboxed = (options, result) => {
+    assert.equal(options.sandbox.enabled, true);
+    assert.deepEqual(result, { behavior: "allow", updatedInput: { command: "echo hi" } });
+  };
+  const outside = { command: "git push", dangerouslyDisableSandbox: true };
+  const network = (host, decision) => async ({ options, approve }) => {
+    const call = options.canUseTool("SandboxNetworkAccess", { host }, ctx(`net-${host}`));
+    return approve(call, decision, params => {
+      assert.deepEqual(params.networkApprovalContext, { host, protocol: "https" });
+      assert.ok(params.availableDecisions.some(d => d?.applyNetworkPolicyAmendment?.network_policy_amendment?.host === host));
+    });
   };
 
   await turn({ approvalMode: "auto" }, async ({ options, hook, approve }) => {
     assert.equal(options.permissionMode, "default");
     const before = f.frames.length;
-    sandboxed(await options.canUseTool("Bash", { command: "echo hi" }, ctx("auto-bash")));
+    sandboxed(options, await options.canUseTool("Bash", { command: "echo hi" }, ctx("auto-bash")));
     assert.equal(f.frames.length, before, "automatic commands do not ask");
+    // Auto never leaves the sandbox on its own: the owner decides on their phone.
+    const declined = await approve(options.canUseTool("Bash", outside, ctx("auto-outside")), "decline",
+      params => assert.match(params.reason, /outside the sandbox/));
+    assert.equal(declined.behavior, "deny");
+    assert.match(declined.message, /outside the sandbox/);
+    assert.equal((await approve(options.canUseTool("Bash", outside, ctx("auto-outside-2")), "accept")).behavior, "allow");
+    // A new host is allowed once, for the session, or saved to Claude Code's project settings.
+    assert.deepEqual(await network("example.com", "accept")({ options, approve }), { behavior: "allow", updatedInput: { host: "example.com" } });
+    assert.equal((await network("example.org", "acceptForSession")({ options, approve })).updatedPermissions[0].destination, "session");
+    const saved = await network("example.net", { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "example.net", action: "allow" } } })({ options, approve });
+    assert.deepEqual(saved.updatedPermissions, [{ type: "addRules", rules: [{ toolName: "WebFetch", ruleContent: "domain:example.net" }], behavior: "allow", destination: "localSettings" }]);
+    const refused = await network("evil.example", "decline")({ options, approve });
+    assert.equal(refused.behavior, "deny");
+    assert.match(refused.message, /did not allow evil\.example/);
     assert.equal((await hook("Bash", { command: "echo hi" })).permissionDecision, "ask");
     assert.equal((await hook("Write", inside)).permissionDecision, "allow");
     assert.equal((await options.canUseTool("Write", inside, ctx("auto-write"))).behavior, "allow");
@@ -126,7 +148,7 @@ test("project approval and plan modes reach the SDK while every command stays sa
   await turn({ approvalMode: "accept_edits" }, async ({ options, approve }) => {
     assert.equal(options.permissionMode, "default");
     assert.equal((await options.canUseTool("Edit", inside, ctx("edit"))).behavior, "allow");
-    sandboxed(await approve(options.canUseTool("Bash", { command: "echo hi" }, ctx("ask-bash")), "accept"));
+    sandboxed(options, await approve(options.canUseTool("Bash", { command: "echo hi" }, ctx("ask-bash")), "accept"));
   });
   await turn({ approvalMode: "auto", planMode: true }, async ({ options, hook, approve }) => {
     assert.equal(options.permissionMode, "plan");
@@ -141,11 +163,20 @@ test("project approval and plan modes reach the SDK while every command stays sa
     assert.equal(exit.behavior, "deny");
     assert.match(exit.message, /owner reviews the plan in Wonder/);
     // Even in Auto, planning asks before running a command, and it stays sandboxed.
-    sandboxed(await approve(options.canUseTool("Bash", { command: "echo hi" }, ctx("plan-bash")), "accept"));
+    sandboxed(options, await approve(options.canUseTool("Bash", { command: "echo hi" }, ctx("plan-bash")), "accept"));
+    assert.equal((await options.canUseTool("Bash", outside, ctx("plan-outside"))).behavior, "deny");
   });
   await turn({ approvalMode: "ask" }, async ({ options }) => {
     assert.equal(options.permissionMode, "default");
     assert.ok(!options.tools.includes("ExitPlanMode"));
+  });
+  // Full access means no sandbox and no questions.
+  await turn({ mode: "full_access", approvalMode: "full_access" }, async ({ options }) => {
+    assert.deepEqual(options.sandbox, { enabled: false });
+    assert.deepEqual(options.systemPrompt, { type: "preset", preset: "claude_code" });
+    const before = f.frames.length;
+    assert.equal((await options.canUseTool("Bash", outside, ctx("full-outside"))).behavior, "allow");
+    assert.equal(f.frames.length, before);
   });
 });
 

@@ -3352,11 +3352,10 @@ import UIKit
         retainMenuScreenshot(app, name: "Project turn running on the Mac")
     }
 
-    // A Claude chat open in Claude Code in a terminal keeps its own copy of
-    // the conversation, so a message waits until it is exited there.
-    // The access menu owns the opt-in interaction; changing it saves through
-    // the existing settings endpoint and never sends a message.
-    func testProjectUnsandboxedCommandsRequireFullAccess() throws {
+    // Claude's access menu offers Ask, Auto (sandboxed) and Full access, with
+    // Plan separate. Each choice saves through the existing settings endpoint,
+    // shows the saved level and never sends a message.
+    func testProjectClaudeAccessPickerSavesSandboxLevels() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-diagnostics-subagent-fixture", "-diagnostics-chat-layout",
@@ -3367,42 +3366,26 @@ import UIKit
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         let access = app.buttons["project-composer-access"]
         XCTAssertTrue(access.waitForExistence(timeout: 15)); access.tap()
-        let option = app.buttons["project-unsandboxed-commands"]
-        func revealOption() {
-            let menu = app.collectionViews.containing(.button, identifier: "access-choice-fullAccess").firstMatch
-            for _ in 0..<10 {
-                guard menu.exists else { return }
-                let visible = menu.frame.intersection(app.frame)
-                if option.exists && visible.contains(option.frame) { return }
-                let origin = app.coordinate(withNormalizedOffset: .zero)
-                origin.withOffset(CGVector(dx: visible.midX, dy: visible.midY))
-                    .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: visible.midX, dy: visible.minY + 20)))
-                Thread.sleep(forTimeInterval: 0.4)
-            }
+        for id in ["access-choice-manual", "access-choice-auto", "access-choice-fullAccess", "access-choice-plan"] {
+            XCTAssertTrue(app.buttons[id].waitForExistence(timeout: 5), id)
         }
-        revealOption()
-        XCTAssertTrue(option.waitForExistence(timeout: 5))
-        XCTAssertFalse(option.isEnabled)
+        XCTAssertFalse(app.buttons["access-choice-acceptEdits"].exists, "Accept edits is no longer offered")
+        XCTAssertFalse(app.buttons["project-unsandboxed-commands"].exists, "Full access replaces the separate sandbox switch")
         app.buttons["access-choice-fullAccess"].tap()
-        let full = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Bypass permissions"), object: access)
+        let full = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Full access"), object: access)
         XCTAssertEqual(XCTWaiter.wait(for: [full], timeout: 10), .completed)
         access.tap()
-        revealOption()
-        XCTAssertTrue(option.waitForExistence(timeout: 5) && option.isEnabled)
-        option.tap()
-        access.tap()
-        revealOption()
-        XCTAssertTrue(option.waitForExistence(timeout: 5))
-        XCTAssertTrue(option.label.contains("On"), option.label)
-        XCTAssertTrue(app.frame.contains(option.frame), "The saved option must be fully on screen")
-        retainMenuScreenshot(app, name: "Project commands outside the sandbox enabled")
-        option.tap()
-        access.tap()
-        revealOption()
-        XCTAssertTrue(option.waitForExistence(timeout: 5))
-        XCTAssertFalse(option.label.contains(": On"), option.label)
+        let auto = app.buttons["access-choice-auto"]
+        XCTAssertTrue(auto.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.frame.contains(auto.frame), "The sandboxed level must be fully on screen")
+        retainMenuScreenshot(app, name: "Claude access picker with sandbox levels")
+        auto.tap()
+        let sandboxed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Auto (sandboxed)"), object: access)
+        XCTAssertEqual(XCTWaiter.wait(for: [sandboxed], timeout: 10), .completed)
     }
 
+    // A Claude chat open in Claude Code in a terminal keeps its own copy of
+    // the conversation, so a message waits until it is exited there.
     func testMessageWaitsWhileClaudeChatIsOpenOnMac() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)

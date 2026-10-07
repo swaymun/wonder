@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BRIDGE_PROTOCOL, HAIKU_MODEL, TurnProjection, questionRequest, questionAnswer } from "./projection.mjs";
 import { baseOptions, inspectSdk, isSubscription } from "./sdk-runtime.mjs";
-import { ToolPolicy, closeCommandSandbox, toolCallKey } from "./permissions.mjs";
+import { SANDBOX_GUIDANCE, ToolPolicy, toolCallKey } from "./permissions.mjs";
 import { createNativeCua } from "./native-cua.mjs";
 import { backgroundTasks, claudeSessionBusy, nativeTurns, sessionSummary } from "./project-history.mjs";
 import { ClaudeSessionFiles } from "./session-file.mjs";
@@ -218,6 +218,7 @@ export class ClaudeBridge {
       selectedModel(options.model);
       const policy = new ToolPolicy({ ...options.wonderPolicy, cwd: options.wonderProject?.cwd ?? options.cwd,
         project: Boolean(options.wonderProject), internal: options.wonderInternal === true, structuredOutput: Boolean(options.outputSchema),
+        projectRoots: options.wonderProject ? [options.wonderProject.cwd, ...(options.wonderProject.additionalDirectories ?? [])] : [],
         tools: options.wonderProject ? [] : options.dynamicTools?.map(t => t.name) ?? [] });
       const content = await sdkInput(params.input, policy);
       const { turn, duplicate } = await this.sessions.accept(session, params);
@@ -411,15 +412,36 @@ export class ClaudeBridge {
       run.authorizedTools.set(key, calls);
       return { behavior: "allow", updatedInput: input }; // The daemon owns these tools' approval and scope checks.
     }
-    // Bash is allowed only here. The host-owned policy decides whether the
-    // owner explicitly enabled unsandboxed Project commands.
-    const allow = async () => ({ behavior: "allow", updatedInput: name === "Bash" ? await policy.commandInput(input) : input });
+    const allow = (updatedPermissions) => ({ behavior: "allow", updatedInput: input, ...(updatedPermissions ? { updatedPermissions } : {}) });
     if (decision === "allow" || (name.startsWith("mcp__") && policy.bypassesApproval)) return allow();
+    if (name === "SandboxNetworkAccess") return this.networkApproval(base, run, input, context);
+    const outside = name === "Bash" && input.dangerouslyDisableSandbox === true;
     const response = await this.serverCall("item/commandExecution/requestApproval", { ...base,
       command: name === "Bash" ? String(input.command ?? "") : `${name}: ${JSON.stringify(input)}`,
-      cwd: policy.cwd, reason: context.title ?? "Allow Claude to perform this action?",
+      cwd: policy.cwd, reason: outside ? "Run this command outside the sandbox, with full access to your Mac and the network?"
+        : context.title ?? "Allow Claude to perform this action?",
       availableDecisions: ["accept", "decline", "cancel"] }, context.signal ?? run.abort.signal);
-    return response?.decision === "accept" ? allow() : deny("The owner declined this action.");
+    return response?.decision === "accept" ? allow() : deny(outside
+      ? "The owner declined running this command outside the sandbox. Continue inside the sandbox or explain what the owner can change."
+      : "The owner declined this action.");
+  }
+  // A sandboxed command reached a host outside the allowlist. Saving the rule
+  // writes Claude Code's own project setting, as the CLI's "always allow" does.
+  async networkApproval(base, run, input, context) {
+    const host = typeof input.host === "string" ? input.host.toLowerCase() : "";
+    if (!/^[a-z0-9.-]{1,253}$/.test(host) || !host.includes(".")) return { behavior: "deny", message: "The sandbox blocked an invalid host." };
+    const rule = (destination) => [{ type: "addRules", rules: [{ toolName: "WebFetch", ruleContent: `domain:${host}` }], behavior: "allow", destination }];
+    const amendment = { applyNetworkPolicyAmendment: { network_policy_amendment: { host, action: "allow" } } };
+    const response = await this.serverCall("item/commandExecution/requestApproval", { ...base,
+      command: `Connect to ${host}`, cwd: null, reason: `The sandbox blocked ${host}. Allow this conversation's commands to connect to it?`,
+      networkApprovalContext: { host, protocol: "https" },
+      availableDecisions: ["accept", "acceptForSession", amendment, "decline"] }, context.signal ?? run.abort.signal);
+    const decision = response?.decision;
+    if (decision === "accept") return { behavior: "allow", updatedInput: input };
+    if (decision === "acceptForSession") return { behavior: "allow", updatedInput: input, updatedPermissions: rule("session") };
+    if (decision?.applyNetworkPolicyAmendment?.network_policy_amendment?.host === host)
+      return { behavior: "allow", updatedInput: input, updatedPermissions: rule("localSettings") };
+    return { behavior: "deny", message: `The owner did not allow ${host}. Continue without it, or ask the owner to allow it or choose Full access.` };
   }
   async execute(session, run, options, policy, content) {
     let lease, query;
@@ -499,10 +521,11 @@ export class ClaudeBridge {
       }
       if (project) {
         // Normal Claude Code behavior and project configuration, still bounded
-        // by Wonder's PreToolUse/canUseTool policy and command sandbox.
-        Object.assign(sdkOptions, { systemPrompt: { type: "preset", preset: "claude_code",
-          ...(run.nativeCua ? { append: "Use the native cua_repl tools for computer use. This turn has a fresh runtime: follow its first-call instructions before using it." }
-            : computerUnavailable ? { append: "Native computer use could not connect for this turn. Report it as unavailable; do not substitute another implementation." } : {}) },
+        // by Wonder's PreToolUse/canUseTool policy and Claude Code's sandbox.
+        const append = [...(policy.unsandboxed ? [] : [SANDBOX_GUIDANCE]),
+          ...(run.nativeCua ? ["Use the native cua_repl tools for computer use. This turn has a fresh runtime: follow its first-call instructions before using it."]
+            : computerUnavailable ? ["Native computer use could not connect for this turn. Report it as unavailable; do not substitute another implementation."] : [])];
+        Object.assign(sdkOptions, { systemPrompt: { type: "preset", preset: "claude_code", ...(append.length ? { append: append.join("\n\n") } : {}) },
           settingSources: ["user", "project", "local"], additionalDirectories: project.additionalDirectories,
           // Planning ends by proposing its plan through ExitPlanMode, which the
           // policy turns into a plan for the owner to review in Wonder.
@@ -627,6 +650,5 @@ export class ClaudeBridge {
     await Promise.allSettled([...this.active.values()].map(run => run.finished));
     for (const pending of this.pending.values()) { pending.cleanup(); pending.reject(new Error("Wonder closed the Claude runtime.")); }
     this.pending.clear();
-    await closeCommandSandbox();
   }
 }
