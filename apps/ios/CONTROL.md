@@ -13,7 +13,8 @@ judgment and for flows that no scenario covers yet.
 Pass `--host mac-mini`, or export `WONDER_CONTROL_HOST=mac-mini`, to run every
 command on the Mac mini instead of this Mac. `build`, `run` and `sync` first copy
 the working tree there, including uncommitted and untracked files but not ignored
-ones. Evidence is copied back to `.local/control/` after every command.
+ones. Each local checkout or worktree gets its own copy under `~/wonder-control/`
+on the mini. Evidence is copied back to `.local/control/` after every command.
 
 ```sh
 scripts/wonderctl --host mac-mini doctor
@@ -34,8 +35,9 @@ uploads keep using `/Applications/Xcode.app` through fastlane.
 Control iPhone` and `Wonder Control iPhone Duo`, created on the newest installed
 iOS runtime. Other simulators are never booted, erased or shut down. `device`
 waits for accessibility automation after a boot, which can take about 30 seconds
-on the Duo. `build`, `run`, `device` and `install` take a lock, so two agents
-cannot drive the same simulator at once.
+on the Duo. `build`, `run`, `device` and `install` take a per-simulator lock on
+that Mac, so agents from different checkouts cannot drive the same simulator at
+once; the second one exits with status 75 and should wait and retry.
 
 The iPhone Duo runs Wonder on its unfolded display. Fold posture is only available
 from Simulator's Device Hub, so check folding by hand. Most app extensions do not

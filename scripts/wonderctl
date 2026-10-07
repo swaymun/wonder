@@ -5,6 +5,7 @@ See apps/ios/CONTROL.md. Pass --host (or WONDER_CONTROL_HOST) to run on another 
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -28,7 +29,10 @@ CONTROL = ROOT / ".local/control"
 EVIDENCE = CONTROL / "evidence"
 DERIVED = ROOT / ".local/build/control-sim"
 CORE_SIMCTL = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/simctl"
-REMOTE_DIR = "wonder-control/Wonder"
+# One remote copy per local checkout, so worktrees never overwrite each other's source.
+REMOTE_DIR = f"wonder-control/{ROOT.name}-{hashlib.sha1(str(ROOT).encode()).hexdigest()[:8]}"
+# Simulators are per machine, so their lock is too.
+LOCKS = Path.home() / "Library/Caches/wonderctl"
 REMOTE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 SYNC_COMMANDS = {"sync", "build", "run"}
 
@@ -470,13 +474,14 @@ def main(argv):
     if args.host:
         return remote(args, argv)
     CONTROL.mkdir(parents=True, exist_ok=True)
+    LOCKS.mkdir(parents=True, exist_ok=True)
     exclusive = args.command in {"build", "run", "device", "install"}
-    with open(CONTROL / "lock", "w") as lock:
+    with open(LOCKS / f"{args.device}.lock", "w") as lock:
         if exclusive:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                print("another wonderctl build/run owns this device; wait for it", file=sys.stderr)
+                print(f"another wonderctl build/run owns '{DEVICE_NAME}' on this Mac; wait for it", file=sys.stderr)
                 return 75
         try:
             return dispatch(args) or 0
