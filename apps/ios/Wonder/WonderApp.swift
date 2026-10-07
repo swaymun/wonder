@@ -23,6 +23,9 @@ private struct WonderRoot: View {
     var body: some View {
         content.environmentObject(library)
             .environment(\.chatBubblePalette, ChatBubblePalette(rawValue: bubblePaletteRaw) ?? .standard)
+            // Actions read as plain text, not blue links. Selection and focus
+            // still use Color.accentColor explicitly; switches use `.systemSwitch()`.
+            .tint(.primary)
     }
 
     @ViewBuilder private var content: some View {
@@ -47,6 +50,11 @@ private struct WonderRoot: View {
         ChatShell(library: library)
         #endif
     }
+}
+
+extension View {
+    /// A switch in system green; the app's neutral tint would draw it black.
+    func systemSwitch() -> some View { tint(Color(uiColor: .systemGreen)) }
 }
 
 #if DEBUG || WONDER_DIAGNOSTICS
@@ -120,6 +128,7 @@ struct ConnectionsView: View {
                             } else { widgetFailure = nil }
                         }
                     ))
+                    .systemSwitch()
                     .accessibilityIdentifier("widget-show-names")
                     if let widgetFailure { Text(widgetFailure).foregroundStyle(.red) }
                 } header: {
@@ -190,6 +199,7 @@ struct ConnectionDetail: View {
                             else { push.disable(model) }
                         }
                     ))
+                    .systemSwitch()
                     .accessibilityIdentifier("connection-notifications")
                     if let state = push.setupState(host) {
                         switch state {

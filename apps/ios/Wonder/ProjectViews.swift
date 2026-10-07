@@ -314,7 +314,7 @@ struct ProjectConversationDetailsView: View {
                     Section {
                         TextField("Thread name", text: $title).submitLabel(.done)
                             .onSubmit { Task { await save(["title": title]) } }
-                        Toggle("Pin thread", isOn: Binding(get: { self.detail?.isPinned ?? false }, set: { value in Task { await save(["isPinned": value]) } }))
+                        Toggle("Pin thread", isOn: Binding(get: { self.detail?.isPinned ?? false }, set: { value in Task { await save(["isPinned": value]) } })).systemSwitch()
                             .accessibilityIdentifier("project-thread-pin")
                     }
                     Section("Project") {
@@ -575,7 +575,7 @@ struct ManageProjectsView: View {
                                 .buttonStyle(.plain)
                                 .accessibilityHint("Edits this project")
                                 if busy.contains(project.id) { ProgressView() }
-                                Toggle("Show in sidebar", isOn: Binding(get: { project.isIncluded }, set: { value in Task { await set(project, ["isIncluded": value]) } }))
+                                Toggle("Show in sidebar", isOn: Binding(get: { project.isIncluded }, set: { value in Task { await set(project, ["isIncluded": value]) } })).systemSwitch()
                                     .labelsHidden()
                                     .disabled(busy.contains(project.id))
                                     .accessibilityLabel("Show \(project.name) in sidebar")

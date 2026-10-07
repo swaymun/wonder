@@ -348,7 +348,7 @@ struct DiagnosticsView: View {
     var body: some View {
         List {
             Section("Recording") {
-                Toggle("Record performance", isOn: $diagnostics.recording)
+                Toggle("Record performance", isOn: $diagnostics.recording).systemSwitch()
                 Text(diagnostics.status).accessibilityIdentifier("diagnostics-status")
                 Button(diagnostics.capturing ? "Stop capture" : "Record two minutes") { if diagnostics.capturing { diagnostics.stopCapture() } else { diagnostics.startCapture() } }
                     .disabled(!diagnostics.recording).accessibilityIdentifier("diagnostics-capture")

@@ -594,6 +594,7 @@ struct ConversationView: View {
     @State private var cameraScope: String?
     @State private var importScope: String?
     @State private var workspaceRequest: WorkspaceBrowserRequest?
+    @State private var showingAttention = false
     @State private var editedFilesReview: EditedFilesReviewRequest?
     @State private var showingApps = false
     @State private var showingDetails = false
@@ -916,6 +917,8 @@ struct ConversationView: View {
                                  initialFilePath: request.initialFilePath, preferredRootID: request.preferredRootID,
                                  reanchor: request.reanchor, replacingAnnotationID: request.replacingAnnotationID)
                     .id(request.id)
+            } else if showingAttention {
+                AttentionReview(model: model, chat: chat) { showingAttention = false }
             } else if model.snapshots[chat.id] != nil || model.groups[chat.id] != nil {
                 ConversationScroller(model: model, projects: model.projects, chat: chat, entries: entries, nodeIDs: nodes.map(\.id),
                     isCovered: conversationCovered,
@@ -1281,7 +1284,6 @@ struct ConversationView: View {
             let attachments = composerAttachments
             return VStack(alignment: .leading, spacing: 8) {
                 DictationControls(controller: model.dictation, model: model, chat: chat)
-                AttentionDock(model: model, chat: chat)
                 if (!chat.isArchived || model.isSubagent(chat)) && (chat.botId != nil || model.groups[chat.id] != nil || model.isProject(chat)) {
                     if model.nativeHistoryFailures.contains(chat.id) {
                         HistoryRetryNotice { await model.reloadNativeHistory(chat) }
@@ -1313,6 +1315,7 @@ struct ConversationView: View {
                         HStack(alignment: .bottom, spacing: 4) {
                             ComputerDock(isPresented: $showingComputer)
                             FilesDock(isPresented: workspaceRequest != nil) {
+                                showingAttention = false
                                 if workspaceRequest == nil { workspaceRequest = WorkspaceBrowserRequest() }
                                 else { workspaceRequest = nil }
                             }
@@ -1320,9 +1323,14 @@ struct ConversationView: View {
                                 EditedFilesDock(summary: latestEdits, isPresented: editedFilesReview != nil) {
                                     if editedFilesReview == nil {
                                         workspaceRequest = nil
+                                        showingAttention = false
                                         editedFilesReview = EditedFilesReviewRequest(summary: latestEdits, selectedPath: nil, scope: model.assignmentScope)
                                     } else { editedFilesReview = nil }
                                 }
+                            }
+                            AttentionDock(model: model, chat: chat, isPresented: showingAttention) {
+                                if !showingAttention { workspaceRequest = nil; editedFilesReview = nil }
+                                showingAttention.toggle()
                             }
                             Spacer(minLength: 0)
                             if let goal = model.goals[chat.id], (chat.botId != nil || model.isProject(chat)),
@@ -2489,6 +2497,9 @@ struct BotMessageText: View {
         for run in Array(value.runs) {
             if let url = run.link, !["https", "http"].contains(url.scheme?.lowercased() ?? "") {
                 value[run.range].link = nil
+            } else if run.link != nil {
+                // Wonder's tint is neutral, so a link is marked by its underline.
+                value[run.range].underlineStyle = .single
             }
         }
         return value
@@ -2885,7 +2896,7 @@ private struct PhoneApprovalFieldView: View {
                             selected = values
                             if let data = try? JSONEncoder().encode(values.sorted()) { answer = String(decoding: data, as: UTF8.self) }
                         }
-                    ))
+                    )).systemSwitch()
                 }
             case .text, .number, .integer:
                 if field.secret {
@@ -6804,84 +6815,59 @@ struct AsyncQuestionRow: View {
 
 /// A stable notice keeps questions reachable without replacing the message
 /// draft. The sheet owns scrolling, including long forms at large text sizes.
-/// Pending permission requests and questions, pinned above the composer.
-/// Each opens in one sheet; none of them is placed in the conversation.
-struct AttentionDock: View {
+/// A conversation's pending permission requests and questions, permissions
+/// first because they block work. Subagent questions are included.
+struct PendingAttention {
+    let requests: [AttentionRequest]
+    let questions: [(chat: ChatSummary, question: AsyncQuestion)]
+    var count: Int { requests.count + questions.count }
+    @MainActor init(model: ConnectionModel, chat: ChatSummary, now: Date) {
+        let ms = UInt64(now.timeIntervalSince1970 * 1000)
+        requests = model.requests(for: chat).sorted { !$0.isQuestion && $1.isQuestion }
+        questions = (model.asyncQuestions[chat.id] ?? []).filter {
+            $0.canAnswer(now: ms) || model.attentionErrors[$0.id] != nil
+        }.map { (chat, $0) } + (model.subagents[chat.id] ?? []).flatMap { child in
+            (model.asyncQuestions[child.id] ?? []).filter { $0.state == "pending" }
+                .map { (child.chatSummary(botId: chat.botId), $0) }
+        }
+    }
+    var isPermission: Bool { requests.first.map { !$0.isQuestion } ?? false }
+    /// The pill's short name.
+    var label: String { count > 1 ? "\(count) requests" : isPermission ? "Permission" : "Question" }
+    var symbol: String { isPermission ? "hand.raised" : "questionmark.bubble" }
+}
+
+/// Replaces the conversation, as Files does, while the owner answers pending
+/// requests. It closes itself when nothing is left to answer.
+struct AttentionReview: View {
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
-    @State private var showingSheet = false
+    let close: () -> Void
     @State private var requestIndex = 0
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let now = UInt64(context.date.timeIntervalSince1970 * 1000)
-            // Permissions block work, so they come first.
-            let requests = model.requests(for: chat).sorted { !$0.isQuestion && $1.isQuestion }
-            let async = (model.asyncQuestions[chat.id] ?? []).filter {
-                $0.canAnswer(now: now) || model.attentionErrors[$0.id] != nil
-            }.map { (chat, $0) } + (model.subagents[chat.id] ?? []).flatMap { child in
-                (model.asyncQuestions[child.id] ?? []).filter { $0.state == "pending" }
-                    .map { (child.chatSummary(botId: chat.botId), $0) }
+            let pending = PendingAttention(model: model, chat: chat, now: context.date)
+            let index = min(requestIndex, max(0, pending.count - 1))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if pending.count > 1 { QuestionNavigation(index: $requestIndex, count: pending.count) }
+                    ForEach(Array(pending.requests.enumerated()).filter { $0.offset == index }, id: \.element.id) { _, request in
+                        AttentionRow(model: model, request: request)
+                    }
+                    ForEach(Array(pending.questions.enumerated()).filter { $0.offset + pending.requests.count == index }, id: \.element.question.id) { _, item in
+                        AsyncQuestionRow(model: model, chat: item.chat, question: item.question)
+                    }
+                }
+                .modifier(ConversationColumn())
+                .padding(16)
             }
-            let count = requests.count + async.count
-            if count > 0 {
-                Button { showingSheet = true } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: requests.first.map { $0.isQuestion ? "questionmark.bubble" : "hand.raised" } ?? "questionmark.bubble")
-                            .font(.body.weight(.semibold)).foregroundStyle(.secondary).frame(width: 24)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(Self.title(requests: requests, questions: async.count))
-                                .font(.subheadline.weight(.semibold))
-                            if let summary = requests.first.flatMap(Self.summary) ?? async.first?.1.questions.first?.title {
-                                Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                        }
-                        Spacer(minLength: 8)
-                        Text("Review").font(.subheadline.weight(.semibold))
-                    }
-                    .foregroundStyle(.primary).padding(.horizontal, 14).padding(.vertical, 8).frame(minHeight: 52)
-                    .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("question-dock-open")
-                .sheet(isPresented: $showingSheet) {
-                    NavigationStack {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 12) {
-                                if count > 1 { QuestionNavigation(index: $requestIndex, count: count) }
-                                ForEach(Array(requests.enumerated()).filter { $0.offset == min(requestIndex, count - 1) }, id: \.element.id) { _, request in
-                                    AttentionRow(model: model, request: request)
-                                }
-                                ForEach(Array(async.enumerated()).filter { $0.offset + requests.count == min(requestIndex, count - 1) }, id: \.element.1.id) { _, item in
-                                    AsyncQuestionRow(model: model, chat: item.0, question: item.1)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(16)
-                        }
-                        .navigationTitle(requests.contains { !$0.isQuestion } ? "Review" : count == 1 ? "Question" : "Questions")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar { Button("Done") { showingSheet = false } }
-                        .onChange(of: count) { _, value in
-                            requestIndex = min(requestIndex, max(0, value - 1))
-                            if value == 0 { showingSheet = false }
-                        }
-                    }
-                    .presentationDetents([.large])
-                }
+            .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("attention-review")
+            .onChange(of: pending.count, initial: true) { _, value in
+                requestIndex = min(requestIndex, max(0, value - 1))
+                if value == 0 { close() }
             }
         }
-    }
-    static func title(requests: [AttentionRequest], questions: Int) -> String {
-        let count = requests.count + questions
-        if count > 1 { return "\(count) requests to review" }
-        return requests.first.map { $0.isQuestion ? "Question to review" : "Permission requested" } ?? "Question to review"
-    }
-    /// One line saying what is being asked, when the request carries it.
-    static func summary(_ request: AttentionRequest) -> String? {
-        if request.isQuestion { return request.params.questions?.first?.question }
-        return [request.params.command, request.computerAction?.detail, request.params.reason, request.params.message]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.first { !$0.isEmpty }
     }
 }
 

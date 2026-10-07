@@ -524,7 +524,7 @@ private struct ProjectAutomationEditor: View {
                     Button("Change schedule") { scheduleEditable = true }
                         .accessibilityIdentifier("project-automation-change-schedule")
                 }
-                Toggle("Active", isOn: $isActive)
+                Toggle("Active", isOn: $isActive).systemSwitch()
                     .accessibilityIdentifier("project-automation-active")
                 Picker("Notify me", selection: $notificationPolicy) {
                     Text("Every run").tag("all_runs")

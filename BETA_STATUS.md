@@ -1,8 +1,8 @@
 # Wonder beta status
 
-On October 7, Wonder Testing Release 1.0 (45) and production Release 1.0 (101)
-uploaded and processed successfully. Testing 45 is available in internal Owner
-Beta; production 101's tester availability was not checked. TestFlight installation
+On October 7, Wonder Testing Release 1.0 (47) and production Release 1.0 (103)
+uploaded and processed successfully. Testing 47 is available in internal Owner
+Beta; production 103's tester availability was not checked. TestFlight installation
 remains unverified. Mac 1.0.125 is Developer ID signed, notarized and stapled, its
 DMG passed Gatekeeper and artifact checks, and it is installed over 1.0.124 with
 passing signature, Gatekeeper, `/healthz` and `/readyz` checks. No external beta
@@ -17,17 +17,22 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (101) uploaded and processed; tester availability not checked. Built from clean, pushed source (`73e52c48`). TestFlight installation remains unverified. |
-| Wonder Testing | Blue Release 1.0 (45) uploaded, processed and available in automatic Owner Beta, from the same source as production 101. Build 44 is superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| iPhone and iPad | Production Release 1.0 (103) uploaded and processed; tester availability not checked. Built from clean, pushed source (`f81d264d`). TestFlight installation remains unverified. |
+| Wonder Testing | Blue Release 1.0 (47) uploaded, processed and available in automatic Owner Beta, from the same source as production 103. Builds 45 and 46 are superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
 | Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.125 (from `6c99f64e`; later commits change only the iPhone app) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `1c944ff976787069eabdd6b79bc36f2340fd4749abf55e8d8cb4ac7d8319f978`. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). The iOS archives and the Mac app came from clean, pushed internal source. Third-party components retain their own licenses. |
 
-Testing 45 and production 101 show permission requests in the same dock above
-the composer as questions: a card naming the command or question, with Review
-opening one sheet. The inline approval card and the blue "Review request" link are
-gone, and subagent questions moved into the dock. The dock scenario
+Testing 47 and production 103 show pending permission requests and questions as
+a pill in the composer row beside Files ("Permission", "Question" or "N
+requests"). Like Files, it replaces the conversation with the requests and
+returns to it; answering the last one returns automatically. The inline approval
+card, the blue "Review request" link and the bottom sheet are gone, and subagent
+questions moved into the pill. Actions across the app use the neutral text color
+instead of blue link styling; selection keeps the accent color, switches stay
+green and links in messages are underlined. The pill scenario
 (`approval-dock.wctl`) and five approval and question UI tests passed on the
-iPhone simulator on the Mac mini.
+iPhone simulator on the Mac mini. Testing 45/46 and production 101/102 were
+intermediate builds of these changes.
 
 Testing 44, production 100 and Mac 1.0.125 run Claude Project commands without a
 sandbox, as Claude Code does. The Access choice is **Ask**, **Auto** (the default)

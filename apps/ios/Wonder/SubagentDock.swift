@@ -351,6 +351,32 @@ struct FilesDock: View {
     }
 }
 
+/// Pending permission requests and questions. Like Files, it replaces the
+/// conversation with their review and returns to it.
+struct AttentionDock: View {
+    @ObservedObject var model: ConnectionModel
+    let chat: ChatSummary
+    let isPresented: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let pending = PendingAttention(model: model, chat: chat, now: context.date)
+            if pending.count > 0 {
+                Button(action: toggle) {
+                    Label(pending.label, systemImage: pending.symbol)
+                        .modifier(ComposerStatusPill())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("question-dock-open")
+                .accessibilityValue(isPresented ? "Open" : "Closed")
+                .accessibilityAddTraits(isPresented ? .isSelected : [])
+                .accessibilityHint(isPresented ? "Return to the conversation" : "Answer what the agent is waiting for")
+            }
+        }
+    }
+}
+
 /// Every saved edit in the conversation; opens and closes their review.
 struct EditedFilesDock: View {
     let summary: ResponseEditedFiles

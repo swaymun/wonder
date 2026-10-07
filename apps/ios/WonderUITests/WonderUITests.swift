@@ -825,8 +825,8 @@ import UIKit
         }
     }
 
-    // A pending permission is pinned above the composer as the same dock as
-    // questions, never as an inline card or a link, and opens in its sheet.
+    // A pending permission is a pill above the composer, like questions, never
+    // an inline card or a link. It replaces the conversation, as Files does.
     func testPendingApprovalOpensFromTheComposerDock() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -834,7 +834,7 @@ import UIKit
         app.launch()
         let dock = app.buttons["question-dock-open"]
         XCTAssertTrue(dock.waitForExistence(timeout: 10))
-        XCTAssertTrue(dock.label.contains("Permission requested"))
+        XCTAssertTrue(dock.label.contains("Permission"))
         XCTAssertFalse(app.buttons["review-approval-request"].exists)
         XCTAssertFalse(app.buttons["approval-accept-fixture-computer"].exists, "Approvals are not placed in the conversation")
         let draft = app.descendants(matching: .any)["message-draft"]
@@ -844,6 +844,9 @@ import UIKit
         let approval = app.buttons["approval-accept-fixture-computer"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5))
         XCTAssertTrue(approval.isHittable)
+        XCTAssertTrue(draft.exists, "The composer stays while requests replace the conversation")
+        dock.tap()
+        XCTAssertFalse(app.buttons["approval-accept-fixture-computer"].exists, "The pill returns to the conversation")
     }
 
     private func openAttentionDock(_ app: XCUIApplication) {
@@ -6161,7 +6164,7 @@ import UIKit
             let notice = app.buttons["question-dock-open"]
             XCTAssertTrue(notice.waitForExistence(timeout: 10))
             XCTAssertTrue(notice.isHittable, "The question notice must stay above the composer")
-            XCTAssertFalse(app.buttons["Next question"].exists, "Questions should open in their sheet")
+            XCTAssertFalse(app.buttons["Next question"].exists, "Questions open from their pill")
             notice.tap()
             let next = app.buttons["Next question"]
             XCTAssertTrue(next.waitForExistence(timeout: 10))
@@ -6182,9 +6185,8 @@ import UIKit
             second.tap()
             XCTAssertFalse(second.isSelected)
             XCTAssertTrue(first.isSelected, "A comma in one label must not select another answer")
-            let done = app.buttons["Done"]
-            XCTAssertTrue(done.exists)
-            done.tap()
+            notice.tap()
+            XCTAssertFalse(app.buttons["Next question"].exists, "The pill returns to the conversation")
             XCTAssertTrue(draft.isHittable, "Closing questions must return to the composer")
             XCTAssertTrue(notice.exists)
             retainMenuScreenshot(app, name: "Multiple question choices " + size)
@@ -6224,8 +6226,7 @@ import UIKit
             let resolved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !notice.exists }, object: nil)
             XCTAssertEqual(XCTWaiter.wait(for: [resolved], timeout: 10), .completed,
                            "The Mac fixture must accept the \(decision) payload and clear the pending question")
-            let done = app.buttons["Done"]
-            if done.isHittable { done.tap() }
+            XCTAssertFalse(app.descendants(matching: .any)["attention-review"].exists, "Answering the last request returns to the conversation")
             XCTAssertTrue(draft.waitForExistence(timeout: 5))
             XCTAssertTrue((draft.value as? String)?.contains("Keep this unsent draft") == true)
             app.terminate()
