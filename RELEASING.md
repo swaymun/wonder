@@ -21,6 +21,20 @@ spctl --assess --type open --context context:primary-signature --verbose=2 .loca
 scripts/verify-macos-dmg.sh .local/release/Wonder.dmg 1.0.47
 ```
 
+`scripts/release-mac.sh VERSION` runs that whole sequence, notarizing with the
+App Store Connect API key, and keeps the evidence in `.local/release/mac-VERSION/`.
+Build releases on the Mac mini from a pushed commit, then install the DMG here:
+
+```sh
+scripts/wonder-remote --ref HEAD --signing --lock mac-release -- scripts/release-mac.sh 1.0.126
+scripts/install-mac-dmg.sh .local/release/mac-1.0.126/Wonder-1.0.126.dmg
+```
+
+The mini signs from its dedicated `wonder-signing` keychain. Prepare a new build
+Mac once by running `scripts/setup-remote-signing.sh HOST` and then
+`scripts/setup-remote-developer-id.sh HOST` yourself; the second copies only the
+Developer ID Application identity from this Mac's login Keychain.
+
 An authorized operator may pass an existing App Store Connect API key directly
 to `notarytool` instead of a Keychain profile. Keep its private key outside the
 repository. The DMG path requires no Developer ID Installer identity. Legacy PKG

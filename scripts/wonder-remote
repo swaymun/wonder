@@ -20,9 +20,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKOUT = f"{ROOT.name}-{hashlib.sha1(str(ROOT).encode()).hexdigest()[:8]}"
-REMOTE_PATH = "/opt/homebrew/opt/ruby/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+REMOTE_PATH = "$HOME/.cargo/bin:/opt/homebrew/opt/ruby/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 # openrsync does not reliably protect .gitignore'd paths from --delete; name them.
-PROTECTED = ["/.git/", "/.local/", "/target/", "/node_modules/", ".build/", "DerivedData/", "__pycache__/"]
+PROTECTED = ["/.git/", "/.claude/", "/.local/", "target/", "node_modules/", ".build/", "DerivedData/", "__pycache__/"]
 # Evidence comes back; caches and build products stay on the remote Mac.
 NOT_PULLED = ["build/", "fastlane-bundle/", "DerivedData/", "public-source/", "control/lock", "*.lock"]
 
@@ -74,6 +74,11 @@ def main():
         push(args.host, ROOT, remote_dir)
 
     steps = [f"export PATH={REMOTE_PATH}", f"cd {remote_dir}", "export BUNDLE_PATH=.local/fastlane-bundle"]
+    if not args.ref:
+        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        commit = f"{head}+working-tree"
+    # The remote copy has no .git, so pass the source identity along.
+    steps.append(f"export WONDER_SOURCE_COMMIT={shlex.quote(commit)}")
     if args.signing:
         steps.append("set -a && . ~/.config/wonder/signing.env && set +a")
     runner = shlex.join(command)

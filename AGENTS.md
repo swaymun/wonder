@@ -183,9 +183,9 @@ forward rules for an older feature or workflow.
   `apps/menubar`, the daemon or bundled helpers), a Developer ID signed, notarized
   and stapled Mac release installed to `/Applications/Wonder.app` is likewise
   standing-authorized when needed.** Follow [RELEASING.md](RELEASING.md#mac-artifact)
-  with the next monotonic build version, notarize with the App Store Connect API
-  key above, install with `scripts/install-signed-app.py` and record the version in
-  `BETA_STATUS.md`. Once the installed app passes its health checks, delete the
+  with the next monotonic build version: build, sign and notarize on the Mac mini
+  with `scripts/release-mac.sh` through `scripts/wonder-remote --ref HEAD`, install
+  here with `scripts/install-mac-dmg.sh` and record the version in `BETA_STATUS.md`. Once the installed app passes its health checks, delete the
   installer's rollback bundles (`~/.wonder/Backups/signed-update-*`); do not keep
   old app backups. Publishing a GitHub release or appcast still needs approval.
 - Use `profile:diagnostics` only for a specifically requested Diagnostics build.

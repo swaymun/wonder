@@ -542,6 +542,7 @@ scripts/collect-dependency-notices.py
 scripts/export-public-source.py
 scripts/generate-sparkle-appcast.py
 scripts/install-dev-app.sh
+scripts/install-mac-dmg.sh
 scripts/install-signed-app.py
 scripts/manage-runtime.sh
 scripts/package-claude-runtime.py
@@ -549,7 +550,9 @@ scripts/package-dev-app.sh
 scripts/package-dev-pkg.sh
 scripts/package-macos-dmg.sh
 scripts/public-source-files.txt
+scripts/release-mac.sh
 scripts/replay-codex-thread.py
+scripts/setup-remote-developer-id.sh
 scripts/setup-remote-signing.sh
 scripts/setup-self-hosted.sh
 scripts/sign-macos-app.py
