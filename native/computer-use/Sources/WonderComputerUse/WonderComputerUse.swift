@@ -545,9 +545,9 @@ struct WonderComputerUse {
     }
 
     private static func click(_ params: [String: Any], dryRun: Bool) throws {
-        try requireAccessibility()
         let point = try screenPoint(params)
         if dryRun { return }
+        try requireAccessibility()
         guard let down = CGEvent(
             mouseEventSource: nil,
             mouseType: .leftMouseDown,
@@ -566,13 +566,13 @@ struct WonderComputerUse {
     }
 
     private static func typeText(_ params: [String: Any], dryRun: Bool) throws {
-        try requireAccessibility()
         guard let text = params["text"] as? String,
               !text.isEmpty,
               text.count <= maxTextLength else {
             throw ComputerUseError.invalidInput
         }
         if dryRun { return }
+        try requireAccessibility()
         let utf16 = Array(text.utf16)
         for start in stride(from: 0, to: utf16.count, by: 64) {
             let end = min(start + 64, utf16.count)
@@ -586,7 +586,6 @@ struct WonderComputerUse {
     }
 
     private static func keyPress(_ params: [String: Any], dryRun: Bool) throws {
-        try requireAccessibility()
         guard let rawKeyCode = params["keyCode"] as? NSNumber,
               rawKeyCode.intValue >= 0,
               rawKeyCode.intValue <= Int(UInt16.max) else {
@@ -602,6 +601,7 @@ struct WonderComputerUse {
             throw ComputerUseError.invalidInput
         }
         if dryRun { return }
+        try requireAccessibility()
         guard let down = CGEvent(keyboardEventSource: nil, virtualKey: UInt16(rawKeyCode.intValue), keyDown: true),
               let up = CGEvent(keyboardEventSource: nil, virtualKey: UInt16(rawKeyCode.intValue), keyDown: false) else {
             throw ComputerUseError.inputUnavailable
