@@ -174,7 +174,9 @@ forward rules for an older feature or workflow.
   ```
 
 - Run builds and test suites on the Mac mini with `scripts/wonder-remote -- <command>`
-  rather than on this Mac.
+  rather than on this Mac. In a session on the Mac mini itself (marked by
+  `~/.config/wonder/is-build-host`), the same `wonder-remote` and `wonderctl --host`
+  commands run locally.
 
 - Keep blue `com.swaymun.wonder.testing` and orange `com.swaymun.wonder` identities,
   pairing, drafts and Keychain access separate. Do not install development or

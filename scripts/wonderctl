@@ -580,7 +580,8 @@ def main(argv):
     global DEVICE_NAME, DEVICE_TYPES
     DEVICE_NAME, DEVICE_TYPES = PROFILES[args.device]
     os.environ["WONDER_CONTROL_PROFILE"] = args.device
-    if args.host:
+    # On the build Mac itself (marked by this file) --host means "here".
+    if args.host and not (Path.home() / ".config/wonder/is-build-host").exists():
         return remote(args, argv)
     CONTROL.mkdir(parents=True, exist_ok=True)
     LOCKS.mkdir(parents=True, exist_ok=True)

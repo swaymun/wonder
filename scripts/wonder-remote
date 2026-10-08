@@ -27,6 +27,18 @@ PROTECTED = ["/.git/", "/.wonder-source", "/.claude/", "/.local/", "target/", "n
 NOT_PULLED = ["build/", "fastlane-bundle/", "DerivedData/", "public-source/", "control/lock", "*.lock"]
 
 
+# On the build Mac itself (marked by this file) commands run here instead of over SSH.
+LOCAL = (Path.home() / ".config/wonder/is-build-host").exists()
+
+
+def shell(host, command):
+    return ["bash", "-c", f"cd ~ && {command}"] if LOCAL else ["ssh", host, command]
+
+
+def dest(host, path):
+    return os.path.expanduser(f"~/{path}") if LOCAL else f"{host}:{path}"
+
+
 def run(cmd, **kwargs):
     result = subprocess.run(cmd, **kwargs)
     if result.returncode != 0:
@@ -38,8 +50,11 @@ def prune(host):
     """Delete remote copies whose local checkout (worktree) no longer exists.
 
     Each sync writes the checkout path to <copy>/.wonder-source; copies without one
-    are left alone.
+    are left alone. Markers name paths on the Mac that synced, so this never runs on
+    the build Mac itself.
     """
+    if LOCAL:
+        return []
     listing = subprocess.run(["ssh", host, "cd wonder-control 2>/dev/null && for d in */; do "
                               "[ -f \"$d.wonder-source\" ] && printf '%s\\t%s\\n' \"${d%/}\" \"$(cat \"$d.wonder-source\")\"; done"],
                              capture_output=True, text=True).stdout
@@ -55,10 +70,10 @@ def prune(host):
 
 
 def push(host, source, remote_dir, gitignore=True):
-    run(["ssh", host, f"mkdir -p {remote_dir}"])
+    run(shell(host, f"mkdir -p {remote_dir}"))
     filters = ["--filter=:- .gitignore"] if gitignore else []
     command = ["rsync", "-a", "--delete", *[f"--exclude={p}" for p in PROTECTED], *filters,
-               f"{source}/", f"{host}:{remote_dir}/"]
+               f"{source}/", dest(host, remote_dir) + "/"]
     # Other agents create and delete files in a shared tree; a vanished file fails one pass.
     for _ in range(3):
         if subprocess.run(command).returncode == 0:
@@ -67,7 +82,10 @@ def push(host, source, remote_dir, gitignore=True):
 
 
 def mark(host, remote_dir):
-    run(["ssh", host, f"printf '%s' {shlex.quote(str(ROOT))} > {remote_dir}/.wonder-source"])
+    # Markers name this Mac's paths for its prune; a build Mac running locally owns its copies.
+    if LOCAL:
+        return
+    run(shell(host, f"printf '%s' {shlex.quote(str(ROOT))} > {remote_dir}/.wonder-source"))
 
 
 def main():
@@ -98,7 +116,9 @@ def main():
                 sys.exit(f"git archive {commit} failed")
             push(args.host, scratch, remote_dir, gitignore=False)
         mark(args.host, remote_dir)
-        print(f"copied commit {commit[:12]} to {args.host}:{remote_dir}", flush=True)
+        print(f"copied commit {commit[:12]} to {dest(args.host, remote_dir)}", flush=True)
+    elif LOCAL:
+        remote_dir = str(ROOT)
     else:
         remote_dir = f"wonder-control/{CHECKOUT}"
         push(args.host, ROOT, remote_dir)
@@ -116,12 +136,14 @@ def main():
     if args.lock:
         steps.append("mkdir -p ~/Library/Caches/wonderctl")
         runner = f"/usr/bin/lockf ~/Library/Caches/wonderctl/{shlex.quote(args.lock)}.lock {runner}"
-    code = subprocess.run(["ssh", args.host, " && ".join(steps) + f" && {runner}"]).returncode
+    code = subprocess.run(shell(args.host, " && ".join(steps) + f" && {runner}")).returncode
+    if LOCAL and not args.ref:
+        return code
 
     pulled = ROOT / ".local"
     pulled.mkdir(exist_ok=True)
     subprocess.run(["rsync", "-a", *[f"--exclude={p}" for p in NOT_PULLED],
-                    f"{args.host}:{remote_dir}/.local/", f"{pulled}/"], capture_output=True)
+                    dest(args.host, f"{remote_dir}/.local/"), f"{pulled}/"], capture_output=True)
     return code
 
 

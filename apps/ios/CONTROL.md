@@ -11,7 +11,8 @@ judgment and for flows that no scenario covers yet.
 ## Run it on the Mac mini
 
 Pass `--host mac-mini`, or export `WONDER_CONTROL_HOST=mac-mini`, to run every
-command on the Mac mini instead of this Mac. `build`, `run` and `sync` first copy
+command on the Mac mini instead of this Mac. On the mini itself, which has
+`~/.config/wonder/is-build-host`, `--host` is ignored and commands run locally. `build`, `run` and `sync` first copy
 the working tree there, including uncommitted and untracked files but not ignored
 ones. Each local checkout or worktree gets its own copy under `~/wonder-control/`
 on the mini. Evidence is copied back to `.local/control/` after every command.
@@ -57,7 +58,7 @@ the same on the Duo profile.
 | `launch --fixture NAME …` | Relaunches the app with launch flags. `fixtures` lists them. |
 | `open URL` | Opens a deep link. |
 | `tap --id ID [--type Button]` / `--label TEXT` / `--xy X,Y` | Taps through AXe. `--type` picks one of several matches. |
-| `hold --id ID` / `--label` / `--contains TEXT` `[--nth N] [--seconds S]` | Long-presses an element, to open a context menu. |
+| `hold --id ID` / `--label` / `--contains TEXT` `[--nth N] [--seconds S]` | Long-presses an element, to open a context menu. Holds the touch inside one `axe batch` session, because `axe touch --down --up` fails on the iPhone Duo ("could not establish simulator input"). |
 | `clipboard --clear` / `--contains TEXT` / `--not-contains TEXT` / `--show` | Clears or asserts on the simulator pasteboard, so Copy actions are checked by their result. |
 | `type TEXT`, `swipe up\|down\|left\|right [--in ID]`, `button home` | Input. `--in` drags inside one element, such as a list in a short panel on the Duo. |
 | `back` | Taps the navigation back control; it is a Button on the iPhone and another element type on the Duo. |
