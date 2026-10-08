@@ -165,12 +165,16 @@ forward rules for an older feature or workflow.
   separate candidate approval is required.** Respect an explicit request to defer
   uploads. Documentation/source-sync/tooling-only changes that do not alter the
   shipped app need no new binary.
-- Run these sequentially from the repository root:
+- Upload from the Mac mini. Commit and push first, then run these sequentially
+  from the repository root (see [fastlane/USAGE.md](fastlane/USAGE.md)):
 
   ```sh
-  bundle exec fastlane ios beta channel:testing profile:release
-  bundle exec fastlane ios beta channel:production profile:release
+  scripts/wonder-remote --ref HEAD --signing --lock testflight -- bundle exec fastlane ios beta channel:testing profile:release
+  scripts/wonder-remote --ref HEAD --signing --lock testflight -- bundle exec fastlane ios beta channel:production profile:release
   ```
+
+- Run builds and test suites on the Mac mini with `scripts/wonder-remote -- <command>`
+  rather than on this Mac.
 
 - Keep blue `com.swaymun.wonder.testing` and orange `com.swaymun.wonder` identities,
   pairing, drafts and Keychain access separate. Do not install development or

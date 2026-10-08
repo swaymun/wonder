@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Run a repository command on another Mac (the Mac mini) and bring its evidence back.
+
+  scripts/wonder-remote -- cargo test
+  scripts/wonder-remote --ref HEAD --signing --lock testflight -- \\
+      bundle exec fastlane ios beta channel:testing profile:release
+
+Without --ref the working tree is copied, including uncommitted and untracked files,
+into the same per-checkout folder wonderctl uses. --ref REF copies exactly that commit
+into a separate folder instead; use it for anything that ships. See apps/ios/CONTROL.md.
+"""
+import argparse
+import hashlib
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CHECKOUT = f"{ROOT.name}-{hashlib.sha1(str(ROOT).encode()).hexdigest()[:8]}"
+REMOTE_PATH = "/opt/homebrew/opt/ruby/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# openrsync does not reliably protect .gitignore'd paths from --delete; name them.
+PROTECTED = ["/.git/", "/.local/", "/target/", "/node_modules/", ".build/", "DerivedData/", "__pycache__/"]
+# Evidence comes back; caches and build products stay on the remote Mac.
+NOT_PULLED = ["build/", "fastlane-bundle/", "DerivedData/", "public-source/", "control/lock", "*.lock"]
+
+
+def run(cmd, **kwargs):
+    result = subprocess.run(cmd, **kwargs)
+    if result.returncode != 0:
+        sys.exit(f"{shlex.join(cmd)} failed ({result.returncode})")
+    return result
+
+
+def push(host, source, remote_dir, gitignore=True):
+    run(["ssh", host, f"mkdir -p {remote_dir}"])
+    filters = ["--filter=:- .gitignore"] if gitignore else []
+    command = ["rsync", "-a", "--delete", *[f"--exclude={p}" for p in PROTECTED], *filters,
+               f"{source}/", f"{host}:{remote_dir}/"]
+    # Other agents create and delete files in a shared tree; a vanished file fails one pass.
+    for _ in range(3):
+        if subprocess.run(command).returncode == 0:
+            return
+    sys.exit(f"{shlex.join(command)} kept failing")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--host", default=os.environ.get("WONDER_CONTROL_HOST", "mac-mini"))
+    parser.add_argument("--ref", help="copy this commit instead of the working tree")
+    parser.add_argument("--lock", help="hold this machine-wide lock while the command runs (e.g. testflight)")
+    parser.add_argument("--signing", action="store_true", help="load ~/.config/wonder/signing.env on the remote Mac")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command:
+        parser.error("give a command after --")
+
+    if args.ref:
+        commit = run(["git", "-C", str(ROOT), "rev-parse", "--verify", f"{args.ref}^{{commit}}"],
+                     capture_output=True, text=True).stdout.strip()
+        remote_dir = f"wonder-control/{CHECKOUT}-ref"
+        with tempfile.TemporaryDirectory() as scratch:
+            archive = subprocess.Popen(["git", "-C", str(ROOT), "archive", commit], stdout=subprocess.PIPE)
+            run(["tar", "-x", "-C", scratch], stdin=archive.stdout)
+            if archive.wait() != 0:
+                sys.exit(f"git archive {commit} failed")
+            push(args.host, scratch, remote_dir, gitignore=False)
+        print(f"copied commit {commit[:12]} to {args.host}:{remote_dir}", flush=True)
+    else:
+        remote_dir = f"wonder-control/{CHECKOUT}"
+        push(args.host, ROOT, remote_dir)
+
+    steps = [f"export PATH={REMOTE_PATH}", f"cd {remote_dir}", "export BUNDLE_PATH=.local/fastlane-bundle"]
+    if args.signing:
+        steps.append("set -a && . ~/.config/wonder/signing.env && set +a")
+    runner = shlex.join(command)
+    if args.lock:
+        steps.append("mkdir -p ~/Library/Caches/wonderctl")
+        runner = f"/usr/bin/lockf ~/Library/Caches/wonderctl/{shlex.quote(args.lock)}.lock {runner}"
+    code = subprocess.run(["ssh", args.host, " && ".join(steps) + f" && {runner}"]).returncode
+
+    pulled = ROOT / ".local"
+    pulled.mkdir(exist_ok=True)
+    subprocess.run(["rsync", "-a", *[f"--exclude={p}" for p in NOT_PULLED],
+                    f"{args.host}:{remote_dir}/.local/", f"{pulled}/"], capture_output=True)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

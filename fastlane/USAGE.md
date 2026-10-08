@@ -77,4 +77,32 @@ the upload may already have succeeded. Do not rerun blindly or reuse a build
 number Apple has accepted. A failed archive/export has no successful upload
 result. Archive logs and identity/encryption checks use the existing script.
 
+## Upload from the Mac mini
+
+The Mac mini is the upload machine. Its Xcode is the one in
+`~/Applications/Xcode.app`, currently Xcode 27.1. Run each channel from this Mac
+with `scripts/wonder-remote`, which copies exactly the given commit to the mini,
+runs the lane there and brings the `.local/testflight-*` evidence back:
+
+```sh
+scripts/wonder-remote --ref HEAD --signing --lock testflight -- bundle exec fastlane ios beta channel:testing profile:release
+scripts/wonder-remote --ref HEAD --signing --lock testflight -- bundle exec fastlane ios beta channel:production profile:release
+```
+
+Commit and push the source first: `--ref` ships the commit, never uncommitted
+files from a shared working tree. `--lock testflight` makes uploads wait for each
+other on the mini. `--signing` loads `MATCH_PASSWORD` and
+`MATCH_KEYCHAIN_PASSWORD` from the owner-only `~/.config/wonder/signing.env`,
+because an SSH session cannot read the mini's login Keychain. The mini clones the
+Match repository with a read-only deploy key.
+
+Prepare a new upload Mac once by running `scripts/setup-remote-signing.sh HOST`
+yourself. It copies the API key and the two secrets from this Mac without printing
+them, creates the dedicated signing keychain, and adds the read-only deploy key.
+Then check it without uploading:
+
+```sh
+scripts/wonder-remote --ref HEAD --signing -- bundle exec fastlane ios validate
+```
+
 Gemfile.lock pins dependencies. Analytics and update checks are disabled.

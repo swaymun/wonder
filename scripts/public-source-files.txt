@@ -550,6 +550,7 @@ scripts/package-dev-pkg.sh
 scripts/package-macos-dmg.sh
 scripts/public-source-files.txt
 scripts/replay-codex-thread.py
+scripts/setup-remote-signing.sh
 scripts/setup-self-hosted.sh
 scripts/sign-macos-app.py
 scripts/test-clean-build-artifacts.py
@@ -572,6 +573,7 @@ scripts/verify-package-lifecycle.sh
 scripts/verify-package-release-gates.py
 scripts/verify-package-release-gates.sh
 scripts/verify-release-docs.py
+scripts/wonder-remote
 scripts/wonderctl
 services/claude-runtime/.gitignore
 services/claude-runtime/bridge.mjs
