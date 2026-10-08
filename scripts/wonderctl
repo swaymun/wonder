@@ -307,7 +307,11 @@ def cmd_hold(args):
         time.sleep(0.4)
     f = found[args.nth]["frame"]
     x, y = f["x"] + f["width"] / 2, f["y"] + min(f["height"] / 2, args.max_y_offset)
-    sh([axe_binary(), "touch", "-x", f"{x:.0f}", "-y", f"{y:.0f}", "--down", "--up", "--delay", str(args.seconds), "--udid", udid()])
+    # One `batch` session holds the touch: `touch --down --up --delay` opens its own input
+    # session, which the iPhone Duo simulator refuses ("could not establish simulator input").
+    pos = f"-x {x:.0f} -y {y:.0f}"
+    sh([axe_binary(), "batch", "--udid", udid(), "--step", f"touch {pos} --down",
+        "--step", f"sleep {args.seconds}", "--step", f"touch {pos} --up"])
     print(f"held {args.seconds}s at {x:.0f},{y:.0f}")
 
 
@@ -553,10 +557,14 @@ def remote(args, argv):
     if args.command in SYNC_COMMANDS:
         sh(["ssh", host, f"mkdir -p {REMOTE_DIR}"])
         # openrsync does not reliably protect .gitignore'd paths from --delete; name them.
-        protected = ["/.git/", "/.claude/", "/.local/", "target/", "node_modules/", ".build/", "DerivedData/", "__pycache__/"]
+        protected = ["/.git/", "/.wonder-source", "/.claude/", "/.local/", "target/", "node_modules/", ".build/", "DerivedData/", "__pycache__/"]
         sh(["rsync", "-a", "--delete", *[f"--exclude={path}" for path in protected], "--filter=:- .gitignore",
             f"{ROOT}/", f"{host}:{REMOTE_DIR}/"])
-    command = f"export PATH={REMOTE_PATH}; cd {REMOTE_DIR} && python3 scripts/wonderctl {shlex.join(forwarded)}"
+        # Record the source checkout so wonder-remote --prune can drop copies of deleted worktrees.
+        sh(["ssh", host, f"printf '%s' {shlex.quote(str(ROOT))} > {REMOTE_DIR}/.wonder-source"])
+        subprocess.run([sys.executable, str(ROOT / "scripts/wonder-remote"), "--host", host, "--prune"])
+    wait = "export WONDER_CONTROL_WAIT=1; " if os.environ.get("WONDER_CONTROL_WAIT") == "1" else ""
+    command = f"export PATH={REMOTE_PATH}; {wait}cd {REMOTE_DIR} && python3 scripts/wonderctl {shlex.join(forwarded)}"
     code = subprocess.run(["ssh", host, command]).returncode
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     subprocess.run(["rsync", "-a", f"{host}:{REMOTE_DIR}/.local/control/", f"{CONTROL}/"],
