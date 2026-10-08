@@ -1277,6 +1277,7 @@ for line in sys.stdin:
     elif method == 'thread/read' and os.path.exists(root + '/native-thread.json'):
         result = {'thread':json.load(open(root + '/native-thread.json'))}
     elif method == 'thread/start': result = {'thread':{'id':'thread'}}
+    elif method == 'thread/fork': result = {'thread':{'id':'forked-thread','cwd':r['params'].get('cwd')}}
     elif method == 'turn/start':
         with open(root + '/accepted-client', 'w') as saved: saved.write(r['params']['clientUserMessageId'])
         open(root + '/completed', 'w').close()

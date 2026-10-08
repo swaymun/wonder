@@ -66,15 +66,18 @@ pub fn is_allowed_method(method: &str) -> bool {
 /// Native project metadata, allowed only on the normal-home Projects client.
 /// Older runtimes without these methods remain compatible; callers treat an
 /// unknown-method response as an unsupported capability.
-pub const PROJECT_METHODS: [&str; 10] = [
+pub const PROJECT_METHODS: [&str; 12] = [
     "project/list",
     "project/read",
     "project/create",
     "thread/metadata/update",
     "thread/archive",
+    // Copies a project thread, through a chosen turn, into a new thread.
+    "thread/fork",
     // Wonder's Claude bridge: native Claude Code session metadata and attach.
     "project/sessions/list",
     "project/session/attach",
+    "project/session/fork",
     "project/folders/list",
     // Read-only Claude agent tasks and background commands of one session.
     "thread/backgroundTasks/list",

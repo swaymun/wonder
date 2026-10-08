@@ -52,6 +52,21 @@ impl Store {
         tool: &str,
         now: &str,
     ) -> Result<bool, sqlx::Error> {
+        self.reserve_tool_call(key, hash, message, runtime, tool, now, 16)
+            .await
+    }
+    /// Reserves one runtime tool call, allowing at most `limit` per message.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reserve_tool_call(
+        &self,
+        key: &str,
+        hash: &str,
+        message: &str,
+        runtime: &str,
+        tool: &str,
+        now: &str,
+        limit: i64,
+    ) -> Result<bool, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         if let Some(existing) =
             sqlx::query_scalar::<_, String>("SELECT input_hash FROM pm_tool_calls WHERE call_key=?")
@@ -66,7 +81,7 @@ impl Store {
                 .bind(message)
                 .fetch_one(&mut *tx)
                 .await?;
-        if count >= 16 {
+        if count >= limit {
             return Ok(false);
         }
         sqlx::query("INSERT INTO pm_tool_calls(call_key,input_hash,message_id,runtime_id,tool_name,created_at) VALUES(?,?,?,?,?,?)").bind(key).bind(hash).bind(message).bind(runtime).bind(tool).bind(now).execute(&mut *tx).await?;

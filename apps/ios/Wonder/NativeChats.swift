@@ -100,6 +100,29 @@ struct TemporaryNotice<Content: View>: View {
     }
 }
 
+/// A short confirmation near the top of the chat. It announces itself to
+/// VoiceOver and fades after a few seconds.
+private struct ChatNotice: View {
+    let text: String
+    let dismiss: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        Text(text)
+            .font(.footnote.weight(.medium))
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .background(.regularMaterial, in: Capsule())
+            .padding(.top, 8)
+            .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+            .accessibilityIdentifier("chat-notice")
+            .task {
+                UIAccessibility.post(notification: .announcement, argument: text)
+                try? await Task.sleep(for: .seconds(UIAccessibility.isVoiceOverRunning ? 6 : 2.5))
+                guard !Task.isCancelled else { return }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) { dismiss() }
+            }
+    }
+}
+
 /// The receipt of the latest row while its end is inside the viewport. The row
 /// reports visibility rather than its frame, so scrolling changes the
 /// scroller's state only when visibility flips, not on every frame.
@@ -599,6 +622,10 @@ struct ConversationView: View {
     @State private var showingApps = false
     @State private var showingDetails = false
     @State private var showingUsage = false
+    @State private var notice: String?
+    @State private var forking = false
+    /// Opens another conversation in the shell; nil where a chat cannot navigate.
+    let openConversation: ((String) -> Void)?
     @State private var composerPhoto: ComposerAttachment?
     @State private var annotationEdit: ComposerAttachment?
     @State private var imagePasteTask: Task<Void, Never>?
@@ -609,6 +636,7 @@ struct ConversationView: View {
     @Environment(\.scenePhase) private var phase
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.wonderTheme) private var theme
     private struct AttachmentMetadataRequest: Hashable {
         let chatID: String
         let scope: String
@@ -649,12 +677,14 @@ struct ConversationView: View {
         model: ConnectionModel,
         chat: ChatSummary,
         rootChat: ChatSummary? = nil,
-        readOnly: Bool = false
+        readOnly: Bool = false,
+        openConversation: ((String) -> Void)? = nil
     ) {
         self.model = model
         self.chat = chat
         self.rootChat = rootChat
         self.readOnly = readOnly
+        self.openConversation = openConversation
         _planModeOn = State(initialValue: model.projects.details[chat.id]?.planMode == true)
         _supportsModes = State(initialValue: model.projects.supportsModes)
     }
@@ -737,6 +767,7 @@ struct ConversationView: View {
                                         )
                                     },
                                     openDocument: { workspaceRequest = WorkspaceBrowserRequest(attachmentIDs: row.attachmentIds) },
+                                    forkFromHere: forkTurnID(for: row).map { turn in { fork(from: turn) } },
                                     avatarColor: speakerBot?.avatarColor, avatarShape: speakerBot?.avatarShape, avatarPalette: speakerBot?.avatarPalette)
                                 }
                                 }
@@ -1023,12 +1054,13 @@ struct ConversationView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             if !readOnly {
                 composer(latestEdits: latestEdits)
-                    .background(Color(uiColor: .systemBackground))
+                    .background(theme.chrome)
             }
         }
+        .background { ThemeBackdrop() }
         .toolbar(.hidden, for: .tabBar)
         .navigationTitle(chat.title)
-        .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
+        .toolbarBackground(theme.chrome, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .onChange(of: disclosureRevision, initial: true) { _, _ in
             guard workspaceRequest == nil else { return }
@@ -1065,6 +1097,20 @@ struct ConversationView: View {
             ToolbarItem(placement: .principal) {
                 if readOnly { conversationHeader }
                 else { conversationTitleMenu }
+            }
+        }
+        .overlay(alignment: .top) {
+            if forking {
+                HStack(spacing: 8) { ProgressView(); Text("Forking…") }
+                    .font(.footnote.weight(.medium))
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 8)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("fork-progress")
+            } else if let notice {
+                ChatNotice(text: notice) { self.notice = nil }
+                    .id(notice)
             }
         }
         .sheet(isPresented: $showingDetails) {
@@ -1233,6 +1279,50 @@ struct ConversationView: View {
             Text(chat.title).font(.headline).lineLimit(1)
         }
     }
+    /// Copies what is loaded on this device and says so when earlier history is not.
+    private func copyAsMarkdown() {
+        let output = ConversationMarkdown.render(
+            title: chat.title,
+            agentName: model.agentFamily(chat).title,
+            rows: model.timeline(for: chat, focusedRowID: nil).rows,
+            isPartial: model.snapshots[chat.id]?.thread.nextCursor != nil
+        )
+        guard output.messageCount > 0 else { notice = "Nothing to copy yet"; return }
+        UIPasteboard.general.string = output.markdown
+        notice = output.confirmation
+    }
+    /// Fork is offered on a started, idle Project thread the owner can write to.
+    private var canFork: Bool {
+        guard !readOnly, openConversation != nil, let detail = model.projectDetail(chat) else { return false }
+        return ConversationFork.canForkLatest(hasNativeSession: detail.hasNativeSession,
+                                              hasActiveTurn: model.activeTurn(chat.id) != nil,
+                                              isArchived: detail.isArchived == true)
+    }
+    /// The turn a finished agent reply can be forked at, if this reply has one.
+    private func forkTurnID(for row: ReadRow) -> String? {
+        guard canFork else { return nil }
+        let finished = row.turnId.flatMap { model.turn($0, in: chat.id) }?.isInProgress == false
+        return ConversationFork.turnID(of: row, turnFinished: finished)
+    }
+    /// Creates the fork on the Mac, then opens it. The source is never changed.
+    private func fork(from turnID: String?) {
+        guard !forking, let openConversation else { return }
+        forking = true; notice = nil
+        let scope = model.assignmentScope
+        Task {
+            defer { forking = false }
+            do {
+                let id = try await model.projects.fork(chat.id, lastTurnID: turnID)
+                guard scope == model.assignmentScope else { return }
+                openConversation(id)
+            } catch is CancellationError {
+            } catch {
+                var status: Int?
+                if case PairingFailure.response(let code) = error { status = code }
+                notice = ConversationFork.failureMessage(status: status, computer: model.macName)
+            }
+        }
+    }
     private var conversationTitleAccessibilityLabel: String {
         if let botID = chat.botId {
             guard let bot = headerBot else { return "\(chat.title), conversation options" }
@@ -1248,6 +1338,13 @@ struct ConversationView: View {
     private var conversationTitleMenu: some View {
         Menu {
             Button("Conversation details", systemImage: "info.circle") { showingDetails = true }
+            Button("Copy as Markdown", systemImage: "doc.on.doc") { copyAsMarkdown() }
+                .accessibilityIdentifier("copy-conversation-markdown")
+            if canFork {
+                Button("Fork", systemImage: "arrow.triangle.branch") { fork(from: nil) }
+                    .disabled(forking || model.accessEnded || model.previewMode)
+                    .accessibilityIdentifier("fork-conversation")
+            }
             if chat.botId != nil || model.isProject(chat) {
                 Button("Connected apps", systemImage: "square.grid.2x2") { showingApps = true }
                 Button("\(model.agentFamily(chat).title) usage", systemImage: "chart.bar") { showingUsage = true }
@@ -1490,7 +1587,7 @@ struct ConversationView: View {
                     }
                     }.padding(5)
                         .foregroundStyle(.primary)
-                        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 28))
+                        .background(theme.surface, in: RoundedRectangle(cornerRadius: 28))
                     }
                     if (model.composers[chat.id]?.draft.utf8.count ?? 0) > 65536 {
                         Text("Message too long").font(.caption).foregroundStyle(.secondary)
@@ -2245,6 +2342,20 @@ private struct MessageAttachmentItem: View {
     }
 }
 
+/// Wonder's report that delegated tasks finished: a compact system row, since
+/// the owner did not write it and it needs no bubble.
+struct AgentTasksFinishedRow: View {
+    let title: String
+    var body: some View {
+        Label(title, systemImage: "checkmark.circle")
+            .font(.caption).foregroundStyle(.secondary)
+            .lineLimit(2).multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 2)
+            .accessibilityIdentifier("agent-tasks-finished")
+    }
+}
+
 struct MessageRow: View {
     let row: ReadRow
     var isGroup = false
@@ -2261,10 +2372,20 @@ struct MessageRow: View {
     var loadRemoteData: (@Sendable (ConversationFile) async throws -> Data)? = nil
     var openImage: (MessageAttachmentPresentation) -> Void = { _ in }
     var openDocument: () -> Void = {}
+    /// Set on a finished agent reply of a Project thread.
+    var forkFromHere: (() -> Void)? = nil
     var avatarColor: String? = nil
     var avatarShape: String? = nil
     var avatarPalette: String? = nil
+    @State private var selectingText = false
     var body: some View {
+        if let source = row.source, source.isWake {
+            AgentTasksFinishedRow(title: source.sourceTitle)
+        } else {
+            messageBody
+        }
+    }
+    private var messageBody: some View {
         HStack(alignment: .bottom, spacing: 4) {
             if row.isUser { Spacer(minLength: 32) }
             HStack(alignment: .top, spacing: 8) {
@@ -2315,6 +2436,13 @@ struct MessageRow: View {
             Group {
                 if row.isUser {
                     VStack(alignment: .leading, spacing: 4) {
+                        if let label = row.source?.fromLabel {
+                            // Another thread wrote this; the owner did not.
+                            Label(label, systemImage: "arrow.turn.down.right")
+                                .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .accessibilityIdentifier("message-source-label")
+                        }
                         if !attachments.isEmpty, let imagePreviews, let loadRemoteData {
                             MessageAttachmentStrip(
                                 attachments: attachments,
@@ -2332,9 +2460,56 @@ struct MessageRow: View {
                 else { BotMessageText(text: row.text) }
             }.font(row.isCommentary ? .subheadline : .body)
                 .modifier(ChatBubbleSurface(isUser: row.isUser))
+                .contextMenu {
+                    if !row.text.isEmpty {
+                        // The row holds the whole message, so Copy never depends on
+                        // what the bubble currently shows.
+                        Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = row.text }
+                            .accessibilityIdentifier("copy-message")
+                        Button("Select text", systemImage: "text.cursor") { selectingText = true }
+                            .accessibilityIdentifier("select-message-text-action")
+                    }
+                    if let forkFromHere {
+                        Button("Fork from here", systemImage: "arrow.triangle.branch", action: forkFromHere)
+                            .accessibilityIdentifier("fork-from-here")
+                    }
+                }
         }
             .accessibilityElement(children: row.attachmentIds.isEmpty && !recoveredBeforeReconnect ? .combine : .contain)
-            .accessibilityLabel(row.isUser ? ChatPlainText.of(row.text) : "\(row.author): \(ChatPlainText.of(row.text))")
+            .accessibilityLabel(row.isUser ? (row.source?.fromLabel.map { "\($0): " } ?? "") + ChatPlainText.of(row.text) : "\(row.author): \(ChatPlainText.of(row.text))")
+            .accessibilityAction(named: "Copy message") { if !row.text.isEmpty { UIPasteboard.general.string = row.text } }
+            .sheet(isPresented: $selectingText) { MessageTextSelectionSheet(text: row.text) }
+    }
+}
+
+/// The whole message in a selectable text view, so part of it can be selected and
+/// copied now that a long-press on the bubble opens the context menu.
+struct MessageTextSelectionSheet: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.wonderTheme) private var theme
+    /// Bounds the text view for a very long message; the full text stays on Copy.
+    private static let limit = 60_000
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(String(text.prefix(Self.limit)))
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .accessibilityIdentifier("select-message-text")
+                if text.count > Self.limit {
+                    Text("Showing the first part of a long message. Copy has all of it.")
+                        .font(.footnote).foregroundStyle(.secondary).padding([.horizontal, .bottom])
+                }
+            }
+            .background(theme.isDefault ? Color(uiColor: .systemBackground) : theme.background)
+            .navigationTitle("Select text")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.accessibilityIdentifier("select-message-done") } }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 
@@ -2394,10 +2569,13 @@ extension EnvironmentValues {
 struct ChatBubbleSurface: ViewModifier {
     var isUser = false
     @Environment(\.chatBubblePalette) private var palette
+    @Environment(\.wonderTheme) private var theme
     func body(content: Content) -> some View {
+        // The Wonder theme keeps the chosen bubble palette; other themes bring their own.
         content.padding(.horizontal, 14).padding(.vertical, 10)
-            .foregroundStyle(.primary)
-            .background(palette.fill(isUser: isUser), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .foregroundStyle(theme.isDefault ? Color.primary : theme.primaryText)
+            .background(theme.isDefault ? palette.fill(isUser: isUser) : theme.bubble(isUser: isUser),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -2457,7 +2635,7 @@ struct BotMessageText: View {
         case text(AttributedString, style: TextStyle)
         case item(marker: String, depth: Int, AttributedString)
         case quote(AttributedString)
-        case code(String)
+        case code(language: String?, text: String)
         case table(header: [AttributedString], rows: [[AttributedString]])
         case rule
     }
@@ -2483,7 +2661,7 @@ struct BotMessageText: View {
             case .heading(let level, let text): .text(Self.inline(text), style: level == 1 ? .heading1 : level == 2 ? .heading2 : .heading3)
             case .listItem(let marker, let depth, let text): .item(marker: marker, depth: depth, Self.inline(text))
             case .quote(let text): .quote(Self.inline(text))
-            case .code(_, let text): .code(text)
+            case .code(let language, let text): .code(language: language, text: text)
             case .table(let header, let rows): .table(header: header.map(Self.inline), rows: rows.map { $0.map(Self.inline) })
             case .rule: .rule
             }
@@ -2524,12 +2702,8 @@ struct BotMessageText: View {
                         Text(value).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                     .fixedSize(horizontal: false, vertical: true)
-                case .code(let code):
-                    ScrollView(.horizontal) {
-                        Text(code).font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled).fixedSize(horizontal: true, vertical: false)
-                            .padding(10)
-                    }.background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+                case .code(let language, let code):
+                    CodeBlockView(code: code, language: language)
                 case .table(let header, let rows):
                     ScrollView(.horizontal) {
                         Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
@@ -3520,6 +3694,7 @@ struct WorkspaceFileLoad: Equatable {
 /// Previews arrive from the Mac over the network. The download takes over the
 /// Files pane with its progress; the X in the ring cancels it.
 private struct WorkspaceFileLoadOverlay: View {
+    @Environment(\.wonderTheme) private var theme
     let load: WorkspaceFileLoad
     let cancel: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3541,7 +3716,7 @@ private struct WorkspaceFileLoadOverlay: View {
                     Circle().stroke(Color.secondary.opacity(0.25), lineWidth: 5)
                     if let fraction {
                         Circle().trim(from: 0, to: max(0.02, fraction))
-                            .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                            .stroke(theme.accent, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                             .rotationEffect(.degrees(-90))
                             .animation(reduceMotion ? nil : .linear(duration: 0.2), value: fraction)
                     } else {
@@ -4975,6 +5150,7 @@ private struct WorkspaceRegionEditor: View {
 }
 
 private struct WorkspaceRegionCanvas: View {
+    @Environment(\.wonderTheme) private var theme
     let image: UIImage
     @Binding var region: CGRect?
     @State private var dragOrigin: CGPoint?
@@ -4992,8 +5168,8 @@ private struct WorkspaceRegionCanvas: View {
                     .accessibilityIdentifier("annotation-preview-image")
                 if let region {
                     Rectangle()
-                        .fill(Color.accentColor.opacity(0.18))
-                        .overlay { Rectangle().strokeBorder(Color.accentColor, lineWidth: 3) }
+                        .fill(theme.accent.opacity(0.18))
+                        .overlay { Rectangle().strokeBorder(theme.accent, lineWidth: 3) }
                         .frame(width: fit.width * region.width, height: fit.height * region.height)
                         .offset(x: fit.minX + fit.width * region.minX,
                                 y: fit.minY + fit.height * region.minY)
@@ -5055,6 +5231,8 @@ private struct SelectablePreviewText: UIViewRepresentable {
     let selectionResetID: UUID
     var onComment: (() -> Void)? = nil
     var onSelecting: ((Bool) -> Void)? = nil
+    /// Syntax colours for the source, prepared off the main thread.
+    var colors: PreviewColorRuns? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(selectedRange: $selectedRange, selectionResetID: selectionResetID)
@@ -5075,6 +5253,7 @@ private struct SelectablePreviewText: UIViewRepresentable {
         view.font = UIFontMetrics(forTextStyle: .body).scaledFont(
             for: .monospacedSystemFont(ofSize: 15, weight: .regular))
         view.text = text
+        SourceTextLayout.apply(to: view.textStorage)
         if let selectedRange { view.selectedRange = selectedRange }
         if let selectedRange, selectedRange.length > 0,
            NSMaxRange(selectedRange) <= view.textStorage.length {
@@ -5084,6 +5263,7 @@ private struct SelectablePreviewText: UIViewRepresentable {
         }
         context.coordinator.appliedRange = selectedRange
         context.coordinator.appliedRevision = revision
+        if let colors { colors.apply(to: view.textStorage, base: .label); context.coordinator.appliedColors = colors.key }
         context.coordinator.onComment = onComment
         context.coordinator.onSelecting = onSelecting
         context.coordinator.isUpdating = false
@@ -5102,11 +5282,17 @@ private struct SelectablePreviewText: UIViewRepresentable {
             context.coordinator.appliedRevision = revision
             let offset = view.contentOffset
             view.text = text
+            SourceTextLayout.apply(to: view.textStorage)
             context.coordinator.highlightedRange = nil
             view.layoutIfNeeded()
             let maxY = max(-view.adjustedContentInset.top,
                            view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom)
             view.contentOffset = CGPoint(x: offset.x, y: min(offset.y, maxY))
+            context.coordinator.appliedColors = nil
+        }
+        if let colors, context.coordinator.appliedColors != colors.key {
+            colors.apply(to: view.textStorage, base: .label)
+            context.coordinator.appliedColors = colors.key
         }
         // The reader's own selection stays until a comment pins or clears one.
         if reset {
@@ -5142,6 +5328,7 @@ private struct SelectablePreviewText: UIViewRepresentable {
         var onComment: (() -> Void)?
         var onSelecting: ((Bool) -> Void)?
         var appliedRevision: String?
+        var appliedColors: String?
         var isUpdating = false
         private var selecting = false
         init(selectedRange: Binding<NSRange?>, selectionResetID: UUID) {
@@ -5244,11 +5431,18 @@ private struct WorkspaceDocumentPreview: View {
         self.onAnnotation = onAnnotation
         self.refresh = refresh; self.onRevision = onRevision
         self.onClose = onClose
+        let kind = Self.viewerKind(name: name, mimeType: mimeType)
+        _viewerMode = State(initialValue: kind.map { TextViewerPreference.mode(for: $0) } ?? .rendered)
     }
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.wonderTheme) private var theme
     @State private var pdfComment: PDFTextComment?
     @State private var showingHTMLSource = false
+    @State private var viewerMode: TextViewerMode
+    @State private var sourceColors: PreviewColorRuns?
+    /// What Copy puts on the pasteboard while a formatted JSON view is shown.
+    @State private var shownCopyText: String?
     var body: some View {
         NavigationStack {
             Group {
@@ -5264,20 +5458,27 @@ private struct WorkspaceDocumentPreview: View {
                 else if mimeType == "text/html", !showingHTMLSource, let html = revision.preparedText {
                     ConstrainedHTML(html: html, sourceID: revision.currentSha256, session: htmlSession)
                 }
-                else if let text = revision.preparedText, canAnnotate {
+                else if showsRenderedViewer, let kind = viewerKind, let text = revision.preparedText {
+                    renderedViewer(kind, text: text)
+                }
+                else if let text = revision.preparedText, canAnnotate || viewerKind == .markdown {
+                    // Markdown source is coloured; it takes comments only where commenting is available.
                     SelectablePreviewText(text: text, revision: revision.currentSha256,
                                           selectedRange: $draft.selectedRange,
                                           selectionResetID: draft.selectionResetID,
-                                          onComment: { draft.editingSelection = true },
-                                          onSelecting: { selecting in
+                                          onComment: canAnnotate ? { draft.editingSelection = true } : nil,
+                                          onSelecting: canAnnotate ? { selecting in
                                               if draft.selectingText != selecting { draft.selectingText = selecting }
-                                          })
+                                          } : nil,
+                                          colors: sourceColors)
                         .accessibilityIdentifier("annotation-selectable-text")
                 } else if let text = revision.preparedText {
-                    ScrollView {
-                        Text(text).font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding()
-                    }
+                    // Raw source: a text view that breaks long tokens by character, never with a hyphen.
+                    ReadOnlyAttributedTextView(
+                        text: NSAttributedString(string: text, attributes: [
+                            .font: UIFontMetrics(forTextStyle: .body).scaledFont(for: .monospacedSystemFont(ofSize: 15, weight: .regular)),
+                            .foregroundColor: UIColor.label]),
+                        identity: revision.currentSha256)
                 }
                 else {
                     ContentUnavailableView("Preview unavailable", systemImage: "doc",
@@ -5300,6 +5501,10 @@ private struct WorkspaceDocumentPreview: View {
                 }
             }
             .safeAreaInset(edge: .top) {
+                if let kind = viewerKind, revision.preparedText != nil {
+                    TextViewerModeBar(kind: kind, mode: $viewerMode,
+                                      onCopy: kind == .markdown ? nil : { UIPasteboard.general.string = copyText })
+                }
                 if revision.previewTruncated, revision.preparedText != nil {
                     Text("Showing the first 128 KB. Open the file on your Mac to read the rest.")
                         .font(.footnote)
@@ -5400,7 +5605,49 @@ private struct WorkspaceDocumentPreview: View {
                     failureMessage: "Can't reach your Mac to update this file.")
             }
             .task(id: revision.currentSha256) { await revision.prepareTextIfNeeded(mimeType: mimeType) }
+            .onChange(of: viewerMode) { _, _ in draft.clearSelection(discardNote: false) }
+            .onChange(of: revision.currentSha256) { _, _ in shownCopyText = nil }
+            .task(id: sourceColorsKey) { await prepareSourceColors() }
         }
+    }
+
+    private static func viewerKind(name: String, mimeType: String) -> TextViewerKind? {
+        guard mimeType != "application/pdf", mimeType != "text/html" else { return nil }
+        return TextViewerKind.detect(name: name, mimeType: mimeType)
+    }
+    private var viewerKind: TextViewerKind? { Self.viewerKind(name: name, mimeType: mimeType) }
+    /// The representation on screen: formatted text when it is shown, else the file's text.
+    private var copyText: String {
+        (viewerMode == .rendered ? shownCopyText : nil) ?? revision.preparedText ?? ""
+    }
+    /// The rendered view replaces the source (and with it, commenting) until the
+    /// reader switches to Source.
+    private var showsRenderedViewer: Bool {
+        viewerKind != nil && viewerMode == .rendered && revision.preparedText != nil
+    }
+    @ViewBuilder private func renderedViewer(_ kind: TextViewerKind, text: String) -> some View {
+        switch kind {
+        case .markdown: MarkdownFileView(text: text, sha: revision.currentSha256)
+        case .json:
+            JSONFileView(text: text, sha: revision.currentSha256, truncated: revision.previewTruncated) { shownCopyText = $0 }
+        case .jsonl:
+            JSONLFileView(text: text, sha: revision.currentSha256, truncated: revision.previewTruncated) { shownCopyText = $0 }
+        }
+    }
+
+    /// Markdown source is coloured with the theme; other text stays plain.
+    private var sourceColorsKey: String {
+        guard viewerKind == .markdown, viewerMode == .source, revision.preparedText != nil else { return "" }
+        return TextViewerCache.key(sha: revision.currentSha256, view: "markdown-source", theme: theme)
+    }
+    private func prepareSourceColors() async {
+        let key = sourceColorsKey
+        guard !key.isEmpty, let text = revision.preparedText else { sourceColors = nil; return }
+        if sourceColors?.key == key { return }
+        let palette = theme.palette
+        let runs = await Task.detached(priority: .userInitiated) { SyntaxRuns.runs(text, language: "md") }.value
+        guard !Task.isCancelled else { return }
+        sourceColors = PreviewColorRuns(key: key, runs: runs, palette: palette)
     }
 
     private var holdsRevision: Bool {
@@ -5413,7 +5660,7 @@ private struct WorkspaceDocumentPreview: View {
         !revision.preparingText && annotationContext != nil && onAnnotation != nil &&
         (canStageAnnotation || draft.selectedRange != nil) &&
         (mimeType != "text/html" || showingHTMLSource) && mimeType != "application/pdf" &&
-        revision.preparedText != nil
+        revision.preparedText != nil && !showsRenderedViewer
     }
     private var offersHTMLSource: Bool {
         mimeType == "text/html" && revision.preparedText != nil && annotationContext != nil && onAnnotation != nil
@@ -5685,25 +5932,6 @@ struct PreparedDiff: Sendable {
     }
 }
 
-/// Xcode-like colours that follow light and dark appearance.
-enum SyntaxColors {
-    static func color(_ role: SyntaxRole) -> Color {
-        let (light, dark): (UInt32, UInt32) = switch role {
-        case .keyword: (0x9B2393, 0xFF7AB2)
-        case .string: (0xC41A16, 0xFF8170)
-        case .comment: (0x5D6C79, 0x7F8C98)
-        case .number: (0x1C00CF, 0xD9C97C)
-        case .type: (0x0B4F79, 0x6BDFFF)
-        case .attribute: (0x815F03, 0xFFA14F)
-        }
-        return Color(uiColor: UIColor { traits in
-            let value = traits.userInterfaceStyle == .dark ? dark : light
-            return UIColor(red: CGFloat((value >> 16) & 0xFF) / 255, green: CGFloat((value >> 8) & 0xFF) / 255,
-                           blue: CGFloat(value & 0xFF) / 255, alpha: 1)
-        })
-    }
-}
-
 /// Files with collapsible diffs in one lazy stack.
 private struct DiffDocument: View {
     struct Section: Identifiable {
@@ -5849,6 +6077,8 @@ private struct DiffNumber: View {
 private struct DiffText: View {
     let line: DiffLine
     let highlighted: AttributedString?
+    /// Read so a theme change re-resolves the syntax colours baked into `highlighted`.
+    @Environment(\.wonderTheme) private var theme
     private var plain: AttributedString {
         let sign: String = switch line.kind { case .added: "+"; case .removed: "−"; default: " " }
         return AttributedString((line.kind == .hunk || line.kind == .note ? "" : sign + " ") + line.text)
@@ -6872,6 +7102,7 @@ struct AttentionReview: View {
 }
 
 struct ConversationChoice: View {
+    @Environment(\.wonderTheme) private var theme
     let title: String
     var detail: String? = nil
     var selected: Bool? = nil
@@ -6881,7 +7112,7 @@ struct ConversationChoice: View {
             HStack(spacing: 10) {
                 if let selected {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                        .foregroundStyle(selected ? theme.accent : Color.secondary)
                         .accessibilityHidden(true)
                 }
                 VStack(alignment: .leading, spacing: 2) {
@@ -6891,7 +7122,7 @@ struct ConversationChoice: View {
                 Spacer(minLength: 0)
             }.padding(.horizontal, 10).padding(.vertical, 8)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .background(selected == true ? Color.accentColor.opacity(0.10) : Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+                .background(selected == true ? theme.accent.opacity(0.10) : Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
                 .contentShape(Rectangle())
         }.buttonStyle(.plain).accessibilityAddTraits(selected == true ? [.isSelected] : [])
     }
@@ -6953,7 +7184,11 @@ struct ContextCompactionMarker: View {
     let isProjectConversation: Bool
 
     private var presentation: ContextCompactionPresentation {
-        ContextCompactionPresentation.forState(row.item?.state ?? "unknown",
+        // A provider switch is a different kind of boundary with its own text.
+        if let text = row.providerSwitchText {
+            return ContextCompactionPresentation(label: text, symbol: "arrow.left.arrow.right", isRunning: false)
+        }
+        return ContextCompactionPresentation.forState(row.item?.state ?? "unknown",
                                                isProjectConversation: isProjectConversation)
     }
 
@@ -6979,7 +7214,7 @@ struct ContextCompactionMarker: View {
         .frame(minHeight: 36)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(presentation.label)
-        .accessibilityIdentifier("context-compaction:" + row.id)
+        .accessibilityIdentifier((row.isProviderSwitch ? "provider-switch:" : "context-compaction:") + row.id)
     }
 }
 
@@ -7034,6 +7269,7 @@ private struct CommandDisclosureLabel: View {
 }
 
 private struct FileChangeDisclosureLabel: View {
+    @Environment(\.wonderTheme) private var theme
     let summary: FileChangeSummary
     let failed: Bool
     let openFile: ((String) -> Void)?
@@ -7081,7 +7317,7 @@ private struct FileChangeDisclosureLabel: View {
             Text(summary.target).underline().multilineTextAlignment(.leading)
                 .frame(minHeight: 44, alignment: .leading).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).foregroundStyle(Color.accentColor)
+        .buttonStyle(.plain).foregroundStyle(theme.accent)
         .accessibilityIdentifier("file-change-open:" + path)
         .accessibilityHint("Open this file in Files")
         .accessibilityAddTraits(.isLink)
@@ -7129,6 +7365,7 @@ private struct SubagentActivityLabel: View {
 }
 
 struct ActivityItemView: View {
+    @Environment(\.wonderTheme) private var theme
     let row: ReadRow
     let expanded: Bool
     let subagent: SubagentSummary?
@@ -7216,7 +7453,7 @@ struct ActivityItemView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 if let path = detail.filePath, let openFile {
                                     Button { openFile(path) } label: { Text(detail.title).underline().frame(minHeight: 44, alignment: .leading).contentShape(Rectangle()) }
-                                        .font(.caption).buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                                        .font(.caption).buttonStyle(.plain).foregroundStyle(theme.accent)
                                         .accessibilityIdentifier("file-change-detail-open:" + path)
                                         .accessibilityHint("Open this file in Files")
                                         .accessibilityAddTraits(.isLink)

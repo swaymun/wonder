@@ -349,25 +349,25 @@ final class ProjectComposerContractTests: XCTestCase {
     private func catalog() throws -> [BotOptions.Model] {
         try models(#"""
         [{"id":"claude:haiku","displayName":"Haiku","hidden":false,"reasoningEfforts":[],"agentFamily":"claude"},
-         {"id":"claude:sonnet","displayName":"Sonnet","hidden":false,"reasoningEfforts":[{"id":"low","label":"Low"},{"id":"medium","label":"Medium"},{"id":"high","label":"High"}],"defaultReasoningEffort":"xhigh","agentFamily":"claude"},
+         {"id":"claude:sonnet","displayName":"Sonnet","hidden":false,"reasoningEfforts":[{"id":"low","label":"Low"},{"id":"medium","label":"Medium"},{"id":"high","label":"High"}],"defaultReasoningEffort":"high","isDefault":true,"agentFamily":"claude"},
          {"id":"gpt-hidden","displayName":"Hidden","hidden":true,"reasoningEfforts":[],"agentFamily":"codex"},
-         {"id":"gpt-a","displayName":"GPT A","hidden":false,"reasoningEfforts":[{"id":"low","label":"Low"},{"id":"medium","label":"Medium"},{"id":"xhigh","label":"xhigh"}],"defaultReasoningEffort":"medium","agentFamily":"codex"},
-         {"id":"gpt-b","displayName":"GPT B","hidden":false,"reasoningEfforts":[{"id":"low","label":"Low"},{"id":"high","label":"High"}],"agentFamily":"codex"},
-         {"id":"gpt-c","displayName":"GPT C","hidden":false,"reasoningEfforts":[{"id":"minimal","label":"Minimal"},{"id":"low","label":"Low"}],"agentFamily":"codex"}]
+         {"id":"gpt-a","displayName":"GPT A","hidden":false,"reasoningEfforts":[{"id":"low","label":"Low"},{"id":"medium","label":"Medium"},{"id":"xhigh","label":"xhigh"}],"defaultReasoningEffort":"medium","isDefault":true,"agentFamily":"codex"},
+         {"id":"gpt-b","displayName":"GPT B","hidden":false,"reasoningEfforts":[{"id":"low","label":"Low"},{"id":"high","label":"High"}],"defaultReasoningEffort":"high","agentFamily":"codex"},
+         {"id":"gpt-c","displayName":"GPT C","hidden":false,"reasoningEfforts":[{"id":"minimal","label":"Minimal"},{"id":"low","label":"Low"}],"defaultReasoningEffort":"minimal","agentFamily":"codex"}]
         """#)
     }
     private func visible(_ family: AgentFamily, _ all: [BotOptions.Model]) -> [BotOptions.Model] {
         all.filter { !$0.hidden && $0.family == family }
     }
 
-    // Contract: choosing a model always yields an effort the model supports:
-    // its own default, else high, else medium, else its first. Regression:
+    // Contract: choosing a model starts from the effort the host published as
+    // its resolved default (the host owns the fallback chain). Regression:
     // the effort was cleared and the button showed no reasoning at all.
     func testEffortIsNeverBlankWhenTheModelOffersEfforts() throws {
         let all = try catalog()
         func effort(_ id: String) -> String? { ModelDefaults.effort(for: all.first { $0.id == id }!) }
         XCTAssertEqual(effort("gpt-a"), "medium")
-        XCTAssertEqual(effort("claude:sonnet"), "high", "An unoffered default falls back to high")
+        XCTAssertEqual(effort("claude:sonnet"), "high")
         XCTAssertEqual(effort("gpt-b"), "high")
         XCTAssertEqual(effort("gpt-c"), "minimal")
         XCTAssertNil(effort("claude:haiku"))
@@ -386,7 +386,7 @@ final class ProjectComposerContractTests: XCTestCase {
     // host's default for its provider and stays on a supported effort.
     func testEnsureModelUsesRememberedThenHostDefault() throws {
         let all = try catalog()
-        XCTAssertEqual(ModelDefaults.defaultModel(in: visible(.claude, all))?.id, "claude:sonnet", "The host avoids Haiku when it can")
+        XCTAssertEqual(ModelDefaults.defaultModel(in: visible(.claude, all))?.id, "claude:sonnet", "The host marks its default; the client applies no rule of its own")
         XCTAssertEqual(ModelDefaults.defaultModel(in: visible(.codex, all))?.id, "gpt-a")
         XCTAssertEqual(ModelDefaults.defaultModel(in: all.filter { $0.id == "claude:haiku" })?.id, "claude:haiku")
         var fresh = NewChatDraft(family: .codex)

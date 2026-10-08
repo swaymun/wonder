@@ -1505,6 +1505,7 @@ private struct ComputerPointerShape: Shape {
 }
 
 struct ComputerSessionControls: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var model: ComputerSessionModel
     var sidePlacement = false
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -1543,7 +1544,7 @@ struct ComputerSessionControls: View {
                         shortcutButton(model.isAppSwitcherPresented ? "Choose app" : "⌘ Tab", symbol: "command",
                                        label: model.isAppSwitcherPresented ? "Choose highlighted app" : "Show app switcher, Command Tab",
                                        identifier: "app-switcher") { model.toggleAppSwitcher() }
-                            .background(model.isAppSwitcherPresented ? Color.accentColor.opacity(0.15) : .clear, in: Capsule())
+                            .background(model.isAppSwitcherPresented ? theme.accent.opacity(0.15) : .clear, in: Capsule())
                             .accessibilityValue(model.isAppSwitcherPresented ? "Open, Command held" : "Closed")
                             .accessibilityHint("Opens and holds the Mac app switcher. Use Tab to move, tap again to choose, or Escape to cancel.")
                     }
@@ -1622,7 +1623,7 @@ struct ComputerSessionControls: View {
         .padding(.horizontal, sidePlacement ? 2 : 8)
         .padding(.vertical, 4)
         .font(.body)
-        .foregroundStyle(Color.accentColor)
+        .foregroundStyle(theme.accent)
         .buttonStyle(.plain)
         .background(sidePlacement ? Color.black : model.isControlActive ? Color(uiColor: .secondarySystemBackground) : Color(uiColor: .systemBackground))
         .background(alignment: .bottomLeading) {
@@ -1666,7 +1667,7 @@ struct ComputerSessionControls: View {
                     shortcutButton(model.isAppSwitcherPresented ? "Choose app" : "⌘ Tab", symbol: "command",
                                    label: model.isAppSwitcherPresented ? "Choose highlighted app" : "Show app switcher, Command Tab",
                                    identifier: "app-switcher", iconOnly: true) { model.toggleAppSwitcher() }
-                        .background(model.isAppSwitcherPresented ? Color.accentColor.opacity(0.15) : .clear, in: Capsule())
+                        .background(model.isAppSwitcherPresented ? theme.accent.opacity(0.15) : .clear, in: Capsule())
                         .accessibilityValue(model.isAppSwitcherPresented ? "Open, Command held" : "Closed")
                     keyButton("Esc", key: "escape", label: "Escape", symbol: "escape", iconOnly: true)
                 }

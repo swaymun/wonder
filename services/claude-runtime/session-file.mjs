@@ -107,6 +107,22 @@ export class ClaudeSessionFiles {
     return messages;
   }
 
+  // What the newest assistant message ran with, as Claude Code recorded it.
+  // `native` is false for turns Wonder's own SDK session wrote ("sdk-ts"), so
+  // only a turn from the desktop app or terminal changes a thread's settings.
+  async latestSettings(sessionId, cwd) {
+    const path = await this.locate(sessionId, cwd);
+    const file = path ? await this.entries(path) : null;
+    for (let i = (file?.rows.length ?? 0) - 1; i >= 0; i--) {
+      const row = file.rows[i], model = row.message?.model;
+      if (row.type !== "assistant" || row.isSidechain || typeof model !== "string" || !model || model.startsWith("<")) continue;
+      const text = value => typeof value === "string" && value ? value : null;
+      return { turnId: row.uuid, native: row.entrypoint !== "sdk-ts", model,
+        effort: text(row.effort), speed: text(row.message?.usage?.speed) };
+    }
+    return null;
+  }
+
   // Claude Code's per-task metadata: subagents/agent-<id>.meta.json beside the transcript.
   async agentTasks(sessionId, cwd) {
     const path = await this.locate(sessionId, cwd);

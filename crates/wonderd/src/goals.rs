@@ -11,7 +11,7 @@ use serde_json::{json, Map, Value};
 use std::path::Path as FsPath;
 use std::sync::atomic::{AtomicI64, Ordering};
 use wonder_app_server::RpcClient;
-use wonder_store::{AgentFamily, StoredProject, EXECUTION_SCOPE_PROJECTS};
+use wonder_store::{StoredProject, EXECUTION_SCOPE_PROJECTS};
 
 static LAST_LIMIT_CHECK_MS: AtomicI64 = AtomicI64::new(0);
 
@@ -49,7 +49,7 @@ async fn direct_thread(
         .await
         .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?
     {
-        if project_conversation.family != AgentFamily::Codex {
+        if !project_conversation.family.provider().capabilities.goals {
             return Err(Box::new(
                 (
                     StatusCode::CONFLICT,
@@ -103,7 +103,7 @@ async fn direct_thread(
             .conversation_thread(conversation)
             .await
             .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?;
-        if binding.family != AgentFamily::Codex
+        if !binding.family.provider().capabilities.goals
             || binding.execution_scope != EXECUTION_SCOPE_PROJECTS
             || binding.thread_id != native
             || recorded.as_deref() != Some(native.as_str())
@@ -129,7 +129,7 @@ async fn direct_thread(
         .await
         .map_err(|_| Box::new(StatusCode::SERVICE_UNAVAILABLE.into_response()))?
         .ok_or_else(|| Box::new(StatusCode::NOT_FOUND.into_response()))?;
-    if bot.agent_family == wonder_store::AgentFamily::Claude {
+    if !bot.agent_family.provider().capabilities.goals {
         return Err(Box::new(
             (
                 StatusCode::CONFLICT,
@@ -463,6 +463,7 @@ mod tests {
         fs,
         os::unix::fs::{symlink, PermissionsExt},
     };
+    use wonder_store::AgentFamily;
     use wonder_store::{ProjectConversationInsert, ProjectRootInput};
 
     async fn fixture() -> (tempfile::TempDir, AppState) {

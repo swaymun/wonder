@@ -2,7 +2,10 @@
 //! owner's native Codex or Claude Code session in its normal provider store, so
 //! it continues in the Codex app/CLI or Claude Code. Bots keep their private
 //! runtime; nothing here creates a Bot or copies a provider transcript.
-use crate::{publish_message_state, AppState, AuthenticatedDevice, DeliveryState, OwnerAuthority};
+use crate::{
+    agent_defaults, publish_message_state, AppState, AuthenticatedDevice, DeliveryState,
+    OwnerAuthority,
+};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -39,7 +42,6 @@ const RECEIPT_PAGES_PER_CYCLE: usize = 20;
 const RECEIPT_RESCAN_DELAY: Duration = Duration::from_secs(60);
 const IDLE_FINAL_ROSTER_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCESS_MODES: [&str; 3] = ["read_only", "workspace", "full_access"];
-const CLAUDE_APPROVALS: [&str; 3] = ["ask", "accept_edits", "auto"];
 
 struct ReceiptScan {
     thread_id: String,
@@ -174,6 +176,18 @@ async fn claude_rpc(state: &AppState) -> Result<RpcClient, String> {
     Ok(rpc)
 }
 
+/// The provider's RPC client only while it is already running, for reads that
+/// must not start a runtime.
+pub(crate) async fn live_rpc_for(state: &AppState, family: AgentFamily) -> Option<RpcClient> {
+    match family {
+        AgentFamily::Codex => {
+            let client = state.projects.codex.lock().await;
+            client.health().is_alive().then(|| client.rpc())
+        }
+        AgentFamily::Claude => claude_rpc(state).await.ok(),
+    }
+}
+
 pub(crate) async fn rpc_for(state: &AppState, family: AgentFamily) -> Result<RpcClient, String> {
     match family {
         AgentFamily::Codex => codex_rpc(state).await,
@@ -189,18 +203,13 @@ async fn recovery_rpc_for(state: &AppState, family: AgentFamily) -> Option<RpcCl
     rpc_for(state, family).await.ok()
 }
 
-fn provider_store(state: &AppState, family: AgentFamily) -> &str {
-    match family {
-        AgentFamily::Codex => &state.projects.codex_store,
-        AgentFamily::Claude => &state.projects.claude_store,
-    }
-}
+use crate::providers::provider_store;
 
-fn now_text() -> String {
+pub(crate) fn now_text() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn error(status: StatusCode, message: impl Into<String>) -> Response {
+pub(crate) fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, message.into()).into_response()
 }
 
@@ -334,7 +343,7 @@ pub(crate) struct ProjectConversationDetail {
     notice: Option<String>,
 }
 
-async fn conversation_detail(
+pub(crate) async fn conversation_detail(
     state: &AppState,
     conversation: &StoredProjectConversation,
 ) -> Result<ProjectConversationDetail, String> {
@@ -1552,20 +1561,6 @@ pub(crate) struct AttachRequest {
     reference: String,
 }
 
-fn default_model(catalog: &crate::RuntimeCatalog, family: AgentFamily) -> Option<String> {
-    catalog
-        .models
-        .iter()
-        .find(|m| m.agent_family == family && !m.hidden && m.id != "claude:haiku")
-        .or_else(|| {
-            catalog
-                .models
-                .iter()
-                .find(|m| m.agent_family == family && !m.hidden)
-        })
-        .map(|m| m.id.clone())
-}
-
 pub(crate) async fn attach(
     State(state): State<AppState>,
     Extension(_authority): Extension<OwnerAuthority>,
@@ -1647,6 +1642,14 @@ async fn attach_native(
             "This thread could not be opened. Try again.".to_owned(),
         )
     };
+    // The host decides model, effort and speed once, here, and stores them.
+    let defaults = agent_defaults::resolve(
+        &*state.runtime_catalog.read().await,
+        family,
+        None,
+        None,
+        None,
+    );
     let (cwd, title, thread_id, session) = match family {
         AgentFamily::Codex => {
             let rpc = codex_rpc(state)
@@ -1719,11 +1722,10 @@ async fn attach_native(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            let model = default_model(&*state.runtime_catalog.read().await, AgentFamily::Claude)
-                .ok_or((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Claude is not available on your Mac.".to_owned(),
-                ))?;
+            let model = defaults.model.clone().ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Claude is not available on your Mac.".to_owned(),
+            ))?;
             let root = project.root_for(&cwd).ok_or((
                 StatusCode::FORBIDDEN,
                 "This session is outside the project's folders.".to_owned(),
@@ -1774,16 +1776,11 @@ async fn attach_native(
             cwd: &root.path,
             roots_revision: project.roots_revision,
             title: &title,
-            model: None,
-            effort: None,
-            service_tier: None,
+            model: defaults.model.as_deref(),
+            effort: defaults.effort.as_deref(),
+            service_tier: defaults.service_tier.as_deref(),
             access_mode: "workspace",
-            // New Claude threads start in Auto, which runs inside the sandbox.
-            claude_approval: if family == AgentFamily::Claude {
-                "auto"
-            } else {
-                "ask"
-            },
+            claude_approval: agent_defaults::claude_approval(family),
             plan_mode: false,
             creation_request_id: None,
             now: &now,
@@ -1811,6 +1808,243 @@ async fn attach_native(
 }
 
 // ---------------------------------------------------------------------------
+// Fork
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ForkRequest {
+    /// The reply to fork from; its turn is the last one kept. Omitted: the
+    /// whole conversation.
+    last_turn_id: Option<String>,
+}
+
+fn fork_title(title: &str) -> String {
+    let base: String = title.chars().take(300).collect();
+    format!("{} (fork)", base.trim_end())
+}
+
+/// Copies a started thread, through `last_turn`, into a new native session and
+/// returns its identity: the native session, the runtime thread and the Claude
+/// session. The source is only read.
+async fn fork_native(
+    state: &AppState,
+    source: &StoredProjectConversation,
+    project: &StoredProject,
+    native: &str,
+    last_turn: Option<&str>,
+    title: &str,
+) -> Result<(String, String, Option<String>), (StatusCode, String)> {
+    let unavailable = |message: String| (StatusCode::SERVICE_UNAVAILABLE, message);
+    let failed = |_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "{} couldn’t fork this chat. Try again.",
+                source.family.provider().display_name
+            ),
+        )
+    };
+    match source.family {
+        AgentFamily::Codex => {
+            let rpc = codex_rpc(state).await.map_err(unavailable)?;
+            let mut params = json!({"threadId": native, "excludeTurns": true, "cwd": source.cwd});
+            if let Some(turn) = last_turn {
+                params["lastTurnId"] = json!(turn);
+            }
+            let forked = result(&rpc, "thread/fork", params).await.map_err(failed)?;
+            let id = forked
+                .pointer("/thread/id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && *id != native)
+                .ok_or_else(|| failed(String::new()))?;
+            Ok((id.to_owned(), id.to_owned(), None))
+        }
+        AgentFamily::Claude => {
+            let rpc = claude_rpc(state).await.map_err(unavailable)?;
+            let binding = state
+                .store
+                .runtime_binding(&source.conversation_id)
+                .await
+                .ok()
+                .flatten()
+                .ok_or_else(|| failed(String::new()))?;
+            let mut params = json!({"threadId": binding.thread_id, "title": title});
+            if let Some(turn) = last_turn {
+                params["lastTurnId"] = json!(turn);
+            }
+            let forked = result(&rpc, "project/session/fork", params)
+                .await
+                .map_err(|message| (StatusCode::CONFLICT, message))?;
+            let session = forked
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| failed(String::new()))?
+                .to_owned();
+            let model = source.model.clone().ok_or_else(|| failed(String::new()))?;
+            let attached = result(
+                &rpc,
+                "project/session/attach",
+                json!({"sessionId": session, "model": model, "cwd": source.cwd,
+                    "wonderProject": claude_project(project, &source.cwd),
+                    "wonderPolicy": claude_policy(state, project, ClaudeModes::from(source), &source.cwd)}),
+            )
+            .await
+            .map_err(failed)?;
+            let thread = attached
+                .pointer("/thread/id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| failed(String::new()))?
+                .to_owned();
+            Ok((session.clone(), thread, Some(session)))
+        }
+    }
+}
+
+/// Starts a new thread in the same project and folder with the same settings
+/// and the source's history up to a chosen reply. Only a finished conversation
+/// can be forked; the source is never changed.
+pub(crate) async fn fork(
+    State(state): State<AppState>,
+    Extension(_authority): Extension<OwnerAuthority>,
+    Path(id): Path<String>,
+    Json(request): Json<ForkRequest>,
+) -> Response {
+    let last_turn = request.last_turn_id.as_deref();
+    if last_turn.is_some_and(|turn| turn.is_empty() || turn.len() > 128) {
+        return error(StatusCode::BAD_REQUEST, "Choose a reply to fork from.");
+    }
+    let Ok(Some(source)) = state.store.project_conversation(&id).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let provider = source.family.provider();
+    if !provider.capabilities.native_fork {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("{} chats can’t be forked yet.", provider.display_name),
+        );
+    }
+    let Some(native) = source.native_session_id.clone() else {
+        return error(
+            StatusCode::CONFLICT,
+            "Send a message first. There is nothing to fork yet.",
+        );
+    };
+    let busy = state
+        .store
+        .conversation_has_active_turn(&id)
+        .await
+        .unwrap_or(true)
+        || (source.family == AgentFamily::Codex
+            && crate::desktop_activity::codex_thread_busy(&native).await);
+    if busy {
+        return error(
+            StatusCode::CONFLICT,
+            format!(
+                "{} is still working in this chat. Fork it when the reply finishes.",
+                provider.display_name
+            ),
+        );
+    }
+    let Some(_admission) = state.update_admission.claim_guard().await else {
+        return error(
+            StatusCode::CONFLICT,
+            "Wonder is preparing to update. Try again shortly.",
+        );
+    };
+    let Ok(Some(project)) = state.store.project(&source.project_id).await else {
+        return error(StatusCode::NOT_FOUND, "This chat’s project is unavailable.");
+    };
+    if !project.is_included || project.root_for(&source.cwd).is_none() {
+        return error(
+            StatusCode::CONFLICT,
+            "This chat’s folder is no longer in the project. Add it back to fork.",
+        );
+    }
+    match codex_is_archived(&state, &source).await {
+        Ok(false) => {}
+        Ok(true) => {
+            return error(
+                StatusCode::CONFLICT,
+                "This chat is archived. Restore it on your Mac before forking.",
+            )
+        }
+        Err(message) => return error(StatusCode::SERVICE_UNAVAILABLE, message),
+    }
+    let title = fork_title(&source.title);
+    let (forked_native, thread_id, session) =
+        match fork_native(&state, &source, &project, &native, last_turn, &title).await {
+            Ok(forked) => forked,
+            Err((status, message)) => return error(status, message),
+        };
+    let not_saved = || {
+        error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The fork was made but could not be saved. Open this chat’s project to find it.",
+        )
+    };
+    let fork_id = uuid::Uuid::new_v4().to_string();
+    let now = now_text();
+    let created = state
+        .store
+        .create_project_conversation(ProjectConversationInsert {
+            conversation_id: &fork_id,
+            project_id: &project.id,
+            family: source.family,
+            provider_store: &source.provider_store,
+            native_session_id: Some(&forked_native),
+            cwd: &source.cwd,
+            roots_revision: project.roots_revision,
+            title: &title,
+            model: source.model.as_deref(),
+            effort: source.effort.as_deref(),
+            service_tier: source.service_tier.as_deref(),
+            access_mode: &source.access_mode,
+            claude_approval: &source.claude_approval,
+            plan_mode: source.plan_mode,
+            creation_request_id: None,
+            now: &now,
+        })
+        .await;
+    let Ok(ProjectConversationCreate::Created(fork)) = created else {
+        return not_saved();
+    };
+    if state
+        .store
+        .bind_project_runtime(
+            &fork.conversation_id,
+            source.family,
+            &source.provider_store,
+            &thread_id,
+            session.as_deref(),
+            &now,
+        )
+        .await
+        .is_err()
+        || state
+            .store
+            .record_project_fork(&fork.conversation_id, &source.conversation_id, last_turn)
+            .await
+            .is_err()
+    {
+        return not_saved();
+    }
+    let _ = state
+        .store
+        .touch_project(&project.id, source.family, &now)
+        .await;
+    if source.family == AgentFamily::Codex {
+        // Best effort: opening the thread repairs its desktop project later.
+        let _ = associate_codex_project(&state, &project, &forked_native).await;
+    }
+    let summary = attached_summary(&state, &fork, activity_seconds(&now), None).await;
+    // Load the copied history so the new thread opens on it; this starts no
+    // model work.
+    let _ = crate::refresh_history(State(state.clone()), Path(fork.conversation_id.clone())).await;
+    (StatusCode::CREATED, Json(summary)).into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Conversation metadata
 // ---------------------------------------------------------------------------
 
@@ -1819,6 +2053,8 @@ pub(crate) async fn conversation(
     Extension(_authority): Extension<OwnerAuthority>,
     Path(id): Path<String>,
 ) -> Response {
+    // A turn made in the desktop app comes first, so the composer shows it.
+    crate::native_settings::sync(&state, &id).await;
     let Ok(Some(conversation)) = state.store.project_conversation(&id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -1861,17 +2097,17 @@ fn validate_claude_approval(
 ) -> Result<(), &'static str> {
     match approval {
         None => Ok(()),
-        Some(_) if family != AgentFamily::Claude => {
+        Some(_) if !family.allows_approval_choice() => {
             Err("Approval modes are available for Claude threads.")
         }
-        Some(approval) if !CLAUDE_APPROVALS.contains(&approval) => {
+        Some(approval) if !family.provider().approval_modes.contains(&approval) => {
             Err("Choose Ask, Accept edits or Auto.")
         }
         Some(_) => Ok(()),
     }
 }
 
-fn validate_model(
+pub(crate) fn validate_model(
     catalog: &crate::RuntimeCatalog,
     family: AgentFamily,
     model: Option<&str>,
@@ -1896,9 +2132,7 @@ fn validate_model(
         }
     }
     if let Some(tier) = service_tier {
-        if !option.service_tiers.iter().any(|choice| choice.id == tier)
-            && option.default_service_tier.as_deref() != Some(tier)
-        {
+        if !agent_defaults::offers_tier(option, tier) {
             return Err("This model does not support that speed.");
         }
     }
@@ -1915,10 +2149,7 @@ fn supports_tier(
         .models
         .iter()
         .find(|option| option.agent_family == family && option.id == model)
-        .is_some_and(|option| {
-            option.service_tiers.iter().any(|choice| choice.id == tier)
-                || option.default_service_tier.as_deref() == Some(tier)
-        })
+        .is_some_and(|option| agent_defaults::offers_tier(option, tier))
 }
 
 pub(crate) async fn update_conversation(
@@ -1968,15 +2199,28 @@ pub(crate) async fn update_conversation(
         && service_tier.is_some_and(|tier| {
             !supports_tier(&catalog, existing.family, model.unwrap_or_default(), tier)
         });
+    // An effort the user names must fit the model. One the model no longer
+    // offers, or an explicit clear, takes the host's resolved default instead.
+    let named_effort = request.effort.as_ref().and_then(|effort| effort.as_deref());
+    let settled_effort = if request.model.is_some() || request.effort.is_some() {
+        let carried = match &request.effort {
+            None => existing.effort.as_deref(),
+            Some(_) => named_effort,
+        };
+        Some(agent_defaults::resolve(&catalog, existing.family, model, carried, None).effort)
+    } else {
+        None
+    };
     if request.model.is_some() || request.effort.is_some() || request.service_tier.is_some() {
         if let Err(message) = validate_model(
             &catalog,
             existing.family,
             model,
-            request
-                .effort
-                .as_ref()
-                .map_or(existing.effort.as_deref(), |effort| effort.as_deref()),
+            match (&request.effort, &settled_effort) {
+                (Some(_), _) => named_effort,
+                (None, Some(settled)) => settled.as_deref(),
+                (None, None) => existing.effort.as_deref(),
+            },
             if clear_incompatible_tier {
                 None
             } else {
@@ -2007,7 +2251,7 @@ pub(crate) async fn update_conversation(
         pinned: request.is_pinned,
         unread: request.has_unread,
         model: request.model.as_deref(),
-        effort: request.effort.as_ref().map(|effort| effort.as_deref()),
+        effort: settled_effort.as_ref().map(|effort| effort.as_deref()),
         service_tier: if clear_incompatible_tier {
             Some(None)
         } else {
@@ -2016,6 +2260,7 @@ pub(crate) async fn update_conversation(
         access_mode: request.access_mode.as_deref(),
         claude_approval: request.claude_approval.as_deref(),
         plan_mode: request.plan_mode,
+        native_settings_turn: None,
     };
     let now = now_text();
     let updated =
@@ -2102,7 +2347,7 @@ fn creation_request_digest(project_id: &str, request: &CreateThreadRequest) -> S
         "effort": request.effort,
         "serviceTier": request.service_tier,
         "accessMode": request.access_mode,
-        "claudeApproval": request.claude_approval.as_deref().unwrap_or("ask"),
+        "claudeApproval": request.claude_approval.as_deref().unwrap_or(agent_defaults::claude_approval(request.family)),
         "planMode": request.plan_mode,
         "folderId": request.folder_id,
         "rootsRevision": request.roots_revision,
@@ -2134,7 +2379,11 @@ fn legacy_creation_matches(
         && fields[5] == json!(request.model)
         && fields[6] == json!(request.effort)
         && fields[7] == json!(request.access_mode)
-        && fields[8] == json!(request.claude_approval.as_deref().unwrap_or("ask"))
+        && fields[8]
+            == json!(request
+                .claude_approval
+                .as_deref()
+                .unwrap_or(agent_defaults::claude_approval(request.family)))
         && fields[9] == json!(i64::from(request.plan_mode))
         && request
             .roots_revision
@@ -2392,6 +2641,13 @@ pub(crate) async fn create_thread(
         .take(80)
         .collect();
     let conversation_id = uuid::Uuid::new_v4().to_string();
+    let resolved = agent_defaults::resolve(
+        &*state.runtime_catalog.read().await,
+        request.family,
+        Some(&request.model),
+        request.effort.as_deref(),
+        request.service_tier.as_deref(),
+    );
     let insert = ProjectConversationInsert {
         conversation_id: &conversation_id,
         project_id: &project.id,
@@ -2402,10 +2658,13 @@ pub(crate) async fn create_thread(
         roots_revision: project.roots_revision,
         title: &title,
         model: Some(&request.model),
-        effort: request.effort.as_deref(),
-        service_tier: request.service_tier.as_deref(),
+        effort: resolved.effort.as_deref(),
+        service_tier: resolved.service_tier.as_deref(),
         access_mode: &request.access_mode,
-        claude_approval: request.claude_approval.as_deref().unwrap_or("ask"),
+        claude_approval: request
+            .claude_approval
+            .as_deref()
+            .unwrap_or(agent_defaults::claude_approval(request.family)),
         plan_mode: request.plan_mode,
         creation_request_id: Some(&request.client_message_id),
         now: &now,
@@ -2541,6 +2800,30 @@ fn codex_policy(mode: &str, roots: &[String]) -> (&'static str, &'static str, Va
     }
 }
 
+/// The model, effort and speed one turn sends. Threads saved before the host
+/// stored defaults resolve here with the rule creation uses, so a model that
+/// offers efforts never runs with a nil one, and a stored speed such as
+/// priority reaches the provider while the model still offers it.
+pub(crate) fn execution_settings(
+    catalog: &crate::RuntimeCatalog,
+    family: AgentFamily,
+    model: Option<&str>,
+    effort: Option<&str>,
+    service_tier: Option<&str>,
+) -> Result<(String, Option<String>, Option<String>), String> {
+    let resolved = agent_defaults::resolve(catalog, family, model, effort, service_tier);
+    let model = resolved.model.ok_or("Choose a model for this thread.")?;
+    validate_model(
+        catalog,
+        family,
+        Some(&model),
+        resolved.effort.as_deref(),
+        resolved.service_tier.as_deref(),
+    )
+    .map_err(str::to_owned)?;
+    Ok((model, resolved.effort, resolved.service_tier))
+}
+
 fn claude_project(project: &StoredProject, cwd: &str) -> Value {
     json!({"cwd": cwd, "additionalDirectories": project.roots.iter().map(|r| r.path.clone()).filter(|p| p != cwd).collect::<Vec<_>>()})
 }
@@ -2557,7 +2840,7 @@ impl Default for ClaudeModes<'_> {
     fn default() -> Self {
         Self {
             access_mode: "workspace",
-            approval: "ask",
+            approval: agent_defaults::claude_approval(AgentFamily::Claude),
             plan: false,
         }
     }
@@ -2838,7 +3121,7 @@ pub(crate) async fn dispatch(state: AppState, message: wonder_store::StoredMessa
     }
 }
 
-async fn dispatch_inner(
+pub(crate) async fn dispatch_inner(
     state: &AppState,
     message: &wonder_store::StoredMessage,
     submitting: &mut bool,
@@ -2875,8 +3158,12 @@ async fn dispatch_inner(
     if !FsPath::new(&root.canonical_path).is_dir() {
         return Err("This thread's folder is no longer available on your Mac.".into());
     }
+    // The model this message carries decides whether the thread keeps its
+    // session or moves to the other provider, in delivery order.
+    let conversation =
+        crate::provider_switch::apply_transition(state, conversation, message).await?;
     let catalog = state.runtime_catalog.read().await.clone();
-    let (selected_model, effort, selected_tier) = state
+    let (selected_model, selected_effort, selected_tier) = state
         .store
         .project_message_execution_settings(&message.id)
         .await
@@ -2888,28 +3175,13 @@ async fn dispatch_inner(
                 conversation.service_tier.clone(),
             )
         });
-    let model = selected_model
-        .clone()
-        .or_else(|| default_model(&catalog, conversation.family))
-        .ok_or("Choose a model for this thread.")?;
-    let service_tier = selected_tier.or_else(|| {
-        if conversation.family == AgentFamily::Codex {
-            return Some("default".to_owned());
-        }
-        catalog
-            .models
-            .iter()
-            .find(|option| option.id == model && option.agent_family == conversation.family)
-            .and_then(|option| option.default_service_tier.clone())
-    });
-    validate_model(
+    let (model, effort, service_tier) = execution_settings(
         &catalog,
         conversation.family,
-        Some(&model),
-        effort.as_deref(),
-        service_tier.as_deref(),
-    )
-    .map_err(str::to_owned)?;
+        selected_model.as_deref(),
+        selected_effort.as_deref(),
+        selected_tier.as_deref(),
+    )?;
     let roots = project
         .roots
         .iter()
@@ -2993,6 +3265,7 @@ async fn dispatch_inner(
             let started = result(&rpc, "thread/start", json!({
                 "cwd": conversation.cwd, "projectId": project_id, "model": model, "serviceTier": service_tier, "sandbox": sandbox,
                 "approvalPolicy": approval, "runtimeWorkspaceRoots": roots,
+                "dynamicTools": crate::thread_tools::specs(),
             }))
             .await?;
             let thread = started
@@ -3078,8 +3351,37 @@ async fn dispatch_inner(
         .into_iter()
         .filter(|file| file.mime_type.as_deref() != Some(crate::artifact_annotations::MIME))
         .collect::<Vec<_>>();
-    let mut input = crate::turn_input(&message.body, &media, &ordinary_files);
+    // An agent's message says who wrote it; the stored body stays as sent.
+    let source = state
+        .store
+        .message_source(&message.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let body = crate::thread_tools::provider_text(source.as_ref(), &message.body);
+    let mut input = crate::turn_input(&body, &media, &ordinary_files);
     input.extend(annotation_inputs);
+    // After a provider switch the first turn also carries the earlier
+    // conversation, as labelled background in its own leading part.
+    let attachment_kinds = ordinary_files
+        .iter()
+        .map(|file| {
+            if file
+                .mime_type
+                .as_deref()
+                .is_some_and(|m| m.starts_with("image/"))
+            {
+                crate::provider_switch::Attachment::Image
+            } else {
+                crate::provider_switch::Attachment::File
+            }
+        })
+        .collect::<Vec<_>>();
+    let handoff =
+        crate::provider_switch::prepare(state, &conversation, &thread_id, &body, &attachment_kinds)
+            .await?;
+    if let Some(text) = &handoff {
+        input.insert(0, json!({"type": "text", "text": text}));
+    }
     let context = json!({
         "schemaVersion": 1, "scope": "projects", "projectId": project.id, "rootsRevision": project.roots_revision,
         "workingDirectory": conversation.cwd, "model": model, "effort": effort, "serviceTier": service_tier,
@@ -3106,7 +3408,7 @@ async fn dispatch_inner(
         AgentFamily::Claude => {
             json!({"threadId": thread_id, "clientUserMessageId": message.client_message_id,
             "input": input, "model": model, "effort": effort, "serviceTier": service_tier,
-            "wonderPolicy": permission,
+            "wonderPolicy": permission, "dynamicTools": crate::thread_tools::specs(),
             "wonderProject": claude_project(&project, &conversation.cwd)})
         }
     };
@@ -3131,6 +3433,11 @@ async fn dispatch_inner(
         .begin_dispatch_submission_with_context(&message.id, &thread_id, Some(&context))
         .await
         .map_err(|e| e.to_string())?;
+    // Pending before submission: if the outcome is lost, this session is
+    // replaced rather than given the same context twice.
+    if handoff.is_some() {
+        crate::provider_switch::delivery_started(state, &message.conversation_id, &thread_id).await;
+    }
     *submitting = true;
     let response = rpc
         .request("turn/start", params)
@@ -3139,6 +3446,14 @@ async fn dispatch_inner(
     if let Some(error) = response.error {
         if turn_start_rejected_before_execution(error.code, &error.message) {
             *submitting = false;
+            if handoff.is_some() {
+                crate::provider_switch::delivery_refused(
+                    state,
+                    &message.conversation_id,
+                    &thread_id,
+                )
+                .await;
+            }
         }
         return Err(error.message);
     }
@@ -3149,6 +3464,11 @@ async fn dispatch_inner(
         .and_then(Value::as_str)
         .ok_or("The provider returned no message receipt")?
         .to_owned();
+    // The context reached the session; it is never sent again.
+    if handoff.is_some() {
+        crate::provider_switch::delivery_accepted(state, &message.conversation_id, &thread_id)
+            .await;
+    }
     Ok((thread_id, turn, rpc.health().id().to_owned()))
 }
 
@@ -5267,6 +5587,9 @@ pub(crate) mod tests {
                 description: None,
             }],
             default_service_tier: Some("default".into()),
+            is_default: false,
+            provider_default: None,
+            native_ids: vec![],
         }];
         state
             .store
@@ -5960,6 +6283,74 @@ pub(crate) mod tests {
     // First-send preparation owns metadata and request recovery only. Native
     // sessions and messages must remain absent until the durable Send arrives.
     #[tokio::test]
+    async fn create_stores_the_resolved_effort_and_speed() {
+        use crate::permission_modes::tests::{call, fixture};
+        let (dir, state) = fixture().await;
+        {
+            let mut catalog = state.runtime_catalog.write().await;
+            let mut effortful = catalog.models[0].clone();
+            effortful.id = "effortful".into();
+            effortful.reasoning_efforts = vec![
+                crate::ChoiceOption {
+                    id: "low".into(),
+                    label: "Low".into(),
+                    description: None,
+                },
+                crate::ChoiceOption {
+                    id: "high".into(),
+                    label: "High".into(),
+                    description: None,
+                },
+            ];
+            effortful.default_reasoning_effort = None;
+            catalog.models.push(effortful);
+        }
+        let source = dir.path().join("project-source");
+        std::fs::create_dir(&source).unwrap();
+        let roots = validate_folders(&[source.to_string_lossy().into_owned()], &[]).unwrap();
+        state
+            .store
+            .create_project(
+                "defaults-project",
+                "request",
+                "hash",
+                "Test",
+                &roots,
+                0,
+                "now",
+            )
+            .await
+            .unwrap();
+        let _service = crate::ingestion::spawn(state.clone()).await;
+        for _ in 0..100 {
+            if state.ingestion.project_readiness(&state.store).await.ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let request = json!({"deviceId":"owner", "clientMessageId":uuid::Uuid::new_v4().to_string(),
+            "family":"codex", "model":"effortful", "body":"Hello", "rootsRevision":1, "prepareOnly":true});
+        let created = call(
+            &state,
+            "POST",
+            "/api/v1/projects/defaults-project/threads",
+            request,
+        )
+        .await;
+        assert_eq!(created.0, StatusCode::OK, "{}", created.1);
+        let id = created.1["conversation"]["conversationId"]
+            .as_str()
+            .unwrap();
+        let stored = state.store.project_conversation(id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.effort.as_deref(),
+            Some("high"),
+            "Omitted effort is stored resolved"
+        );
+        assert_eq!(stored.service_tier.as_deref(), Some("default"));
+    }
+
+    #[tokio::test]
     async fn preparation_retries_one_conversation_without_starting_work() {
         use crate::permission_modes::tests::{call, fixture};
         let (dir, state) = fixture().await;
@@ -6161,12 +6552,32 @@ pub(crate) mod tests {
         assert_eq!(preserved.0, StatusCode::OK, "{}", preserved.1);
         assert_eq!(preserved.1["effort"], "high");
         let incompatible = call(&state, "PATCH", &path, json!({"model": "fake"})).await;
-        assert_eq!(
-            incompatible.0,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{}",
-            incompatible.1
+        assert_eq!(incompatible.0, StatusCode::OK, "{}", incompatible.1);
+        assert!(
+            incompatible.1["effort"].is_null(),
+            "An effort the new model lacks is replaced by its resolved default (none here)"
         );
+        let restore = call(&state, "PATCH", &path, json!({"model": "effortful"})).await;
+        assert_eq!(restore.0, StatusCode::OK, "{}", restore.1);
+        assert_eq!(
+            restore.1["effort"], "high",
+            "Switching to a model that offers efforts stores its default"
+        );
+        let named = call(&state, "PATCH", &path, json!({"effort": "bogus"})).await;
+        assert_eq!(named.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", named.1);
+        state
+            .store
+            .update_project_conversation(
+                id,
+                ProjectConversationPatch {
+                    model: Some("effortful"),
+                    effort: Some(Some("high")),
+                    ..Default::default()
+                },
+                "later",
+            )
+            .await
+            .unwrap();
         let clear = json!({"model": "fake", "effort": null});
         crate::tests::validate_http_contract("updateProjectConversationRequest", &clear);
         let cleared = call(&state, "PATCH", &path, clear).await;
@@ -7115,7 +7526,73 @@ pub(crate) mod tests {
                 assert_eq!(value["deniedRoots"], json!(denied));
             }
         }
-        assert_eq!(ClaudeModes::default().approval, "ask");
+        assert_eq!(
+            ClaudeModes::default().approval,
+            agent_defaults::claude_approval(AgentFamily::Claude)
+        );
+    }
+
+    #[test]
+    fn turn_settings_never_send_nil_effort_and_keep_a_stored_speed() {
+        let choice = |id: &str| crate::ChoiceOption {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+        };
+        let model = |id: &str, efforts: &[&str], default: Option<&str>| crate::ModelOption {
+            agent_family: AgentFamily::Codex,
+            capabilities: crate::ModelCapabilities::for_family(AgentFamily::Codex),
+            id: id.into(),
+            display_name: id.into(),
+            description: None,
+            model_specialty: None,
+            hidden: false,
+            reasoning_efforts: efforts.iter().map(|e| choice(e)).collect(),
+            default_reasoning_effort: default.map(str::to_owned),
+            service_tiers: vec![choice("default"), choice("priority")],
+            default_service_tier: None,
+            is_default: false,
+            provider_default: None,
+            native_ids: vec![],
+        };
+        let catalog = crate::RuntimeCatalog {
+            models: vec![
+                model("gpt-a", &["low", "medium", "xhigh"], Some("medium")),
+                model("gpt-b", &["low", "xhigh"], None),
+                model("plain", &[], None),
+            ],
+            ..Default::default()
+        };
+        let run = |m, e, t| execution_settings(&catalog, AgentFamily::Codex, m, e, t).unwrap();
+        // A legacy thread (nothing stored) and a stale effort both resolve.
+        assert_eq!(
+            run(None, None, None),
+            (
+                "gpt-a".into(),
+                Some("medium".into()),
+                Some("default".into())
+            )
+        );
+        assert_eq!(run(Some("gpt-b"), None, None).1.as_deref(), Some("low"));
+        assert_eq!(
+            run(Some("gpt-b"), Some("medium"), None).1.as_deref(),
+            Some("low")
+        );
+        assert_eq!(run(Some("plain"), Some("high"), None).1, None);
+        // A stored non-default speed is what reaches turn/start.
+        assert_eq!(
+            run(Some("gpt-a"), Some("xhigh"), Some("priority"))
+                .2
+                .as_deref(),
+            Some("priority")
+        );
+        assert_eq!(
+            run(Some("gpt-a"), None, Some("gone")).2.as_deref(),
+            Some("default")
+        );
+        let mut hidden_all = catalog.clone();
+        hidden_all.models.clear();
+        assert!(execution_settings(&hidden_all, AgentFamily::Codex, None, None, None).is_err());
     }
 
     // Contract: protected locations and whole-home folders cannot become
@@ -7177,5 +7654,285 @@ pub(crate) mod tests {
             std::os::unix::fs::symlink(&protected, &linked).unwrap();
             assert!(validate_folder(linked.to_str().unwrap(), &denied).is_err());
         }
+    }
+
+    async fn fork_response(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&body)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
+        )
+    }
+
+    fn fork_requests(dir: &FsPath, log: &str, method: &str) -> Vec<Value> {
+        std::fs::read_to_string(dir.join(log))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|request| request["method"] == method)
+            .collect()
+    }
+
+    // Contract: a fork is refused while the source is working, then becomes a new
+    // project thread in the same folder with the same settings, cut at the chosen
+    // turn, and the source is never touched.
+    #[tokio::test]
+    async fn forking_a_codex_thread_makes_an_independent_project_thread() {
+        let (dir, state, message) = handoff_fixture().await;
+        let source_folder = state
+            .store
+            .project_conversation("project-chat")
+            .await
+            .unwrap()
+            .unwrap()
+            .cwd;
+        let fork_from = |turn: Option<&str>| {
+            fork(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path("project-chat".into()),
+                Json(ForkRequest {
+                    last_turn_id: turn.map(str::to_owned),
+                }),
+            )
+        };
+        let (status, body) = fork_response(fork_from(Some("turn")).await).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.to_string().contains("still working in this chat"));
+        assert!(fork_requests(dir.path(), "requests-jsonl", "thread/fork").is_empty());
+
+        state
+            .store
+            .update_message_delivery(&message.id, "completed", Some("thread"), Some("turn"))
+            .await
+            .unwrap();
+        std::fs::write(
+            dir.path().join("native-thread.json"),
+            json!({"id":"forked-thread","cwd":source_folder,"projectId":"native-project"})
+                .to_string(),
+        )
+        .unwrap();
+        let (status, summary) = fork_response(fork_from(Some("turn")).await).await;
+        assert_eq!(status, StatusCode::CREATED, "{summary}");
+        crate::tests::validate_http_contract("projectThreadSummary", &summary);
+        assert_eq!(summary["title"], "Recovery (fork)");
+        assert_eq!(summary["family"], "codex");
+        let fork_id = summary["conversationId"].as_str().unwrap();
+
+        let requests = fork_requests(dir.path(), "requests-jsonl", "thread/fork");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["params"],
+            json!({"threadId":"thread","excludeTurns":true,"cwd":source_folder,"lastTurnId":"turn"})
+        );
+        let stored = state
+            .store
+            .project_conversation(fork_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.native_session_id.as_deref(), Some("forked-thread"));
+        assert_eq!(
+            (stored.cwd.as_str(), stored.access_mode.as_str()),
+            (source_folder.as_str(), "read_only")
+        );
+        assert_eq!(
+            state
+                .store
+                .runtime_binding(fork_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .thread_id,
+            "forked-thread"
+        );
+        assert_eq!(
+            state.store.project_fork_source(fork_id).await.unwrap(),
+            Some(("project-chat".into(), Some("turn".into())))
+        );
+        let source = state
+            .store
+            .project_conversation("project-chat")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.native_session_id.as_deref(), Some("thread"));
+        assert_eq!(source.title, "Recovery");
+
+        // The fake runtime answers every fork with the same thread, which is
+        // already attached, so a second fork of the latest turn is not saved.
+        let (status, _) = fork_response(fork_from(None).await).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let all = fork_requests(dir.path(), "requests-jsonl", "thread/fork");
+        assert_eq!(all.len(), 2);
+        assert!(all[1]["params"].get("lastTurnId").is_none());
+    }
+
+    // Contract: Claude forks through the bridge, then attaches the copy with the
+    // source's model and access; the bridge's refusal reaches the owner as is.
+    #[tokio::test]
+    async fn forking_a_claude_thread_attaches_the_bridge_copy() {
+        let (dir, mut state) = crate::ingestion::tests::fixture().await;
+        let source_folder = dir.path().join("project-source");
+        std::fs::create_dir(&source_folder).unwrap();
+        let roots = validate_folders(&[source_folder.to_string_lossy().into_owned()], &[]).unwrap();
+        state
+            .store
+            .create_project("project", "request", "hash", "Test", &roots, 0, "now")
+            .await
+            .unwrap();
+        state.projects = ProjectRuntime::configured(
+            dir.path().join("codex"),
+            "test".into(),
+            &dir.path().join("home"),
+            &dir.path().join("claude"),
+            crate::ingestion::notification_sink(state.store.clone()),
+        );
+        let entrypoint = dir.path().join("claude-bridge.py");
+        std::fs::write(
+            &entrypoint,
+            r#"import json, sys, os
+root = os.path.dirname(__file__)
+for line in sys.stdin:
+    r = json.loads(line)
+    if 'id' not in r: continue
+    m = r.get('method'); p = r.get('params', {}); result = {}
+    with open(root + '/claude-requests', 'a') as log: log.write(json.dumps({'method': m, 'params': p}) + '\n')
+    if m == 'initialize': result = {'wonderBridge': {'protocolVersion': 1, 'family': 'claude'}, 'capabilities': {'experimentalApi': True}}
+    elif m == 'project/session/fork':
+        if p.get('lastTurnId') == 'busy':
+            print(json.dumps({'id': r['id'], 'error': {'code': -32000, 'message': 'Wait for Claude to finish before forking this conversation.'}}), flush=True)
+            continue
+        result = {'sessionId': '99999999-8888-4777-8666-555555555555'}
+    elif m == 'project/session/attach': result = {'thread': {'id': 'claude-99999999-8888-4777-8666-555555555555'}}
+    print(json.dumps({'id': r['id'], 'result': result}), flush=True)
+"#,
+        )
+        .unwrap();
+        let config = wonder_app_server::BridgeLaunchConfig {
+            node_bin: "/usr/bin/python3".into(),
+            entrypoint,
+            state_dir: dir.path().join("claude-state"),
+            npm_cli: None,
+            wonder_version: "test".into(),
+        };
+        let client = Arc::new(Mutex::new(AppServerClient::unavailable(
+            "test".into(),
+            crate::ingestion::notification_sink(state.store.clone()),
+        )));
+        client
+            .lock()
+            .await
+            .restart_bridge(config.clone())
+            .await
+            .unwrap();
+        state.claude = Some(Arc::new(crate::claude::Runtime { client, config }));
+        let session = "11111111-2222-4333-8444-555555555555";
+        state
+            .store
+            .create_project_conversation(ProjectConversationInsert {
+                conversation_id: "claude-chat",
+                project_id: "project",
+                family: AgentFamily::Claude,
+                provider_store: &state.projects.claude_store,
+                native_session_id: Some(session),
+                cwd: source_folder.to_str().unwrap(),
+                roots_revision: 1,
+                title: "Refactor",
+                model: Some("claude:sonnet"),
+                effort: Some("high"),
+                service_tier: None,
+                access_mode: "workspace",
+                claude_approval: "accept_edits",
+                plan_mode: false,
+                creation_request_id: None,
+                now: "now",
+            })
+            .await
+            .unwrap();
+        state
+            .store
+            .bind_project_runtime(
+                "claude-chat",
+                AgentFamily::Claude,
+                &state.projects.claude_store,
+                &format!("claude-{session}"),
+                Some(session),
+                "now",
+            )
+            .await
+            .unwrap();
+        let fork_from = |turn: &str| {
+            fork(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path("claude-chat".into()),
+                Json(ForkRequest {
+                    last_turn_id: Some(turn.into()),
+                }),
+            )
+        };
+        let (status, body) = fork_response(fork_from("busy").await).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.to_string().contains("Wait for Claude to finish"),
+            "{body}"
+        );
+        assert_eq!(
+            state
+                .store
+                .project_conversations("project")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let (status, summary) = fork_response(fork_from("turn-1").await).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(summary["title"], "Refactor (fork)");
+        let fork_id = summary["conversationId"].as_str().unwrap();
+        let forks = fork_requests(dir.path(), "claude-requests", "project/session/fork");
+        assert_eq!(
+            forks.last().unwrap()["params"],
+            json!({"threadId": format!("claude-{session}"), "title": "Refactor (fork)", "lastTurnId": "turn-1"})
+        );
+        let attach =
+            &fork_requests(dir.path(), "claude-requests", "project/session/attach")[0]["params"];
+        assert_eq!(attach["sessionId"], "99999999-8888-4777-8666-555555555555");
+        assert_eq!(attach["model"], "claude:sonnet");
+        assert_eq!(attach["wonderPolicy"]["approvalMode"], "accept_edits");
+        let stored = state
+            .store
+            .project_conversation(fork_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.native_session_id.as_deref(),
+            Some("99999999-8888-4777-8666-555555555555")
+        );
+        assert_eq!(
+            (stored.effort.as_deref(), stored.claude_approval.as_str()),
+            (Some("high"), "accept_edits")
+        );
+        assert_eq!(
+            state
+                .store
+                .runtime_binding(fork_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .thread_id,
+            "claude-99999999-8888-4777-8666-555555555555"
+        );
+        assert_eq!(
+            state.store.project_fork_source(fork_id).await.unwrap(),
+            Some(("claude-chat".into(), Some("turn-1".into())))
+        );
     }
 }

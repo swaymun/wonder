@@ -175,7 +175,7 @@ pub(super) fn approval_options_for_bot(
     catalog: &RuntimeCatalog,
     bot: &StoredBot,
 ) -> Vec<ApprovalModeOption> {
-    if bot.agent_family == AgentFamily::Claude {
+    if bot.agent_family.provider().requires_permission_mode {
         return [ApprovalMode::AskForApproval, ApprovalMode::FullAccess]
             .into_iter()
             .map(|mode| ApprovalModeOption {
@@ -243,7 +243,7 @@ fn approval_option_values(
 }
 
 pub(super) fn approval_allowed(catalog: &RuntimeCatalog, bot: &StoredBot) -> bool {
-    if bot.agent_family == AgentFamily::Claude {
+    if bot.agent_family.provider().requires_permission_mode {
         return bot.approval_mode.as_deref() != Some("approve-for-me")
             && matches!(
                 bot.permission_mode.as_deref(),
@@ -375,7 +375,7 @@ pub(super) fn options(catalog: &RuntimeCatalog) -> Vec<serde_json::Value> {
 }
 
 pub(super) async fn verify_selected(state: &AppState, bot: &StoredBot) -> Result<(), String> {
-    if bot.agent_family == AgentFamily::Claude {
+    if bot.agent_family.provider().requires_permission_mode {
         crate::claude::policy(state, bot).await?;
         return file_access::dispatch_check(state, bot, bot.effective_permission_profile()).await;
     }
@@ -389,7 +389,7 @@ pub(super) async fn verify(
     runtime: &mut AppServerClient,
     bot: &StoredBot,
 ) -> Result<(), String> {
-    if bot.agent_family == AgentFamily::Claude {
+    if bot.agent_family.provider().requires_permission_mode {
         crate::claude::policy(state, bot).await?;
         return file_access::dispatch_check(state, bot, bot.effective_permission_profile()).await;
     }
@@ -601,6 +601,9 @@ pub(crate) mod tests {
                 default_reasoning_effort: None,
                 service_tiers: vec![],
                 default_service_tier: None,
+                is_default: false,
+                provider_default: None,
+                native_ids: vec![],
             });
         (dir, state)
     }

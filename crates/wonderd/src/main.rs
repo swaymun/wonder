@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bots = store.list_bots().await?;
     let mut permission_overrides = vec![bootstrap_profile];
     for bot in &bots {
-        if bot.permission_mode.is_some() || bot.agent_family == wonder_store::AgentFamily::Claude {
+        if bot.permission_mode.is_some() || bot.agent_family.provider().requires_permission_mode {
             continue;
         }
         let access = store.bot_file_access(&bot.id).await?;
@@ -131,7 +131,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env!("CARGO_PKG_VERSION").into(),
         wonderd::ingestion::notification_sink(store.clone()),
     );
-    let runtime_catalog = RuntimeCatalog::default();
+    let runtime_catalog = RuntimeCatalog {
+        preferences: store
+            .agent_default_preferences()
+            .await?
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
 
     let (events, _) = tokio::sync::broadcast::channel::<HostEventEnvelope>(256);
     let (revocations, _) = tokio::sync::broadcast::channel::<String>(64);

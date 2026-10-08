@@ -22,7 +22,33 @@ export function taskNotification(entry) {
     summary: tag(body, "summary"), outputFile: tag(body, "output-file") };
 }
 const syntheticUser = entry => Boolean(entry?.origin?.kind && entry.origin.kind !== "human") || taskNotification(entry) !== null;
+// Claude Code's desktop app appends each paste to the prompt wrapped as
+// `<pasted_content id="x">...</pasted_content id="x">` (the closing tag repeats
+// the id). The tags are transport markup; the owner sees the pasted words.
+export const unwrapPastes = text => !text.includes("<pasted_content") ? text : text.replace(
+  /<pasted_content id="([^"]*)">\n?([\s\S]*?)\n?<\/pasted_content id="\1">/g, (_, _id, body) => body).trim();
 const interruptMarker = text => /^\[Request interrupted by user/.test(text.trim());
+
+// The prompt that opens a turn: a human message, not a tool result, background
+// notice or interruption marker. `nativeTurns` splits history at the same entries.
+const opensTurn = entry => {
+  if (entry?.type !== "user" || entry.parent_tool_use_id) return false;
+  const content = entry.message?.content;
+  if (Array.isArray(content) && content.some(b => b?.type === "tool_result")) return false;
+  const text = unwrapPastes(textOf(content));
+  return Boolean(text.trim()) && !syntheticUser(entry) && !interruptMarker(text);
+};
+
+// The last transcript entry that belongs to the turn `turnId` (the uuid of the
+// prompt that opened it), so a fork can end exactly where that turn ends.
+export function turnEndMessageId(messages, turnId) {
+  let found = false, last = null;
+  for (const entry of messages) {
+    if (opensTurn(entry)) { if (found) break; found = entry.uuid === turnId; }
+    if (found && !entry.parent_tool_use_id && typeof entry.uuid === "string") last = entry.uuid;
+  }
+  return last;
+}
 
 // Wonder-originated turns reuse the owner's receipt from the bridge journal.
 export function nativeTurns(messages, journal = [], active = false) {
@@ -40,7 +66,7 @@ export function nativeTurns(messages, journal = [], active = false) {
         applyClaudeToolResult(item, block);
         if (item.type === "mcpToolCall") delete item.result;
       }
-      const text = textOf(content);
+      const text = unwrapPastes(textOf(content));
       if (results.length || !text.trim() || syntheticUser(entry)) continue;
       if (interruptMarker(text)) { if (turn) turn.interrupted = true; continue; }
       const receipt = known.get(entry.uuid);
@@ -73,7 +99,11 @@ export function nativeTurns(messages, journal = [], active = false) {
   for (const t of turns) markCommentary(t.items);
   const last = turns.at(-1);
   for (const t of turns) if (t.interrupted) { t.status = "interrupted"; delete t.interrupted; }
-  if (last && active) last.status = "inProgress";
+  if (last && active) {
+    last.status = "inProgress";
+    // A call still waiting for its result is running, not done.
+    for (const item of last.items) if (tools.get(item.id) === item && item.success === undefined) item.status = "inProgress";
+  }
   // Preserve the durable outcome of Wonder's own turns (failed, interrupted).
   for (const t of turns) {
     const receipt = known.get(t.id);
@@ -114,7 +144,8 @@ export function backgroundTasks(messages, live = false, agentFiles = []) {
         const background = block.input?.run_in_background === true || known?.background === true;
         if (!agent && !background) continue;
         tasks.set(block.id, { ...known, id: block.id, kind: agent ? "agent" : "command", background,
-          title: bounded(block.input?.description, 200) ?? known?.title ?? (agent ? "Agent task" : "Background command"),
+          title: bounded(block.input?.description, 200) ?? known?.title
+            ?? (agent ? "Agent task" : bounded(block.input?.command?.split?.("\n")[0], 80) ?? "Background command"),
           role: agent ? bounded(block.input?.subagent_type, 80) ?? known?.role ?? null : null, status: known?.status ?? "running",
           request: bounded(agent ? block.input?.prompt : block.input?.command, 8000),
           summary: null, result: null, outputFile: null, taskId: known?.taskId ?? null, startedAt: entry.timestamp ?? known?.startedAt ?? null });
@@ -127,17 +158,25 @@ export function backgroundTasks(messages, live = false, agentFiles = []) {
       const text = bounded(toolContent(block.content).filter(c => c.type === "inputText").map(c => c.text).join("\n"), 32_000);
       // Claude Code may run an agent in the background without the explicit flag;
       // its immediate result only acknowledges the launch.
-      if (task.kind === "agent" && /^Async agent launched/i.test(text ?? "")) { task.background = true; continue; }
+      if (task.kind === "agent" && /^Async agent launched/i.test(text ?? "")) {
+        task.background = true;
+        task.taskId ??= text.match(/\bagentId: ([A-Za-z0-9_-]{1,64})/)?.[1] ?? null;
+        continue;
+      }
       // A background launch only acknowledges the start; the notice carries its outcome.
       if (block.is_error === true) { task.status = "failed"; task.result = text; }
       else if (!task.background) { task.status = "completed"; task.result = text; }
     }
     const notice = taskNotification(entry);
     if (!notice?.toolUseId) continue;
-    let task = tasks.get(notice.toolUseId);
+    // A resumed agent (SendMessage) notifies again under the resuming call's
+    // tool-use ID with the same task ID; it is the same task, not a new one.
+    let task = tasks.get(notice.toolUseId)
+      ?? (notice.taskId ? [...tasks.values()].find(t => t.taskId === notice.taskId) : undefined);
     if (!task) {
       // The launch scrolled out of the readable transcript; the notice still names the task.
-      task = { id: notice.toolUseId, kind: "command", background: true,
+      const agent = /^Agent "/.test(notice.summary ?? "");
+      task = { id: notice.toolUseId, kind: agent ? "agent" : "command", background: true,
         title: bounded(notice.summary?.match(/"([^"]{1,200})"/)?.[1], 200) ?? "Background task", role: null,
         status: "running", request: null, summary: null, result: null, outputFile: null, taskId: null, startedAt: entry.timestamp ?? null };
       tasks.set(notice.toolUseId, task);

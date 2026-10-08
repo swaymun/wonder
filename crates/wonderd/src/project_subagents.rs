@@ -16,6 +16,8 @@ use wonder_store::{AgentFamily, StoredProject, StoredProjectConversation};
 
 const MAX_CHILDREN: usize = 100;
 const PAGE_SIZE: usize = 100;
+// The bridge returns an agent's latest 200 steps plus its task and result text.
+const CLAUDE_TASK_ITEMS: usize = 256;
 const MAX_ARCHIVE_LOOKUP_PAGES: usize = 10;
 
 struct ProjectParent {
@@ -110,11 +112,7 @@ async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent
     if roots_valid.is_err() {
         return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
-    let store = match conversation.family {
-        AgentFamily::Codex => &state.projects.codex_store,
-        AgentFamily::Claude => &state.projects.claude_store,
-    };
-    if &conversation.provider_store != store {
+    if conversation.provider_store != crate::providers::provider_store(state, conversation.family) {
         return Err(Box::new(StatusCode::CONFLICT.into_response()));
     }
     let native_session = conversation.native_session_id.clone().ok_or_else(|| {
@@ -170,8 +168,6 @@ async fn parent(state: &AppState, conversation_id: &str) -> Result<ProjectParent
     })
 }
 
-/// Codex binds the provider thread itself. Claude binds Wonder's bridge thread,
-/// whose session is the native Claude Code session.
 fn binding_matches(
     family: AgentFamily,
     native_session: &str,
@@ -179,10 +175,7 @@ fn binding_matches(
 ) -> bool {
     binding.execution_scope == "projects"
         && binding.family == family
-        && match family {
-            AgentFamily::Codex => binding.thread_id == native_session,
-            AgentFamily::Claude => binding.session_id.as_deref() == Some(native_session),
-        }
+        && crate::providers::binds_native_session(family, native_session, binding)
 }
 
 fn verified_child(
@@ -337,7 +330,7 @@ pub(crate) async fn list(
         }
         Err(response) => return *response,
     };
-    if parent.conversation.family == AgentFamily::Claude {
+    if parent.conversation.family.provider().transcript_agent_tasks {
         // Claude agent tasks and background commands come from the session
         // transcript itself; they have no archive or paging of their own.
         if query.archived == Some(true) || query.cursor.is_some() {
@@ -442,7 +435,7 @@ pub(crate) async fn transcript(
         Ok(parent) => parent,
         Err(response) => return *response,
     };
-    if parent.conversation.family == AgentFamily::Claude {
+    if parent.conversation.family.provider().transcript_agent_tasks {
         return claude_transcript(&state, &parent, &conversation_id, &thread_id).await;
     }
     let read = match request(
@@ -594,6 +587,27 @@ async fn claude_tasks(
         .collect())
 }
 
+/// The agent's own work, shaped like Codex's: its messages plus the commands,
+/// file changes, tool calls and plans it ran. Items without an ID, or messages
+/// without text, have nothing to show.
+fn claude_transcript_items(task_id: &str, entries: &[Value]) -> Vec<history::AppServerThreadItem> {
+    entries
+        .iter()
+        .filter(|item| {
+            item.get("id").and_then(Value::as_str).is_some()
+                && match item.get("type").and_then(Value::as_str) {
+                    Some("agentMessage") => item.get("text").and_then(Value::as_str).is_some(),
+                    Some("commandExecution" | "fileChange" | "mcpToolCall" | "plan") => true,
+                    _ => false,
+                }
+        })
+        .map(|item| history::AppServerThreadItem {
+            turn_id: task_id.to_owned(),
+            item: item.clone(),
+        })
+        .collect()
+}
+
 async fn claude_transcript(
     state: &AppState,
     parent: &ProjectParent,
@@ -620,22 +634,11 @@ async fn claude_transcript(
     let Some(entries) = result
         .get("items")
         .and_then(Value::as_array)
-        .filter(|items| items.len() <= PAGE_SIZE)
+        .filter(|items| items.len() <= CLAUDE_TASK_ITEMS)
     else {
         return unavailable("Claude returned invalid agent task history.");
     };
-    let items: Vec<history::AppServerThreadItem> = entries
-        .iter()
-        .filter(|item| {
-            item.get("type").and_then(Value::as_str) == Some("agentMessage")
-                && item.get("id").and_then(Value::as_str).is_some()
-                && item.get("text").and_then(Value::as_str).is_some()
-        })
-        .map(|item| history::AppServerThreadItem {
-            turn_id: task_id.to_owned(),
-            item: item.clone(),
-        })
-        .collect();
+    let items = claude_transcript_items(task_id, entries);
     let projection = history::conversation_thread_projection_with_items(
         Some(task_id.to_owned()),
         &[],
@@ -725,6 +728,28 @@ mod tests {
             row(json!({"id":"toolu_4","kind":"shell","title":"x","status":"running"})).is_none()
         );
         assert!(row(json!({"id":"","kind":"command","title":"x","status":"running"})).is_none());
+    }
+
+    // An agent task's transcript keeps the commands and edits the agent ran
+    // beside its messages, in order; internal or malformed entries are dropped.
+    #[test]
+    fn claude_agent_transcript_keeps_tool_work_in_order() {
+        let entries = [
+            json!({"type":"agentMessage","id":"m1","text":"Looking","status":"completed"}),
+            json!({"type":"commandExecution","id":"c1","command":"ls","status":"completed","success":true,"aggregatedOutput":"a"}),
+            json!({"type":"fileChange","id":"f1","status":"failed","changes":[]}),
+            json!({"type":"mcpToolCall","id":"t1","server":"Claude","tool":"Grep","status":"inProgress"}),
+            json!({"type":"userMessage","id":"u1","content":[]}),
+            json!({"type":"commandExecution","command":"no id"}),
+            json!({"type":"agentMessage","id":"m2"}),
+        ];
+        let items = claude_transcript_items("task", &entries);
+        let ids: Vec<_> = items
+            .iter()
+            .map(|i| i.item["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["m1", "c1", "f1", "t1"]);
+        assert!(items.iter().all(|i| i.turn_id == "task"));
     }
 
     #[test]

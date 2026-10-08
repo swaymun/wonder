@@ -4,12 +4,13 @@ import WonderPairing
 /// One shared visual envelope keeps both controls aligned as text scales.
 private struct ComposerStatusPill: ViewModifier {
     @ScaledMetric(relativeTo: .subheadline) private var height: CGFloat = 36
+    @Environment(\.wonderTheme) private var theme
     func body(content: Content) -> some View {
         content
             .font(.subheadline.weight(.medium))
             .padding(.horizontal, 12)
             .frame(minWidth: 44, minHeight: height)
-            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+            .background(theme.surface, in: Capsule())
             .frame(minHeight: 44)
             .contentShape(Rectangle())
     }

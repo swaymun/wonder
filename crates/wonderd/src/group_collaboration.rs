@@ -133,11 +133,24 @@ async fn config(state: &AppState, id: &str) -> Result<Option<Config>, String> {
         .map(|v| serde_json::from_str(&v).map_err(|e| e.to_string()))
         .transpose()
 }
+/// The provider that lists `model`. A group stores only its model id, so the
+/// catalog is the authority; a model no provider lists is unavailable.
+async fn listed_family(state: &AppState, model: &str) -> Result<AgentFamily, String> {
+    state
+        .runtime_catalog
+        .read()
+        .await
+        .family_of(model)
+        .ok_or_else(|| {
+            "The selected model is unavailable on this computer. Change Model settings.".into()
+        })
+}
+
 pub(super) async fn family(state: &AppState, id: &str) -> Result<AgentFamily, String> {
-    Ok(config(state, id)
-        .await?
-        .map(|c| AgentFamily::for_model(Some(&c.routing.model)))
-        .unwrap_or(AgentFamily::Codex))
+    match config(state, id).await? {
+        Some(c) => listed_family(state, &c.routing.model).await,
+        None => Ok(AgentFamily::default()),
+    }
 }
 
 pub(super) async fn enabled(state: &AppState, id: &str) -> bool {
@@ -192,7 +205,7 @@ async fn validate_settings(state: &AppState, settings: &ModelSettings) -> Result
         return Err("The selected speed is unavailable. Change Model settings.".into());
     }
     if let Some(approval) = settings.approval_mode {
-        let allowed = if AgentFamily::for_model(Some(&settings.model)) == AgentFamily::Claude {
+        let allowed = if !model.agent_family.provider().automatic_approval_reviewer {
             approval != permission_modes::ApprovalMode::ApproveForMe
         } else {
             permission_modes::approval_options(&catalog, None)
@@ -221,7 +234,7 @@ async fn structured(
         .update_admission
         .dispatch_guard(&state.dispatch_lock)
         .await;
-    let family = AgentFamily::for_model(Some(&settings.model));
+    let family = listed_family(state, &settings.model).await?;
     let client = claude::client(state, family)?;
     let rpc = client.lock().await.rpc();
     let mut thread_params = json!({
@@ -1102,7 +1115,7 @@ pub(super) async fn execution_bot(
         Some("workspace" | "full-access") => assignment.access == "read",
         _ => return Err("Choose this Bot's access mode in Bot settings before using it in a conversational group.".into()),
     };
-    bot.agent_family = AgentFamily::for_model(Some(&cfg.routing.model));
+    bot.agent_family = listed_family(state, &cfg.routing.model).await?;
     bot.model = Some(cfg.routing.model.clone());
     bot.reasoning_effort =
         (!cfg.routing.reasoning_effort.is_empty()).then(|| cfg.routing.reasoning_effort.clone());
@@ -1137,7 +1150,8 @@ pub(super) async fn detail(State(state): State<AppState>, Path(id): Path<String>
         Ok(p) => p,
         Err(e) => return error(e),
     };
-    Json(json!({"configuration":cfg,"runs":plans.into_iter().filter_map(|(id,p)|serde_json::from_str::<Value>(&p).ok().map(|p|json!({"parentMessageId":id,"plan":p}))).collect::<Vec<_>>()})).into_response()
+    let agent_family = listed_family(&state, &cfg.routing.model).await.ok();
+    Json(json!({"configuration":cfg,"agentFamily":agent_family,"runs":plans.into_iter().filter_map(|(id,p)|serde_json::from_str::<Value>(&p).ok().map(|p|json!({"parentMessageId":id,"plan":p}))).collect::<Vec<_>>()})).into_response()
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1160,9 +1174,14 @@ pub(super) async fn configure(
         Ok(Some(c)) => c,
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    if AgentFamily::for_model(Some(&cfg.routing.model))
-        != AgentFamily::for_model(Some(&input.routing.model))
-    {
+    let same_family = match (
+        listed_family(&state, &cfg.routing.model).await,
+        listed_family(&state, &input.routing.model).await,
+    ) {
+        (Ok(current), Ok(chosen)) => current == chosen,
+        (Err(e), _) | (_, Err(e)) => return error(e),
+    };
+    if !same_family {
         return error("Choose a model from this Group Chat’s agent family.");
     }
     cfg.instructions = input.instructions;
@@ -1207,7 +1226,9 @@ pub(super) async fn summary(state: &AppState, channel: StoredChannel) -> Value {
                 }
             }
         }
-        value["collaboration"] = json!({"configuration":cfg,"runs":runs});
+        let agent_family = listed_family(state, &cfg.routing.model).await.ok();
+        value["collaboration"] =
+            json!({"configuration":cfg,"agentFamily":agent_family,"runs":runs});
     }
     value
 }
@@ -1738,8 +1759,8 @@ pub(super) async fn accept_settings(
     let mut cfg = config(state, group)
         .await?
         .ok_or("Update this group before selecting participation settings")?;
-    if AgentFamily::for_model(Some(&cfg.routing.model))
-        != AgentFamily::for_model(Some(&settings.model))
+    if listed_family(state, &cfg.routing.model).await?
+        != listed_family(state, &settings.model).await?
     {
         return Err("Choose a model from this Group Chat’s agent family.".into());
     }
@@ -1959,9 +1980,13 @@ mod tests {
     #[tokio::test]
     async fn manual_creation_is_idempotent_and_initialization_is_hidden() {
         use crate::permission_modes::tests::{call, fixture};
-        for (selected, effort) in [("fake", "high"), ("claude:haiku", "")] {
+        for (selected, effort, expected_family) in [
+            ("fake", "high", AgentFamily::Codex),
+            ("claude:haiku", "", AgentFamily::Claude),
+        ] {
             let (_dir, state) = fixture().await;
             state.runtime_catalog.write().await.apply_models_page(
+                AgentFamily::Claude,
                 &json!({"data":[{"id":"claude:haiku","displayName":"Haiku 4.5"}]}),
             );
             state
@@ -2051,10 +2076,7 @@ mod tests {
                 "A route must never promote the Bot's permissions"
             );
             assert_eq!(execution.permission_profile, ":read-only");
-            assert_eq!(
-                execution.agent_family,
-                AgentFamily::for_model(Some(selected))
-            );
+            assert_eq!(execution.agent_family, expected_family);
             assert_eq!(execution.model.as_deref(), Some(selected));
             assert_eq!(
                 state.store.bot("bot").await.unwrap().unwrap().agent_family,
@@ -2082,9 +2104,13 @@ mod tests {
     #[tokio::test]
     async fn new_members_accept_models_without_reasoning_choices_and_retries_reuse_them() {
         use crate::permission_modes::tests::{call, fixture};
-        for selected in ["fake", "claude:haiku"] {
+        for (selected, expected_family) in [
+            ("fake", AgentFamily::Codex),
+            ("claude:haiku", AgentFamily::Claude),
+        ] {
             let (_dir, state) = fixture().await;
             state.runtime_catalog.write().await.apply_models_page(
+                AgentFamily::Claude,
                 &json!({"data":[{"id":"claude:haiku","displayName":"Haiku 4.5"}]}),
             );
             let id = uuid::Uuid::new_v4().to_string();
@@ -2102,7 +2128,7 @@ mod tests {
             let bot = state.store.bot(member_id).await.unwrap().unwrap();
             assert_eq!(bot.model.as_deref(), Some(selected));
             assert_eq!(bot.reasoning_effort, None);
-            assert_eq!(bot.agent_family, AgentFamily::for_model(Some(selected)));
+            assert_eq!(bot.agent_family, expected_family);
             let messages = state
                 .store
                 .messages_for_conversation(bot.conversation_id.as_deref().unwrap())

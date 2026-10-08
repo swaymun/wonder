@@ -1844,6 +1844,7 @@ pub(super) mod tests {
         {
             let mut catalog = state.runtime_catalog.write().await;
             catalog.apply_models_page(
+                wonder_store::AgentFamily::Codex,
                 &serde_json::json!({"data":[{"id":"test-model","isDefault":true}]}),
             );
             catalog.apply_permission_profiles(

@@ -1,0 +1,11 @@
+# A Project thread whose history holds a desktop paste shows the pasted words, with
+# no pasted_content tags. The host unwraps the markup (claude-runtime tests); the
+# fixture serves history as the host now projects it. Nothing is sent.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-actions
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id pinned-thread:codex:read-fixture --timeout 20
+tap --id pinned-thread:codex:read-fixture
+wait --contains "Continue the project at:" --timeout 20
+wait --contains "pasted_content" --gone --timeout 3
+shot desktop-paste

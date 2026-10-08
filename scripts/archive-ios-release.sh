@@ -28,10 +28,16 @@ for artifact in Wonder.xcarchive archive.log source-commit.txt source-status.txt
   [[ ! -e "$OUT/$artifact" && ! -L "$OUT/$artifact" ]] || { echo 'Use a new output directory; preserve prior evidence' >&2; exit 2; }
 done
 cd "$ROOT_DIR"
-git rev-parse HEAD > "$OUT/source-commit.txt"
-git status --porcelain > "$OUT/source-status.txt"
-git diff --binary HEAD > "$OUT/source-diff.patch"
-python3 - "$OUT" <<'PY'
+# wonder-remote --ref copies have no .git; they are exactly the named commit
+# and pass its identity, so there is no working-tree status, diff or new file.
+if [[ -n "${WONDER_SOURCE_COMMIT:-}" ]] && ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "$WONDER_SOURCE_COMMIT" > "$OUT/source-commit.txt"
+  : > "$OUT/source-status.txt"
+else
+  git rev-parse HEAD > "$OUT/source-commit.txt"
+  git status --porcelain > "$OUT/source-status.txt"
+  git diff --binary HEAD > "$OUT/source-diff.patch"
+  python3 - "$OUT" <<'PY'
 import subprocess, sys, tarfile
 from pathlib import Path
 paths = subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '-z']).split(b'\0')
@@ -41,6 +47,7 @@ with tarfile.open(Path(sys.argv[1]) / 'source-new-files.tar.gz', 'w:gz') as arch
             path = Path(raw.decode())
             if path.is_file(): archive.add(path, arcname=str(path), recursive=False)
 PY
+fi
 if ! xcodebuild -project apps/ios/Wonder.xcodeproj -scheme "$SCHEME" WONDER_APNS_ENVIRONMENT=production \
   -configuration "$CONFIGURATION" -destination 'generic/platform=iOS' \
   -archivePath "$OUT/Wonder.xcarchive" -derivedDataPath "$OUT/DerivedData" \

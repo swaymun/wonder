@@ -135,13 +135,9 @@ pub(crate) async fn discover(
         .result
         .ok_or("Claude models are temporarily unavailable.")?;
     let mut discovered = RuntimeCatalog::default();
-    discovered.apply_models_page(&models);
-    if discovered.models.is_empty()
-        || discovered
-            .models
-            .iter()
-            .any(|m| AgentFamily::for_model(Some(&m.id)) != AgentFamily::Claude)
-    {
+    // The bridge lists only its own namespaced models.
+    let refused = discovered.apply_models_page(AgentFamily::Claude, &models);
+    if discovered.models.is_empty() || refused > 0 {
         return Err(
             "Claude returned an incompatible model list. Update Wonder on your Mac.".into(),
         );
@@ -149,8 +145,9 @@ pub(crate) async fn discover(
     let mut catalog = state.runtime_catalog.write().await;
     catalog
         .models
-        .retain(|m| AgentFamily::for_model(Some(&m.id)) != AgentFamily::Claude);
+        .retain(|m| m.agent_family != AgentFamily::Claude);
     catalog.models.extend(discovered.models);
+    catalog.resolve_defaults();
     Ok(())
 }
 

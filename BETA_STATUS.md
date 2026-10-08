@@ -1,12 +1,14 @@
 # Wonder beta status
 
-On October 7, Wonder Testing Release 1.0 (47) and production Release 1.0 (103)
-uploaded and processed successfully. Testing 47 is available in internal Owner
-Beta; production 103's tester availability was not checked. TestFlight installation
-remains unverified. Mac 1.0.125 is Developer ID signed, notarized and stapled, its
-DMG passed Gatekeeper and artifact checks, and it is installed over 1.0.124 with
-passing signature, Gatekeeper, `/healthz` and `/readyz` checks. No external beta
-review, public enrollment or new public Mac binary release was requested.
+On October 8, Wonder Testing Release 1.0 (48) and production Release 1.0 (104)
+uploaded and processed successfully, both archived on the Mac mini with Xcode 27.1
+(the first builds with the iOS 27.1 SDK). Testing 48 is available in internal
+Owner Beta; production 104's tester availability was not checked. TestFlight
+installation remains unverified. Mac 1.0.126 was built on the Mac mini, Developer
+ID signed, notarized and stapled; its DMG passed Gatekeeper and artifact checks,
+and it is installed over 1.0.125 with passing signature, Gatekeeper and `/readyz`
+checks. No external beta review, public enrollment or new public Mac binary
+release was requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -17,12 +19,23 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (103) uploaded and processed; tester availability not checked. Built from clean, pushed source (`f81d264d`). TestFlight installation remains unverified. |
-| Wonder Testing | Blue Release 1.0 (47) uploaded, processed and available in automatic Owner Beta, from the same source as production 103. Builds 45 and 46 are superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.125 (from `6c99f64e`; later commits change only the iPhone app) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `1c944ff976787069eabdd6b79bc36f2340fd4749abf55e8d8cb4ac7d8319f978`. |
+| iPhone and iPad | Production Release 1.0 (104) uploaded and processed; tester availability not checked. Built on the Mac mini from clean, pushed source (`58871f0f`) with Xcode 27.1. TestFlight installation remains unverified. |
+| Wonder Testing | Blue Release 1.0 (48) uploaded, processed and available in automatic Owner Beta, from the same source as production 104. Build 47 is superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.126 (from `58871f0f`, built on the Mac mini) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `5b1f0f16f47bd8cc4346237a2ed46af0fc7523743fd40e91a4e0e6b3cf083040`. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). The iOS archives and the Mac app came from clean, pushed internal source. Third-party components retain their own licenses. |
 
-Testing 47 and production 103 show pending permission requests and questions as
+Testing 48, production 104 and Mac 1.0.126 add: host-resolved model, effort and
+speed defaults with a per-provider Default models screen; the phone adopting the
+model and effort last used in the desktop app; switching a Project thread between
+Codex and Claude from the model picker, with a budgeted history handoff (ported
+from t3code, MIT); Project agent tools to list, read, message, wait for and
+delegate to other threads, with one batched wake-up; forking a thread; Copy
+message, Select text, Copy as Markdown and Copy folder path; 21 themes including
+four photo themes, a distinct sidebar and syntax-highlighted code; Markdown
+Preview/Source and JSON/JSON Lines Formatted/Raw viewers; Claude agent tasks that
+show their commands and edits; and desktop pastes shown as plain text.
+
+Testing 47 and production 103 showed pending permission requests and questions as
 a pill in the composer row beside Files ("Permission", "Question" or "N
 requests"). Like Files, it replaces the conversation with the requests and
 returns to it; answering the last one returns automatically. The inline approval

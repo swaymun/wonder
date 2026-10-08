@@ -95,13 +95,15 @@ public enum AgentFamily: String, Codable, CaseIterable, Sendable, Identifiable {
     case codex, claude
     public var id: String { rawValue }
     public var title: String { self == .claude ? "Claude" : "Codex" }
-    public init(model: String?) { self = model?.hasPrefix("claude:") == true ? .claude : .codex }
+    /// The family the host sent. A host that sends none predates Claude, so the
+    /// conversation is Codex; the family is never read from a model id.
+    public init(host value: String?) { self = value.flatMap(AgentFamily.init(rawValue:)) ?? .codex }
 }
 
 public struct ManagedBot: Codable, Identifiable, Sendable {
     public var modelSelectionRevision: Int? = nil
     public var agentFamily: String? = nil
-    public var family: AgentFamily { agentFamily.flatMap(AgentFamily.init(rawValue:)) ?? AgentFamily(model: model) }
+    public var family: AgentFamily { AgentFamily(host: agentFamily) }
     public let id: String
     public let name: String
     public let role: String
@@ -186,7 +188,7 @@ public struct BotOptions: Decodable, Sendable {
     }
     public struct Model: Decodable, Identifiable, Sendable {
         public var agentFamily: String? = nil
-        public var family: AgentFamily { agentFamily.flatMap(AgentFamily.init(rawValue:)) ?? AgentFamily(model: id) }
+        public var family: AgentFamily { AgentFamily(host: agentFamily) }
         public struct Capabilities: Decodable, Sendable {
             public let guide: Bool?
             public let goals: Bool?
@@ -200,12 +202,17 @@ public struct BotOptions: Decodable, Sendable {
         public let serviceTiers: [Choice]?
         public let defaultServiceTier: String?
         public let defaultReasoningEffort: String?
+        /// The host's pick for this provider when a thread has no model yet.
+        public var isDefault: Bool? = nil
     }
     public let models: [Model]
     public let timezone: String?
     public let allowedApprovalPolicies: [String]
     public func approvalChoices(model: String?) -> [ApprovalMode]? {
-        let family = AgentFamily(model: (model?.isEmpty == false ? model : models.first(where: { !$0.hidden })?.id))
+        // The provider that listed the model decides its family. A model the
+        // host did not list has no approval choices.
+        let listed = model?.isEmpty == false ? models.first(where: { $0.id == model }) : models.first(where: { !$0.hidden })
+        guard let family = listed?.family else { return nil }
         return permissionsByFamily?[family.rawValue]?.approvalModes ?? approvalModes
     }
 }

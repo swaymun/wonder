@@ -72,6 +72,22 @@ public struct SubagentListResponse: Codable, Sendable {
     public let subagents: [SubagentSummary]
 }
 
+/// Who wrote a message when another thread, or Wonder reporting finished
+/// delegated tasks, did instead of the owner.
+public struct MessageSource: Codable, Equatable, Sendable {
+    /// `thread`, `delegation` or `wake`.
+    public let kind: String
+    public let sourceConversationId: String?
+    public let sourceTitle: String
+    public init(kind: String, sourceConversationId: String? = nil, sourceTitle: String) {
+        self.kind = kind; self.sourceConversationId = sourceConversationId; self.sourceTitle = sourceTitle
+    }
+    /// A short, user-facing label for a message another thread wrote.
+    public var fromLabel: String? { kind == "wake" ? nil : "From " + sourceTitle }
+    /// Wonder's own report that delegated tasks finished; shown as a system row.
+    public var isWake: Bool { kind == "wake" }
+}
+
 public struct ConversationMessage: Codable, Identifiable, Sendable {
     public var clientMessageId: String?
     public var codexTurnId: String?
@@ -82,6 +98,7 @@ public struct ConversationMessage: Codable, Identifiable, Sendable {
     public let state: String
     public let createdAt: String
     public let attachmentIds: [String]
+    public var source: MessageSource?
     public var id: String { messageId }
     /// Removing queued work cancels the local message before any runtime saw it.
     public var wasCancelledBeforeDispatch: Bool {
@@ -197,14 +214,14 @@ public struct ConversationSnapshot: Codable, Sendable {
                     let speaker: String = user ? "You" : (message ? author : "Activity")
                     return ReadRow(id: identity, author: speaker,
                                    text: durable?.body ?? text, isUser: user, timestamp: durable?.createdAt ?? item.createdAt,
-                                   turnId: turn.id, item: item, attachmentIds: durable?.attachmentIds ?? [])
+                                   turnId: turn.id, item: item, attachmentIds: durable?.attachmentIds ?? [], source: durable?.source)
                 }
             }
             // Live projections can precede thread hydration. Merge by identity so
             // accepted sends and in-progress assistant text remain visible.
             let userIDs = Set(rows.filter(\.isUser).map(\.id))
             let missingUsers = messages.filter { !$0.wasCancelledBeforeDispatch && !userIDs.contains("user-" + ($0.clientMessageId ?? $0.messageId)) }.map {
-                ReadRow(id: "user-" + ($0.clientMessageId ?? $0.messageId), author: "You", text: $0.body, isUser: true, timestamp: $0.createdAt, attachmentIds: $0.attachmentIds)
+                ReadRow(id: "user-" + ($0.clientMessageId ?? $0.messageId), author: "You", text: $0.body, isUser: true, timestamp: $0.createdAt, attachmentIds: $0.attachmentIds, source: $0.source)
             }
             var merged = rows
             for message in assistantMessages {
@@ -222,7 +239,7 @@ public struct ConversationSnapshot: Codable, Sendable {
             let visible = (merged + missingUsers).filter { !(!$0.isUser && $0.nativeQuestion == nil && ($0.item == nil || $0.item?.type == "agentMessage") && $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && seen.insert($0.id).inserted }.sorted { $0.time < $1.time }
             return ReadRow.reconcilingQuestions(visible)
         }
-        return (messages.filter { !$0.wasCancelledBeforeDispatch }.map { ReadRow(id: "user-" + ($0.clientMessageId ?? $0.messageId), author: "You", text: $0.body, isUser: true, timestamp: $0.createdAt, attachmentIds: $0.attachmentIds) }
+        return (messages.filter { !$0.wasCancelledBeforeDispatch }.map { ReadRow(id: "user-" + ($0.clientMessageId ?? $0.messageId), author: "You", text: $0.body, isUser: true, timestamp: $0.createdAt, attachmentIds: $0.attachmentIds, source: $0.source) }
          + assistantMessages.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.map { ReadRow(id: $0.rowId, author: author, text: $0.text, isUser: false, timestamp: $0.createdAt) })
         .sorted { $0.time < $1.time }
     }
@@ -552,6 +569,8 @@ private enum ReadTimestamp {
 public struct ReadRow: Identifiable, Sendable {
     public let groupStatus: String?
     public let attachmentIds: [String]
+    /// Set when another thread, or Wonder reporting finished tasks, wrote this.
+    public let source: MessageSource?
     /// Prepared while projecting the cached row so command wrapper scanning
     /// never runs from a SwiftUI body update.
     public let commandSummary: CommandSummary?
@@ -575,9 +594,11 @@ public struct ReadRow: Identifiable, Sendable {
     /// Commentary is visible Bot speech, never private reasoning or a tool result.
     public var isCommentary: Bool { !isUser && item?.type == "agentMessage" && item?.payload?["phase"]?.string == "commentary" }
     public init(id: String, author: String, text: String, isUser: Bool, timestamp: String, authorId: String? = nil,
-                turnId: String? = nil, item: ReadItem? = nil, attachmentIds: [String] = [], groupStatus: String? = nil) {
+                turnId: String? = nil, item: ReadItem? = nil, attachmentIds: [String] = [], groupStatus: String? = nil,
+                source: MessageSource? = nil) {
         self.groupStatus = groupStatus
         self.attachmentIds = attachmentIds
+        self.source = source
         self.turnId = turnId; self.item = item
         self.commandSummary = item.flatMap(CommandSummary.prepare)
         self.fileChangeSummary = item.flatMap(FileChangeSummary.prepare)
@@ -778,6 +799,9 @@ public final class ProjectionWriter: @unchecked Sendable {
 
 public struct GroupCollaboration: Codable, Sendable {
     public var configuration: Configuration
+    /// The provider that lists the group's model, as sent by the host.
+    public var agentFamily: String? = nil
+    public var family: AgentFamily { AgentFamily(host: agentFamily) }
     public var runs: [Run]
     public struct Configuration: Codable, Sendable {
         public var instructions: String

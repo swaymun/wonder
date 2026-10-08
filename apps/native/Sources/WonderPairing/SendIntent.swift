@@ -9,6 +9,8 @@ public struct SendRequest: Codable, Sendable {
     public var modelSelectionRevision: Int? = nil
     public var groupRouting: NewBotDefaults? = nil
     public var expectedTurnId: String?
+    /// A Project thread's model for this message alone; see `ProjectMessageModel`.
+    public var projectModel: ProjectMessageModel? = nil
 }
 
 public struct SendReceipt: Codable, Sendable {
@@ -100,14 +102,14 @@ public struct ComposerIntent: Codable, Sendable {
         stagedFiles?.removeAll { $0.id == id }
         draftAttachmentIds?.removeAll { $0 == id }
     }
-    public mutating func begin(device: String, clientMessageID: String = UUID().uuidString, expectedTurnId: String? = nil, groupRouting: NewBotDefaults? = nil, modelSelectionRevision: Int? = nil) throws {
+    public mutating func begin(device: String, clientMessageID: String = UUID().uuidString, expectedTurnId: String? = nil, groupRouting: NewBotDefaults? = nil, modelSelectionRevision: Int? = nil, projectModel: ProjectMessageModel? = nil) throws {
         guard pending == nil else { throw SendFailure.pending }
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(stagedFiles ?? []).isEmpty || !(draftAttachmentIds ?? []).isEmpty else { throw SendFailure.empty }
         guard draft.utf8.count <= 65536 else { throw SendFailure.tooLarge }
         guard attachmentCount <= 4 else { throw FileFailure.tooLarge }
         guard (stagedFiles ?? []).allSatisfy({ $0.uploaded != nil }) else { throw FileFailure.notUploaded }
         pending = PendingSend(request: SendRequest(deviceId: device, clientMessageId: clientMessageID,
-            body: draft, attachmentIds: (stagedFiles ?? []).compactMap { $0.uploaded?.id } + (draftAttachmentIds ?? []), modelSelectionRevision: modelSelectionRevision, groupRouting: groupRouting, expectedTurnId: expectedTurnId), createdAt: ISO8601DateFormatter().string(from: Date()))
+            body: draft, attachmentIds: (stagedFiles ?? []).compactMap { $0.uploaded?.id } + (draftAttachmentIds ?? []), modelSelectionRevision: modelSelectionRevision, groupRouting: groupRouting, expectedTurnId: expectedTurnId, projectModel: projectModel), createdAt: ISO8601DateFormatter().string(from: Date()))
         draft = ""
         stagedFiles = nil
         draftAttachmentIds = nil

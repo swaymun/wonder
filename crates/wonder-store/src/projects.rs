@@ -74,6 +74,10 @@ pub struct StoredProjectConversation {
     /// How a Claude thread asks before acting; always `ask` for Codex threads.
     pub claude_approval: String,
     pub plan_mode: bool,
+    /// The newest native turn made outside Wonder whose settings this thread
+    /// already took, so a later change on the phone wins until the desktop
+    /// app runs another turn.
+    pub native_settings_turn: Option<String>,
     pub is_pinned: bool,
     pub has_unread: bool,
     pub creation_request_id: Option<String>,
@@ -116,6 +120,7 @@ pub struct ProjectConversationPatch<'a> {
     pub access_mode: Option<&'a str>,
     pub claude_approval: Option<&'a str>,
     pub plan_mode: Option<bool>,
+    pub native_settings_turn: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,7 +179,7 @@ fn invalid(message: &str) -> sqlx::Error {
     sqlx::Error::Protocol(message.into())
 }
 
-fn project_conversation(
+pub(crate) fn project_conversation(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<StoredProjectConversation, sqlx::Error> {
     Ok(StoredProjectConversation {
@@ -192,6 +197,8 @@ fn project_conversation(
         access_mode: row.get("access_mode"),
         claude_approval: row.get("claude_approval"),
         plan_mode: row.get::<i64, _>("plan_mode") != 0,
+        // Absent before migration 0091, which upgrade tests read through.
+        native_settings_turn: row.try_get("native_settings_turn").unwrap_or(None),
         is_pinned: row.get::<i64, _>("is_pinned") != 0,
         has_unread: row.get::<i64, _>("has_unread") != 0,
         creation_request_id: row.get("creation_request_id"),
@@ -228,7 +235,6 @@ fn validate_roots(roots: &[ProjectRootInput], primary: usize) -> Result<(), sqlx
 }
 
 const ACCESS_MODES: [&str; 3] = ["read_only", "workspace", "full_access"];
-const CLAUDE_APPROVALS: [&str; 3] = ["ask", "accept_edits", "auto"];
 
 impl Store {
     async fn load_project(
@@ -600,10 +606,12 @@ impl Store {
         if !ACCESS_MODES.contains(&insert.access_mode) {
             return Err(invalid("Unknown project access mode"));
         }
-        if !CLAUDE_APPROVALS.contains(&insert.claude_approval) {
+        if !AgentFamily::is_known_approval_mode(insert.claude_approval) {
             return Err(invalid("Unknown Claude approval mode"));
         }
-        if insert.family != AgentFamily::Claude && insert.claude_approval != "ask" {
+        if !insert.family.allows_approval_choice()
+            && insert.claude_approval != insert.family.provider().default_approval
+        {
             return Err(invalid("Claude approval applies only to Claude threads"));
         }
         if insert.title.trim().is_empty() || insert.title.len() > 400 {
@@ -696,6 +704,29 @@ impl Store {
             .collect()
     }
 
+    /// Remembers which conversation a fork was copied from and where it was cut.
+    pub async fn record_project_fork(
+        &self,
+        conversation: &str,
+        source: &str,
+        at_turn: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT INTO project_conversation_forks(conversation_id,forked_from,forked_at_turn) VALUES(?,?,?)")
+            .bind(conversation).bind(source).bind(at_turn)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// The conversation a fork came from and the turn it was cut at.
+    pub async fn project_fork_source(
+        &self,
+        conversation: &str,
+    ) -> Result<Option<(String, Option<String>)>, sqlx::Error> {
+        let row = sqlx::query("SELECT forked_from,forked_at_turn FROM project_conversation_forks WHERE conversation_id=?")
+            .bind(conversation).fetch_optional(&self.pool).await?;
+        Ok(row.map(|row| (row.get("forked_from"), row.get("forked_at_turn"))))
+    }
+
     /// Records the provider's actual session exactly once.
     pub async fn set_project_native_session(
         &self,
@@ -759,7 +790,7 @@ impl Store {
         }
         if patch
             .claude_approval
-            .is_some_and(|mode| !CLAUDE_APPROVALS.contains(&mode))
+            .is_some_and(|mode| !AgentFamily::is_known_approval_mode(mode))
         {
             return Err(invalid("Unknown Claude approval mode"));
         }
@@ -777,15 +808,21 @@ impl Store {
             .bind(conversation)
             .fetch_optional(&self.pool)
             .await?;
-            if family.as_deref().is_some_and(|family| family != "claude") {
+            if family
+                .as_deref()
+                .map(self::family)
+                .transpose()?
+                .is_some_and(|family| !family.allows_approval_choice())
+            {
                 return Err(invalid("Claude approval applies only to Claude threads"));
             }
         }
-        let updated = sqlx::query("UPDATE project_conversations SET title=COALESCE(?,title),is_pinned=COALESCE(?,is_pinned),has_unread=COALESCE(?,has_unread),model=COALESCE(?,model),effort=CASE WHEN ? THEN ? ELSE effort END,service_tier=CASE WHEN ? THEN ? ELSE service_tier END,access_mode=COALESCE(?,access_mode),claude_approval=COALESCE(?,claude_approval),plan_mode=COALESCE(?,plan_mode),updated_at=? WHERE conversation_id=? AND (?=0 OR (model IS ? AND effort IS ? AND service_tier IS ?))")
+        let updated = sqlx::query("UPDATE project_conversations SET title=COALESCE(?,title),is_pinned=COALESCE(?,is_pinned),has_unread=COALESCE(?,has_unread),model=COALESCE(?,model),effort=CASE WHEN ? THEN ? ELSE effort END,service_tier=CASE WHEN ? THEN ? ELSE service_tier END,access_mode=COALESCE(?,access_mode),claude_approval=COALESCE(?,claude_approval),plan_mode=COALESCE(?,plan_mode),native_settings_turn=COALESCE(?,native_settings_turn),updated_at=? WHERE conversation_id=? AND (?=0 OR (model IS ? AND effort IS ? AND service_tier IS ?))")
             .bind(patch.title.map(str::trim)).bind(patch.pinned.map(i64::from)).bind(patch.unread.map(i64::from))
             .bind(patch.model).bind(patch.effort.is_some()).bind(patch.effort.flatten())
             .bind(patch.service_tier.is_some()).bind(patch.service_tier.flatten()).bind(patch.access_mode)
             .bind(patch.claude_approval).bind(patch.plan_mode.map(i64::from))
+            .bind(patch.native_settings_turn)
             .bind(now).bind(conversation).bind(expected.is_some())
             .bind(expected.and_then(|value| value.0))
             .bind(expected.and_then(|value| value.1))
@@ -800,6 +837,12 @@ impl Store {
             };
         }
         self.project_conversation(conversation).await
+    }
+
+    /// Native turn ids Wonder itself started in this conversation.
+    pub async fn wonder_turn_ids(&self, conversation: &str) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT codex_turn_id FROM messages WHERE conversation_id=? AND codex_turn_id IS NOT NULL")
+            .bind(conversation).fetch_all(&self.pool).await
     }
 
     /// The settings accepted with this message, independent of later edits.
@@ -856,11 +899,7 @@ impl Store {
         session: Option<&str>,
         now: &str,
     ) -> Result<(), sqlx::Error> {
-        if thread.trim().is_empty()
-            || thread.len() > 512
-            || (family == AgentFamily::Claude && !thread.starts_with("claude-"))
-            || (family == AgentFamily::Codex && thread.starts_with("claude-"))
-        {
+        if thread.trim().is_empty() || thread.len() > 512 || !family.accepts_thread_id(thread) {
             return Err(invalid("Invalid provider session identity"));
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -1196,6 +1235,33 @@ mod tests {
         .await
         .is_err());
         assert!(updated.root_for("/work/application").is_none());
+    }
+
+    // Contract: a fork records its source and cut once; the source stays unmarked.
+    #[tokio::test]
+    async fn a_fork_records_its_source_once() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        project(&store, "p1", &["/work/app"]).await;
+        for (id, native) in [("source", "thread"), ("fork", "thread-fork")] {
+            store
+                .create_project_conversation(conversation(id, "p1", Some(native), None))
+                .await
+                .unwrap();
+        }
+        assert_eq!(store.project_fork_source("fork").await.unwrap(), None);
+        store
+            .record_project_fork("fork", "source", Some("turn-2"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.project_fork_source("fork").await.unwrap(),
+            Some(("source".into(), Some("turn-2".into())))
+        );
+        assert_eq!(store.project_fork_source("source").await.unwrap(), None);
+        assert!(store
+            .record_project_fork("fork", "other", None)
+            .await
+            .is_err());
     }
 
     // Contract: rediscovering a native session attaches the same conversation;

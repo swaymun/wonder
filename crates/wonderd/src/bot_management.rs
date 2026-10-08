@@ -77,7 +77,7 @@ pub(super) async fn prepare_private_home(
 
 pub(super) async fn options(State(state): State<AppState>) -> Response {
     let mut providers = Vec::new();
-    for family in [AgentFamily::Codex, AgentFamily::Claude] {
+    for family in AgentFamily::ALL {
         let readiness = state.ingestion.readiness_for(&state.store, family).await;
         providers.push(serde_json::json!({"id":family,"installed": family == AgentFamily::Codex || state.claude.is_some(), "ready":readiness.ready,"detail":readiness.detail}));
     }

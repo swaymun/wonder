@@ -172,7 +172,7 @@ async fn scope(
     project_assignments::canonical_repo(&repository).await?;
     Ok(Scope { run, repository })
 }
-fn arguments(params: &Value) -> Result<Value, String> {
+pub(super) fn arguments(params: &Value) -> Result<Value, String> {
     let value = match params.get("arguments") {
         Some(Value::Object(value)) => Value::Object(value.clone()),
         Some(Value::String(value)) => {

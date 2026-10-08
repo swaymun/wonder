@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   release-docs:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, wonder-mini]
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/verify-release-docs.py

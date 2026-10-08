@@ -79,6 +79,11 @@ def reviewed_binary(name):
                 'apps/ios/Wonder/Assets.xcassets/ProviderClaude.imageset/claude.png',
                 'apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex.png',
                 'apps/ios/Wonder/Assets.xcassets/ProviderCodex.imageset/codex-dark.png',
+                # Project-generated theme backgrounds (Codex imagegen); no metadata or text.
+                'apps/ios/Wonder/Assets.xcassets/ThemeBackgroundDunes.dataset/desert-dunes.jpg',
+                'apps/ios/Wonder/Assets.xcassets/ThemeBackgroundForest.dataset/misty-forest.jpg',
+                'apps/ios/Wonder/Assets.xcassets/ThemeBackgroundGeometric.dataset/geometric.jpg',
+                'apps/ios/Wonder/Assets.xcassets/ThemeBackgroundOcean.dataset/ocean-waves.jpg',
             }
             or name == 'apps/menubar/Resources/WonderMenuIcon.pdf'
             or name == 'research/assets/wonder-brand/wonder-sun-logo-source.png'

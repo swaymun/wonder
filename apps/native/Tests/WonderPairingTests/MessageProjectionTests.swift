@@ -14,6 +14,19 @@ final class MessageProjectionTests: XCTestCase {
         ReadItem(id: id, type: "userMessage", state: "completed", text: "Runtime-wrapped input", createdAt: "0",
                  payload: client.map { ["clientId": .string($0)] })
     }
+    // A message another thread wrote keeps its source through decoding and rows,
+    // so the bubble can say who wrote it; a wake-up becomes a system row.
+    func testMessagesFromOtherThreadsCarryTheirSourceIntoRows() throws {
+        let json = #"{"conversationId":"chat","hostEpoch":"epoch","lastSequence":2,"assistantMessages":[],"thread":{"nextCursor":null,"hydrated":true,"turns":[]},"messages":[{"clientMessageId":"c1","messageId":"m1","body":"Please review","state":"completed","createdAt":"1000","attachmentIds":[],"source":{"kind":"thread","sourceConversationId":"planner","sourceTitle":"Planner"}},{"clientMessageId":"c2","messageId":"m2","body":"Automatic message","state":"completed","createdAt":"2000","attachmentIds":[],"source":{"kind":"wake","sourceTitle":"Agent tasks finished: Tests (completed)"}},{"clientMessageId":"c3","messageId":"m3","body":"Mine","state":"completed","createdAt":"3000","attachmentIds":[]}]}"#
+        let snapshot = try JSONDecoder().decode(ConversationSnapshot.self, from: Data(json.utf8))
+        let rows = snapshot.rows(author: "Ada")
+        XCTAssertEqual(rows.map { $0.source?.fromLabel }, ["From Planner", nil, nil])
+        XCTAssertEqual(rows[1].source?.isWake, true)
+        XCTAssertEqual(rows[1].source?.sourceTitle, "Agent tasks finished: Tests (completed)")
+        XCTAssertNil(rows[2].source)
+        let cached = try JSONDecoder().decode(ConversationSnapshot.self, from: JSONEncoder().encode(snapshot))
+        XCTAssertEqual(cached.rows(author: "Ada").map { $0.source?.kind }, ["thread", "wake", nil])
+    }
     func testQuestionOnlyEmptyReplyDoesNotRenderBubble() {
         let rows = snapshot([ReadItem(id: "question", type: "agentMessage", state: "completed", text: "  ", createdAt: "1")], clients: []).rows(author: "Ada")
         XCTAssertTrue(rows.isEmpty)

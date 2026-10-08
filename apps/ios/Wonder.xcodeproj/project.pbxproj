@@ -31,6 +31,9 @@
 		A10000000000000000000012 /* GroupCollaborationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* GroupCollaborationViews.swift */; };
 		A10000000000000000000014 /* CameraCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* CameraCapture.swift */; };
 		A10000000000000000000015 /* ScienceAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* ScienceAvatar.swift */; };
+		A100000000000000000F0001 /* WonderTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000F0002 /* WonderTheme.swift */; };
+		A100000000000000000F0003 /* CodeBlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000F0004 /* CodeBlockView.swift */; };
+		A100000000000000000F0005 /* TextFileViewers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000F0006 /* TextFileViewers.swift */; };
 		A10000000000000000000017 /* ComputerSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* ComputerSessionView.swift */; };
 		A1000000000000000000001A /* WebRTC-LICENSE.md in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* WebRTC-LICENSE.md */; };
 		A10000000000000000000091 /* ScienceAvatarGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000092 /* ScienceAvatarGeometry.swift */; };
@@ -147,6 +150,9 @@
 		A10000000000000000000011 /* GroupCollaborationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupCollaborationViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000013 /* CameraCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCapture.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* ScienceAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScienceAvatar.swift; sourceTree = "<group>"; };
+		A100000000000000000F0002 /* WonderTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WonderTheme.swift; sourceTree = "<group>"; };
+		A100000000000000000F0004 /* CodeBlockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlockView.swift; sourceTree = "<group>"; };
+		A100000000000000000F0006 /* TextFileViewers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextFileViewers.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* ComputerSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerSessionView.swift; sourceTree = "<group>"; };
 		A10000000000000000000019 /* WebRTC-LICENSE.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = "WebRTC-LICENSE.md"; sourceTree = "<group>"; };
 		A10000000000000000000092 /* ScienceAvatarGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScienceAvatarGeometry.swift; sourceTree = "<group>"; };
@@ -281,6 +287,9 @@
 				E1000000000000000000000A /* ProjectWidgetSnapshotPublisher.swift */,
 				A10000000000000000000011 /* GroupCollaborationViews.swift */,
 				A10000000000000000000016 /* ScienceAvatar.swift */,
+				A100000000000000000F0002 /* WonderTheme.swift */,
+				A100000000000000000F0004 /* CodeBlockView.swift */,
+				A100000000000000000F0006 /* TextFileViewers.swift */,
 				A10000000000000000000092 /* ScienceAvatarGeometry.swift */,
 				3F57D5EB13865B3F87CCC662 /* Diagnostics.swift */,
 				F5AA3A14AB81C67C8DDCB7B6 /* DiagnosticScenarios.swift */,
@@ -617,6 +626,9 @@
 				B20000000000000000000002 /* AppShell.swift in Sources */,
 				A10000000000000000000012 /* GroupCollaborationViews.swift in Sources */,
 				A10000000000000000000015 /* ScienceAvatar.swift in Sources */,
+				A100000000000000000F0001 /* WonderTheme.swift in Sources */,
+				A100000000000000000F0003 /* CodeBlockView.swift in Sources */,
+				A100000000000000000F0005 /* TextFileViewers.swift in Sources */,
 				A10000000000000000000091 /* ScienceAvatarGeometry.swift in Sources */,
 				957A868C40FEB21B3429D722 /* Diagnostics.swift in Sources */,
 				19676721D0C33BD9EDCB60A9 /* DiagnosticScenarios.swift in Sources */,

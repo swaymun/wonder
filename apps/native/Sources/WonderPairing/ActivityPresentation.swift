@@ -4,7 +4,9 @@ public struct ChatFeedEntry: Identifiable, Sendable {
     public var rows: [ReadRow]
     public var id: String { rows[0].id }
     public var isContextCompaction: Bool { rows.count == 1 && rows[0].isContextCompaction }
-    public var isActivity: Bool { !isContextCompaction && !rows[0].isPlan && (rows[0].activitySummary != nil || rows[0].isCommentary) }
+    /// A durable boundary in the transcript: a compaction or a provider switch.
+    public var isTimelineMarker: Bool { rows.count == 1 && (rows[0].isContextCompaction || rows[0].isProviderSwitch) }
+    public var isActivity: Bool { !isTimelineMarker && !rows[0].isPlan && (rows[0].activitySummary != nil || rows[0].isCommentary) }
 
     public static func visibleRows(_ rows: [ReadRow], queuedClientIDs: Set<String>) -> [ReadRow] {
         let queuedRows = Set(queuedClientIDs.map { "user-" + $0 })
@@ -16,14 +18,14 @@ public struct ChatFeedEntry: Identifiable, Sendable {
         for row in rows {
             if row.item?.type == "reasoning",
                !(row.turnId.map(activeTurnIDs.contains) == true && row.activitySummary?.isRunning == true) { continue }
-            if row.isContextCompaction {
+            if row.isContextCompaction || row.isProviderSwitch {
                 // A compaction is a durable boundary in the transcript, not a
                 // row inside the surrounding Working disclosure.
                 entries.append(Self(rows: [row]))
                 continue
             }
             if row.activitySummary != nil || row.isCommentary, !row.isPlan, let first = entries.last?.rows.first,
-               !entries.last!.isContextCompaction, !first.isPlan,
+               !entries.last!.isTimelineMarker, !first.isPlan,
                first.activitySummary != nil || first.isCommentary,
                row.id != focusedRowID, first.id != focusedRowID,
                let turn = row.turnId, first.turnId == turn,
@@ -177,7 +179,7 @@ public struct ChatFeedNode: Identifiable, Sendable {
     public static func visible(_ entries: [ChatFeedEntry], expanded: Set<String>) -> [Self] {
         var result: [Self] = []
         for entry in entries {
-            if entry.isContextCompaction, let row = entry.rows.first {
+            if entry.isTimelineMarker, let row = entry.rows.first {
                 // Keep the marker in the single lazy timeline regardless of
                 // disclosure state. Its identity is the App Server item ID.
                 result.append(Self(id: row.id, entryID: entry.id, content: .compaction(row)))
@@ -472,6 +474,7 @@ public struct ContextCompactionPresentation: Equatable, Sendable {
     public let label: String
     public let symbol: String
     public let isRunning: Bool
+    public init(label: String, symbol: String, isRunning: Bool) { self.label = label; self.symbol = symbol; self.isRunning = isRunning }
 
     public static func forState(_ state: String, isProjectConversation: Bool = false) -> Self {
         switch state.lowercased() {
@@ -528,6 +531,12 @@ extension ReadRow {
 
     public var activity: ActivityPresentation? { presentation(includeDetails: true) }
     public var isContextCompaction: Bool { !isUser && item?.type == "contextCompaction" }
+    /// "Switched to Claude Sonnet · Codex history was handed over …", written by the host.
+    public var isProviderSwitch: Bool { !isUser && item?.type == "providerSwitch" }
+    public var providerSwitchText: String? {
+        guard isProviderSwitch, let text = item?.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        return text
+    }
     public var contextCompactionPresentation: ContextCompactionPresentation? {
         guard isContextCompaction, let item else { return nil }
         return .forState(item.state)
@@ -665,6 +674,8 @@ extension ReadRow {
         case "exitedReviewMode":
             title = "Finish review"; symbol = "checkmark.shield.fill"
             add("Review", payload["review"]?.string)
+        case "providerSwitch":
+            title = "Switched provider"; symbol = "arrow.left.arrow.right"
         case "contextCompaction":
             let marker = ContextCompactionPresentation.forState(item.state)
             title = "Context compaction"; symbol = marker.symbol

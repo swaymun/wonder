@@ -109,6 +109,7 @@ enum WonderDeepLink: Equatable {
 
 /// Root of the signed-in app: one chat surface with a navigation tree.
 struct ChatShell: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject private var push = PushNotifications.shared
     @StateObject private var shell = ShellState()
@@ -169,9 +170,9 @@ struct ChatShell: View {
                             SidebarView(library: library, shell: shell)
                         }
                         .frame(width: sidebarWidth)
-                        .background(Color(uiColor: .systemBackground))
+                        .background(theme.sidebar)
                         .overlay(alignment: .trailing) {
-                            if !compact && showWideSidebar { Divider() }
+                            if !compact && showWideSidebar { theme.separator.frame(width: 1) }
                         }
                         .offset(x: sidebarVisible ? 0 : -sidebarWidth)
                         .allowsHitTesting(sidebarVisible)
@@ -285,6 +286,7 @@ private struct HostSheet: Identifiable { let id: String }
 /// conversation. The navigation stack remains mounted as the size class changes.
 /// Drag state lives here, so only the drawer's offset and dimming change per frame.
 private struct PhoneDrawerLayout: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -346,7 +348,7 @@ private struct PhoneDrawerLayout: View {
                     .accessibilityIdentifier("sidebar-scrim")
                 SidebarView(library: library, shell: shell)
                     .frame(width: width)
-                    .background(Color(uiColor: .systemBackground))
+                    .background(theme.sidebar)
                     // A horizontal dismissal must cancel a pressed row rather than open it.
                     .disabled(dragEngaged)
                     .accessibilityElement(children: .contain)
@@ -469,6 +471,7 @@ private struct ProjectOnboardingObserver: View {
 
 /// The main surface: a chat or its draft, with the shared header controls.
 private struct ShellMain: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
     let compactIPadWindow: Bool
@@ -495,7 +498,8 @@ private struct ShellMain: View {
                 if let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == host }) {
                     let model = library.model(for: saved)
                     ShellConversation(model: model, projects: model.projects, chatID: id,
-                                      fromLink: shell.linkedConversation == shell.route) { shell.route = .newChat }
+                                      fromLink: shell.linkedConversation == shell.route,
+                                      openConversation: { shell.open(host: host, conversation: $0) }) { shell.route = .newChat }
                         .id(shell.route)
                 } else {
                     ContentUnavailableView("Chat unavailable", systemImage: "bubble.left",
@@ -513,7 +517,7 @@ private struct ShellMain: View {
                 }
                 .padding(.horizontal, 12)
                 .frame(minHeight: 44)
-                .background(Color(uiColor: .systemBackground))
+                .background(theme.chrome)
             }
         }
         .toolbar {
@@ -570,6 +574,7 @@ private struct ShellConversation: View {
     @ObservedObject var projects: ProjectLibrary
     let chatID: String
     let fromLink: Bool
+    let openConversation: (String) -> Void
     var onArchived: () -> Void
     @State private var resolving = false
     @State private var unavailable = false
@@ -579,7 +584,7 @@ private struct ShellConversation: View {
         Group {
             if !archived, !model.accessEnded, !projects.unavailable.contains(chatID),
                let detail = projects.details[chatID] {
-                ConversationView(model: model, chat: model.projectChat(detail))
+                ConversationView(model: model, chat: model.projectChat(detail), openConversation: openConversation)
             } else if archived {
                 ContentUnavailableView("Chat archived", systemImage: "archivebox",
                                        description: Text("This chat has been archived on \(model.macName)."))
@@ -770,6 +775,7 @@ private struct ShellConversation: View {
 // MARK: - Sidebar
 
 struct SidebarView: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
     @StateObject private var presenter = SidebarPresenter()
@@ -838,13 +844,14 @@ struct SidebarView: View {
                 }
             }
             .padding(.horizontal, 12).frame(minHeight: 40)
-            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+            .background(theme.field, in: RoundedRectangle(cornerRadius: 10))
             .padding(.horizontal, 16).padding(.vertical, 8)
             if presenter.pills.count > 1 { filterPills }
             List {
                 if let error = library.error { FailureDetails("Connection problem", message: error).listRowSeparator(.hidden) }
                 ForEach(presenter.rows) { row in
                     rowView(row)
+                        .modifier(ClearRowBackground(row: row))
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
                 }
@@ -922,7 +929,7 @@ struct SidebarView: View {
             }
             .foregroundStyle(selected ? Color.primary : Color.secondary)
             .padding(.horizontal, 12).frame(minHeight: 32)
-            .background(selected ? Color.accentColor.opacity(0.16) : Color(uiColor: .secondarySystemFill), in: Capsule())
+            .background(selected ? theme.accent.opacity(0.16) : Color(uiColor: .secondarySystemFill), in: Capsule())
             .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
@@ -1075,6 +1082,11 @@ struct SidebarView: View {
                 renaming = ThreadTarget(host: host, project: projectID, thread: thread)
             }
             Button("Copy resume command", systemImage: "terminal") { copyResumeCommand(host, projectID, thread) }
+            // Only a thread Wonder has opened has a stored folder.
+            if thread.conversationId != nil {
+                Button("Copy folder path", systemImage: "folder") { copyFolderPath(host, thread) }
+                    .accessibilityIdentifier("copy-thread-folder")
+            }
             if thread.family == .codex, !thread.reference.hasPrefix("wonder:"), model(host)?.projects.supportsArchive == true {
                 Button("Archive", systemImage: "archivebox") { archive(host, projectID, thread) }
                     .disabled(busyThread != nil || thread.isWorking || model(host)?.macConnected != true)
@@ -1186,6 +1198,22 @@ struct SidebarView: View {
         }
     }
 
+    private func copyFolderPath(_ host: String, _ thread: ProjectThreadSummary) {
+        guard let conversation = thread.conversationId, let model = model(host) else { return }
+        Task {
+            do {
+                let folder: String
+                if let saved = model.projects.details[conversation] { folder = saved.workingFolder }
+                else { folder = try await model.projects.loadDetail(conversation).workingFolder }
+                UIPasteboard.general.string = folder
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } catch is CancellationError {
+            } catch {
+                failure = "The folder path couldn’t be loaded. Check \(model.macName) and try again."
+            }
+        }
+    }
+
     private func copyResumeCommand(_ host: String, _ projectID: String, _ thread: ProjectThreadSummary) {
         guard busyThread == nil, let model = model(host) else { return }
         busyThread = thread.reference
@@ -1217,6 +1245,18 @@ struct SidebarView: View {
 }
 
 /// A restrained fill for the one selected row; other rows stay on the sidebar.
+/// Headers, notices and actions take the sidebar's colour; the system's row fill
+/// would draw them black under a themed sidebar. Thread and project rows set their own.
+private struct ClearRowBackground: ViewModifier {
+    let row: SidebarRow
+    @ViewBuilder func body(content: Content) -> some View {
+        switch row {
+        case .pinned, .thread, .project: content
+        default: content.listRowBackground(Color.clear)
+        }
+    }
+}
+
 func selectionFill(_ selected: Bool) -> some View {
     RoundedRectangle(cornerRadius: 8)
         .fill(selected ? Color(uiColor: .tertiarySystemFill) : Color.clear)

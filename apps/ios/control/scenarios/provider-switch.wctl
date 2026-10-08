@@ -1,0 +1,45 @@
+# A Project thread's composer lists Codex and Claude models by provider, with a
+# footnote under the other provider. Choosing an other-provider model shows it in
+# the composer summary with no confirmation; the next message carries it as
+# projectModel (the fixture shows the host's "Switched to ..." row only when the
+# request had it). A same-provider pick is still saved on the thread. Nothing
+# reaches a Mac or a model.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-provider-switch
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id pinned-thread:codex:read-fixture --timeout 20
+tap --id pinned-thread:codex:read-fixture
+wait --id project-composer-model --timeout 15
+wait --contains "Codex Fixture" --timeout 10
+wait --contains "Switched to Codex Fixture" --timeout 15
+shot provider-switch-row
+tap --id project-composer-model
+wait --id project-model:claude-fixture --timeout 10
+wait --id project-model:gpt-fixture-mini --timeout 5
+wait --contains "Your next message goes to Claude" --timeout 5
+shot provider-switch-picker
+tap --id project-model:claude-fixture
+tap --label Done
+wait --id project-composer-model --timeout 10
+wait --contains "Claude Fixture" --timeout 10
+shot provider-switch-chosen
+tap --id message-draft --type TextArea
+type "Switch check"
+wait --id send-message --timeout 10
+tap --id send-message --type Button
+wait --contains "history handed over (request carried projectModel)" --timeout 20
+shot provider-switch-sent
+# A same-provider pick is saved on the thread as before.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-provider-switch
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id pinned-thread:codex:read-fixture --timeout 20
+tap --id pinned-thread:codex:read-fixture
+wait --id project-composer-model --timeout 15
+tap --id project-composer-model
+wait --id project-model:gpt-fixture-mini --timeout 10
+tap --id project-model:gpt-fixture-mini
+tap --label Done
+wait --id project-composer-model --timeout 10
+wait --contains "Codex Fixture Mini" --timeout 10
+shot provider-switch-same-provider

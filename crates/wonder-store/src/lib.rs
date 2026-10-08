@@ -1,5 +1,7 @@
 //! SQLite persistence for Wonder-owned metadata and the durable event ledger.
 
+mod agent_preferences;
+pub use agent_preferences::AgentDefaultPreference;
 mod automations;
 pub mod avatar;
 mod onboarding;
@@ -7,10 +9,16 @@ mod push;
 pub use push::{PushDelivery, PushPreview, PushRevocation};
 mod questions;
 pub use questions::AsyncQuestion;
+mod provider;
+pub use provider::{DefaultSpeed, NativeSessionKey, ProviderCapabilities, ProviderDescriptor};
 mod runtime_bindings;
 pub use runtime_bindings::{AgentFamily, RuntimeBinding};
 mod update_handoff;
 pub use update_handoff::UpdateHandoff;
+mod provider_switch;
+pub use provider_switch::{
+    HandoffDelivery, MessageTarget, PendingHandoff, ProjectRuntimeSwitch, RuntimeHistoryEntry,
+};
 mod projects;
 pub use projects::{
     ProjectConversationCreate, ProjectConversationInsert, ProjectConversationPatch, ProjectCreate,
@@ -122,6 +130,10 @@ pub use teaching::{
 mod file_access;
 pub use file_access::BotFileAccess;
 mod pm_tools;
+mod thread_tools;
+pub use thread_tools::{
+    MessageSource, NewMessageSource, ThreadDelegation, ThreadRunState, WakeCandidate, WakeChild,
+};
 mod project_assignments;
 pub use project_assignments::ProjectAssignment;
 mod group_collaboration;
@@ -2045,6 +2057,7 @@ impl Store {
             durable_dispatch,
             None,
             model_selection_revision,
+            None,
         )
         .await
     }
@@ -2072,6 +2085,7 @@ impl Store {
             false,
             Some(turn),
             None,
+            None,
         )
         .await
     }
@@ -2089,6 +2103,7 @@ impl Store {
         durable_dispatch: bool,
         guide_turn: Option<&str>,
         model_selection_revision: Option<i64>,
+        source: Option<&NewMessageSource<'_>>,
     ) -> Result<MessageInsert, sqlx::Error> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let draft: Option<(String, i64, Option<String>)> = sqlx::query_as("SELECT d.bot_id,d.revision,d.first_message_id FROM bot_model_drafts d JOIN conversation_metadata c ON c.bot_id=d.bot_id WHERE c.id=? AND NOT EXISTS(SELECT 1 FROM channels WHERE conversation_id=c.id) AND NOT EXISTS(SELECT 1 FROM subagent_ownership WHERE conversation_id=c.id)")
@@ -2258,8 +2273,17 @@ impl Store {
                 .bind(&id).bind(conversation_id).execute(&mut *transaction).await?;
             // Project sends use the same acceptance boundary as Bot sends.
             // A later settings edit cannot change a queued message's speed.
-            sqlx::query("INSERT INTO message_execution_settings(message_id,model,reasoning_effort,service_tier,permission_mode,approval_mode,permission_profile,working_directory) SELECT ?,p.model,p.effort,p.service_tier,NULL,NULL,'project',p.cwd FROM project_conversations p WHERE p.conversation_id=?")
-                .bind(&id).bind(conversation_id).execute(&mut *transaction).await?;
+            // The model may be one the owner chose for this message alone,
+            // staged just before; it can belong to the other provider.
+            sqlx::query("INSERT INTO message_execution_settings(message_id,model,reasoning_effort,service_tier,permission_mode,approval_mode,permission_profile,working_directory,agent_family) SELECT ?,CASE WHEN t.device_id IS NULL THEN p.model ELSE t.model END,CASE WHEN t.device_id IS NULL THEN p.effort ELSE t.effort END,CASE WHEN t.device_id IS NULL THEN p.service_tier ELSE t.service_tier END,NULL,NULL,'project',p.cwd,CASE WHEN t.device_id IS NULL THEN p.agent_family ELSE t.agent_family END FROM project_conversations p LEFT JOIN project_message_targets t ON t.device_id=? AND t.client_message_id=? WHERE p.conversation_id=?")
+                .bind(&id).bind(device_id).bind(client_message_id).bind(conversation_id).execute(&mut *transaction).await?;
+            sqlx::query(
+                "DELETE FROM project_message_targets WHERE device_id=? AND client_message_id=?",
+            )
+            .bind(device_id)
+            .bind(client_message_id)
+            .execute(&mut *transaction)
+            .await?;
         }
         if durable_dispatch {
             sqlx::query("INSERT INTO dispatch_work (message_id) VALUES (?)")
@@ -2273,6 +2297,12 @@ impl Store {
                 .bind(turn)
                 .execute(&mut *transaction)
                 .await?;
+        }
+        if let Some(source) = source {
+            if !Self::insert_message_source(&mut transaction, &id, source).await? {
+                // A wake-up whose children were already reported creates nothing.
+                return Ok(MessageInsert::Conflict);
+            }
         }
         transaction.commit().await?;
         Ok(MessageInsert::Inserted(StoredMessage {

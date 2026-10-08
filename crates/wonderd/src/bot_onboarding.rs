@@ -495,7 +495,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .all(|m| m["id"].as_str().unwrap().starts_with("claude:")));
+            .all(|m| m["agentFamily"] == "claude"));
         assert_eq!(
             state
                 .store

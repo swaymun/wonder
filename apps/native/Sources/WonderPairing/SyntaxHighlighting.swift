@@ -1,8 +1,8 @@
 import Foundation
 
 /// A colour role for code shown in diffs. Views map roles to their palette.
-public enum SyntaxRole: Sendable, Equatable {
-    case keyword, string, comment, number, type, attribute
+public enum SyntaxRole: Sendable, Hashable {
+    case keyword, string, comment, number, type, attribute, function, punctuation
 }
 
 /// A run of one line's text; `role` is nil for plain text.
@@ -27,10 +27,18 @@ public struct SyntaxHighlighter: Sendable {
         var capitalizedTypes = false
         var attributePrefixes: Set<Character> = []
         var markup = false
+        /// A name followed by `(` is a function.
+        var functions = true
+        /// A string or name followed by `:` or `=` is a key (JSON, YAML, TOML).
+        var keys = false
+        var markdown = false
     }
 
     let language: Language
     private var inBlock = false
+    /// Marks brackets and operators `.punctuation`; off for diffs, which only
+    /// colour words.
+    public var emitsPunctuation = false
 
     public init?(path: String) {
         let name = (path as NSString).lastPathComponent.lowercased()
@@ -38,6 +46,23 @@ public struct SyntaxHighlighter: Sendable {
         guard let language = Self.language(name: name, ext: ext) else { return nil }
         self.language = language
     }
+
+    /// A highlighter for a Markdown code fence's info string (`swift`, `ts`,
+    /// `bash`, `yml`...); nil when the language is not one it knows.
+    public init?(language tag: String) {
+        let tag = tag.lowercased().trimmingCharacters(in: .whitespaces)
+        let ext = Self.fenceExtensions[tag] ?? tag
+        guard !ext.isEmpty, let language = Self.language(name: "code." + ext, ext: ext) else { return nil }
+        self.language = language
+    }
+
+    private static let fenceExtensions: [String: String] = [
+        "javascript": "js", "node": "js", "typescript": "ts", "python": "py", "python3": "py", "rust": "rs",
+        "golang": "go", "bash": "sh", "shell": "sh", "console": "sh", "shell-session": "sh", "zsh": "zsh",
+        "markdown": "md", "postgres": "sql", "postgresql": "sql", "mysql": "sql", "sqlite": "sql",
+        "c++": "cpp", "objc": "m", "objective-c": "m", "objectivec": "m", "kotlin": "kt", "ruby": "rb",
+        "csharp": "cs", "c#": "cs", "yaml": "yml", "xml": "xml", "jsonc": "jsonc", "powershell": "sh",
+    ]
 
     public mutating func reset() { inBlock = false }
 
@@ -48,6 +73,10 @@ public struct SyntaxHighlighter: Sendable {
         func emit(_ text: String, _ role: SyntaxRole?) {
             guard !text.isEmpty else { return }
             if role == nil { plain += text; return }
+            if role == .punctuation, plain.isEmpty, let last = spans.last, last.role == .punctuation {
+                spans[spans.count - 1] = SyntaxSpan(text: last.text + text, role: .punctuation)
+                return
+            }
             if !plain.isEmpty { spans.append(SyntaxSpan(text: plain, role: nil)); plain = "" }
             spans.append(SyntaxSpan(text: text, role: role))
         }
@@ -57,6 +86,30 @@ public struct SyntaxHighlighter: Sendable {
         }
         func identifierChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" || c == "$" }
 
+        func nextNonSpace(after index: Int) -> Character? {
+            var k = index
+            while k < chars.count, chars[k] == " " || chars[k] == "\t" { k += 1 }
+            return k < chars.count ? chars[k] : nil
+        }
+        func isKeyMarker(after index: Int) -> Bool {
+            guard let next = nextNonSpace(after: index) else { return false }
+            if next == ":" { return true }
+            guard next == "=" else { return false }
+            var k = index
+            while k < chars.count, chars[k] == " " { k += 1 }
+            return k + 1 >= chars.count || chars[k + 1] != "="
+        }
+
+        if language.markdown {
+            let trimmed = line.drop(while: { $0 == " " })
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                return [SyntaxSpan(text: line, role: .comment)]
+            }
+            let hashes = trimmed.prefix(while: { $0 == "#" }).count
+            if (1...6).contains(hashes), trimmed.dropFirst(hashes).first == " " {
+                return [SyntaxSpan(text: line, role: .keyword)]
+            }
+        }
         var i = 0
         var inTag = false
         var expectTagName = false
@@ -98,9 +151,9 @@ public struct SyntaxHighlighter: Sendable {
                     j += chars[j] == "\\" ? 2 : 1
                 }
                 j = min(j + 1, chars.count)
-                emit(String(chars[i..<j]), .string); i = j; continue
+                emit(String(chars[i..<j]), language.keys && isKeyMarker(after: j) ? .type : .string); i = j; continue
             }
-            if c.isASCII, c.isNumber, i == 0 || !identifierChar(chars[i - 1]) {
+            if !language.markdown, c.isASCII, c.isNumber, i == 0 || !identifierChar(chars[i - 1]) {
                 var j = i + 1
                 while j < chars.count, chars[j].isHexDigit || "xXoObB_.".contains(chars[j]) {
                     if chars[j] == ".", j + 1 < chars.count, !chars[j + 1].isNumber { break }
@@ -116,7 +169,7 @@ public struct SyntaxHighlighter: Sendable {
             }
             if c.isLetter || c == "_" {
                 var j = i + 1
-                while j < chars.count, identifierChar(chars[j]) || (language.markup && (chars[j] == "-" || chars[j] == ":")) { j += 1 }
+                while j < chars.count, identifierChar(chars[j]) || (language.markup && (chars[j] == "-" || chars[j] == ":")) || (language.keys && chars[j] == "-") { j += 1 }
                 let word = String(chars[i..<j])
                 let role: SyntaxRole?
                 if language.markup {
@@ -124,14 +177,20 @@ public struct SyntaxHighlighter: Sendable {
                     expectTagName = false
                 } else if language.keywords.contains(language.caseInsensitive ? word.lowercased() : word) {
                     role = .keyword
+                } else if language.keys, isKeyMarker(after: j),
+                          chars[..<i].allSatisfy({ $0 == " " || $0 == "\t" || $0 == "-" }) {
+                    role = .type
                 } else if language.capitalizedTypes, c.isUppercase, word.contains(where: \.isLowercase) {
                     role = .type
+                } else if language.functions, j < chars.count, chars[j] == "(" {
+                    role = .function
                 } else {
                     role = nil
                 }
                 emit(word, role); i = j; continue
             }
-            emit(String(c), nil); i += 1
+            let punctuation = emitsPunctuation && !language.markdown && !c.isWhitespace && !identifierChar(c)
+            emit(String(c), punctuation ? .punctuation : nil); i += 1
         }
         if !plain.isEmpty { spans.append(SyntaxSpan(text: plain, role: nil)) }
         return spans
@@ -177,9 +236,12 @@ public struct SyntaxHighlighter: Sendable {
             return Language(keywords: sql, caseInsensitive: true, lineComments: ["--"], block: cBlock)
         case "json", "jsonc", "json5":
             return Language(keywords: literals, lineComments: ext == "json" ? [] : ["//"], block: ext == "json" ? nil : cBlock,
-                            quotes: ["\""])
+                            quotes: ["\""], functions: false, keys: true)
         case "yaml", "yml", "toml", "ini", "cfg", "conf", "env":
-            return Language(keywords: literals.union(["yes", "no", "on", "off"]), lineComments: ["#", ";"].filter { $0 == "#" || ext == "ini" })
+            return Language(keywords: literals.union(["yes", "no", "on", "off"]), lineComments: ["#", ";"].filter { $0 == "#" || ext == "ini" },
+                            functions: false, keys: true)
+        case "md", "markdown":
+            return Language(quotes: ["`"], functions: false, markdown: true)
         case "css", "scss", "sass", "less":
             return Language(keywords: ["important", "media", "import", "keyframes"], lineComments: ext == "css" ? [] : ["//"],
                             block: cBlock, attributePrefixes: ["@"])
@@ -285,4 +347,31 @@ public struct SyntaxHighlighter: Sendable {
         "then", "transaction", "union", "unique", "update", "values", "view", "when", "where", "with",
         "integer", "text", "real", "blob", "varchar", "boolean",
     ]
+}
+
+
+/// Highlights a whole code block for a chat message. Tokenizing is pure and
+/// thread-safe: call it off the main thread and cache the result.
+public enum CodeHighlighter {
+    /// Longer blocks render plain rather than spending time on colour.
+    public static let maxLines = 2000
+    public static let maxBytes = 300_000
+
+    public static func supports(language: String?) -> Bool {
+        language.flatMap { SyntaxHighlighter(language: $0) } != nil
+    }
+
+    /// One span list per line, or nil when the language is unknown or the block
+    /// is too large to colour.
+    public static func lines(_ code: String, language: String?) -> [[SyntaxSpan]]? {
+        guard let language, var highlighter = SyntaxHighlighter(language: language),
+              code.utf8.count <= maxBytes else { return nil }
+        let rows = code.split(separator: "\n", omittingEmptySubsequences: false)
+        guard rows.count <= maxLines else { return nil }
+        highlighter.emitsPunctuation = true
+        var result: [[SyntaxSpan]] = []
+        result.reserveCapacity(rows.count)
+        for row in rows { result.append(highlighter.spans(String(row))) }
+        return result
+    }
 }

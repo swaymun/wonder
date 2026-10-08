@@ -749,6 +749,7 @@ mod tests {
             .contains("\"second line\""));
         let request = crate::SendMessageRequest {
             model_selection_revision: None,
+            project_model: None,
             group_routing: None,
             device_id: "owner".into(),
             client_message_id: uuid::Uuid::new_v4().to_string(),
@@ -765,6 +766,7 @@ mod tests {
                 body: request.body.clone(),
                 device_id: request.device_id.clone(),
                 model_selection_revision: None,
+                project_model: None,
                 group_routing: None,
             }),
             None,
@@ -826,6 +828,7 @@ mod tests {
                 body: request.body.clone(),
                 device_id: request.device_id.clone(),
                 model_selection_revision: None,
+                project_model: None,
                 group_routing: None,
             }),
             None,
@@ -852,6 +855,7 @@ mod tests {
             None,
             Json(crate::SendMessageRequest {
                 model_selection_revision: None,
+                project_model: None,
                 group_routing: None,
                 device_id: "owner".into(),
                 client_message_id: uuid::Uuid::new_v4().to_string(),

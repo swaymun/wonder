@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, wonder-mini]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,7 +30,7 @@ jobs:
       - run: cargo run -p wonder-smoke -- recorded --restart
 
   tunnel:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, wonder-mini]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -41,7 +41,7 @@ jobs:
         working-directory: cmd/wonder-tunnel
 
   native:
-    runs-on: macos-latest
+    runs-on: [self-hosted, wonder-mini]
     steps:
       - uses: actions/checkout@v4
       - run: swift test --package-path apps/native
@@ -50,8 +50,43 @@ jobs:
       - run: swift build -c release --package-path native/computer-use
       - run: node scripts/verify-computer-use.mjs "$(swift build -c release --package-path native/computer-use --show-bin-path)/WonderComputerUse"
 
+  ios-scenarios:
+    runs-on: [self-hosted, wonder-mini]
+    timeout-minutes: 45
+    # The iPhone Duo runs report-only until its known gaps are fixed: AXe raw
+    # touches (scenario `hold`) do not reach the Duo simulator, and Settings
+    # opens differently on its wide layout.
+    continue-on-error: ${{ matrix.device == 'duo' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [iphone, duo]
+    env:
+      # Wait for agents using the same simulator, and keep the build cache
+      # outside the checkout, which the runner cleans every job.
+      WONDER_CONTROL_WAIT: "1"
+      WONDER_CONTROL_DERIVED: ~/Library/Caches/wonderctl/ci-derived
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/wonderctl --device ${{ matrix.device }} build
+      - name: Run feature-map scenarios
+        run: |
+          failed=0
+          for scenario in apps/ios/control/scenarios/*.wctl; do
+            echo "::group::$scenario"
+            scripts/wonderctl --device ${{ matrix.device }} run "$scenario" || { failed=$((failed + 1)); echo "::error::$scenario failed on ${{ matrix.device }}"; }
+            echo "::endgroup::"
+          done
+          test "$failed" -eq 0
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenario-evidence-${{ matrix.device }}
+          path: .local/control/evidence/
+          retention-days: 7
+
   push-service:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, wonder-mini]
     defaults:
       run:
         working-directory: services/push

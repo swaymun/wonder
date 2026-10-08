@@ -10,20 +10,13 @@ pub enum AgentFamily {
     Claude,
 }
 impl AgentFamily {
-    pub fn for_model(model: Option<&str>) -> Self {
-        if model.is_some_and(|model| model.starts_with("claude:")) {
-            Self::Claude
-        } else {
-            Self::Codex
-        }
-    }
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
         }
     }
-    fn from_storage(value: &str) -> Result<Self, sqlx::Error> {
+    pub(crate) fn from_storage(value: &str) -> Result<Self, sqlx::Error> {
         match value {
             "codex" => Ok(Self::Codex),
             "claude" => Ok(Self::Claude),
@@ -84,11 +77,7 @@ impl Store {
         session: Option<&str>,
         now: &str,
     ) -> Result<(), sqlx::Error> {
-        if thread.trim().is_empty()
-            || thread.len() > 512
-            || (family == AgentFamily::Claude && !thread.starts_with("claude-"))
-            || (family == AgentFamily::Codex && thread.starts_with("claude-"))
-        {
+        if thread.trim().is_empty() || thread.len() > 512 || !family.accepts_thread_id(thread) {
             return Err(sqlx::Error::Protocol(
                 "Invalid provider session identity".into(),
             ));

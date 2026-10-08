@@ -12,6 +12,15 @@ final class ManagementTests: XCTestCase {
         XCTAssertThrowsError(try NewBotDefaults(model: "claude:haiku", approvalMode: .approveForMe).creationValues(options: options))
         XCTAssertThrowsError(try NewBotDefaults(model: "claude:haiku", reasoningEffort: "high").creationValues(options: options))
     }
+    // The family is whatever the host sent. A model id that looks like another
+    // provider's, or one the host did not list, never changes it.
+    func testFamilyComesFromTheHostNotTheModelId() throws {
+        let options = try JSONDecoder().decode(BotOptions.self, from: Data(#"{"models":[{"id":"claude:lookalike","agentFamily":"codex","displayName":"Lookalike","hidden":false,"reasoningEfforts":[]},{"id":"plain","displayName":"Old host","hidden":false,"reasoningEfforts":[]}],"allowedApprovalPolicies":[],"approvalModes":[{"id":"ask-for-approval","allowed":true}],"permissionsByFamily":{"claude":{"permissionModes":[],"approvalModes":[{"id":"full-access","allowed":true}]}}}"#.utf8))
+        XCTAssertEqual(options.models[0].family, .codex)
+        XCTAssertEqual(options.models[1].family, .codex)
+        XCTAssertEqual(options.approvalChoices(model: "claude:lookalike")?.map(\.id), ["ask-for-approval"])
+        XCTAssertNil(options.approvalChoices(model: "claude:unlisted"))
+    }
     func testGlobalDefaultsSurviveDraftRemovalAndAreValidatedAgainstHostChoices() throws {
         let suite = "WonderDefaultsTests." + UUID().uuidString
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))

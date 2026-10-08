@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { Sessions } from "../sessions.mjs";
 import { ClaudeBridge } from "../bridge.mjs";
 import { ToolPolicy } from "../permissions.mjs";
-import { backgroundTasks, claudeSessionBusy, nativeTurns } from "../project-history.mjs";
+import { backgroundTasks, claudeSessionBusy, nativeTurns, turnEndMessageId } from "../project-history.mjs";
 import { ClaudeSessionFiles, projectFolderName } from "../session-file.mjs";
 
 // Contract owner: project conversations continue the owner's native Claude Code
@@ -76,6 +76,36 @@ test("project turns use the native coding preset and name the transcript entry a
   // A project cannot be moved to another folder by a later turn.
   await assert.rejects(f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "x" }],
     wonderProject: { cwd: f.secondary } }), /keeps its working folder/);
+});
+
+// Contract: a Project turn offers Claude the daemon's thread tools under the
+// `wonder` server, and nothing else the daemon happens to register; a call
+// round-trips through the daemon only after its permission check.
+test("project turns expose only the thread tools and route them through the daemon", async t => {
+  const f = await fixture(t);
+  const names = ["wonder_thread_list", "wonder_thread_read", "wonder_thread_send", "wonder_thread_wait", "wonder_delegate"];
+  const spec = name => ({ name, description: name, inputSchema: { type: "object", properties: { limit: { type: "integer" } } } });
+  const { thread } = await f.bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+  f.gate.current = Promise.withResolvers();
+  await f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Delegate it" }],
+    dynamicTools: [...names.map(spec), spec("wonder_ask_question"), spec("wonder_computer_use")] });
+  while (!f.capturedOptions.length) await new Promise(resolve => setImmediate(resolve));
+  const options = f.capturedOptions[0];
+  assert.deepEqual(options.mcpServers.wonder.tools.map(tool => tool.name), names);
+  const list = options.mcpServers.wonder.tools[0].handler;
+  const origin = { name: "wonder", source: "sdk" };
+  assert.equal((await options.canUseTool("mcp__wonder__wonder_thread_list", {}, { toolUseID: "forged", mcpServer: { name: "wonder", source: "user" } })).behavior, "deny");
+  assert.equal((await options.canUseTool("mcp__wonder__wonder_thread_list", { limit: 5 }, { toolUseID: "call-1", mcpServer: origin })).behavior, "allow");
+  const answered = list({ limit: 5 });
+  await new Promise(resolve => setImmediate(resolve));
+  const call = f.frames.find(frame => frame.method === "item/tool/call");
+  assert.equal(call.params.tool, "wonder_thread_list");
+  assert.equal(call.params.callId, "call-1");
+  assert.deepEqual(call.params.arguments, { limit: 5 });
+  await f.bridge.receive({ id: call.id, result: { success: true, contentItems: [{ type: "inputText", text: '{"threads":[]}' }] } });
+  assert.equal((await answered).isError, false);
+  f.gate.current.resolve();
+  await f.bridge.active.get(thread.id)?.finished;
 });
 
 // Contract: the owner's approval and plan modes reach every turn as Claude
@@ -231,6 +261,20 @@ test("native history includes Claude Code turns and reuses Wonder receipts by id
   assert.equal(turns[0].items[1].id, "turn-1:msg-1:1");
   // Shell commands use Codex's command row: the command and its output.
   assert.deepEqual(turns[1].items[1], { type: "commandExecution", id: "tool-1", command: "ls", status: "completed", success: true, aggregatedOutput: "ok" });
+});
+
+test("desktop pastes appear as their pasted text, not as pasted_content tags", () => {
+  // Shape recorded by Claude Desktop: typed words, then each paste wrapped with a repeated id.
+  const fence = "```\nContinue the project at:\n/p/app\n\nShow me the lyrics only.\n```";
+  const [typed, pasteOnly, two] = nativeTurns([
+    { type: "user", uuid: "u1", message: { content: `Please continue\n\n<pasted_content id="9ef7">\n${fence}\n</pasted_content id="9ef7">\n` } },
+    { type: "user", uuid: "u2", message: { content: [{ type: "text", text: `\n\n<pasted_content id="a1">\nonly a paste\n</pasted_content id="a1">\n` }] } },
+    { type: "user", uuid: "u3", message: { content: `<pasted_content id="b1">\none\n</pasted_content id="b1">\n\n<pasted_content id="b2">\ntwo\n\n</pasted_content id="b2">` } },
+  ]);
+  const text = turn => turn.items[0].content[0].text;
+  assert.equal(text(typed), `Please continue\n\n${fence}`);
+  assert.equal(text(pasteOnly), "only a paste");
+  assert.equal(text(two), "one\n\ntwo");
 });
 
 test("text between Claude tool calls is commentary; text after the last one is the reply", () => {
@@ -416,6 +460,63 @@ test("turns and agent tasks from before a compaction stay visible", async t => {
   assert.deepEqual(await files.earlierMessages("not-a-uuid", cwd, "u2"), []);
 });
 
+// Shape recorded by Claude Code: a resumed background agent notifies again under
+// the resuming call's tool-use ID but keeps its task ID.
+test("a resumed agent's later notice updates its task instead of adding a command row", () => {
+  const agentNotice = (id, toolUseId, status, summary) => ({ type: "user", uuid: id,
+    message: { content: `<task-notification>\n<task-id>a0b1c2</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>` } });
+  const messages = [
+    { type: "user", uuid: "turn-1", message: { content: "Go" } },
+    { type: "assistant", uuid: "a1", timestamp: "2026-10-06T20:12:08Z", message: { id: "m1", content: [
+      { type: "tool_use", id: "tu-agent", name: "Agent", input: { description: "Readiness pass", subagent_type: "general-purpose", prompt: "Do it", run_in_background: true } },
+      { type: "tool_use", id: "tu-bg", name: "Bash", input: { command: "make build\nmake test", run_in_background: true } }] } },
+    { type: "user", uuid: "r1", message: { content: [{ type: "tool_result", tool_use_id: "tu-agent",
+      content: [{ type: "text", text: "Async agent launched successfully.\nagentId: a0b1c2 (internal ID)" }] }] } },
+    agentNotice("n1", "tu-agent", "completed", 'Agent "Readiness pass" finished'),
+    { type: "assistant", uuid: "a2", message: { id: "m2", content: [{ type: "tool_use", id: "tu-resume", name: "SendMessage", input: { to: "a0b1c2" } }] } },
+    agentNotice("n2", "tu-resume", "failed", 'Agent "Readiness pass" failed: API error'),
+  ];
+  const tasks = backgroundTasks(messages, true);
+  assert.deepEqual(tasks.map(t => [t.id, t.kind, t.title, t.status]), [
+    ["tu-bg", "command", "make build", "running"], ["tu-agent", "agent", "Readiness pass", "failed"]]);
+  // Without the launch in view, a notice that names an agent still makes an agent row.
+  assert.equal(backgroundTasks([agentNotice("n3", "tu-gone", "completed", 'Agent "Old pass" finished')], true)[0].kind, "agent");
+});
+
+test("a running agent's unanswered tool call is in progress, answered ones are done", () => {
+  const [turn] = nativeTurns([
+    { type: "user", uuid: "p", message: { content: "Look" } },
+    { type: "assistant", uuid: "a1", message: { id: "m1", content: [
+      { type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } },
+      { type: "tool_use", id: "t2", name: "Grep", input: { pattern: "x" } }] } },
+    { type: "user", uuid: "r1", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } },
+  ], [], true);
+  assert.deepEqual(turn.items.slice(1).map(i => [i.id, i.status]), [["t1", "completed"], ["t2", "inProgress"]]);
+  const [done] = nativeTurns([
+    { type: "user", uuid: "p", message: { content: "Look" } },
+    { type: "assistant", uuid: "a1", message: { id: "m1", content: [{ type: "tool_use", id: "t2", name: "Grep", input: {} }] } },
+  ], [], false);
+  assert.equal(done.items[1].status, "completed");
+});
+
+test("Latest settings come from the newest assistant message and say who wrote it", async t => {
+  const root = await mkdtemp(join(tmpdir(), "wonder-settings-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "app"), id = "11111111-2222-3333-4444-555555555555";
+  const folder = join(root, projectFolderName(cwd));
+  await mkdir(folder, { recursive: true });
+  const assistant = (uuid, extra) => ({ type: "assistant", uuid, message: { model: "claude-opus-5-5", usage: { speed: "standard" } }, ...extra });
+  const write = rows => writeFile(join(folder, `${id}.jsonl`), rows.map(r => JSON.stringify(r)).join("\n") + "\n");
+  await write([assistant("a1", { entrypoint: "claude-desktop", effort: "xhigh" }),
+    { type: "assistant", uuid: "a2", message: { model: "<synthetic>" }, entrypoint: "claude-desktop" },
+    assistant("side", { isSidechain: true, effort: "low" })]);
+  const files = new ClaudeSessionFiles(root);
+  assert.deepEqual(await files.latestSettings(id, cwd), { turnId: "a1", native: true, model: "claude-opus-5-5", effort: "xhigh", speed: "standard" });
+  await write([assistant("a1", { entrypoint: "claude-desktop", effort: "xhigh" }), assistant("a3", { entrypoint: "sdk-ts" })]);
+  assert.deepEqual(await files.latestSettings(id, cwd), { turnId: "a3", native: false, model: "claude-opus-5-5", effort: null, speed: "standard" });
+  assert.equal(await files.latestSettings("not-a-uuid", cwd), null);
+});
+
 // Project dispatch must retain the registered adapter, not replace its MCP
 // servers with an empty inventory. The peer is local and runs no model work.
 test("Projects retain the host-owned native computer adapter", async t => {
@@ -439,4 +540,48 @@ test("Projects retain the host-owned native computer adapter", async t => {
     assert.equal((await options.canUseTool("mcp__cua_repl__js", input,
       { ...ctx, mcpServer: { name: "cua_repl", source: "user" } })).behavior, "deny");
   } finally { f.gate.current.resolve(); await f.bridge.active.get(thread.id)?.finished; }
+});
+
+const forkMessages = [
+  { type: "user", uuid: "turn-1", origin: { kind: "human" }, message: { content: "First ask" } },
+  { type: "assistant", uuid: "a1", message: { id: "m1", content: [{ type: "tool_use", id: "tu1", name: "Bash", input: { command: "ls" } }] } },
+  { type: "user", uuid: "r1", message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: "files" }] } },
+  { type: "assistant", uuid: "a2", message: { id: "m2", content: [{ type: "text", text: "Done one" }] } },
+  { type: "user", uuid: "turn-2", origin: { kind: "human" }, message: { content: "Second ask" } },
+  { type: "assistant", uuid: "a3", message: { id: "m3", content: [{ type: "text", text: "Done two" }] } },
+];
+
+test("a fork ends at the last entry of the chosen turn, never inside the next one", () => {
+  assert.deepEqual(nativeTurns(forkMessages).map(t => t.id), ["turn-1", "turn-2"]);
+  assert.equal(turnEndMessageId(forkMessages, "turn-1"), "a2");
+  assert.equal(turnEndMessageId(forkMessages, "turn-2"), "a3");
+  assert.equal(turnEndMessageId(forkMessages, "r1"), null, "a tool result does not open a turn");
+  assert.equal(turnEndMessageId(forkMessages, "missing"), null);
+});
+
+test("forking copies the native session through the chosen turn and leaves the source alone", async t => {
+  const f = await fixture(t);
+  const id = "11111111-2222-4333-8444-555555555555", forked = [];
+  const claudeSessionsDir = await mkdtemp(join(tmpdir(), "wonder-claude-sessions-"));
+  t.after(() => rm(claudeSessionsDir, { recursive: true, force: true }));
+  const sdk = { getSessionMessages: async () => forkMessages, getSessionInfo: async (sessionId, { dir }) => ({ sessionId, cwd: dir, lastModified: 1 }),
+    forkSession: async (sessionId, options) => { forked.push({ sessionId, options }); return { sessionId: "99999999-8888-4777-8666-555555555555" }; } };
+  const bridge = new ClaudeBridge({ updates: { acquire: async () => ({ runtime: { sdk }, release: async () => {} }) },
+    sessions: f.sessions, send: async () => {}, claudeSessionsDir });
+  const { thread } = await bridge.request("project/session/attach", { sessionId: id, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+
+  const first = await bridge.request("project/session/fork", { threadId: thread.id, lastTurnId: "turn-1", title: "Plan (fork)" });
+  assert.equal(first.sessionId, "99999999-8888-4777-8666-555555555555");
+  assert.deepEqual(forked[0], { sessionId: id, options: { dir: f.primary, upToMessageId: "a2", title: "Plan (fork)" } });
+  await bridge.request("project/session/fork", { threadId: thread.id });
+  assert.deepEqual(forked[1].options, { dir: f.primary }, "the latest turn copies the whole session");
+  await assert.rejects(bridge.request("project/session/fork", { threadId: thread.id, lastTurnId: "gone" }), /no longer in this conversation/);
+  assert.equal(forked.length, 2);
+  assert.equal(f.sessions.get(thread.id).sdkSessionId, id, "the source keeps its session");
+
+  bridge.active.set(thread.id, {});
+  await assert.rejects(bridge.request("project/session/fork", { threadId: thread.id }), /Wait for Claude to finish/);
+  bridge.active.delete(thread.id);
+  const draft = await bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+  await assert.rejects(bridge.request("project/session/fork", { threadId: draft.thread.id }), /Send a message first/);
 });

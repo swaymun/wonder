@@ -159,6 +159,8 @@ async fn tick(state: &AppState) -> Result<(), String> {
             let _ = crate::dispatch_guide(state.clone(), message, turn).await;
         }
     }
+    // Idle parents learn that delegated threads finished before new work starts.
+    crate::thread_tools::wake_parents(state).await;
     for message in state
         .store
         .pending_dispatch_messages()
@@ -487,7 +489,10 @@ mod tests {
     async fn enqueue(state: &AppState, client: &str, direct: bool) -> wonder_store::StoredMessage {
         {
             let mut catalog = state.runtime_catalog.write().await;
-            catalog.apply_models_page(&json!({"data":[{"id":"test-model","isDefault":true}]}));
+            catalog.apply_models_page(
+                wonder_store::AgentFamily::Codex,
+                &json!({"data":[{"id":"test-model","isDefault":true}]}),
+            );
             catalog.apply_permission_profiles(
                 &state.bot_home,
                 &json!({"data":[{"name":"test","allowed":true}]}),
@@ -593,7 +598,10 @@ mod tests {
             .unwrap();
         {
             let mut catalog = state.runtime_catalog.write().await;
-            catalog.apply_models_page(&json!({"data":[{"id":"test-model","isDefault":true}]}));
+            catalog.apply_models_page(
+                wonder_store::AgentFamily::Codex,
+                &json!({"data":[{"id":"test-model","isDefault":true}]}),
+            );
             catalog.apply_permission_profiles(
                 &state.bot_home,
                 &json!({"data":[{"name":"test","allowed":true}]}),

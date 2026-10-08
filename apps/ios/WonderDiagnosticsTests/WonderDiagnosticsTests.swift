@@ -730,7 +730,7 @@ final class WonderDiagnosticsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let (model, chat) = try recoveryGroup(root: root)
         model.editDraft("Keep this message", chat: chat.id)
-        let family = AgentFamily(model: model.usageModel(chat))
+        let family = model.agentFamily(chat)
         let usage = try JSONSerialization.data(withJSONObject: ["agentFamily": family.rawValue, "checkedAtMs": 1,
             "windows": [["id": "primary", "label": "5 hours", "usedPercent": 100, "remainingPercent": 0]], "additionalUsageAvailable": false])
         MessageRecoveryURLProtocol.enqueue(path: "/api/v1/account/usage", body: usage)

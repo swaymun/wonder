@@ -1053,6 +1053,8 @@ export interface ProjectThreadSummary {
 }
 export interface ProjectThreadsPage { threads: ProjectThreadSummary[]; nextCursor: string | null; partial: ProjectPartialFailure[] }
 export interface AttachProjectThreadRequest { reference: string }
+/** Copies a started thread, through `lastTurnId` when given, into a new thread. */
+export interface ForkProjectConversationRequest { lastTurnId?: string | null }
 /** The first message is the only request that starts provider work. */
 export interface CreateProjectThreadRequest {
   deviceId: string;

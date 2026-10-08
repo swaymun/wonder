@@ -25,3 +25,7 @@ apps/ios/**/xcuserdata/
 /fastlane/report.xml
 /fastlane/README.md
 /fastlane/Preview.html
+
+# Claude Code: share only the project settings
+/.claude/*
+!/.claude/settings.json

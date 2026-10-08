@@ -23,9 +23,9 @@ private struct WonderRoot: View {
     var body: some View {
         content.environmentObject(library)
             .environment(\.chatBubblePalette, ChatBubblePalette(rawValue: bubblePaletteRaw) ?? .standard)
-            // Actions read as plain text, not blue links. Selection and focus
-            // still use Color.accentColor explicitly; switches use `.systemSwitch()`.
-            .tint(.primary)
+            // The theme owns the tint (plain text, not blue links), the forced
+            // appearance and the accent; switches use `.systemSwitch()`.
+            .modifier(WonderThemeHost())
     }
 
     @ViewBuilder private var content: some View {
@@ -78,6 +78,7 @@ struct ConnectionsView: View {
     var isSheet = false
     @Environment(\.dismiss) private var dismiss
     @AppStorage(ProjectWidgetSnapshot.showNamesPreferenceKey) private var showNamesOnWidgets = false
+    @AppStorage(WonderTheme.storageKey) private var themeID = WonderThemeCatalog.defaultID
     @State private var adding = false
     @State private var widgetFailure: String?
     var body: some View {
@@ -112,6 +113,10 @@ struct ConnectionsView: View {
                 Button("Add computer", systemImage: "plus") { adding = true }.disabled(!library.loaded).accessibilityIdentifier("settings-add-computer")
             }
             Section("Appearance") {
+                NavigationLink { ThemePickerView() } label: {
+                    LabeledContent("Theme", value: WonderThemeCatalog.theme(id: ProcessInfo.processInfo.diagnosticThemeOverride ?? themeID).name)
+                }
+                .accessibilityIdentifier("settings-theme")
                 NavigationLink("Chat bubbles") { ChatAppearanceView() }
                     .accessibilityIdentifier("settings-chat-bubbles")
             }
@@ -141,6 +146,7 @@ struct ConnectionsView: View {
             Section { NavigationLink("Diagnostics") { DiagnosticsView(library: library) }.accessibilityIdentifier("diagnostics-settings") }
             #endif
         }
+        .wonderGroupedStyle()
         .navigationTitle("Settings")
         .sheet(isPresented: $adding) { PairComputerView(model: library.pairingModel()) }
     }
@@ -157,6 +163,8 @@ private struct ChatAppearanceView: View {
                     }
                 }
                 .accessibilityIdentifier("chat-bubble-palette")
+            } footer: {
+                Text("These colors apply to the Wonder theme. Other themes bring their own bubbles.")
             }
             Section("Preview") {
                 VStack(spacing: 12) {
@@ -171,6 +179,7 @@ private struct ChatAppearanceView: View {
                 .accessibilityElement(children: .contain)
             }
         }
+        .wonderGroupedStyle()
         .navigationTitle("Chat bubbles")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -233,6 +242,8 @@ struct ConnectionDetail: View {
                     .accessibilityIdentifier("connection-projects")
                 NavigationLink("Automations") { AutomationsView(model: model) }
                     .accessibilityIdentifier("connection-automations")
+                NavigationLink("Default models") { DefaultModelsView(model: model) }
+                    .accessibilityIdentifier("connection-default-models")
                 NavigationLink("Connected apps") { ConnectedAppsView(model: model) }
             }
             CodexUsageSection(model: model)
@@ -242,6 +253,7 @@ struct ConnectionDetail: View {
             }
             if let error = model.error { FailureDetails("Couldn’t connect", message: error) }
         }
+        .wonderGroupedStyle()
         .navigationTitle(model.macName).navigationBarTitleDisplayMode(.inline)
         .task {
             await model.check()

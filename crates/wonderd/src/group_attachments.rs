@@ -273,11 +273,10 @@ mod tests {
                     &json!({"data":[{"name":":read-only","allowed":true}]}),
                 );
         }
-        state
-            .runtime_catalog
-            .write()
-            .await
-            .apply_models_page(&json!({"data":[{"id":"test-model","isDefault":true}]}));
+        state.runtime_catalog.write().await.apply_models_page(
+            wonder_store::AgentFamily::Codex,
+            &json!({"data":[{"id":"test-model","isDefault":true}]}),
+        );
         (dir, state)
     }
     async fn upload(state: &AppState, conversation: &str, upload: &str, text: &str) -> Value {
@@ -500,6 +499,7 @@ mod tests {
             Some(Extension(LocalOwnerAuthority)),
             Json(SendMessageRequest {
                 model_selection_revision: None,
+                project_model: None,
                 group_routing: None,
                 device_id: "owner".into(),
                 client_message_id: uuid::Uuid::new_v4().to_string(),

@@ -592,6 +592,25 @@ import WonderPairing
         return response
     }
 
+    /// Copies a started thread, through `lastTurnID` when given, into a new
+    /// thread in the same project. The Mac never changes the source. Returns
+    /// the new conversation's ID.
+    func fork(_ conversationID: String, lastTurnID: String?) async throws -> String {
+        guard let model, let scope = fenced() else { throw PairingFailure.response(401) }
+        let created: ProjectThreadSummary = try await model.manage(
+            "/api/v1/project-conversations/\(ConnectionModel.escape(conversationID))/fork", method: "POST",
+            body: ForkConversationRequest(lastTurnId: lastTurnID).body())
+        guard isCurrent(scope), let id = created.conversationId else { throw CancellationError() }
+        if let projectID = details[conversationID]?.projectId, var state = threads[projectID],
+           !state.threads.contains(where: { $0.conversationId == id }) {
+            state.threads.insert(created, at: 0)
+            threads[projectID] = state
+            if threadTasks[projectID] != nil { createdDuringThreadRead[projectID, default: []].insert(id) }
+            saveCache()
+        }
+        return id
+    }
+
     func continuation(_ conversationID: String) async throws -> DesktopContinuation {
         guard let model, let scope = fenced() else { throw PairingFailure.response(401) }
         let response: DesktopContinuation = try await model.manage("/api/v1/conversations/\(ConnectionModel.escape(conversationID))/desktop-continuation")

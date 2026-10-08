@@ -295,6 +295,22 @@
         "response": { "$ref": "#/$defs/projectConversationDetail" }
       }
     },
+    "/api/v1/project-conversations/{conversationId}/fork": {
+      "post": {
+        "request": { "$ref": "#/$defs/forkProjectConversationRequest" },
+        "response": { "$ref": "#/$defs/projectThreadSummary" },
+        "successStatus": 201
+      }
+    },
+    "/api/v1/settings/default-models": {
+      "get": { "response": { "$ref": "#/$defs/defaultModelPreferences" } }
+    },
+    "/api/v1/settings/default-models/{family}": {
+      "put": {
+        "request": { "$ref": "#/$defs/setDefaultModelRequest" },
+        "response": { "$ref": "#/$defs/defaultModelPreferences" }
+      }
+    },
     "/api/v1/project-conversations/{conversationId}/subagents": {
       "get": { "query": { "$ref": "#/$defs/projectSubagentListQuery" }, "response": { "$ref": "#/$defs/projectSubagentList" } }
     },
@@ -2472,6 +2488,11 @@
       },
       "additionalProperties": false
     },
+    "forkProjectConversationRequest": {
+      "type": "object",
+      "properties": { "lastTurnId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 } },
+      "additionalProperties": false
+    },
     "attachProjectThreadRequest": {
       "type": "object",
       "required": ["reference"],
@@ -2505,6 +2526,37 @@
       "properties": {
         "conversation": { "$ref": "#/$defs/projectThreadSummary" },
         "receipt": { "anyOf": [{ "$ref": "#/$defs/messageReceipt" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "defaultModelPreferences": {
+      "type": "object",
+      "required": ["families"],
+      "properties": {
+        "families": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["family", "model", "effort", "serviceTier"],
+            "properties": {
+              "family": { "enum": ["codex", "claude"] },
+              "model": { "type": ["string", "null"], "description": "Null means Wonder's own default." },
+              "effort": { "type": ["string", "null"] },
+              "serviceTier": { "type": ["string", "null"] }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "setDefaultModelRequest": {
+      "type": "object",
+      "required": ["model"],
+      "properties": {
+        "model": { "type": ["string", "null"], "minLength": 1, "description": "Null returns the harness to Wonder's own default." },
+        "effort": { "type": ["string", "null"], "minLength": 1 },
+        "serviceTier": { "type": ["string", "null"], "minLength": 1 }
       },
       "additionalProperties": false
     },

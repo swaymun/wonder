@@ -1,0 +1,22 @@
+# A permission request arriving in an open conversation shows as a pill above
+# the composer (no inline card or link). The pill replaces the conversation
+# with the request, as Files does, and returns to it; questions use the same pill.
+launch --fixture read-preview --fixture send-preview --fixture attention-arrives-preview --fixture phone-approval-preview --arg command
+wait --id message-draft --timeout 20
+wait --id question-dock-open --gone
+wait --id question-dock-open --timeout 10
+wait --contains "Permission"
+wait --id review-approval-request --gone
+wait --id approval-decline-fixture-command --gone
+shot approval-dock
+tap --id question-dock-open
+wait --id approval-decline-fixture-command --timeout 5
+wait --id message-draft
+shot approval-dock-open
+tap --id question-dock-open
+wait --id approval-decline-fixture-command --gone --timeout 5
+launch --fixture read-preview --fixture send-preview --fixture question-preview
+wait --id question-dock-open --timeout 20
+tap --id question-dock-open
+wait --contains "Which day works best?" --timeout 5
+shot question-dock-open

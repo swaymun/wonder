@@ -1,0 +1,19 @@
+# Capture the Chats sidebar, an open conversation with a code block, Settings and the
+# Settings theme picker (the forced theme must show ticked there) under a forced theme. apps/ios/control/theme-sweep.sh reruns this for
+# each catalog id; the default here is nord. Nothing is sent.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-actions --fixture theme --arg nord
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id pinned-thread:codex:read-fixture --timeout 20
+shot theme-nord-sidebar
+tap --id pinned-thread:codex:read-fixture
+wait --contains "Continue the project at:" --timeout 20
+shot theme-nord-chat
+tap --id open-sidebar --type Button
+wait --id sidebar-settings --timeout 10
+tap --id sidebar-settings
+wait --id settings-theme --timeout 10
+shot theme-nord-settings
+tap --id settings-theme
+wait --id theme-option:dracula --timeout 10
+shot theme-nord-picker

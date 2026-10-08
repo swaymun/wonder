@@ -1,0 +1,29 @@
+# Open guide.md from Files: it opens rendered (Preview); Source shows coloured markdown;
+# the choice is remembered across a relaunch, and switching back is remembered too.
+launch --fixture read-preview --fixture send-preview --fixture files-preview --fixture project-files-conversation-preview --fixture workspace-viewer-preview
+wait --id conversation-files-pill
+tap --id conversation-files-pill
+wait --id workspace-file-list
+tap --id workspace-file-entry:guide.md --timeout 5
+wait --id workspace-markdown-preview --timeout 10
+shot markdown-preview
+tap --label Source --type RadioButton
+wait --id annotation-selectable-text --timeout 5
+wait --id workspace-markdown-preview --gone --timeout 5
+shot markdown-source
+launch --fixture read-preview --fixture send-preview --fixture files-preview --fixture project-files-conversation-preview --fixture workspace-viewer-preview
+wait --id conversation-files-pill
+tap --id conversation-files-pill
+wait --id workspace-file-list
+tap --id workspace-file-entry:guide.md --timeout 5
+wait --id annotation-selectable-text --timeout 10
+shot markdown-source-remembered
+tap --label Preview --type RadioButton
+wait --id workspace-markdown-preview --timeout 5
+shot markdown-preview-again
+launch --fixture read-preview --fixture send-preview --fixture files-preview --fixture project-files-conversation-preview --fixture workspace-viewer-preview
+wait --id conversation-files-pill
+tap --id conversation-files-pill
+wait --id workspace-file-list
+tap --id workspace-file-entry:guide.md --timeout 5
+wait --id workspace-markdown-preview --timeout 10

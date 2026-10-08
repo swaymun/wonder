@@ -196,11 +196,7 @@ async fn project_thread(
     state: &AppState,
     project: &wonder_store::StoredProjectConversation,
 ) -> Result<String, Box<Response>> {
-    let expected_store = match project.family {
-        AgentFamily::Codex => &state.projects.codex_store,
-        AgentFamily::Claude => &state.projects.claude_store,
-    };
-    if project.provider_store != *expected_store {
+    if project.provider_store != crate::providers::provider_store(state, project.family) {
         return Err(Box::new(
             (
                 StatusCode::CONFLICT,
@@ -230,10 +226,8 @@ async fn project_thread(
                 .into_response(),
         ));
     };
-    let matches_native = match project.family {
-        AgentFamily::Codex => binding.thread_id == native_session,
-        AgentFamily::Claude => binding.session_id.as_deref() == Some(native_session),
-    };
+    let matches_native =
+        crate::providers::binds_native_session(project.family, native_session, &binding);
     if binding.family != project.family
         || binding.execution_scope != wonder_store::EXECUTION_SCOPE_PROJECTS
         || !matches_native

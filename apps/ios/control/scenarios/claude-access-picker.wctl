@@ -1,0 +1,25 @@
+# Claude's access menu offers Ask, Auto and Full access, with Plan
+# separate; choosing a level saves it and the shield shows the saved level.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-read
+wait --id open-sidebar --timeout 20
+tap --id open-sidebar --type Button
+wait --id pinned-thread:claude:read-fixture --timeout 20
+tap --id pinned-thread:claude:read-fixture
+wait --id project-composer-access --timeout 15
+tap --id project-composer-access
+wait --id access-choice-auto --timeout 5
+wait --id access-choice-manual
+wait --id access-choice-fullAccess
+wait --id access-choice-plan
+wait --id access-choice-acceptEdits --gone
+wait --id project-unsandboxed-commands --gone
+shot claude-access-menu
+tap --id access-choice-fullAccess
+wait --id access-choice-auto --gone --timeout 5
+wait --contains "Full access" --timeout 10
+tap --id project-composer-access
+wait --id access-choice-auto --timeout 5
+tap --id access-choice-auto
+wait --id access-choice-auto --gone --timeout 5
+wait --contains "Auto" --timeout 10
+shot claude-access-auto-saved

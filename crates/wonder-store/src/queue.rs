@@ -12,7 +12,7 @@ pub struct QueueItem {
 impl Store {
     pub async fn pending_queue(&self, conversation: &str) -> Result<Vec<QueueItem>, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let rows = sqlx::query("SELECT m.* FROM messages m JOIN dispatch_work w ON w.message_id=m.id WHERE m.conversation_id=? AND m.state='accepted_by_wonder' AND NOT EXISTS(SELECT 1 FROM bot_initializations i WHERE i.message_id=m.id) AND NOT EXISTS(SELECT 1 FROM bot_workspace_followups f WHERE f.message_id=m.id) ORDER BY m.queue_position,m.created_at,m.id")
+        let rows = sqlx::query("SELECT m.* FROM messages m JOIN dispatch_work w ON w.message_id=m.id WHERE m.conversation_id=? AND m.state='accepted_by_wonder' AND NOT EXISTS(SELECT 1 FROM bot_initializations i WHERE i.message_id=m.id) AND NOT EXISTS(SELECT 1 FROM bot_workspace_followups f WHERE f.message_id=m.id) AND NOT EXISTS(SELECT 1 FROM message_sources s WHERE s.message_id=m.id AND s.kind='wake') ORDER BY m.queue_position,m.created_at,m.id")
             .bind(conversation).fetch_all(&mut *tx).await?;
         let mut items = Vec::new();
         for row in rows {

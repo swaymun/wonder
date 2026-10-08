@@ -59,6 +59,7 @@ struct ComposerModelLabel: View {
 
 /// Shows that plan mode is on; tapping turns it off.
 struct PlanModeChip: View {
+    @Environment(\.wonderTheme) private var theme
     var isDisabled = false
     let turnOff: () -> Void
     var body: some View {
@@ -69,9 +70,9 @@ struct PlanModeChip: View {
                 Image(systemName: "xmark").font(.caption2.weight(.bold))
             }
             .font(.subheadline.weight(.medium))
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(theme.accent)
             .padding(.horizontal, 10).frame(minHeight: 28)
-            .background(Color.accentColor.opacity(0.12), in: Capsule())
+            .background(theme.accent.opacity(0.12), in: Capsule())
             .padding(.vertical, 4)
             .contentShape(Rectangle())
         }
@@ -167,8 +168,10 @@ struct ProjectConversationHeader: View {
     }
 }
 
-/// Model, effort and access for one project thread. The provider is fixed once
-/// the thread exists; only models from that provider are offered.
+/// Model, effort and access for one project thread. The picker lists both
+/// providers' models. A model of the thread's own provider is saved on the
+/// thread; one of the other provider is carried by the next message, and the
+/// Mac moves the thread to that provider when the message is delivered.
 struct ProjectComposerSettings: View {
     @ObservedObject var model: ConnectionModel
     @ObservedObject var library: ProjectLibrary
@@ -177,30 +180,38 @@ struct ProjectComposerSettings: View {
     @State private var failure: String?
     private var detail: ProjectConversationDetail? { library.details[chat.id] }
     private var saving: Bool { model.savingComposerSettings.contains(chat.id) }
-    private var models: [BotOptions.Model] {
-        (library.options?.models ?? []).filter { !$0.hidden && $0.family == detail?.family }
+    private var pending: ProjectMessageModel? { model.projectNextModels[chat.id] }
+    private var allModels: [BotOptions.Model] { (library.options?.models ?? []).filter { !$0.hidden } }
+    private var groups: [ProjectModelGroup] {
+        guard let detail else { return [] }
+        return ProjectModelPicker.groups(models: allModels, current: detail.family)
     }
+    /// The provider the next message goes to.
+    private var targetFamily: AgentFamily? { pending?.family ?? detail?.family }
+    private var models: [BotOptions.Model] { allModels.filter { $0.family == targetFamily } }
     /// A thread that never chose a model uses its provider's default.
     private var selected: BotOptions.Model? {
         guard let detail else { return nil }
+        if let pending { return models.first { $0.id == pending.model } }
         if let stored = detail.model { return models.first { $0.id == stored } }
         return ModelDefaults.defaultModel(in: models)
     }
-    private var effort: String? { selected.flatMap { ModelDefaults.effort(detail?.effort, for: $0) } }
+    private var effort: String? { selected.flatMap { ModelDefaults.effort(pending?.effort ?? detail?.effort, for: $0) } }
+    private var serviceTier: String? { pending == nil ? detail?.serviceTier : pending?.serviceTier }
     private var title: String {
         if let selected {
             let summary = ModelDefaults.summary(model: selected, effort: effort)
-            let speed = selected.serviceTiers?.first { $0.id == detail?.serviceTier }
+            let speed = selected.serviceTiers?.first { $0.id == serviceTier }
             return speed.map { $0.id == "default" ? summary : summary + " · " + $0.label } ?? summary
         }
-        return detail?.model ?? "Model"
+        return pending?.model ?? detail?.model ?? "Model"
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
                 accessMenu
                 Spacer(minLength: 0)
-                Button { showingModel = true } label: { ComposerModelLabel(family: detail?.family, title: title) }
+                Button { showingModel = true } label: { ComposerModelLabel(family: targetFamily, title: title) }
                     .disabled(saving || detail == nil)
                     .accessibilityLabel("Model").accessibilityValue(title)
                     .accessibilityIdentifier("project-composer-model")
@@ -209,15 +220,28 @@ struct ProjectComposerSettings: View {
             if let failure { FailureDetails("Settings not saved", message: failure).padding(.horizontal, 12) }
         }
         .task(id: model.assignmentScope + ":" + String(model.macConnected == true)) { await library.loadOptions() }
+        // The choice ends once the Mac has moved the thread to it.
+        .onChange(of: detail) { _, latest in
+            if let pending, ProjectModelPicker.isApplied(pending, to: latest) { model.projectNextModels[chat.id] = nil }
+        }
         .sheet(isPresented: $showingModel) {
             NavigationStack {
                 Form {
-                    Section("Model") {
-                        if models.isEmpty { Text("Models are unavailable. Check \(model.macName).").foregroundStyle(.secondary) }
-                        ForEach(models) { option in
-                            Button { Task { await choose(option) } } label: {
-                                HStack { Text(option.displayName); Spacer(); if option.id == selected?.id { Image(systemName: "checkmark") } }
-                            }.foregroundStyle(.primary)
+                    if groups.isEmpty {
+                        Section("Model") { Text("Models are unavailable. Check \(model.macName).").foregroundStyle(.secondary) }
+                    }
+                    ForEach(groups) { group in
+                        Section {
+                            ForEach(group.models) { option in
+                                Button { Task { await choose(option) } } label: {
+                                    HStack { Text(option.displayName); Spacer(); if option.id == selected?.id && option.family == targetFamily { Image(systemName: "checkmark") } }
+                                }.foregroundStyle(.primary)
+                                    .accessibilityIdentifier("project-model:\(option.id)")
+                            }
+                        } header: {
+                            Text(group.family.title)
+                        } footer: {
+                            if group.family != detail?.family, let note = group.note { Text(note) }
                         }
                     }
                     if let selected, !selected.reasoningEfforts.isEmpty {
@@ -241,7 +265,7 @@ struct ProjectComposerSettings: View {
                                             }
                                         }
                                         Spacer()
-                                        if option.id == (detail?.serviceTier ?? "default") { Image(systemName: "checkmark") }
+                                        if option.id == (serviceTier ?? "default") { Image(systemName: "checkmark") }
                                     }
                                 }
                                 .accessibilityIdentifier("project-speed:\(option.id)")
@@ -251,8 +275,7 @@ struct ProjectComposerSettings: View {
                     if let failure { FailureDetails("Settings not saved", message: failure) }
                 }
                 .disabled(saving || model.accessEnded)
-                .navigationTitle(detail?.family.title ?? "Model").navigationBarTitleDisplayMode(.inline)
-                .toolbar { Button("Done") { showingModel = false } }
+                .pinnedSheetHeader("Model") { showingModel = false }
             }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
         }
     }
@@ -266,17 +289,34 @@ struct ProjectComposerSettings: View {
     }
     /// Picking a model starts from that model's default effort.
     private func choose(_ option: BotOptions.Model, effort: String? = nil) async {
+        guard let detail else { return }
         // Choosing the current model again keeps the effort already chosen.
-        guard let family = detail?.family, effort != nil || option.id != selected?.id else { return }
+        guard effort != nil || option.id != selected?.id || option.family != targetFamily else { return }
         let chosen = effort ?? ModelDefaults.effort(for: option)
-        let retainedTier = detail?.serviceTier.flatMap { tier in
+        let carriedTier = serviceTier.flatMap { tier in
             (option.serviceTiers ?? []).contains(where: { $0.id == tier }) || option.defaultServiceTier == tier ? tier : nil
         }
-        let fields: [String: Any] = ["model": option.id, "effort": chosen as Any? ?? NSNull(),
-                                     "serviceTier": retainedTier as Any? ?? NSNull()]
-        if await save(fields) { RememberedModels.save(family, model: option.id, effort: chosen) }
+        switch ProjectModelPicker.choice(current: detail.family, option: option, effort: chosen, serviceTier: option.family == targetFamily ? carriedTier : nil) {
+        case .sendWithNextMessage(let carried):
+            // Nothing changes on the Mac yet; the next message carries this choice.
+            failure = nil
+            model.projectNextModels[chat.id] = carried
+            RememberedModels.save(option.family, model: option.id, effort: chosen)
+        case .saveToThread:
+            let fields: [String: Any] = ["model": option.id, "effort": chosen as Any? ?? NSNull(),
+                                         "serviceTier": carriedTier as Any? ?? NSNull()]
+            if await save(fields) {
+                model.projectNextModels[chat.id] = nil
+                RememberedModels.save(detail.family, model: option.id, effort: chosen)
+            }
+        }
     }
     private func chooseSpeed(_ tier: String, model selected: BotOptions.Model) async {
+        if var carried = pending {
+            carried.serviceTier = tier
+            model.projectNextModels[chat.id] = carried
+            return
+        }
         var fields: [String: Any] = ["serviceTier": tier]
         if detail?.model == nil {
             fields["model"] = selected.id
@@ -617,6 +657,7 @@ struct ManageProjectsView: View {
 /// Suggestions from native Codex projects and Claude Code folders. Nothing is
 /// selected by default and nothing is included until the owner confirms.
 struct ChooseProjectsView: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var model: ConnectionModel
     @ObservedObject var library: ProjectLibrary
     var onFinish: () -> Void = {}
@@ -639,7 +680,7 @@ struct ChooseProjectsView: View {
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: selected.contains(candidate.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(selected.contains(candidate.id) ? Color.accentColor : Color.secondary)
+                                    .foregroundStyle(selected.contains(candidate.id) ? theme.accent : Color.secondary)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(candidate.name).foregroundStyle(.primary)
                                     Text(candidate.folders.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)

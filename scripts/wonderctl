@@ -27,7 +27,7 @@ PROFILES = {
 DEVICE_NAME, DEVICE_TYPES = PROFILES[os.environ.get("WONDER_CONTROL_PROFILE", "iphone")]
 CONTROL = ROOT / ".local/control"
 EVIDENCE = CONTROL / "evidence"
-DERIVED = ROOT / ".local/build/control-sim"
+DERIVED = Path(os.path.expanduser(os.environ.get("WONDER_CONTROL_DERIVED", ""))) if os.environ.get("WONDER_CONTROL_DERIVED") else ROOT / ".local/build/control-sim"
 CORE_SIMCTL = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/simctl"
 # One remote copy per local checkout, so worktrees never overwrite each other's source.
 REMOTE_DIR = f"wonder-control/{ROOT.name}-{hashlib.sha1(str(ROOT).encode()).hexdigest()[:8]}"
@@ -161,7 +161,7 @@ def matches(node, args):
         return False
     if args.label and node.get("AXLabel") != args.label:
         return False
-    if getattr(args, "contains", None) and args.contains not in (node.get("AXLabel") or "") + (node.get("AXValue") or ""):
+    if getattr(args, "contains", None) and args.contains not in (node.get("AXLabel") or "") + str(node.get("AXValue") or ""):
         return False
     return True
 
@@ -209,7 +209,16 @@ def cmd_device(args):
             simctl("shutdown", device["udid"])
         print("shut down")
         return
-    if args.erase:
+    # `simctl erase` can leave an iPhone Duo with a second display and dead input, so the
+    # Duo (and --recreate on any profile) is deleted and created again instead.
+    if args.recreate or (args.erase and DEVICE_NAME == PROFILES["duo"][0]):
+        device = find_device()
+        if device:
+            if device["state"] == "Booted":
+                simctl("shutdown", device["udid"])
+            simctl("delete", device["udid"])
+        create_device()
+    elif args.erase:
         device = ensure_device(boot=False)
         if device["state"] == "Booted":
             simctl("shutdown", device["udid"])
@@ -285,6 +294,44 @@ def cmd_tap(args):
     print("tapped")
 
 
+def cmd_hold(args):
+    """Long-press the centre of the first element matching the selector (opens context menus)."""
+    selector(args)
+    deadline = time.time() + args.timeout
+    while True:
+        found = [n for n in walk(ui_tree()) if matches(n, args) and n.get("frame")]
+        if len(found) > args.nth:
+            break
+        if time.time() > deadline:
+            raise ControlError(f"nothing to hold for {vars(args)}")
+        time.sleep(0.4)
+    f = found[args.nth]["frame"]
+    x, y = f["x"] + f["width"] / 2, f["y"] + min(f["height"] / 2, args.max_y_offset)
+    sh([axe_binary(), "touch", "-x", f"{x:.0f}", "-y", f"{y:.0f}", "--down", "--up", "--delay", str(args.seconds), "--udid", udid()])
+    print(f"held {args.seconds}s at {x:.0f},{y:.0f}")
+
+
+def cmd_back(args):
+    """Tap the navigation back control. It is a Button on the iPhone and a GenericElement on
+    the Duo, and an id can match several hidden copies, so take the on-screen one."""
+    deadline = time.time() + args.timeout
+    while True:
+        nodes = list(walk(ui_tree()))
+        screen = next((n["frame"] for n in nodes if n.get("type") == "Application" and n.get("frame")), None)
+        found = [n for n in nodes if n.get("AXUniqueId") == "BackButton" and n.get("frame")
+                 and screen and 0 <= n["frame"]["x"] < screen["width"] and 0 <= n["frame"]["y"] < screen["height"]
+                 and n["frame"]["width"] > 0]
+        if found:
+            break
+        if time.time() > deadline:
+            raise ControlError("no back control on screen")
+        time.sleep(0.4)
+    f = found[-1]["frame"]
+    x, y = f["x"] + f["width"] / 2, f["y"] + f["height"] / 2
+    sh([axe_binary(), "tap", "-x", f"{x:.0f}", "-y", f"{y:.0f}", "--udid", udid()])
+    print(f"went back via {x:.0f},{y:.0f}")
+
+
 def cmd_type(args):
     sh([axe_binary(), "type", args.text, "--udid", udid()])
     print("typed")
@@ -292,7 +339,22 @@ def cmd_type(args):
 
 def cmd_swipe(args):
     presets = {"up": "scroll-up", "down": "scroll-down", "left": "swipe-from-right-edge", "right": "swipe-from-left-edge"}
-    sh([axe_binary(), "gesture", presets[args.direction], "--udid", udid()])
+    if getattr(args, "inside", None):
+        # Drag within one element, such as a list in a short panel. The presets only scroll
+        # the middle of a 390x844 screen, which can miss it on the iPhone Duo.
+        node = next((n for n in walk(ui_tree()) if n.get("AXUniqueId") == args.inside), None)
+        if not node:
+            raise ControlError(f"no element with id {args.inside!r} to swipe in")
+        f = node["frame"]
+        x = f["x"] + f["width"] / 2
+        top, bottom = f["y"] + f["height"] * 0.2, f["y"] + f["height"] * 0.8
+        if args.direction not in ("up", "down"):
+            raise ControlError("--in supports up and down")
+        start, end = (bottom, top) if args.direction == "up" else (top, bottom)
+        sh([axe_binary(), "swipe", "--start-x", f"{x:.0f}", "--start-y", f"{start:.0f}",
+            "--end-x", f"{x:.0f}", "--end-y", f"{end:.0f}", "--duration", "0.4", "--udid", udid()])
+    else:
+        sh([axe_binary(), "gesture", presets[args.direction], "--udid", udid()])
     print(f"swiped {args.direction}")
 
 
@@ -308,6 +370,7 @@ def cmd_tree(args):
         return
     for node in walk(nodes):
         ident, label, value = node.get("AXUniqueId"), node.get("AXLabel"), node.get("AXValue")
+        value = None if value is None else str(value)
         if not (ident or label or value):
             continue
         frame = node.get("frame") or {}
@@ -332,6 +395,26 @@ def cmd_shot(args):
     path = evidence_path(args.name, ".png")
     simctl("io", udid(), "screenshot", str(path))
     print(path.relative_to(ROOT))
+
+
+def cmd_clipboard(args):
+    """Assert on the simulator pasteboard: --clear empties it; --contains/--not-contains poll it."""
+    if args.clear:
+        device = udid()
+        simctl("list", "-j", "devicetypes", check=False)  # resolves the simctl path
+        subprocess.run([_simctl, "pbcopy", device], input="", text=True, check=False)
+        print("cleared")
+        return
+    deadline = time.time() + args.timeout
+    while True:
+        text = simctl("pbpaste", udid(), check=False).stdout
+        ok = all(t in text for t in args.contains or []) and not any(t in text for t in args.not_contains or [])
+        if ok:
+            print(f"pasteboard ({len(text)} chars):\n{text}" if args.show or not (args.contains or args.not_contains) else f"pasteboard ok ({len(text)} chars)")
+            return
+        if time.time() > deadline:
+            raise ControlError(f"pasteboard check failed; contains={args.contains} not_contains={args.not_contains}; got: {text[:400]!r}")
+        time.sleep(0.4)
 
 
 def cmd_container(args):
@@ -391,7 +474,8 @@ def parser():
     add("doctor", cmd_doctor, "report Xcode, AXe, device, build and install state")
     c = add("device", cmd_device, "create/boot the dedicated simulator and print its UDID")
     c.add_argument("--shutdown", action="store_true")
-    c.add_argument("--erase", action="store_true", help="erase to a fresh-install state first")
+    c.add_argument("--erase", action="store_true", help="erase to a fresh-install state first (recreates the Duo)")
+    c.add_argument("--recreate", action="store_true", help="delete and create the simulator again, then boot it")
     c = add("build", cmd_build, "build TestingDiagnostics for the simulator and install it")
     c.add_argument("--no-install", action="store_true")
     add("install", cmd_install, "install the last build")
@@ -399,6 +483,8 @@ def parser():
     c.add_argument("--fixture", action="append", help="fixture name (e.g. fixtures) or full flag")
     c.add_argument("--arg", action="append", help="extra launch argument")
     c.add_argument("--env", action="append", help="KEY=VALUE for the app process")
+    c = add("back", cmd_back, "tap the navigation back control (iPhone and Duo)")
+    c.add_argument("--timeout", type=float, default=10)
     add("terminate", cmd_terminate, "terminate Wonder Testing")
     add("fixtures", cmd_fixtures, "list launch flags the app understands")
     c = add("open", cmd_open, "open a URL (deep link) in the simulator")
@@ -415,16 +501,31 @@ def parser():
         else:
             c.add_argument("--contains", help="substring of label or value")
             c.add_argument("--gone", action="store_true")
+    c = add("hold", cmd_hold, "long-press an element found by id/label/contains")
+    c.add_argument("--id")
+    c.add_argument("--label")
+    c.add_argument("--contains")
+    c.add_argument("--nth", type=int, default=0, help="which match, from 0")
+    c.add_argument("--seconds", type=float, default=1.2)
+    c.add_argument("--timeout", type=float, default=10)
+    c.add_argument("--max-y-offset", type=float, default=40, help="press no lower than this far into tall elements")
     c = add("type", cmd_type, "type text into the focused field")
     c.add_argument("text")
     c = add("swipe", cmd_swipe, "scroll or edge-swipe")
     c.add_argument("direction", choices=["up", "down", "left", "right"])
+    c.add_argument("--in", dest="inside", help="drag inside the element with this accessibility id")
     c = add("button", cmd_button, "press a hardware button")
     c.add_argument("name", choices=["home", "lock", "side-button", "siri", "apple-pay"])
     c = add("tree", cmd_tree, "print the accessibility tree")
     c.add_argument("--json", action="store_true")
     c = add("shot", cmd_shot, "save a screenshot under .local/control/evidence")
     c.add_argument("name", nargs="?", default="screen")
+    c = add("clipboard", cmd_clipboard, "check or clear the simulator pasteboard")
+    c.add_argument("--clear", action="store_true")
+    c.add_argument("--contains", action="append")
+    c.add_argument("--not-contains", action="append")
+    c.add_argument("--show", action="store_true")
+    c.add_argument("--timeout", type=float, default=5)
     add("container", cmd_container, "print the app's data container path")
     c = add("logs", cmd_logs, "recent Wonder process logs")
     c.add_argument("--last", default="2m")
@@ -452,7 +553,7 @@ def remote(args, argv):
     if args.command in SYNC_COMMANDS:
         sh(["ssh", host, f"mkdir -p {REMOTE_DIR}"])
         # openrsync does not reliably protect .gitignore'd paths from --delete; name them.
-        protected = ["/.git/", "/.local/", "/target/", "/node_modules/", ".build/", "DerivedData/", "__pycache__/"]
+        protected = ["/.git/", "/.claude/", "/.local/", "target/", "node_modules/", ".build/", "DerivedData/", "__pycache__/"]
         sh(["rsync", "-a", "--delete", *[f"--exclude={path}" for path in protected], "--filter=:- .gitignore",
             f"{ROOT}/", f"{host}:{REMOTE_DIR}/"])
     command = f"export PATH={REMOTE_PATH}; cd {REMOTE_DIR} && python3 scripts/wonderctl {shlex.join(forwarded)}"
@@ -477,7 +578,10 @@ def main(argv):
     LOCKS.mkdir(parents=True, exist_ok=True)
     exclusive = args.command in {"build", "run", "device", "install"}
     with open(LOCKS / f"{args.device}.lock", "w") as lock:
-        if exclusive:
+        if exclusive and os.environ.get("WONDER_CONTROL_WAIT") == "1":
+            print(f"waiting for '{DEVICE_NAME}'", file=sys.stderr, flush=True)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        elif exclusive:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:

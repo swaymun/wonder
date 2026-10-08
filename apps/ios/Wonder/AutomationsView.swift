@@ -135,6 +135,7 @@ struct AutomationsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .wonderGroupedStyle()
         .navigationTitle("Automations")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -535,6 +536,7 @@ private struct ProjectAutomationEditor: View {
         }
         .disabled(saving)
         .safeAreaInset(edge: .top) { failureBanner }
+        .wonderGroupedStyle()
         .navigationTitle(item == nil ? "New automation" : "Edit automation")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

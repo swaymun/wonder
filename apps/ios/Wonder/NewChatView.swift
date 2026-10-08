@@ -469,6 +469,7 @@ private struct ProjectRouteGate<Content: View>: View {
 }
 
 private struct NewChatContent: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
     @ObservedObject var model: ConnectionModel
@@ -931,7 +932,7 @@ private struct NewChatContent: View {
                                 Text(candidate.macName).lineLimit(2)
                                 Spacer(minLength: 8)
                                 Image(systemName: "checkmark")
-                                    .font(.body.weight(.semibold)).foregroundStyle(Color.accentColor)
+                                    .font(.body.weight(.semibold)).foregroundStyle(theme.accent)
                                     .opacity(selected ? 1 : 0)
                             }
                             .frame(minHeight: 44).contentShape(Rectangle())
@@ -1103,8 +1104,7 @@ private struct NewChatContent: View {
             }
             .foregroundStyle(.primary)
             .disabled(sending || draft.isSubmitted)
-            .navigationTitle("Model").navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Done") { showingModel = false } }
+            .pinnedSheetHeader("Model") { showingModel = false }
         }
         .alert("Switch working folder?", isPresented: $showingFolderChangeConfirmation,
                presenting: pendingFolderSelection) { folder in

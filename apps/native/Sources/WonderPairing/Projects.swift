@@ -591,10 +591,11 @@ public struct RememberedModel: Codable, Hashable, Sendable {
 /// Defaults shared by new chats and existing threads so the composer never
 /// shows a model without its reasoning effort.
 public enum ModelDefaults {
-    /// A model's own default when it offers it, else high, medium, or its first.
+    /// The host publishes each model's resolved default effort. A Mac that
+    /// predates host-resolved defaults may publish none, so keep its old rule:
+    /// high, medium, or the first offered.
     public static func effort(for model: BotOptions.Model) -> String? {
         let offered = model.reasoningEfforts.map(\.id)
-        guard !offered.isEmpty else { return nil }
         if let preferred = model.defaultReasoningEffort, offered.contains(preferred) { return preferred }
         return ["high", "medium"].first(where: offered.contains) ?? offered.first
     }
@@ -605,10 +606,10 @@ public enum ModelDefaults {
         return effort(for: model)
     }
 
-    /// The model the host uses for a provider when a thread has none. Mirrors
-    /// `default_model` in the host: the first visible model, avoiding Haiku.
+    /// The model the host marked as its default for a provider; the first
+    /// visible model only when talking to a host that does not mark one.
     public static func defaultModel(in models: [BotOptions.Model]) -> BotOptions.Model? {
-        models.first { !$0.hidden && $0.id != "claude:haiku" } ?? models.first { !$0.hidden }
+        models.first { !$0.hidden && $0.isDefault == true } ?? models.first { !$0.hidden }
     }
 
     public static func title(of effort: BotOptions.Choice) -> String {

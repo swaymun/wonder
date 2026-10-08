@@ -256,6 +256,61 @@ enum DiagnosticWorkspaceFileFixtures {
     }
 }
 
+/// Markdown, JSON and JSON Lines samples for the Preview | Source and Formatted | Raw toggles.
+/// Launch with `--fixture workspace-viewer-preview`. Excluded from Release.
+enum DiagnosticTextViewerFixtures {
+    static let markdown = """
+    # Trip planner
+
+    A short note with **bold**, _italic_ and `inline code`.
+
+    ## Checklist
+
+    - [x] Book the train
+    - [ ] Pack the camera
+    1. First stop
+    2. Second stop
+
+    > Remember the charger.
+
+    | Day | Plan |
+    | --- | --- |
+    | Sat | Museum |
+    | Sun | Market |
+
+    ```swift
+    struct Trip { let days: Int }
+    let trip = Trip(days: 2) // short
+    ```
+
+    ---
+
+    See [the guide](https://example.com/guide).
+    """
+    static let json = #"{"name":"trip","days":2,"budget":1234567890123456789012,"ratio":0.10000000000000000555,"zebra":true,"alpha":null,"stops":[{"city":"Zürich","nights":1},{"city":"Bern","nights":1}],"tags":[]}"#
+    static let brokenJSON = "{\n  \"name\": \"trip\"\n  \"days\": 2\n}\n"
+    static let jsonl = """
+    {"id":1,"event":"start","at":"2026-10-08T09:00:00Z"}
+
+    {"id":2,"event":"step","detail":{"tool":"read","path":"README.md"}}
+    not json at all
+    {"id":3,"event":"done","ok":true,"usage":{"input":1200,"output":340}}
+    """
+    static let files: [String: (mime: String, data: Data)] = [
+        "guide.md": ("text/markdown", Data(markdown.utf8)),
+        "trip.json": ("application/json", Data(json.utf8)),
+        "broken.json": ("application/json", Data(brokenJSON.utf8)),
+        "events.jsonl": ("text/plain", Data(jsonl.utf8)),
+    ]
+    static var entries: [WorkspaceEntry] {
+        files.keys.sorted().map { name in
+            WorkspaceEntry(name: name, path: name, isDirectory: false,
+                           byteSize: UInt64(files[name]!.data.count), mimeType: files[name]!.mime)
+        }
+    }
+    static func data(name: String) -> Data? { files[name]?.data }
+}
+
 enum DiagnosticSubagentFixture {
     // Synthetic release artwork uses the real native views and transport fixture.
     // This entire file is excluded from Release. Private offline history replay
@@ -275,6 +330,9 @@ enum DiagnosticSubagentFixture {
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
     static var projectArchiveFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-archive") }
     static var projectSpeedFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-speed") }
+    static var defaultModelsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-default-models") }
+    static var defaultModelsFailsOnce: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-default-models-fail-once") }
+    static var projectProviderSwitchFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-provider-switch") }
     static var projectSubagentFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents") }
     static var projectFilesSendFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-send") }
     static var projectFilesRefreshFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-refresh") }
@@ -283,10 +341,13 @@ enum DiagnosticSubagentFixture {
     static var projectFilesRevokedAtDirectory: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-revoked-directory") }
     static var projectFilesRevokedAtGit: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-revoked-git") }
     static var questionResolutionFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-question-resolution") }
-    static var projectReadFixture: Bool { projectArchiveFixture || projectSpeedFixture || projectSubagentFixture || projectFilesSendFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
+    /// A started Codex Project thread that can be forked, copied and read as Markdown.
+    static var projectActionsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-actions") }
+    static var projectReadFixture: Bool { projectActionsFixture || projectArchiveFixture || projectSpeedFixture || defaultModelsFixture || projectSubagentFixture || projectFilesSendFixture || projectProviderSwitchFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
     static let hostID = "diagnostic-host"
     static let parentID = "fixture-parent-conversation"
     static let childID = "fixture-child-conversation"
+    static let forkID = "fixture-fork-conversation"
     static let parentThreadID = "fixture-parent-thread"
     static let childThreadID = "fixture-child-thread"
     static let secondChildThreadID = "fixture-second-child-thread"
@@ -373,7 +434,7 @@ enum DiagnosticSubagentFixture {
             return historyReplaySnapshot!
         }
         let text = "The update is ready.\n\n- The action, filename, and counts stay together.\n- The extra metadata has been removed.\n- A completed change uses the same compact spacing.\n\nThe new build includes these changes.\n\nThe layout should already be in place when this conversation opens."
-        let turns: [[String: Any]] = (1...12).map { index -> [String: Any] in
+        var turns: [[String: Any]] = (1...12).map { index -> [String: Any] in
             let work: [String: Any] = ["id": "layout-work-\(index)", "type": "commandExecution", "state": "completed", "createdAt": String(index * 1000 + 100), "payload": ["command": "fixture check", "exitCode": 0]]
             let reply: [String: Any] = ["id": "layout-reply-\(index)", "type": "agentMessage", "state": "completed", "createdAt": String(index * 1000 + 900), "text": "Reply \(index). " + text]
             var items = [work]
@@ -386,11 +447,38 @@ enum DiagnosticSubagentFixture {
             items.append(reply)
             return ["id": "layout-turn-\(index)", "status": "completed", "createdAt": String(index * 1000), "updatedAt": String(index * 1000 + 900), "items": items]
         }
-        let messages: [[String: Any]] = (1...12).map { index -> [String: Any] in [
+        var messages: [[String: Any]] = (1...12).map { index -> [String: Any] in [
             "messageId": "layout-question-\(index)", "body": "Question \(index): Please check the compact layout and keep the same content spacing.",
             "state": "completed", "codexTurnId": "layout-turn-\(index)", "codexThreadId": parentThreadID,
             "createdAt": String(index * 1000), "attachmentIds": []
         ] }
+        if projectActionsFixture {
+            // The owner's words and a desktop paste, as the host's history now projects
+            // them: the paste markup is already unwrapped (claude-runtime unwrapPastes).
+            let pasted = "Please continue\n\n```\nContinue the project at:\n/p/app\n```"
+            messages.append(["messageId": "layout-question-13", "body": pasted, "state": "completed",
+                "codexTurnId": "layout-turn-13", "codexThreadId": parentThreadID, "createdAt": "13000", "attachmentIds": []])
+            turns.append(["id": "layout-turn-13", "status": "completed", "createdAt": "13000", "updatedAt": "13900", "items": [
+                ["id": "layout-reply-13", "type": "agentMessage", "state": "completed", "createdAt": "13900", "text": "Reply 13. Continuing the project at /p/app.\n\n```swift\nstruct Trip { let days: Int }\nlet trip = Trip(days: 2) // short\nprint(\"Days: \\(trip.days)\", 42, true)\n```"]]])
+        }
+        if projectProviderSwitchFixture {
+            // Another thread's message, Wonder's finished-tasks report, and the host's switch rows.
+            messages.append(["messageId": "layout-from-thread", "body": "Please summarise the failing tests.", "state": "completed",
+                "codexTurnId": "layout-turn-14", "codexThreadId": parentThreadID, "createdAt": "14000", "attachmentIds": [],
+                "source": ["kind": "thread", "sourceConversationId": "release-planner", "sourceTitle": "Release planner"]])
+            messages.append(["messageId": "layout-wake", "body": "Delegated tasks finished.", "state": "completed",
+                "codexTurnId": "layout-turn-14", "codexThreadId": parentThreadID, "createdAt": "14500", "attachmentIds": [],
+                "source": ["kind": "wake", "sourceTitle": "Agent tasks finished: Builder, Scout"]])
+            var items: [[String: Any]] = [
+                ["id": "layout-reply-14", "type": "agentMessage", "state": "completed", "createdAt": "14900", "text": "Reply 14. Two tests fail in ParserTests."],
+                ["id": "layout-switch-static", "type": "providerSwitch", "state": "completed", "createdAt": "14950",
+                 "text": "Switched to Codex Fixture · history handed over"]]
+            if DiagnosticSubagentURLProtocol.state.lock.withLock({ DiagnosticSubagentURLProtocol.state.projectSentModel }) == "claude:claude-fixture" {
+                items.append(["id": "layout-switch-sent", "type": "providerSwitch", "state": "completed", "createdAt": "99000",
+                              "text": "Switched to Claude Fixture · history handed over (request carried projectModel)"])
+            }
+            turns.append(["id": "layout-turn-14", "status": "completed", "createdAt": "14000", "updatedAt": "14950", "items": items])
+        }
         let sequence = projectFilesRefreshFixture && DiagnosticSubagentURLProtocol.state.lock.withLock({ DiagnosticSubagentURLProtocol.state.workspaceChanged }) ? 2 : 1
         return ["conversationId": parentID, "hostEpoch": "fixture", "lastSequence": sequence,
                 "messages": messages, "assistantMessages": [],
@@ -406,6 +494,8 @@ enum DiagnosticSubagentFixture {
             state.projectSubagentRosterFails = false
             state.projectServiceTier = "default"
             state.projectAccessMode = "read_only"
+            state.projectSavedModel = nil
+            state.projectSentModel = nil
             state.projectClaudeApproval = "ask"
             state.goalPresent = goalFixture
             state.goalObjective = "Prepare a reliable beta launch with the Scout helper."
@@ -448,7 +538,12 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var projectUnread = true
         var projectArchived = false
         var projectServiceTier = "default"
+        var defaultModelEntries: [String: [String: Any]] = [:]
+        var defaultModelsLoadsFailed = 0
         var projectAccessMode = "read_only"
+        /// A same-provider model saved by PATCH, and the model a Project message carried as `projectModel`.
+        var projectSavedModel: String?
+        var projectSentModel: String?
         var projectClaudeApproval = "ask"
         var archiveFailures = 1
         var questionResolved = false
@@ -533,7 +628,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             let conversation = DiagnosticSubagentFixture.parentID
             let archiveFixture = DiagnosticSubagentFixture.projectArchiveFixture
             let speedFixture = DiagnosticSubagentFixture.projectSpeedFixture
-            let family = archiveFixture || speedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture ? "codex" : "claude"
+            let family = DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || speedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture ? "codex" : "claude"
             let archived = Self.state.lock.withLock { Self.state.projectArchived }
             switch path {
             case "/api/v1/pairing/session/refresh-challenge":
@@ -556,6 +651,30 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                 finish(status: 200, body: json(projectReadThread())); return
             case "/api/v1/conversations/\(conversation)/history/refresh":
                 finish(status: 200, body: json(["state": "completed"])); return
+            case "/api/v1/project-conversations/\(conversation)/fork" where DiagnosticSubagentFixture.projectActionsFixture && method == "POST":
+                // Slow enough for the "Forking…" state to be observed.
+                if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-fork-conflict") {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(1200)) { [self] in finish(status: 409, body: Data("{}".utf8)) }
+                } else {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(1200)) { [self] in
+                        finish(status: 200, body: json(["reference": "codex:fork-fixture", "conversationId": DiagnosticSubagentFixture.forkID,
+                            "title": "Read status fixture (fork)", "family": "codex", "updatedAt": 2, "isPinned": false,
+                            "hasUnread": false, "isWorking": false]))
+                    }
+                }
+                return
+            case "/api/v1/project-conversations/\(DiagnosticSubagentFixture.forkID)" where DiagnosticSubagentFixture.projectActionsFixture:
+                finish(status: 200, body: json([
+                    "conversationId": DiagnosticSubagentFixture.forkID, "projectId": "read-project", "projectName": "Read status",
+                    "title": "Read status fixture (fork)", "family": "codex", "model": "gpt-fixture", "effort": "high",
+                    "serviceTier": NSNull(), "accessMode": "read_only", "workingFolder": "/fixture", "workingFolderName": "fixture",
+                    "isPinned": false, "hasUnread": false, "hasNativeSession": true, "folderInProject": true,
+                    "claudeApproval": "ask", "planMode": false, "isArchived": false
+                ])); return
+            case "/api/v1/conversations/\(DiagnosticSubagentFixture.forkID)" where DiagnosticSubagentFixture.projectActionsFixture:
+                var snapshot = DiagnosticSubagentFixture.chatLayoutSnapshot()
+                snapshot["conversationId"] = DiagnosticSubagentFixture.forkID
+                finish(status: 200, body: json(snapshot)); return
             case "/api/v1/project-conversations/\(conversation)":
                 if method == "PATCH", let fields = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any] {
                     if let value = fields["isArchived"] as? Bool {
@@ -569,15 +688,16 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     if let access = fields["accessMode"] as? String { Self.state.lock.withLock { Self.state.projectAccessMode = access } }
                     if let approval = fields["claudeApproval"] as? String { Self.state.lock.withLock { Self.state.projectClaudeApproval = approval } }
                     if let tier = fields["serviceTier"] as? String { Self.state.lock.withLock { Self.state.projectServiceTier = tier } }
+                    if let saved = fields["model"] as? String { Self.state.lock.withLock { Self.state.projectSavedModel = saved } }
                 }
                 finish(status: 200, body: json([
                     "conversationId": conversation, "projectId": "read-project", "projectName": "Read status",
-                    "title": "Read status fixture", "family": family, "model": archiveFixture || speedFixture || DiagnosticSubagentFixture.projectFilesSendFixture ? "gpt-fixture" : "claude:sonnet", "effort": "high",
+                    "title": "Read status fixture", "family": family, "model": DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || speedFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture ? (Self.state.lock.withLock { Self.state.projectSavedModel } ?? "gpt-fixture") : "claude:sonnet", "effort": "high",
                     "serviceTier": speedFixture ? Self.state.lock.withLock { Self.state.projectServiceTier } as Any : NSNull(),
                     "accessMode": Self.state.lock.withLock { Self.state.projectAccessMode },
                     "workingFolder": "/fixture", "workingFolderName": "fixture",
                     "isPinned": true, "hasUnread": Self.state.lock.withLock { Self.state.projectUnread },
-                    "hasNativeSession": archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture, "folderInProject": true, "claudeApproval": Self.state.lock.withLock { Self.state.projectClaudeApproval }, "planMode": false,
+                    "hasNativeSession": DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture, "folderInProject": true, "claudeApproval": Self.state.lock.withLock { Self.state.projectClaudeApproval }, "planMode": false,
                     "isArchived": Self.state.lock.withLock { Self.state.projectArchived }
                 ])); return
             case "/api/v1/project-conversations/\(conversation)/subagents" where DiagnosticSubagentFixture.projectSubagentFixture:
@@ -633,13 +753,13 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                 finish(status: 200, body: json(["subagent": [
                     "parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.childThreadID,
                     "title": "Scout", "agentNickname": "Scout", "agentRole": "research",
-                    "status": "notLoaded", "isArchived": false, "canAcceptDirectInput": false
+                    "status": ProcessInfo.processInfo.arguments.contains("-diagnostics-project-claude-tasks") ? "running" : "notLoaded", "isArchived": false, "canAcceptDirectInput": false
                 ], "snapshot": [
                     "conversationId": "project-agent:\(conversation):\(DiagnosticSubagentFixture.childThreadID)",
                     "hostEpoch": "fixture", "lastSequence": 0, "messages": [], "assistantMessages": [],
                     "thread": ["threadId": DiagnosticSubagentFixture.childThreadID, "nextCursor": NSNull(),
-                        "hydrated": true, "turns": [["id": "project-child-turn", "status": "completed",
-                            "createdAt": "1000", "updatedAt": "2000", "items": [[
+                        "hydrated": true, "turns": [["id": "project-child-turn", "status": ProcessInfo.processInfo.arguments.contains("-diagnostics-project-claude-tasks") ? "inProgress" : "completed",
+                            "createdAt": "1000", "updatedAt": "2000", "items": ProcessInfo.processInfo.arguments.contains("-diagnostics-project-claude-tasks") ? Self.claudeTaskItems(running: true) : [[
                                 "id": "project-child-reply", "type": "agentMessage", "state": "completed",
                                 "createdAt": "2000", "text": "Scout found the parser issue."
                             ]]]]]
@@ -654,15 +774,57 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     "hostEpoch": "fixture", "lastSequence": 0, "messages": [], "assistantMessages": [],
                     "thread": ["threadId": DiagnosticSubagentFixture.secondChildThreadID, "nextCursor": NSNull(),
                         "hydrated": true, "turns": [["id": "project-second-child-turn", "status": "completed",
-                            "createdAt": "1000", "updatedAt": "2000", "items": [[
+                            "createdAt": "1000", "updatedAt": "2000", "items": ProcessInfo.processInfo.arguments.contains("-diagnostics-project-claude-tasks") ? Self.claudeTaskItems(running: false) : [[
                                 "id": "project-second-child-reply", "type": "agentMessage", "state": "completed",
                                 "createdAt": "2000", "text": "Builder completed the file review."
                             ]]]]]
                 ]])); return
+            case "/api/v1/bot-options" where DiagnosticSubagentFixture.defaultModelsFixture:
+                func model(_ id: String, _ name: String, _ family: String, _ isDefault: Bool, _ efforts: [String], _ tiers: Bool) -> [String: Any] {
+                    var value: [String: Any] = ["id": id, "displayName": name, "hidden": false, "agentFamily": family,
+                        "isDefault": isDefault, "defaultReasoningEffort": efforts.first ?? "medium",
+                        "reasoningEfforts": efforts.map { ["id": $0, "label": $0.capitalized] }]
+                    if tiers { value["serviceTiers"] = [["id": "default", "label": "Standard", "description": "Standard speed"], ["id": "fast", "label": "Fast", "description": "Faster responses"]] }
+                    return value
+                }
+                finish(status: 200, body: json([
+                    "models": [model("gpt-fixture", "Codex Fixture", "codex", true, ["medium", "high"], true),
+                               model("gpt-fixture-mini", "Codex Fixture Mini", "codex", false, ["low", "medium"], false),
+                               model("claude-fixture", "Claude Fixture", "claude", true, ["medium", "high"], false),
+                               model("claude-fixture-small", "Claude Fixture Small", "claude", false, ["low"], false)],
+                    "allowedApprovalPolicies": [], "timezone": "UTC"
+                ])); return
+            case "/api/v1/settings/default-models" where DiagnosticSubagentFixture.defaultModelsFixture:
+                let failed: Bool = Self.state.lock.withLock {
+                    guard DiagnosticSubagentFixture.defaultModelsFailsOnce, Self.state.defaultModelsLoadsFailed == 0 else { return false }
+                    Self.state.defaultModelsLoadsFailed = 1; return true
+                }
+                if failed { finish(status: 503, body: Data("{}".utf8)); return }
+                let entries = Self.state.lock.withLock { Self.state.defaultModelEntries }
+                finish(status: 200, body: json(["families": ["codex", "claude"].map { entries[$0] ?? ["family": $0, "model": NSNull(), "effort": NSNull(), "serviceTier": NSNull()] }])); return
+            case let put where DiagnosticSubagentFixture.defaultModelsFixture && method == "PUT" && put.hasPrefix("/api/v1/settings/default-models/"):
+                let family = String(put.dropFirst("/api/v1/settings/default-models/".count))
+                guard var fields = (try? JSONSerialization.jsonObject(with: body ?? Data())) as? [String: Any] else { finish(status: 400, body: Data("{}".utf8)); return }
+                fields["family"] = family
+                Self.state.lock.withLock { Self.state.defaultModelEntries[family] = fields }
+                finish(status: 200, body: json(["families": ["codex", "claude"].map { f in
+                    Self.state.lock.withLock { Self.state.defaultModelEntries[f] } ?? ["family": f, "model": NSNull(), "effort": NSNull(), "serviceTier": NSNull()] }])); return
+            case "/api/v1/bot-options" where DiagnosticSubagentFixture.projectProviderSwitchFixture:
+                func model(_ id: String, _ name: String, _ family: String, _ isDefault: Bool, _ efforts: [String]) -> [String: Any] {
+                    ["id": id, "displayName": name, "hidden": false, "agentFamily": family, "isDefault": isDefault,
+                     "defaultReasoningEffort": efforts.first ?? "medium", "reasoningEfforts": efforts.map { ["id": $0, "label": $0.capitalized] }]
+                }
+                finish(status: 200, body: json([
+                    "models": [model("gpt-fixture", "Codex Fixture", "codex", true, ["medium", "high"]),
+                               model("gpt-fixture-mini", "Codex Fixture Mini", "codex", false, ["low", "medium"]),
+                               model("claude-fixture", "Claude Fixture", "claude", true, ["medium", "high"])],
+                    "allowedApprovalPolicies": [], "timezone": "UTC"
+                ])); return
             case "/api/v1/bot-options" where speedFixture:
                 finish(status: 200, body: json([
                     "models": [["id":"gpt-fixture","displayName":"Fixture model","hidden":false,"agentFamily":"codex",
-                                "reasoningEfforts":[["id":"high","label":"High"]],
+                                "isDefault":true,"defaultReasoningEffort":"high",
+                                "reasoningEfforts":[["id":"medium","label":"Medium"],["id":"high","label":"High"]],
                                 "serviceTiers":[["id":"default","label":"Standard","description":"Standard speed"],
                                                 ["id":"fast","label":"Fast","description":"Faster responses"]]]],
                     "allowedApprovalPolicies": [], "timezone": "UTC"
@@ -835,6 +997,16 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                 finish(status: 400, body: Data("{}".utf8)); return
             }
             finish(status: 200, body: Data("Live workspace note.\n".utf8))
+        case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/messages" where DiagnosticSubagentFixture.projectProviderSwitchFixture && method == "POST":
+            // Captures the request: the snapshot shows the host's switch row only when the
+            // message carried the other provider's model, as `projectModel`.
+            guard let body, let request = try? JSONDecoder().decode(SendRequest.self, from: body) else {
+                finish(status: 400, body: Data("{}".utf8)); return
+            }
+            Self.state.lock.withLock { Self.state.projectSentModel = request.projectModel.map { "\($0.family.rawValue):\($0.model)" } ?? "none" }
+            finish(status: 200, body: json(["clientMessageId": request.clientMessageId,
+                "wonderMessageId": "fixture-switch-message", "conversationId": DiagnosticSubagentFixture.parentID,
+                "bodySha256": ConversationFile.digest(Data(request.body.utf8)), "deliveryState": "accepted"]))
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/messages" where DiagnosticSubagentFixture.projectFilesSendFixture && method == "POST":
             guard let body, let request = try? JSONDecoder().decode(SendRequest.self, from: body),
                   request.body == "Review this file while Files stays open.", request.attachmentIds.isEmpty else {
@@ -868,8 +1040,28 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
     private func json(_ value: Any) -> Data {
         (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
     }
+    /// What a Claude agent task transcript holds once the host keeps its commands,
+    /// edits and tool calls (shapes from the claude-runtime bridge, as projected for the phone).
+    private static func claudeTaskItems(running: Bool) -> [[String: Any]] {
+        var items: [[String: Any]] = [
+            ["id": "task-note", "type": "agentMessage", "state": "completed", "createdAt": "1100", "text": "Checking the parser."],
+            ["id": "task-command", "type": "commandExecution", "state": "completed", "createdAt": "1200",
+             "payload": ["command": "swift test --filter ParserTests", "exitCode": 0, "durationMs": 4200, "output": "Executed 12 tests, with 0 failures"]],
+            ["id": "task-edit", "type": "fileChange", "state": "completed", "createdAt": "1300",
+             "payload": ["diffs": [["path": "Sources/Parser.swift", "kind": "update", "additions": 3, "deletions": 1,
+                                    "diff": "@@ -1 +1,3 @@\n-old\n+new\n+new two\n+new three"]]]]
+        ]
+        if running {
+            // The agent has asked for this tool and not heard back yet.
+            items.append(["id": "task-tool", "type": "mcpToolCall", "state": "started", "createdAt": "1400",
+                          "payload": ["server": "Claude", "tool": "Grep", "arguments": ["pattern": "parseValue"]]])
+        } else {
+            items.append(["id": "task-reply", "type": "agentMessage", "state": "completed", "createdAt": "2000", "text": "The parser review is done."])
+        }
+        return items
+    }
     private func projectReadThread() -> [String: Any] {
-        let family = DiagnosticSubagentFixture.projectArchiveFixture || DiagnosticSubagentFixture.projectSpeedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture ? "codex" : "claude"
+        let family = DiagnosticSubagentFixture.projectActionsFixture || DiagnosticSubagentFixture.projectArchiveFixture || DiagnosticSubagentFixture.projectSpeedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture ? "codex" : "claude"
         return ["reference": "\(family):read-fixture", "conversationId": DiagnosticSubagentFixture.parentID,
          "title": "Read status fixture", "family": family, "updatedAt": 1, "isPinned": true,
          "hasUnread": Self.state.lock.withLock { Self.state.projectUnread }, "isWorking": false]
@@ -1689,6 +1881,16 @@ private final class DiagnosticDictationProtocol: URLProtocol, @unchecked Sendabl
                 turns: updatedTurns
             )
         )
+    }
+}
+
+/// `-diagnostics-theme <id>` forces a theme (for example `nord` or `misty-forest`)
+/// so one screen can be captured in each palette without touching Settings.
+enum DiagnosticTheme {
+    static var forcedID: String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-diagnostics-theme"), arguments.indices.contains(index + 1) else { return nil }
+        return arguments[index + 1]
     }
 }
 #endif

@@ -5,7 +5,7 @@ import { BRIDGE_PROTOCOL, HAIKU_MODEL, TurnProjection, questionRequest, question
 import { baseOptions, inspectSdk, isSubscription } from "./sdk-runtime.mjs";
 import { SANDBOX_GUIDANCE, ToolPolicy, toolCallKey } from "./permissions.mjs";
 import { createNativeCua } from "./native-cua.mjs";
-import { backgroundTasks, claudeSessionBusy, nativeTurns, sessionSummary } from "./project-history.mjs";
+import { backgroundTasks, claudeSessionBusy, nativeTurns, sessionSummary, turnEndMessageId } from "./project-history.mjs";
 import { ClaudeSessionFiles } from "./session-file.mjs";
 import { lstat, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
@@ -53,6 +53,15 @@ function modelDisplayName(model) {
   if (!match) return model.name;
   const [, family, major, minor] = match;
   return `${family[0].toUpperCase()}${family.slice(1)} ${major}${minor ? `.${minor}` : ""}`;
+}
+
+// A Project turn offers the agent only Wonder's thread tools: the daemon sends
+// them with the turn, and no Bot or onboarding tool belongs in a Project.
+const PROJECT_TOOL = /^wonder_(thread_(list|read|send|wait)|delegate)$/;
+function advertisedTools(options) {
+  if (options.wonderPlanning) return [];
+  const specs = options.dynamicTools ?? [];
+  return options.wonderProject ? specs.filter(spec => PROJECT_TOOL.test(spec.name)) : specs;
 }
 
 function sdkToolResult(result) {
@@ -146,7 +155,7 @@ export class ClaudeBridge {
       const catalog = await this.catalog();
       return { data: catalog.models.filter(m => m.id !== "default").sort((a, b) => Number(b.id === "haiku") - Number(a.id === "haiku")).map(m => ({ id: `claude:${m.id}`, model: `claude:${m.id}`,
         displayName: modelDisplayName(m), description: m.description, hidden: false,
-        agentFamily: "claude", isDefault: m.id === "haiku", supportedReasoningEfforts: (m.efforts ?? []).map(effort => ({ reasoningEffort: effort, description: `${effort[0].toUpperCase()}${effort.slice(1)}` })), defaultReasoningEffort: null })), nextCursor: null };
+        agentFamily: "claude", nativeModelIds: m.resolvedModel ? [m.resolvedModel] : [], isDefault: m.id === "haiku", supportedReasoningEfforts: (m.efforts ?? []).map(effort => ({ reasoningEffort: effort, description: `${effort[0].toUpperCase()}${effort.slice(1)}` })), defaultReasoningEffort: null })), nextCursor: null };
     }
     if (method === "account/rateLimits/read") {
       const catalog = await this.catalog(true);
@@ -166,6 +175,7 @@ export class ClaudeBridge {
     if (method === "project/sessions/list") return this.projectSessions(params);
     if (method === "project/folders/list") return this.projectFolders(params);
     if (method === "project/session/attach") return this.attachProjectSession(params);
+    if (method === "project/session/fork") return this.forkProjectSession(params);
     if (method === "thread/start") {
       selectedModel(params.model);
       if (params.wonderProject) params.wonderProject = await projectContext(params.wonderProject);
@@ -177,6 +187,10 @@ export class ClaudeBridge {
     }
     if (method === "thread/list") return page([...this.sessions.values.values()].filter(s => !params.sourceKinds || s.parent).map(s => this.sessions.describe(s)), params);
     const session = this.sessions.get(params.threadId);
+    if (method === "thread/nativeSettings") {
+      const project = session.options.wonderProject;
+      return { settings: project && session.sdkStarted ? await this.sessionFiles.latestSettings(session.sdkSessionId, project.cwd) : null };
+    }
     if (session.options.wonderProject && ["thread/turns/list", "thread/items/list"].includes(method)) {
       // The native transcript includes turns written by Claude Code on the Mac.
       const turns = await this.projectTurns(session);
@@ -219,7 +233,7 @@ export class ClaudeBridge {
       const policy = new ToolPolicy({ ...options.wonderPolicy, cwd: options.wonderProject?.cwd ?? options.cwd,
         project: Boolean(options.wonderProject), internal: options.wonderInternal === true, structuredOutput: Boolean(options.outputSchema),
         projectRoots: options.wonderProject ? [options.wonderProject.cwd, ...(options.wonderProject.additionalDirectories ?? [])] : [],
-        tools: options.wonderProject ? [] : options.dynamicTools?.map(t => t.name) ?? [] });
+        tools: advertisedTools(options).map(t => t.name) });
       const content = await sdkInput(params.input, policy);
       const { turn, duplicate } = await this.sessions.accept(session, params);
       if (!duplicate) {
@@ -296,6 +310,26 @@ export class ClaudeBridge {
     if (!info || info.cwd !== project.cwd) throw new Error("This Claude session is no longer available on your Mac.");
     const session = await this.sessions.create({ ...params, wonderProject: project, cwd: project.cwd }, null, { sdkSessionId: params.sessionId, sdkStarted: true });
     return { thread: this.sessions.describe(session) };
+  }
+  // Copies the transcript, through the end of `lastTurnId` when given, into a new
+  // native session. The source is never touched; the caller attaches the copy.
+  async forkProjectSession(params) {
+    const session = this.sessions.get(params.threadId);
+    const project = session.options.wonderProject;
+    if (!project || !session.sdkStarted) throw new Error("Send a message first. There is nothing to fork yet.");
+    if (this.active.has(session.id)) throw new Error("Wait for Claude to finish before forking this conversation.");
+    if (await claudeSessionBusy(session.sdkSessionId, this.claudeSessionsDir))
+      throw new Error("Claude is working on this conversation on your Mac. Fork it when it finishes.");
+    let upToMessageId;
+    if (params.lastTurnId != null) {
+      if (typeof params.lastTurnId !== "string") throw new Error("Choose a reply to fork from.");
+      upToMessageId = turnEndMessageId((await this.projectMessages(session)).messages, params.lastTurnId);
+      if (!upToMessageId) throw new Error("That reply is no longer in this conversation.");
+    }
+    const title = typeof params.title === "string" && params.title.trim() ? params.title.trim().slice(0, 200) : undefined;
+    const forked = await this.withSdk(sdk => sdk.forkSession(session.sdkSessionId,
+      { dir: project.cwd, ...(upToMessageId ? { upToMessageId } : {}), ...(title ? { title } : {}) }));
+    return { sessionId: forked.sessionId };
   }
   async projectMessages(session) {
     if (!session.sdkStarted) return { messages: [], desktop: false };
@@ -462,7 +496,7 @@ export class ClaudeBridge {
       projection.start(); await flush();
       lease = await this.updates.acquire();
       const { sdk } = lease.runtime;
-      const tools = (options.wonderPlanning || options.wonderProject ? [] : options.dynamicTools ?? [])
+      const tools = advertisedTools(options)
         .filter(spec => spec.name !== "wonder_computer_use")
         .map(spec => sdk.tool(spec.name, spec.description,
         z.fromJSONSchema(spec.inputSchema).shape, async (input) => {

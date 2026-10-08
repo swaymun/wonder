@@ -14,6 +14,9 @@ pub(super) struct ConversationMessage {
     pub(super) codex_thread_id: Option<String>,
     pub(super) codex_turn_id: Option<String>,
     pub(super) attachment_ids: Vec<String>,
+    /// Set when another thread, or Wonder reporting finished tasks, wrote it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) source: Option<wonder_store::MessageSource>,
 }
 
 #[derive(Debug, Serialize)]
@@ -333,6 +336,7 @@ pub(super) fn known_thread_item_type(item_type: &str) -> bool {
             | "contextCompaction"
             | "approval"
             | "error"
+            | "providerSwitch"
     )
 }
 
@@ -555,6 +559,21 @@ pub(super) fn sanitize_typed_item(
                         *raw = serde_json::Value::String("[tool result truncated]".into());
                     }
                 }
+            }
+        }
+        if item_type == "userMessage" {
+            // Context handed over after a provider switch is the agent's
+            // briefing, not something the owner wrote.
+            if let Some(parts) = object
+                .get_mut("content")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                parts.retain(|part| {
+                    !part
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(crate::provider_switch::is_handoff_text)
+                });
             }
         }
         if item_type == "commandExecution" {
@@ -1394,6 +1413,31 @@ pub(super) async fn conversation_snapshot(
         .filter(|m| !answers.iter().any(|hidden| hidden.id == m.id))
         .collect::<Vec<_>>();
     thread.next_cursor = next_cursor.map(|cursor| encode_history_cursor(&conversation_id, &cursor));
+    let sources = match state.store.message_sources(&conversation_id).await {
+        Ok(sources) => sources,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    if !sources.is_empty() {
+        let by_client: HashMap<&str, &wonder_store::MessageSource> = messages
+            .iter()
+            .filter_map(|m| Some((m.client_message_id.as_str(), sources.get(&m.id)?)))
+            .collect();
+        for item in thread
+            .turns
+            .iter_mut()
+            .flat_map(|turn| turn.items.iter_mut())
+            .filter(|item| item.item_type == "userMessage")
+        {
+            let source = item
+                .payload
+                .get("clientId")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|client| by_client.get(client));
+            if let (Some(source), Some(payload)) = (source, item.payload.as_object_mut()) {
+                payload.insert("source".into(), serde_json::json!(source));
+            }
+        }
+    }
     let events = if compact {
         compact_thread(&mut thread);
         Vec::new()
@@ -1409,6 +1453,7 @@ pub(super) async fn conversation_snapshot(
             let mut projected = Vec::with_capacity(messages.len());
             for message in messages {
                 let message_attachment_ids = attachment_ids.remove(&message.id).unwrap_or_default();
+                let source = sources.get(&message.id).cloned();
                 projected.push(ConversationMessage {
                     original_body_sha256: state
                         .store
@@ -1425,6 +1470,7 @@ pub(super) async fn conversation_snapshot(
                     codex_thread_id: message.codex_thread_id,
                     codex_turn_id: message.codex_turn_id,
                     attachment_ids: message_attachment_ids,
+                    source,
                 });
             }
             projected
@@ -1563,7 +1609,7 @@ pub(super) async fn history_activity(
             .and_then(serde_json::Value::as_bool)
             == Some(true),
     };
-    if let (Some(id), false) = (&id, thread.starts_with("claude-")) {
+    if let (Some(id), AgentFamily::Codex) = (&id, AgentFamily::issuing_thread(&thread)) {
         let mut statuses = HashMap::from([(id.clone(), status.clone())]);
         mark_codex_desktop_turn(&runtime, &thread, &mut statuses).await;
         if let Some(marked) = statuses.remove(id) {
@@ -1573,10 +1619,12 @@ pub(super) async fn history_activity(
     // A Claude session open in Claude Code in a terminal keeps Wonder's
     // messages waiting; the desktop app's chats are taken over on send.
     let open_elsewhere = match state.store.project_conversation(&conversation).await {
-        Ok(Some(stored)) if thread.starts_with("claude-") => match stored.native_session_id {
-            Some(native) => crate::desktop_activity::claude_open_in_terminal(&native).await,
-            None => false,
-        },
+        Ok(Some(stored)) if AgentFamily::issuing_thread(&thread) == AgentFamily::Claude => {
+            match stored.native_session_id {
+                Some(native) => crate::desktop_activity::claude_open_in_terminal(&native).await,
+                None => false,
+            }
+        }
         _ => false,
     };
     Json(serde_json::json!({
@@ -1666,6 +1714,46 @@ pub(super) async fn refresh_history(
         .into_response()
 }
 
+/// Saves the provider history a thread is about to leave. After a provider
+/// switch the timeline is read from Wonder's own record, so anything made on
+/// the Mac and never opened here would otherwise be lost. Best effort: a busy
+/// refresh slot, a slow runtime or a failure keeps what is already saved.
+pub(crate) async fn save_history_before_switch(state: &AppState, conversation: &str) {
+    let Ok(Some(thread)) = state.store.conversation_thread(conversation).await else {
+        return;
+    };
+    if thread.is_empty() {
+        return;
+    }
+    let Ok(permit) = HISTORY_REFRESH_SLOTS.try_acquire() else {
+        return;
+    };
+    let token = uuid::Uuid::new_v4().to_string();
+    if !matches!(
+        state
+            .store
+            .claim_history_refresh(conversation, &token, now_ms() as i64)
+            .await,
+        Ok(true)
+    ) {
+        return;
+    }
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        refresh_runtime_history(state, conversation, &thread, &token),
+    )
+    .await;
+    drop(permit);
+    let (status, detail) = match finished {
+        Ok(Ok(())) => ("completed", None),
+        _ => ("failed", Some("History refresh could not finish. Saved messages are still available. Try refreshing again.")),
+    };
+    let _ = state
+        .store
+        .update_history_refresh(conversation, &token, status, now_ms() as i64, detail)
+        .await;
+}
+
 async fn refresh_runtime_history(
     state: &AppState,
     conversation: &str,
@@ -1680,6 +1768,7 @@ async fn refresh_runtime_history(
     // Bot and project threads live in different provider stores.
     let runtime = crate::claude::for_thread(state, thread).await?;
     let statuses = if crate::projects::is_project(state, conversation).await {
+        crate::native_settings::sync(state, conversation).await;
         native_turn_statuses(&runtime, thread).await?
     } else {
         HashMap::new()
@@ -1830,7 +1919,7 @@ async fn native_turn_statuses(
             break;
         }
     }
-    if !thread.starts_with("claude-") {
+    if AgentFamily::issuing_thread(thread) == AgentFamily::Codex {
         mark_codex_desktop_turn(runtime, thread, &mut statuses).await;
     }
     Ok(statuses)

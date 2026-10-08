@@ -19,12 +19,14 @@ mod sync;
 use sync::stream_events;
 
 mod account_usage;
+mod agent_defaults;
 mod artifact_annotations;
 pub mod claude;
 mod computer_runtime;
 pub mod computer_sessions;
 mod computer_tools;
 mod connected_apps;
+mod default_models;
 mod desktop_activity;
 pub mod dispatch;
 pub mod file_access;
@@ -35,6 +37,7 @@ mod group_collaboration;
 mod groups;
 pub mod ingestion;
 pub mod logging;
+mod native_settings;
 mod permission_modes;
 #[cfg(test)]
 mod phone_approval_tests;
@@ -42,11 +45,16 @@ mod pm_tools;
 mod project_assignments;
 mod project_subagents;
 pub mod projects;
+mod provider_switch;
+#[cfg(test)]
+mod provider_switch_tests;
+mod providers;
 pub mod push;
 mod questions;
 mod queue;
 mod subagents;
 mod teaching;
+mod thread_tools;
 pub mod update_admission;
 mod update_handoff;
 
@@ -62,7 +70,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use base64::Engine;
@@ -86,8 +94,8 @@ use wonder_app_server::{
 };
 use wonder_store::{
     avatar, AgentFamily, ComputerControlLeaseCreate, ComputerLeaseAcquireResult,
-    ComputerSessionCreate, ComputerSessionState, MessageInsert, NewChannelMessage, Store,
-    StoredBot, StoredChannel, StoredChannelMember, StoredComputerControlLease,
+    ComputerSessionCreate, ComputerSessionState, DefaultSpeed, MessageInsert, NewChannelMessage,
+    Store, StoredBot, StoredChannel, StoredChannelMember, StoredComputerControlLease,
     StoredComputerSession, StoredConversationFile, StoredConversationSummary,
     TeachingCaptureAppendResult, TeachingEventCreate,
 };
@@ -144,6 +152,8 @@ pub struct RuntimeCatalog {
     pub approval_reviewers_restricted: bool,
     pub permission_profiles_restricted: bool,
     pub auto_review_required_on_models: Option<Vec<String>>,
+    /// The owner's default model, effort and speed per harness.
+    pub preferences: HashMap<AgentFamily, wonder_store::AgentDefaultPreference>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -160,6 +170,21 @@ pub struct ModelOption {
     pub default_reasoning_effort: Option<String>,
     pub service_tiers: Vec<ChoiceOption>,
     pub default_service_tier: Option<String>,
+    /// The host's pick for this family when a thread has no model yet.
+    pub is_default: bool,
+    /// The provider's own effort and speed defaults, kept so the published
+    /// ones can follow the owner's preference and return to these.
+    #[serde(skip)]
+    pub provider_default: Option<ProviderDefaults>,
+    /// Ids the provider's own transcripts use for this model.
+    #[serde(skip)]
+    pub native_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderDefaults {
+    pub effort: Option<String>,
+    pub service_tier: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -171,11 +196,11 @@ pub struct ModelCapabilities {
 }
 impl ModelCapabilities {
     fn for_family(family: AgentFamily) -> Self {
-        let codex = family == AgentFamily::Codex;
+        let provider = family.provider().capabilities;
         Self {
-            guide: codex,
-            goals: codex,
-            image_generation: codex,
+            guide: provider.guide,
+            goals: provider.goals,
+            image_generation: provider.image_generation,
         }
     }
 }
@@ -237,10 +262,26 @@ struct RuntimeCapabilitiesResponse {
 }
 
 impl RuntimeCatalog {
-    pub fn apply_models_page(&mut self, result: &serde_json::Value) {
+    /// The provider that listed `model`, or `None` when no provider has.
+    pub fn family_of(&self, model: &str) -> Option<AgentFamily> {
+        self.models
+            .iter()
+            .find(|m| m.id == model)
+            .map(|m| m.agent_family)
+    }
+
+    /// Adds the models `family`'s provider listed. The provider that answered
+    /// owns them; a model id is never read to decide its family. A provider
+    /// cannot list an id in another provider's namespace or one the other
+    /// provider already lists, so ids stay unambiguous in the shared catalog.
+    ///
+    /// Returns how many listed models were refused for leaving the provider's
+    /// namespace or shadowing another provider's model.
+    pub fn apply_models_page(&mut self, family: AgentFamily, result: &serde_json::Value) -> usize {
         let Some(data) = result.get("data").and_then(serde_json::Value::as_array) else {
-            return;
+            return 0;
         };
+        let mut refused = 0;
         for model in data {
             let Some(id) = model
                 .get("id")
@@ -249,6 +290,16 @@ impl RuntimeCatalog {
             else {
                 continue;
             };
+            if !family.model_in_own_namespace(id)
+                || family.model_in_foreign_namespace(id)
+                || self
+                    .models
+                    .iter()
+                    .any(|existing| existing.id == id && existing.agent_family != family)
+            {
+                refused += 1;
+                continue;
+            }
             let reasoning_efforts = model
                 .get("supportedReasoningEfforts")
                 .and_then(serde_json::Value::as_array)
@@ -259,7 +310,7 @@ impl RuntimeCatalog {
                 .and_then(serde_json::Value::as_array)
                 .map(|values| values.iter().filter_map(choice_option).collect())
                 .unwrap_or_default();
-            if AgentFamily::for_model(Some(id)) == AgentFamily::Codex
+            if family.provider().default_speed == DefaultSpeed::Standard
                 && !service_tiers
                     .iter()
                     .any(|option: &ChoiceOption| option.id == "default")
@@ -273,7 +324,6 @@ impl RuntimeCatalog {
                     },
                 );
             }
-            let family = AgentFamily::for_model(Some(id));
             let option = ModelOption {
                 agent_family: family,
                 capabilities: ModelCapabilities::for_family(family),
@@ -305,10 +355,24 @@ impl RuntimeCatalog {
                     .get("defaultServiceTier")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned),
+                is_default: false,
+                provider_default: None,
+                native_ids: model
+                    .get("nativeModelIds")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             };
             self.models.retain(|existing| existing.id != option.id);
             self.models.push(option);
         }
+        self.resolve_defaults();
+        refused
     }
 
     pub fn apply_requirements(&mut self, result: &serde_json::Value) {
@@ -550,6 +614,11 @@ struct LocalOwnerAuthority;
 pub struct SendMessageRequest {
     #[serde(default)]
     pub model_selection_revision: Option<i64>,
+    /// The model this message is sent with; for a Project thread it may belong
+    /// to the other provider, which moves the thread when the message is
+    /// released for delivery.
+    #[serde(default)]
+    pub project_model: Option<provider_switch::MessageModel>,
     #[serde(default)]
     pub group_routing: Option<group_collaboration::ModelSettings>,
     pub device_id: String,
@@ -892,9 +961,18 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/projects/{project_id}/threads/attach",
             post(projects::attach),
         )
+        .route("/api/v1/settings/default-models", get(default_models::list))
+        .route(
+            "/api/v1/settings/default-models/{family}",
+            put(default_models::set),
+        )
         .route(
             "/api/v1/project-conversations/{conversation_id}",
             get(projects::conversation).patch(projects::update_conversation),
+        )
+        .route(
+            "/api/v1/project-conversations/{conversation_id}/fork",
+            post(projects::fork),
         )
         .route(
             "/api/v1/project-conversations/{conversation_id}/subagents",
@@ -1597,6 +1675,14 @@ async fn process_app_server_notification(
         )
     {
         return bot_onboarding::handle(state, &notification, &params, message.as_ref()).await;
+    }
+    if method == "item/tool/call"
+        && params
+            .get("tool")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(thread_tools::registered)
+    {
+        return thread_tools::handle(state, &notification, &params, message.as_ref()).await;
     }
     if method == "item/tool/call"
         && params
@@ -5010,9 +5096,15 @@ async fn bot_update_endpoint(
         current.system_prompt = value.trim().to_owned();
     }
     if let Some(value) = request.model {
-        if !value.trim().is_empty()
-            && AgentFamily::for_model(Some(value.trim())) != current.agent_family
-        {
+        // The provider that lists the model decides its family. A model no
+        // provider lists keeps the Bot's family so validation can reject it.
+        let listed_family = state
+            .runtime_catalog
+            .read()
+            .await
+            .family_of(value.trim())
+            .unwrap_or(current.agent_family);
+        if !value.trim().is_empty() && listed_family != current.agent_family {
             if current.model_selection_revision.is_none() {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -5020,10 +5112,11 @@ async fn bot_update_endpoint(
                 )
                     .into_response();
             }
-            current.agent_family = AgentFamily::for_model(Some(value.trim()));
+            current.agent_family = listed_family;
             family_changed = true;
-            // Claude has no automatic approval reviewer. Switching never broadens access.
-            if current.agent_family == AgentFamily::Claude
+            // Providers without an automatic approval reviewer cannot keep it.
+            // Switching never broadens access.
+            if !current.agent_family.provider().automatic_approval_reviewer
                 && current.approval_mode.as_deref() == Some("approve-for-me")
             {
                 current.approval_mode = Some("ask-for-approval".into());
@@ -7418,7 +7511,7 @@ fn effective_settings(
             catalog
                 .models
                 .iter()
-                .find(|m| !m.hidden && AgentFamily::for_model(Some(&m.id)) == bot.agent_family)
+                .find(|m| !m.hidden && m.agent_family == bot.agent_family)
                 .map(|m| m.id.clone())
         });
     let model_definition = model_option(catalog, model.as_deref());
@@ -7534,7 +7627,7 @@ async fn conversation_composer_options(
             .filter(|model| {
                 !model.hidden
                     && (bot.model_selection_revision.is_some()
-                        || AgentFamily::for_model(Some(&model.id)) == bot.agent_family)
+                        || model.agent_family == bot.agent_family)
             })
             .cloned()
             .collect(),
@@ -7618,8 +7711,14 @@ fn validate_setting_value(
     service_tier: Option<&str>,
     permission_profile: Option<&str>,
 ) -> Result<(), &'static str> {
-    if model.is_some_and(|m| AgentFamily::for_model(Some(m)) != bot.agent_family) {
-        return Err("Choose a model from this Bot’s agent family.");
+    if let Some(model) = model {
+        match catalog.family_of(model) {
+            Some(family) if family != bot.agent_family => {
+                return Err("Choose a model from this Bot’s agent family.")
+            }
+            Some(_) => {}
+            None => return Err("selected model is unavailable"),
+        }
     }
     // Conversation/automation overrides may select a different model than the
     // Bot default. Managed reviewer requirements apply to that effective model.
@@ -7660,7 +7759,7 @@ fn validate_setting_value(
         {
             return Err("Change access in Bot settings. Conversation access cannot override this Bot's mode.");
         }
-        let allowed = if bot.agent_family == AgentFamily::Claude {
+        let allowed = if bot.agent_family.provider().requires_permission_mode {
             bot.permission_mode.is_some()
                 && permission_profile == bot.effective_permission_profile()
         } else {
@@ -8607,11 +8706,25 @@ async fn create_bot(
     Extension(_authority): Extension<OwnerAuthority>,
     Json(mut request): Json<CreateBotRequest>,
 ) -> Response {
-    let uses_default_permissions = AgentFamily::for_model(request.model.as_deref())
-        == AgentFamily::Codex
+    // The provider that lists the model owns the Bot. A model no provider
+    // lists is rejected by the settings validation below; no model means the
+    // original default provider.
+    let family = {
+        let catalog = state.runtime_catalog.read().await;
+        request
+            .model
+            .as_deref()
+            .map_or(Some(AgentFamily::default()), |m| {
+                catalog.family_of(m.trim())
+            })
+    };
+    let requires_permission_mode =
+        family.is_some_and(|family| family.provider().requires_permission_mode);
+    let uses_default_permissions = family
+        .is_some_and(|family| !family.provider().requires_permission_mode)
         && request.permission_mode.is_none()
         && request.approval_mode.is_none();
-    if AgentFamily::for_model(request.model.as_deref()) == AgentFamily::Claude
+    if requires_permission_mode
         && request.permission_mode.is_none()
         && request.approval_mode.is_none()
     {
@@ -9301,6 +9414,26 @@ async fn send_message_inner(
         }
     };
     let body_sha256 = hex::encode(Sha256::digest(request.body.as_bytes()));
+    if request.project_model.is_some() && !is_project {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "A message model applies to Project threads only.",
+        )
+            .into_response();
+    }
+    if is_project {
+        if let Err(response) = provider_switch::stage_message_model(
+            &state,
+            &conversation_id,
+            &request.device_id,
+            &request.client_message_id,
+            request.project_model.as_ref(),
+        )
+        .await
+        {
+            return response;
+        }
+    }
     if is_project && !request.attachment_ids.is_empty() {
         if let Err((status, detail)) = artifact_annotations::validate_first_acceptance(
             &state,
@@ -9544,7 +9677,13 @@ async fn dispatch_guide(
         let thread_id = active_message
             .codex_thread_id
             .ok_or("This work has no runtime thread")?;
-        Ok::<_, String>((thread_id, state.app_server.lock().await.rpc()))
+        // A Project thread runs in its provider's own store, not a Bot runtime.
+        let rpc = if projects::is_project(&state, &conversation_id).await {
+            claude::for_thread(&state, &thread_id).await?
+        } else {
+            state.app_server.lock().await.rpc()
+        };
+        Ok::<_, String>((thread_id, rpc))
     }
     .await;
     let (active_thread_id, runtime) = match target {
@@ -9573,18 +9712,32 @@ async fn dispatch_guide(
                 .into_response()
         }
     };
-    let workspace = match bot_for_conversation(&state, &conversation_id).await {
-        Ok(Some(bot)) => bot.workspace_path,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "conversation lookup failed",
-            )
-                .into_response()
+    let workspace = if projects::is_project(&state, &conversation_id).await {
+        match projects::media_workspace(&state, &conversation_id).await {
+            Some(workspace) => workspace,
+            None => return StatusCode::NOT_FOUND.into_response(),
+        }
+    } else {
+        match bot_for_conversation(&state, &conversation_id).await {
+            Ok(Some(bot)) => bot.workspace_path,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "conversation lookup failed",
+                )
+                    .into_response()
+            }
         }
     };
-    let input = turn_input(&steered_message.body, &workspace, &attachments);
+    let source = state
+        .store
+        .message_source(&steered_message.id)
+        .await
+        .ok()
+        .flatten();
+    let body = thread_tools::provider_text(source.as_ref(), &steered_message.body);
+    let input = turn_input(&body, &workspace, &attachments);
     if !state
         .store
         .claim_guide(&steered_message.id, &active_thread_id)
@@ -11049,7 +11202,7 @@ async fn rediscover_runtime(
             return Err("Model discovery failed".into());
         }
         let result = response.result.ok_or("model/list returned no result")?;
-        catalog.apply_models_page(&result);
+        catalog.apply_models_page(AgentFamily::Codex, &result);
         cursor = result
             .get("nextCursor")
             .and_then(serde_json::Value::as_str)
@@ -11167,9 +11320,11 @@ async fn rediscover_runtime(
         current
             .models
             .iter()
-            .filter(|m| AgentFamily::for_model(Some(&m.id)) == AgentFamily::Claude)
+            .filter(|m| m.agent_family != AgentFamily::Codex)
             .cloned(),
     );
+    catalog.preferences = current.preferences.clone();
+    catalog.resolve_defaults();
     *current = catalog;
     Ok(())
 }
@@ -13167,6 +13322,7 @@ mod tests {
             None,
             axum::Json(super::SendMessageRequest {
                 model_selection_revision: None,
+                project_model: None,
                 device_id: "owner".into(),
                 client_message_id: uuid::Uuid::new_v4().to_string(),
                 body: "keep this unsent".into(),
@@ -13956,6 +14112,9 @@ mod tests {
                     description: None,
                 }],
                 default_service_tier: Some("fast".into()),
+                is_default: false,
+                provider_default: None,
+                native_ids: vec![],
             }],
             ..RuntimeCatalog::default()
         };
@@ -14809,6 +14968,9 @@ for line in sys.stdin:
                         },
                     ],
                     default_service_tier: Some("default".into()),
+                    is_default: false,
+                    provider_default: None,
+                    native_ids: vec![],
                 }],
                 permission_profiles_by_cwd: permission_profiles,
                 allowed_approval_policies: vec![],
@@ -14818,6 +14980,7 @@ for line in sys.stdin:
                 approval_reviewers_restricted: false,
                 permission_profiles_restricted: false,
                 auto_review_required_on_models: None,
+                preferences: Default::default(),
             })),
             computer_use_enabled: false,
             computer_use_bin: None,
@@ -16310,17 +16473,20 @@ for line in sys.stdin:
     #[test]
     fn runtime_catalog_uses_model_specific_effort_and_speed_options() {
         let mut catalog = RuntimeCatalog::default();
-        catalog.apply_models_page(&serde_json::json!({
-            "data": [{
-                "id": "model-a",
-                "displayName": "Model A",
-                "description": "A useful model",
-                "modelSpecialty": "Planning",
-                "supportedReasoningEfforts": [{"reasoningEffort":"high","description":"Deep"}],
-                "defaultReasoningEffort": "high",
-                "serviceTiers": [{"id":"fast","name":"Fast"}]
-            }]
-        }));
+        catalog.apply_models_page(
+            wonder_store::AgentFamily::Codex,
+            &serde_json::json!({
+                "data": [{
+                    "id": "model-a",
+                    "displayName": "Model A",
+                    "description": "A useful model",
+                    "modelSpecialty": "Planning",
+                    "supportedReasoningEfforts": [{"reasoningEffort":"high","description":"Deep"}],
+                    "defaultReasoningEffort": "high",
+                    "serviceTiers": [{"id":"fast","name":"Fast"}]
+                }]
+            }),
+        );
         assert_eq!(catalog.models.len(), 1);
         assert_eq!(catalog.models[0].reasoning_efforts[0].id, "high");
         assert_eq!(
@@ -16338,6 +16504,48 @@ for line in sys.stdin:
             catalog.models[0].default_reasoning_effort.as_deref(),
             Some("high")
         );
+    }
+
+    // Contract: the provider that lists a model owns its family. A model id is
+    // never read to decide it, and one provider cannot shadow another's models.
+    #[test]
+    fn model_family_comes_from_the_listing_provider_not_the_model_id() {
+        let mut catalog = RuntimeCatalog::default();
+        let refused = catalog.apply_models_page(
+            wonder_store::AgentFamily::Codex,
+            &serde_json::json!({"data":[{"id":"gpt-5"},{"id":"claude:imposter"}]}),
+        );
+        assert_eq!(refused, 1, "Codex cannot list inside the Claude namespace");
+        assert_eq!(
+            catalog.family_of("gpt-5"),
+            Some(wonder_store::AgentFamily::Codex)
+        );
+        assert_eq!(catalog.family_of("claude:imposter"), None);
+        assert_eq!(catalog.family_of("never-listed"), None);
+
+        let refused = catalog.apply_models_page(
+            wonder_store::AgentFamily::Claude,
+            &serde_json::json!({"data":[{"id":"claude:sonnet"},{"id":"gpt-5"},{"id":"plain"}]}),
+        );
+        assert_eq!(
+            refused, 2,
+            "Claude cannot shadow Codex or leave its namespace"
+        );
+        assert_eq!(
+            catalog.family_of("claude:sonnet"),
+            Some(wonder_store::AgentFamily::Claude)
+        );
+        assert_eq!(
+            catalog.family_of("gpt-5"),
+            Some(wonder_store::AgentFamily::Codex)
+        );
+        assert_eq!(catalog.family_of("plain"), None);
+        let claude = catalog
+            .models
+            .iter()
+            .find(|m| m.id == "claude:sonnet")
+            .unwrap();
+        assert!(!claude.capabilities.goals && claude.service_tiers.is_empty());
     }
 
     #[test]

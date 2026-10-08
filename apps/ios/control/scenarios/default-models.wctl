@@ -1,0 +1,34 @@
+# Settings > connection > Default models: a failed load offers Try again, the
+# screen then lists Codex and Claude, and a chosen model and effort are kept after
+# leaving and reopening the screen. The fixture stands in for the Mac; nothing is sent.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture default-models --fixture default-models-fail-once
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id sidebar-settings --timeout 10
+tap --id sidebar-settings
+wait --label "Synthetic fixture" --timeout 10
+tap --label "Synthetic fixture" --type Button
+wait --id connection-default-models --timeout 15
+tap --id connection-default-models
+wait --id default-models-retry --timeout 15
+shot default-models-load-failed
+tap --id default-models-retry
+wait --id default-model-codex --timeout 15
+wait --id default-model-claude --timeout 10
+shot default-models-loaded
+tap --id default-model-codex
+wait --label "Codex Fixture Mini" --timeout 10
+tap --label "Codex Fixture Mini"
+wait --id default-effort-codex --timeout 10
+tap --id default-effort-codex
+wait --label "Low" --timeout 10
+tap --label "Low"
+wait --contains "Codex Fixture Mini" --timeout 10
+shot default-models-chosen
+back
+wait --id connection-default-models --timeout 10
+tap --id connection-default-models
+wait --id default-model-codex --timeout 15
+wait --contains "Codex Fixture Mini" --timeout 10
+wait --contains "Low" --timeout 10
+shot default-models-persisted

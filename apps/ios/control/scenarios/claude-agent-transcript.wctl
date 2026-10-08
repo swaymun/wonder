@@ -1,0 +1,22 @@
+# A Claude agent task's transcript shows the commands, edits and tool calls it
+# ran, not only messages; a tool the running agent has not heard back on shows as
+# running. The fixture stands in for the Mac.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-subagents --fixture project-claude-tasks
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id pinned-thread:codex:read-fixture --timeout 20
+tap --id pinned-thread:codex:read-fixture
+wait --id project-subagent-status-pill --timeout 15
+tap --id project-subagent-status-pill
+wait --id project-subagent-roster:fixture-child-thread --timeout 10
+tap --id project-subagent-roster:fixture-child-thread
+wait --contains "Checking the parser." --timeout 15
+shot claude-agent-transcript-collapsed
+tap --id activity-group:project-child-turn/task-command
+wait --contains "swift test --filter ParserTests" --timeout 5
+wait --contains "Edited Parser.swift" --timeout 5
+shot claude-agent-transcript-work
+swipe up
+swipe up
+wait --label "Grep, Running" --timeout 10
+shot claude-agent-transcript-running

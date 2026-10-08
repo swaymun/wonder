@@ -271,6 +271,8 @@ struct ManagedBotListMutationState {
     @Published var goalErrors: [String: String] = [:]
     private var goalMutationTokens: [String: UUID] = [:]
     @Published var savingComposerSettings: Set<String> = []
+    /// A Project thread's model chosen from the other provider, carried by its next messages until the host has moved the thread.
+    @Published var projectNextModels: [String: ProjectMessageModel] = [:]
     @Published var composerApprovalChanges: [ComposerApprovalTarget: ComposerApprovalChange] = [:]
     var composerApprovalTasks: [ComposerApprovalTarget: Task<Void, Never>] = [:]
     var composerApprovalTokens: [ComposerApprovalTarget: UUID] = [:]
@@ -1235,7 +1237,7 @@ struct ManagedBotListMutationState {
 
     func agentFamily(_ chat: ChatSummary) -> AgentFamily {
         if let detail = projects.details[chat.id] { return detail.family }
-        if let group = groups[chat.id]?.collaboration { return AgentFamily(model: group.configuration.routing.model) }
+        if let group = groups[chat.id]?.collaboration { return group.family }
         return managedBots.first(where: { $0.id == chat.botId })?.family ?? .codex
     }
 
@@ -1773,7 +1775,7 @@ struct ManagedBotListMutationState {
 
     func usageLimitMessage(_ chat: ChatSummary, model: String? = nil) -> String? {
         let selected = model ?? usageModel(chat)
-        let family = AgentFamily(model: selected)
+        let family = agentFamily(chat)
         guard let cached = (family == .claude ? claudeUsageCache : codexUsageCache)[assignmentScope],
             let exhausted = cached.exhaustedWindow(model: selected) else { return nil }
         let provider = exhausted.id == "seven_day_sonnet" ? "Claude Sonnet" : exhausted.id == "seven_day_opus" ? "Claude Opus" : family.title
@@ -1782,7 +1784,7 @@ struct ManagedBotListMutationState {
 
     func refreshComposerUsage(_ chat: ChatSummary) async {
         guard !previewMode, !isSubagent(chat), !chat.isArchived else { return }
-        let selected = usageModel(chat), family = AgentFamily(model: selected)
+        let family = agentFamily(chat)
         try? await loadUsage(family: family, maxAge: 60)
         // Drop expired gates even if the refresh is offline. A stale observation
         // cannot permanently disable Send after the provider's reset time.
@@ -1847,14 +1849,14 @@ struct ManagedBotListMutationState {
             return
         }
         let selectedModel = routing?.model ?? usageModel(chat)
-        try? await loadUsage(family: AgentFamily(model: selectedModel), maxAge: 60)
+        try? await loadUsage(family: agentFamily(chat), maxAge: 60)
         guard usageLimitMessage(chat, model: selectedModel) == nil, routing != nil || selectedModel == usageModel(chat) else { return }
         guard scope == assignmentScope, connection?.origin == saved.origin, !accessEnded,
               !Task.isCancelled, !savingComposerSettings.contains(chat.id),
               !approvalSettingsBlockSending(chat.id) else { return }
         do {
             var next = composers[chat.id] ?? ComposerIntent()
-            try next.begin(device: saved.credential.deviceId, groupRouting: routing, modelSelectionRevision: groups[chat.id] == nil ? managedBots.first(where: { $0.id == chat.botId })?.modelSelectionRevision : nil)
+            try next.begin(device: saved.credential.deviceId, groupRouting: routing, modelSelectionRevision: groups[chat.id] == nil ? managedBots.first(where: { $0.id == chat.botId })?.modelSelectionRevision : nil, projectModel: isProject(chat) ? projectNextModels[chat.id] : nil)
             try saveComposer(next, chat: chat.id)
         } catch {
             guard assignmentScope == scope else { return }
@@ -2613,6 +2615,9 @@ struct ManagedBotListMutationState {
             if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview") {
                 rootEntries += DiagnosticWorkspaceFileFixtures.entries
             }
+            if ProcessInfo.processInfo.arguments.contains("-workspace-viewer-preview") {
+                rootEntries += DiagnosticTextViewerFixtures.entries
+            }
             if ProcessInfo.processInfo.arguments.contains("-workspace-html-scroll-preview") ||
                ProcessInfo.processInfo.arguments.contains("-workspace-html-script-preview") {
                 rootEntries.append(WorkspaceEntry(name: "reader.html", path: "reader.html", isDirectory: false,
@@ -2642,6 +2647,8 @@ struct ManagedBotListMutationState {
         }
         if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview"),
            let data = DiagnosticWorkspaceFileFixtures.data(name: entry.name) { return data }
+        if ProcessInfo.processInfo.arguments.contains("-workspace-viewer-preview"),
+           let data = DiagnosticTextViewerFixtures.data(name: entry.name) { return data }
         if ProcessInfo.processInfo.arguments.contains("-workspace-html-script-preview"), entry.name == "reader.html" {
             return Data("<h1>Script safety page</h1><p id='result'>Safe content remains</p><script>document.getElementById('result').textContent='SCRIPT EXECUTED'</script>".utf8)
         }
