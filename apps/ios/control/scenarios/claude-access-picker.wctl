@@ -1,19 +1,37 @@
-# Claude's access menu offers Ask, Auto and Full access, with Plan
-# separate; choosing a level saves it and the shield shows the saved level.
-launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-read
+# Claude's access menu lists Auto, Ask, Accept edits, Plan and Full access in
+# that order with no divider. Plan is chosen there and shows only on the shield,
+# never as a composer chip. The header shows the 5-hour and weekly usage in
+# place of a usage menu entry, and no provider icon beside the name.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-read --fixture usage-fixture
 wait --id open-sidebar --timeout 20
 tap --id open-sidebar --type Button
 wait --id pinned-thread:claude:read-fixture --timeout 20
 tap --id pinned-thread:claude:read-fixture
 wait --id project-composer-access --timeout 15
+wait --id header-usage --timeout 15
+wait --label "5-hour limit 14% used, weekly 8% used"
+wait --label "Read status fixture, Read status project, Claude, conversation options"
+shot claude-header-usage
+tap --id conversation-title-menu
+wait --id copy-conversation-markdown --timeout 5
+wait --contains "usage" --gone
+shot claude-header-menu
+tap --id copy-conversation-markdown
+wait --id copy-conversation-markdown --gone --timeout 5
 tap --id project-composer-access
 wait --id access-choice-auto --timeout 5
-wait --id access-choice-manual
-wait --id access-choice-fullAccess
-wait --id access-choice-plan
-wait --id access-choice-acceptEdits --gone
+order --ids access-choice-auto,access-choice-manual,access-choice-acceptEdits,access-choice-plan,access-choice-fullAccess
 wait --id project-unsandboxed-commands --gone
 shot claude-access-menu
+tap --id access-choice-plan
+wait --id access-choice-auto --gone --timeout 5
+wait --id project-composer-access --timeout 10
+wait --label "Access" --timeout 10
+wait --id plan-mode-chip --gone
+wait --id composer-plan-mode --gone
+shot claude-plan-selected
+tap --id project-composer-access
+wait --id access-choice-fullAccess --timeout 5
 tap --id access-choice-fullAccess
 wait --id access-choice-auto --gone --timeout 5
 wait --contains "Full access" --timeout 10

@@ -58,6 +58,12 @@ impl std::fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {}
 
 impl RuntimeError {
+    /// The installed runtime is not one Wonder supports (unknown protocol
+    /// contract, failed handshake or helper), as opposed to a transient failure.
+    pub fn is_incompatible(&self) -> bool {
+        matches!(self, Self::Incompatible(_))
+    }
+
     pub fn is_transport_failure(&self) -> bool {
         match self {
             Self::Io(_) => true,

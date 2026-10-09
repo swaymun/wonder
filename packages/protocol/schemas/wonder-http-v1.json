@@ -311,11 +311,17 @@
         "response": { "$ref": "#/$defs/defaultModelPreferences" }
       }
     },
+    "/api/v1/project-conversations/{conversationId}/pull-requests": {
+      "get": { "query": { "$ref": "#/$defs/projectPullRequestListQuery" }, "response": { "$ref": "#/$defs/projectPullRequestList" } }
+    },
     "/api/v1/project-conversations/{conversationId}/subagents": {
       "get": { "query": { "$ref": "#/$defs/projectSubagentListQuery" }, "response": { "$ref": "#/$defs/projectSubagentList" } }
     },
     "/api/v1/project-conversations/{conversationId}/subagents/{threadId}/transcript": {
       "get": { "query": { "$ref": "#/$defs/projectSubagentTranscriptQuery" }, "response": { "$ref": "#/$defs/projectSubagentTranscript" } }
+    },
+    "/api/v1/project-conversations/{conversationId}/subagents/{threadId}/stop": {
+      "post": { "response": { "$ref": "#/$defs/projectSubagentSummary" } }
     },
     "/api/v1/conversations/{conversationId}/desktop-continuation": { "get": { "response": { "$ref": "#/$defs/desktopContinuation" } } }
   },
@@ -737,7 +743,7 @@
       "properties": {
         "ready": { "type": "boolean" },
         "detail": { "type": "string" },
-        "reason": { "enum": ["ready", "runtime_unavailable", "storage_unavailable", "recovering", "backlog"] }
+        "reason": { "enum": ["ready", "runtime_unavailable", "storage_unavailable", "recovering", "backlog", "runtime_incompatible"] }
       },
       "additionalProperties": false
     },
@@ -1452,7 +1458,7 @@
     },
     "projectSubagentSummary": {
       "type": "object",
-      "required": ["parentConversationId", "threadId", "title", "agentNickname", "agentRole", "status", "isArchived", "canAcceptDirectInput"],
+      "required": ["parentConversationId", "threadId", "title", "agentNickname", "agentRole", "status", "isArchived", "canAcceptDirectInput", "namedSubagents", "kind", "canStop", "runningElsewhere", "updatedAt"],
       "properties": {
         "parentConversationId": { "type": "string", "minLength": 1 },
         "threadId": { "type": "string", "minLength": 1 },
@@ -1461,7 +1467,12 @@
         "agentRole": { "type": ["string", "null"] },
         "status": { "type": "string" },
         "isArchived": { "type": "boolean" },
-        "canAcceptDirectInput": { "const": false }
+        "canAcceptDirectInput": { "const": false },
+        "namedSubagents": { "type": "boolean" },
+        "kind": { "enum": ["agent", "command", null] },
+        "canStop": { "type": "boolean" },
+        "runningElsewhere": { "type": "boolean" },
+        "updatedAt": { "type": ["string", "null"], "maxLength": 64 }
       },
       "additionalProperties": false
     },
@@ -2526,6 +2537,51 @@
       "properties": {
         "conversation": { "$ref": "#/$defs/projectThreadSummary" },
         "receipt": { "anyOf": [{ "$ref": "#/$defs/messageReceipt" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "projectPullRequestListQuery": {
+      "type": "object",
+      "properties": {
+        "refresh": { "type": "boolean", "description": "Ask GitHub again unless the list is under ten seconds old." }
+      },
+      "additionalProperties": false
+    },
+    "projectPullRequestList": {
+      "type": "object",
+      "description": "Pull requests a Project thread worked with, read through the GitHub CLI signed in on the Mac. No GitHub credential is ever included.",
+      "required": ["version", "available", "detail", "pullRequests"],
+      "properties": {
+        "version": { "const": 1 },
+        "available": { "type": "boolean", "description": "False when gh is not installed or not signed in; clients hide pull requests." },
+        "detail": { "type": ["string", "null"] },
+        "pullRequests": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "required": ["number", "repository", "title", "state", "checks", "url"],
+            "properties": {
+              "number": { "type": "integer", "minimum": 1 },
+              "repository": { "type": "string", "pattern": "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$" },
+              "title": { "type": "string" },
+              "state": { "enum": ["open", "draft", "merged", "closed"] },
+              "checks": {
+                "type": "object",
+                "required": ["state", "passed", "failed", "pending"],
+                "properties": {
+                  "state": { "enum": ["passing", "failing", "pending", "none"] },
+                  "passed": { "type": "integer", "minimum": 0 },
+                  "failed": { "type": "integer", "minimum": 0 },
+                  "pending": { "type": "integer", "minimum": 0 }
+                },
+                "additionalProperties": false
+              },
+              "url": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[0-9]+$" }
+            },
+            "additionalProperties": false
+          }
+        }
       },
       "additionalProperties": false
     },

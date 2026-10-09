@@ -28,6 +28,11 @@ const syntheticUser = entry => Boolean(entry?.origin?.kind && entry.origin.kind 
 export const unwrapPastes = text => !text.includes("<pasted_content") ? text : text.replace(
   /<pasted_content id="([^"]*)">\n?([\s\S]*?)\n?<\/pasted_content id="\1">/g, (_, _id, body) => body).trim();
 const interruptMarker = text => /^\[Request interrupted by user/.test(text.trim());
+// A `!` shell command or slash command run in Claude Code is one user entry
+// (`<bash-input>` or `<command-name>`) and its output a second one
+// (`<bash-stdout>`, `<local-command-stdout>`, ...). The output belongs to the
+// command's turn; the phone renders the joined markup as one command card.
+const commandOutput = text => /^<(bash-stdout|bash-stderr|local-command-stdout|local-command-stderr)>/.test(text.trimStart());
 
 // The prompt that opens a turn: a human message, not a tool result, background
 // notice or interruption marker. `nativeTurns` splits history at the same entries.
@@ -36,7 +41,7 @@ const opensTurn = entry => {
   const content = entry.message?.content;
   if (Array.isArray(content) && content.some(b => b?.type === "tool_result")) return false;
   const text = unwrapPastes(textOf(content));
-  return Boolean(text.trim()) && !syntheticUser(entry) && !interruptMarker(text);
+  return Boolean(text.trim()) && !syntheticUser(entry) && !interruptMarker(text) && !commandOutput(text);
 };
 
 // The last transcript entry that belongs to the turn `turnId` (the uuid of the
@@ -63,12 +68,17 @@ export function nativeTurns(messages, journal = [], active = false) {
       for (const block of results) {
         const item = tools.get(block.tool_use_id);
         if (!item) continue;
-        applyClaudeToolResult(item, block);
+        applyClaudeToolResult(item, block, entry.tool_use_result);
         if (item.type === "mcpToolCall") delete item.result;
       }
       const text = unwrapPastes(textOf(content));
       if (results.length || !text.trim() || syntheticUser(entry)) continue;
       if (interruptMarker(text)) { if (turn) turn.interrupted = true; continue; }
+      const prompt = turn?.items[0];
+      if (commandOutput(text) && prompt?.type === "userMessage" && prompt.content?.[0]?.type === "text") {
+        prompt.content = [{ ...prompt.content[0], text: `${prompt.content[0].text}\n${text.trim()}` }];
+        continue;
+      }
       const receipt = known.get(entry.uuid);
       const user = receipt?.items?.find(i => i.type === "userMessage");
       turn = { id: entry.uuid, status: "completed", error: null, items: [user
@@ -163,6 +173,9 @@ export function backgroundTasks(messages, live = false, agentFiles = []) {
         task.taskId ??= text.match(/\bagentId: ([A-Za-z0-9_-]{1,64})/)?.[1] ?? null;
         continue;
       }
+      // A background command's launch names the task ID that stop_task needs.
+      if (task.kind === "command" && task.background && block.is_error !== true)
+        task.taskId ??= text?.match(/\bbackground with ID: ([A-Za-z0-9_-]{1,64})/)?.[1] ?? null;
       // A background launch only acknowledges the start; the notice carries its outcome.
       if (block.is_error === true) { task.status = "failed"; task.result = text; }
       else if (!task.background) { task.status = "completed"; task.result = text; }
@@ -182,9 +195,10 @@ export function backgroundTasks(messages, live = false, agentFiles = []) {
       tasks.set(notice.toolUseId, task);
     }
     Object.assign(task, { status: taskStatus(notice.status), summary: bounded(notice.summary, 2000),
-      outputFile: notice.outputFile, taskId: notice.taskId ?? task.taskId });
+      outputFile: notice.outputFile, taskId: notice.taskId ?? task.taskId, updatedAt: entry.timestamp ?? task.updatedAt ?? null });
   }
   const list = [...tasks.values()]
+    .map(task => ({ ...task, updatedAt: task.updatedAt ?? task.startedAt ?? null }))
     .map((task, order) => ({ task, order }))
     .sort((a, b) => String(b.task.startedAt ?? "").localeCompare(String(a.task.startedAt ?? "")) || b.order - a.order)
     .map(({ task }) => task).slice(0, 100);

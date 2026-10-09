@@ -1,0 +1,10 @@
+# With the GitHub CLI signed out on the Mac, a Project thread shows no pull
+# request pill, even though the composer's other pills are there.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-pull-requests --fixture project-pull-requests-signed-out
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id pinned-thread:claude:read-fixture --timeout 20
+tap --id pinned-thread:claude:read-fixture
+wait --id conversation-files-pill --timeout 15
+wait --id pull-requests-pill --gone --timeout 5
+shot pull-requests-hidden

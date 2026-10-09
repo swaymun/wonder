@@ -66,6 +66,9 @@ pub struct ProviderDescriptor {
     /// The provider reports agent tasks from the session transcript instead of
     /// native subagent threads.
     pub transcript_agent_tasks: bool,
+    /// Subagents have human-readable names (Codex nicknames). Without them an
+    /// avatar of initials is noise, so Wonder shows the task and a status glyph.
+    pub named_subagents: bool,
 }
 
 const CODEX: ProviderDescriptor = ProviderDescriptor {
@@ -88,6 +91,7 @@ const CODEX: ProviderDescriptor = ProviderDescriptor {
     requires_permission_mode: false,
     automatic_approval_reviewer: true,
     transcript_agent_tasks: false,
+    named_subagents: true,
 };
 
 const CLAUDE: ProviderDescriptor = ProviderDescriptor {
@@ -110,6 +114,7 @@ const CLAUDE: ProviderDescriptor = ProviderDescriptor {
     requires_permission_mode: true,
     automatic_approval_reviewer: false,
     transcript_agent_tasks: true,
+    named_subagents: false,
 };
 
 impl AgentFamily {

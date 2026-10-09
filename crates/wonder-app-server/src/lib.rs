@@ -16,11 +16,12 @@ pub use process::{
 pub const CODEX_VERSION: &str = "codex-cli 0.155.0-alpha.9";
 // Known versions retain a fast exact-hash path. Later versions are checked
 // against the embedded protocol contract instead of requiring a Wonder update.
-pub const COMPATIBLE_CODEX_VERSIONS: [&str; 4] = [
+pub const COMPATIBLE_CODEX_VERSIONS: [&str; 5] = [
     CODEX_VERSION,
     "codex-cli 0.155.0-alpha.9.2",
     "codex-cli 0.155.0-alpha.16.3",
     "codex-cli 0.155.0-alpha.16.4",
+    "codex-cli 0.162.0-alpha.2",
 ];
 pub const STABLE_SCHEMA_SHA256: &str =
     "5a4d50ed04afa9cd1b383d011f67ec055960a35ca7fdeab222ed65e70fca8f0b";
@@ -31,6 +32,11 @@ pub const ALPHA16_STABLE_SCHEMA_SHA256: &str =
 pub const ALPHA16_EXPERIMENTAL_SCHEMA_SHA256: &str =
     "c7291ce922a7e7f5fe5e36902544bbc18b793d6f5a998ef36aeff0b195b0e91d";
 
+pub const V162_STABLE_SCHEMA_SHA256: &str =
+    "0c34fd753d5e4498c32db50dbb20e9c142f81cb3f4b186c581d756d6b7e10bac";
+pub const V162_EXPERIMENTAL_SCHEMA_SHA256: &str =
+    "9be20dabc0516c68cbe7ad4480affd2953c43ad0e7770a3949663967c00f5ca5";
+
 pub fn expected_schema_hashes(version: &str) -> Option<(&'static str, &'static str)> {
     match version {
         CODEX_VERSION | "codex-cli 0.155.0-alpha.9.2" => {
@@ -40,6 +46,9 @@ pub fn expected_schema_hashes(version: &str) -> Option<(&'static str, &'static s
             ALPHA16_STABLE_SCHEMA_SHA256,
             ALPHA16_EXPERIMENTAL_SCHEMA_SHA256,
         )),
+        "codex-cli 0.162.0-alpha.2" => {
+            Some((V162_STABLE_SCHEMA_SHA256, V162_EXPERIMENTAL_SCHEMA_SHA256))
+        }
         _ => None,
     }
 }
@@ -66,7 +75,7 @@ pub fn is_allowed_method(method: &str) -> bool {
 /// Native project metadata, allowed only on the normal-home Projects client.
 /// Older runtimes without these methods remain compatible; callers treat an
 /// unknown-method response as an unsupported capability.
-pub const PROJECT_METHODS: [&str; 12] = [
+pub const PROJECT_METHODS: [&str; 13] = [
     "project/list",
     "project/read",
     "project/create",
@@ -79,9 +88,11 @@ pub const PROJECT_METHODS: [&str; 12] = [
     "project/session/attach",
     "project/session/fork",
     "project/folders/list",
-    // Read-only Claude agent tasks and background commands of one session.
+    // Claude agent tasks and background commands of one session: read them, and
+    // stop a running one while Wonder drives the session.
     "thread/backgroundTasks/list",
     "thread/backgroundTask/read",
+    "thread/backgroundTask/stop",
 ];
 
 pub fn is_project_method(method: &str) -> bool {
@@ -374,6 +385,18 @@ mod tests {
             "local-additive-schema-check-against-0.155.0-alpha.16.3"
         );
         assert_eq!(
+            manifest["codex"]["v162SchemaSha256"]["stable"],
+            V162_STABLE_SCHEMA_SHA256
+        );
+        assert_eq!(
+            manifest["codex"]["v162SchemaSha256"]["experimental"],
+            V162_EXPERIMENTAL_SCHEMA_SHA256
+        );
+        assert_eq!(
+            expected_schema_hashes("codex-cli 0.162.0-alpha.2"),
+            Some((V162_STABLE_SCHEMA_SHA256, V162_EXPERIMENTAL_SCHEMA_SHA256))
+        );
+        assert_eq!(
             expected_schema_hashes("codex-cli 0.155.0-alpha.16.4"),
             Some((
                 ALPHA16_STABLE_SCHEMA_SHA256,
@@ -385,6 +408,8 @@ mod tests {
             (include_bytes!("../../../research/codex-app-server/0.155.0-alpha.9/experimental/codex_app_server_protocol.v2.schemas.json").as_slice(), EXPERIMENTAL_SCHEMA_SHA256),
             (include_bytes!("../../../research/codex-app-server/0.155.0-alpha.16.3/stable/codex_app_server_protocol.v2.schemas.json").as_slice(), ALPHA16_STABLE_SCHEMA_SHA256),
             (include_bytes!("../../../research/codex-app-server/0.155.0-alpha.16.3/experimental/codex_app_server_protocol.v2.schemas.json").as_slice(), ALPHA16_EXPERIMENTAL_SCHEMA_SHA256),
+            (include_bytes!("../../../research/codex-app-server/0.162.0-alpha.2/stable/codex_app_server_protocol.v2.schemas.json").as_slice(), V162_STABLE_SCHEMA_SHA256),
+            (include_bytes!("../../../research/codex-app-server/0.162.0-alpha.2/experimental/codex_app_server_protocol.v2.schemas.json").as_slice(), V162_EXPERIMENTAL_SCHEMA_SHA256),
         ] {
             assert_eq!(hex::encode(Sha256::digest(schema)), expected);
         }
@@ -395,6 +420,7 @@ mod tests {
         for (schema, server_requests) in [
             (include_str!("../../../research/codex-app-server/0.155.0-alpha.9/experimental/codex_app_server_protocol.v2.schemas.json"), include_str!("../../../research/codex-app-server/0.155.0-alpha.9/experimental/ServerRequest.ts")),
             (include_str!("../../../research/codex-app-server/0.155.0-alpha.16.3/experimental/codex_app_server_protocol.v2.schemas.json"), include_str!("../../../research/codex-app-server/0.155.0-alpha.16.3/experimental/ServerRequest.ts")),
+            (include_str!("../../../research/codex-app-server/0.162.0-alpha.2/experimental/codex_app_server_protocol.v2.schemas.json"), include_str!("../../../research/codex-app-server/0.162.0-alpha.2/experimental/ServerRequest.ts")),
         ] {
         let schema: Value = serde_json::from_str(schema).unwrap();
         let definitions = &schema["definitions"];
@@ -500,7 +526,11 @@ mod tests {
         }
         assert!(!is_project_method("project/delete"));
         // The Mac's agent-task roster calls these through the Claude bridge.
-        for method in ["thread/backgroundTasks/list", "thread/backgroundTask/read"] {
+        for method in [
+            "thread/backgroundTasks/list",
+            "thread/backgroundTask/read",
+            "thread/backgroundTask/stop",
+        ] {
             assert!(
                 is_project_method(method),
                 "{method} must reach project clients"

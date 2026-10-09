@@ -79,8 +79,28 @@ export function claudeToolItem(block, status) {
   }
   return null;
 }
-// Apply a tool result to a projected item, in place.
-export function applyClaudeToolResult(item, block) {
+// Claude Code's own record of a file edit: the hunks it applied against the
+// file (`structuredPatch`), or a new file's content. Counting the tool input
+// instead marks every old line removed and every new line added.
+export function fileEditResult(result) {
+  if (!result || typeof result !== "object" || typeof result.filePath !== "string") return null;
+  if (result.type === "create" && typeof result.content === "string") return { filePath: result.filePath, type: "create", content: result.content };
+  if (!Array.isArray(result.structuredPatch)) return null;
+  const hunks = result.structuredPatch.filter(h => h && Array.isArray(h.lines) && [h.oldStart, h.oldLines, h.newStart, h.newLines].every(Number.isInteger));
+  return { filePath: result.filePath, type: "update",
+    structuredPatch: hunks.map(({ oldStart, oldLines, newStart, newLines, lines }) => ({ oldStart, oldLines, newStart, newLines, lines: lines.map(String) })) };
+}
+function applyFileEdit(item, result) {
+  const edit = fileEditResult(result);
+  const change = item.changes?.length === 1 ? item.changes[0] : null;
+  if (!edit || !change || edit.filePath !== change.path) return;
+  if (edit.type === "create") { change.kind = { type: "add" }; change.diff = edit.content; return; }
+  change.kind = { type: "update" };
+  change.diff = edit.structuredPatch.map(h => [`@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`, ...h.lines].join("\n")).join("\n");
+}
+// Apply a tool result to a projected item, in place. `result` is the SDK's
+// `tool_use_result` (Claude Code's `toolUseResult`) for the same message.
+export function applyClaudeToolResult(item, block, result) {
   item.success = block.is_error !== true;
   const contentItems = toolContent(block.content);
   const text = contentItems.filter(c => c.type === "inputText").map(c => c.text).join("\n");
@@ -92,6 +112,7 @@ export function applyClaudeToolResult(item, block) {
   if (item.type === "fileChange") {
     item.status = item.success ? "completed" : "failed";
     if (!item.success) item.error = { message: text || "Edit failed" };
+    else applyFileEdit(item, result);
     return;
   }
   item.contentItems = contentItems;
@@ -252,7 +273,7 @@ export class TurnProjection {
     }
     const item = this.items.get(block.tool_use_id);
     if (!item || ["completed", "failed"].includes(item.status)) return;
-    applyClaudeToolResult(item, block);
+    applyClaudeToolResult(item, block, result);
     item.status = "inProgress"; // finishItem publishes the terminal state.
     this.finishItem(item);
   }

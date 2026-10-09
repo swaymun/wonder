@@ -141,7 +141,7 @@ struct ChatShell: View {
                                 // corner instead of contributing to safe area.
                                 Color.clear.frame(height: 52).accessibilityHidden(true)
                             }
-                            NavigationStack {
+                            NavigationStack { // theme-exempt: a root stack; WonderThemeHost and its screens theme it
                                 ShellMain(library: library, shell: shell,
                                           compactIPadWindow: compact,
                                           showSidebarButton: true,
@@ -317,7 +317,7 @@ private struct PhoneDrawerLayout: View {
                 HStack(spacing: 0) {
                     Color.clear.frame(width: wide ? width + 1 : 0)
                         .accessibilityHidden(true)
-                    NavigationStack {
+                    NavigationStack { // theme-exempt: a root stack; WonderThemeHost and its screens theme it
                         ShellMain(library: library, shell: shell, compactIPadWindow: false,
                                   showSidebarButton: !wide, sidebarButtonLabel: "Open sidebar") {
                             shell.sidebarOpen = true
@@ -732,7 +732,8 @@ private struct ShellConversation: View {
             return SidebarHostProjects(hostID: source.hostID, name: model.macName, isOnline: model.macConnected == true && !model.accessEnded,
                                        supportsProjects: catalog.supportsProjects, projects: catalog.projects, threads: catalog.threads,
                                        pinned: catalog.pinned,
-                                       notice: model.accessEnded ? .pairAgain : (model.macConnected == false ? .offline : nil))
+                                       notice: model.accessEnded ? .pairAgain : (model.macConnected == false ? .offline : nil),
+                                       unavailableFamilies: Set(catalog.families.filter { !$0.available }.map(\.family)))
         }
         var selectedHost: String?, selectedConversation: String?
         if case .conversation(let host, let id) = inputs.selection { selectedHost = host; selectedConversation = id }
@@ -847,7 +848,7 @@ struct SidebarView: View {
             .background(theme.field, in: RoundedRectangle(cornerRadius: 10))
             .padding(.horizontal, 16).padding(.vertical, 8)
             if presenter.pills.count > 1 { filterPills }
-            List {
+            List { // theme-exempt: the sidebar draws theme.sidebar
                 if let error = library.error { FailureDetails("Connection problem", message: error).listRowSeparator(.hidden) }
                 ForEach(presenter.rows) { row in
                     rowView(row)
@@ -904,6 +905,14 @@ struct SidebarView: View {
             setExpanded(key, true)
         }
         .onChange(of: shell.sidebarOpen) { _, open in headingFocused = open }
+        #if WONDER_DIAGNOSTICS
+        .onAppear {
+            // The threads-notice scenario starts from its project expanded, whatever was remembered.
+            if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-threads-partial") {
+                expandedStorage = SidebarProjection.expansionKey(host: DiagnosticSubagentFixture.hostID, project: "read-project")
+            }
+        }
+        #endif
     }
 
     // MARK: Header
@@ -978,10 +987,19 @@ struct SidebarView: View {
             threadRow(host: host, projectID: projectID, thread: thread, isSelected: isSelected, subtitle: nil, leading: 34, prefix: "project-thread:")
         case .threadsLoading:
             ProgressView().frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 38)
-        case .threadsNotice(let host, let projectID, let message, let canRetry):
-            Button { if canRetry { model(host)?.projects.loadThreads(projectID) } } label: {
-                Text(message).font(.caption).foregroundStyle(.secondary).padding(.leading, 38).frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.plain).disabled(!canRetry)
+        case .threadsNotice(let host, let projectID, let message, let canRetry, let isRetrying):
+            HStack(spacing: 8) {
+                Text(message).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                if isRetrying {
+                    ProgressView().controlSize(.small).accessibilityLabel("Retrying")
+                } else if canRetry {
+                    Button("Retry") { model(host)?.projects.loadThreads(projectID) }
+                        .font(.caption.weight(.semibold)).buttonStyle(.borderless)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("threads-retry:" + projectID)
+                }
+            }
+            .padding(.leading, 38)
         case .moreThreads(let host, let projectID, let isLoading):
             Button { model(host)?.projects.loadThreads(projectID, more: true) } label: {
                 HStack { Text("Show more"); if isLoading { ProgressView().controlSize(.small) } }

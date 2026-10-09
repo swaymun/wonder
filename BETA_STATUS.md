@@ -1,14 +1,14 @@
 # Wonder beta status
 
-On October 8, Wonder Testing Release 1.0 (48) and production Release 1.0 (104)
-uploaded and processed successfully, both archived on the Mac mini with Xcode 27.1
-(the first builds with the iOS 27.1 SDK). Testing 48 is available in internal
-Owner Beta; production 104's tester availability was not checked. TestFlight
-installation remains unverified. Mac 1.0.126 was built on the Mac mini, Developer
-ID signed, notarized and stapled; its DMG passed Gatekeeper and artifact checks,
-and it is installed over 1.0.125 with passing signature, Gatekeeper and `/readyz`
-checks. No external beta review, public enrollment or new public Mac binary
-release was requested.
+On October 9, Wonder Testing Release 1.0 (51) and production Release 1.0 (107)
+uploaded and processed from `fbe1cf5d` (the October stack, #85), archived on the
+Mac mini with Xcode 27.1. Testing 51 is available in internal Owner Beta;
+production 107's tester availability was not checked. TestFlight installation
+remains unverified. Mac 1.0.130 was built on the Mac mini from the same commit,
+Developer ID signed, notarized and stapled; its DMG passed Gatekeeper and artifact
+checks, and it is installed here over 1.0.129 with `/healthz` and `/readyz` matching
+the previous host. No external beta review, public enrollment or new public Mac
+binary release was requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -19,12 +19,27 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (104) uploaded and processed; tester availability not checked. Built on the Mac mini from clean, pushed source (`58871f0f`) with Xcode 27.1. TestFlight installation remains unverified. |
-| Wonder Testing | Blue Release 1.0 (48) uploaded, processed and available in automatic Owner Beta, from the same source as production 104. Build 47 is superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.126 (from `58871f0f`, built on the Mac mini) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `5b1f0f16f47bd8cc4346237a2ed46af0fc7523743fd40e91a4e0e6b3cf083040`. |
+| iPhone and iPad | Production Release 1.0 (107) uploaded and processed; tester availability not checked. Built on the Mac mini from clean, pushed source (`fbe1cf5d`) with Xcode 27.1. TestFlight installation remains unverified. |
+| Wonder Testing | Blue Release 1.0 (51) uploaded, processed and available in automatic Owner Beta, from the same source as production 107. Earlier builds are superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.130 (from `fbe1cf5d`, built on the Mac mini) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `6073a409cf2495c94ae1d7136d8a2d2c47f02e6a37011b7ad95ed6cf7dac6dd2`. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). The iOS archives and the Mac app came from clean, pushed internal source. Third-party components retain their own licenses. |
 
-Testing 48, production 104 and Mac 1.0.126 add: host-resolved model, effort and
+Mac 1.0.129 matches Claude Desktop when a Claude Project reply is stopped: the
+reply ends, its running background agents keep running in the same Claude process,
+the next message joins that process, and each agent is stopped from Agent tasks.
+Changing model, effort, folders, tools, plan mode or sandbox still starts a new
+Claude process. It is installed over 1.0.128 with `/readyz` ready; a real
+interrupt against Claude Code has not been exercised yet.
+
+Testing 49, production 105 and Mac 1.0.128 add: a composer and pill row that sit
+on the chat background instead of a separate panel; Claude agent tasks grouped
+Running then Completed, without avatars, with Stop for running agents and
+background commands Wonder drives; a theme-colored computer view; Default models
+in app Settings for every paired Mac; and removal of the Chat bubbles and widget
+name settings. Mac 1.0.127 accepts ChatGPT's Codex 0.162.0-alpha.2 and reports an
+unsupported Codex instead of Ready.
+
+Testing 48, production 104 and Mac 1.0.126 added: host-resolved model, effort and
 speed defaults with a per-provider Default models screen; the phone adopting the
 model and effort last used in the desktop app; switching a Project thread between
 Codex and Claude from the model picker, with a budgeted history handoff (ported

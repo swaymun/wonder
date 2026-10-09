@@ -757,6 +757,21 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(response.windows[0].windowDurationMins, 300)
     }
 
+    // Contract: the header reads Codex primary/secondary and Claude's named
+    // windows as 5-hour and weekly use, and shows nothing without either.
+    func testHeaderUsageReadsEachProvidersWindows() throws {
+        func usage(_ windows: String) throws -> HeaderUsage? {
+            HeaderUsage(try JSONDecoder().decode(CodexUsageResponse.self, from: Data(#"{"checkedAtMs":1,"windows":[\#(windows)]}"#.utf8)))
+        }
+        let codex = try XCTUnwrap(usage(#"{"id":"secondary","label":"Usage","usedPercent":18.4,"remainingPercent":81.6},{"id":"primary","label":"Usage","usedPercent":41.6,"remainingPercent":58.4}"#))
+        XCTAssertEqual([codex.fiveHourUsed, codex.weeklyUsed], [42, 18])
+        XCTAssertEqual(codex.accessibilityLabel, "5-hour limit 42% used, weekly 18% used")
+        let claude = try XCTUnwrap(usage(#"{"id":"seven_day_opus","label":"Weekly · Opus","usedPercent":90,"remainingPercent":10},{"id":"seven_day","label":"Weekly","usedPercent":8,"remainingPercent":92}"#))
+        XCTAssertEqual([claude.fiveHourUsed, claude.weeklyUsed], [nil, 8])
+        XCTAssertEqual(claude.accessibilityLabel, "Weekly limit 8% used")
+        XCTAssertNil(try usage(""))
+    }
+
     func testVisibleChatProjectionExcludesArchivedBotDirectChatsAndRestoresThem() throws {
         func summary(_ id: String, botID: String?) throws -> ChatSummary {
             let botValue = botID.map { "\"\($0)\"" } ?? "null"

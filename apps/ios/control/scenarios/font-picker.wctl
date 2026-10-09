@@ -1,0 +1,44 @@
+# Settings > Appearance > Font: choose a message font and a code font, read the bundled
+# font licenses, and find both choices kept after a relaunch. Ends back on the defaults.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-actions
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id sidebar-settings --timeout 10
+tap --id sidebar-settings
+wait --id settings-font --timeout 10
+tap --id settings-font
+wait --id message-font:atkinson --timeout 10
+tap --id message-font:atkinson
+shot font-picker
+# Code fonts and the licenses link sit below the fold on a phone.
+swipe up --in font-picker
+wait --id code-font:plex --timeout 5
+tap --id code-font:plex
+swipe up --in font-picker
+wait --id font-licenses --timeout 5
+tap --id font-licenses
+wait --contains "SIL OPEN FONT LICENSE" --timeout 10
+shot font-licenses
+back
+wait --id font-picker --timeout 10
+back
+wait --id settings-font --contains "Atkinson Hyperlegible, IBM Plex Mono" --timeout 10
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-actions
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id pinned-thread:codex:read-fixture --timeout 20
+tap --id pinned-thread:codex:read-fixture
+wait --contains "Continue the project at:" --timeout 20
+shot font-picker-chat-after-relaunch
+tap --id open-sidebar --type Button
+wait --id sidebar-settings --timeout 10
+tap --id sidebar-settings
+wait --id settings-font --contains "Atkinson Hyperlegible, IBM Plex Mono" --timeout 10
+tap --id settings-font
+wait --id message-font:system --timeout 10
+tap --id message-font:system
+swipe up --in font-picker
+wait --id code-font:system --timeout 5
+tap --id code-font:system
+back
+wait --id settings-font --contains "Default" --timeout 10

@@ -748,7 +748,7 @@ struct DiagnosticAutomationsFixtureView: View {
             api: PairingAPI(configuration: configuration), replayEnabled: false))
     }
 
-    var body: some View { NavigationStack { AutomationsView(model: model) } }
+    var body: some View { NavigationStack { AutomationsView(model: model) } } // theme-exempt: Diagnostics fixture host
 }
 
 private final class DiagnosticAutomationURLProtocol: URLProtocol, @unchecked Sendable {

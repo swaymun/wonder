@@ -23,7 +23,8 @@ scripts/verify-macos-dmg.sh .local/release/Wonder.dmg 1.0.47
 
 `scripts/release-mac.sh VERSION` runs that whole sequence, notarizing with the
 App Store Connect API key, and keeps the evidence in `.local/release/mac-VERSION/`.
-Build releases on the Mac mini from a pushed commit, then install the DMG here:
+Build releases on the Mac mini from a pushed commit (signing credentials stay
+there; ordinary builds and tests run on the MacBook), then install the DMG here:
 
 ```sh
 scripts/wonder-remote --ref HEAD --signing --lock mac-release -- scripts/release-mac.sh 1.0.126
@@ -265,9 +266,11 @@ DMG and its digest; remove redundant app staging copies after verification.
   `~/Applications` and `~/.wonder/Backups/signed-update-*`. A rollback app may remain
   during validation. Preserve pairing, databases, credentials, runtime/model data
   and source backups.
-- Remove an obsolete worktree only when clean, reachable from `main` and unused
-  by any process/task. Use `git worktree remove`, inspect ignored contents before
-  forcing removal and prune stale metadata.
+- Remove a worktree once its PR merges, with `scripts/prune-merged-worktrees --apply`.
+  PRs are squash-merged, so merged commits are never reachable from `main`; the
+  script asks GitHub instead. It keeps worktrees that have changes, commits after the
+  merged head, or a process working inside them, and moves `.local/` evidence
+  (except build output) to the main checkout's `.local/merged-worktrees/`.
 - Keep compact final reports and relevant crash/failure evidence. Avoid duplicate
   screenshots, repository copies and repeated test bundles for unchanged code.
   Record substantial disk savings and deliberately retained large artifacts.

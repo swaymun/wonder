@@ -50,6 +50,7 @@ struct CodeBlockView: View {
     let code: String
     let language: String?
     @Environment(\.wonderTheme) private var theme
+    @Environment(\.wonderTypography) private var typography
     @State private var colored: (key: String, text: AttributedString)?
 
     var body: some View {
@@ -57,7 +58,7 @@ struct CodeBlockView: View {
         let text = CodeHighlightCache.shared.value(for: key) ?? (colored?.key == key ? colored?.text : nil)
         ScrollView(.horizontal) {
             Text(text ?? AttributedString(code))
-                .font(.system(.body, design: .monospaced))
+                .font(typography.codeFont(.body))
                 .foregroundStyle(theme.primaryText)
                 .textSelection(.enabled).fixedSize(horizontal: true, vertical: false)
                 .padding(10)
@@ -75,6 +76,121 @@ struct CodeBlockView: View {
             guard !Task.isCancelled, let result else { return }
             CodeHighlightCache.shared.store(result, for: key, cost: code.utf8.count * 4)
             colored = (key, result)
+        }
+    }
+}
+
+/// A `!` shell command or slash command the owner ran in Claude Code: the
+/// command, then its output and errors in monospace. Long output starts
+/// collapsed; errors are marked apart from output.
+struct CommandBlockCard: View {
+    let block: ClaudeCommandBlock
+    @Environment(\.wonderTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header
+            if !block.output.isEmpty {
+                CommandOutputSection(title: "Output", text: block.output, lineCount: block.outputLineCount, isError: false)
+            }
+            if !block.errorOutput.isEmpty {
+                CommandOutputSection(title: "Errors", text: block.errorOutput, lineCount: block.errorLineCount, isError: true)
+            }
+            ForEach(Array(block.notes.enumerated()), id: \.offset) { _, note in
+                Text(note).font(.subheadline).foregroundStyle(theme.secondaryText)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("command-card")
+    }
+
+    @ViewBuilder private var header: some View {
+        switch block.kind {
+        case .shell:
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("$").foregroundStyle(theme.secondaryText).accessibilityHidden(true)
+                Text(block.command.isEmpty ? "Shell command" : block.command)
+                    .textSelection(.enabled)
+            }
+            .font(.system(.subheadline, design: .monospaced).weight(.medium))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Shell command: \(block.command)")
+            .accessibilityIdentifier("command-card-command")
+        case .slash:
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(block.command.isEmpty ? "Command" : block.command)
+                    .font(.system(.subheadline, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(theme.accent)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(theme.accent.opacity(0.14), in: Capsule())
+                    .accessibilityIdentifier("slash-command-chip")
+                if !block.arguments.isEmpty {
+                    Text(block.arguments).font(.subheadline).textSelection(.enabled)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Command \(block.command) \(block.arguments)")
+            .accessibilityIdentifier("command-card-command")
+        }
+    }
+}
+
+/// One stream of command output. Short output shows at once; longer output
+/// opens on a tap and shows a bounded prefix, with the whole text on Copy.
+private struct CommandOutputSection: View {
+    let title: String
+    let text: String
+    let lineCount: Int
+    let isError: Bool
+    @Environment(\.wonderTheme) private var theme
+    @State private var expanded: Bool?
+    private static let shortLines = 8
+    private static let shownCharacters = 20_000
+
+    var body: some View {
+        let isExpanded = expanded ?? (lineCount <= Self.shortLines)
+        let id = isError ? "command-card-errors" : "command-card-output"
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                expanded = !isExpanded
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Text(title)
+                    Text(lineCount == 1 ? "1 line" : "\(lineCount) lines").foregroundStyle(theme.secondaryText)
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(isError ? Color.red : theme.secondaryText)
+                .frame(minHeight: 28)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(title), \(lineCount == 1 ? "1 line" : "\(lineCount) lines")")
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityHint(isExpanded ? "Hides the \(title.lowercased())" : "Shows the \(title.lowercased())")
+            .accessibilityIdentifier(id + "-toggle")
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 4) {
+                    ScrollView(.horizontal) {
+                        Text(text.utf8.count > Self.shownCharacters ? String(text.prefix(Self.shownCharacters)) : text)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(isError ? Color.red : theme.primaryText)
+                            .textSelection(.enabled)
+                            .fixedSize()
+                            .padding(8)
+                    }
+                    if text.utf8.count > Self.shownCharacters {
+                        Text("Showing the start of long output. Copy has all of it.")
+                            .font(.caption2).foregroundStyle(theme.secondaryText)
+                    }
+                }
+                .background(isError ? Color.red.opacity(0.10) : theme.codeBackground, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(alignment: .leading) {
+                    if isError { Rectangle().fill(Color.red).frame(width: 3).clipShape(RoundedRectangle(cornerRadius: 1.5)) }
+                }
+                .accessibilityIdentifier(id)
+            }
         }
     }
 }

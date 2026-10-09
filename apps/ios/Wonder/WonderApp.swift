@@ -18,11 +18,9 @@ import VisionKit
 private struct WonderRoot: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var preview: ConnectionModel
-    @AppStorage(ChatBubblePalette.storageKey) private var bubblePaletteRaw = ChatBubblePalette.standard.rawValue
 
     var body: some View {
         content.environmentObject(library)
-            .environment(\.chatBubblePalette, ChatBubblePalette(rawValue: bubblePaletteRaw) ?? .standard)
             // The theme owns the tint (plain text, not blue links), the forced
             // appearance and the accent; switches use `.systemSwitch()`.
             .modifier(WonderThemeHost())
@@ -63,7 +61,7 @@ extension View {
 private struct PreviewConversationRoot: View {
     @ObservedObject var model: ConnectionModel
     var body: some View {
-        NavigationStack {
+        NavigationStack { // theme-exempt: Diagnostics host; ConversationView draws ThemeBackdrop
             if let chat = model.chats.first { ConversationView(model: model, chat: chat).id(chat.id) }
             else { ProgressView() }
         }
@@ -77,10 +75,12 @@ struct ConnectionsView: View {
     @ObservedObject var library: ConnectionLibrary
     var isSheet = false
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(ProjectWidgetSnapshot.showNamesPreferenceKey) private var showNamesOnWidgets = false
     @AppStorage(WonderTheme.storageKey) private var themeID = WonderThemeCatalog.defaultID
+    @Environment(\.wonderTypography) private var typography
+    private var fontSummary: String {
+        typography.code == .system ? typography.message.name : "\(typography.message.name), \(typography.code.name)"
+    }
     @State private var adding = false
-    @State private var widgetFailure: String?
     var body: some View {
         if isSheet {
             NavigationStack {
@@ -117,29 +117,15 @@ struct ConnectionsView: View {
                     LabeledContent("Theme", value: WonderThemeCatalog.theme(id: ProcessInfo.processInfo.diagnosticThemeOverride ?? themeID).name)
                 }
                 .accessibilityIdentifier("settings-theme")
-                NavigationLink("Chat bubbles") { ChatAppearanceView() }
-                    .accessibilityIdentifier("settings-chat-bubbles")
+                NavigationLink { FontPickerView() } label: {
+                    LabeledContent("Font", value: fontSummary)
+                }
+                .accessibilityIdentifier("settings-font")
             }
-            if ProjectWidgetIdentity(bundleIdentifier: Bundle.main.bundleIdentifier) != nil {
+            if !library.saved.connections.isEmpty {
                 Section {
-                    Toggle("Show names on widgets", isOn: Binding(
-                        get: { showNamesOnWidgets },
-                        set: { value in
-                            let previous = showNamesOnWidgets
-                            showNamesOnWidgets = value
-                            if !library.publishWidgetSnapshotNow() {
-                                showNamesOnWidgets = previous
-                                widgetFailure = "Widget settings could not be saved. Try again."
-                            } else { widgetFailure = nil }
-                        }
-                    ))
-                    .systemSwitch()
-                    .accessibilityIdentifier("widget-show-names")
-                    if let widgetFailure { Text(widgetFailure).foregroundStyle(.red) }
-                } header: {
-                    Text("Widgets")
-                } footer: {
-                    Text("Names may appear on your Home Screen when enabled. Otherwise widgets use generic Project and chat labels.")
+                    NavigationLink("Default models") { AppDefaultModelsView(library: library) }
+                        .accessibilityIdentifier("settings-default-models")
                 }
             }
             #if WONDER_DIAGNOSTICS
@@ -149,39 +135,6 @@ struct ConnectionsView: View {
         .wonderGroupedStyle()
         .navigationTitle("Settings")
         .sheet(isPresented: $adding) { PairComputerView(model: library.pairingModel()) }
-    }
-}
-
-private struct ChatAppearanceView: View {
-    @AppStorage(ChatBubblePalette.storageKey) private var paletteRaw = ChatBubblePalette.standard.rawValue
-    var body: some View {
-        Form {
-            Section {
-                Picker("Bubble palette", selection: $paletteRaw) {
-                    ForEach(ChatBubblePalette.allCases, id: \.rawValue) { palette in
-                        Text(palette.title).tag(palette.rawValue)
-                    }
-                }
-                .accessibilityIdentifier("chat-bubble-palette")
-            } footer: {
-                Text("These colors apply to the Wonder theme. Other themes bring their own bubbles.")
-            }
-            Section("Preview") {
-                VStack(spacing: 12) {
-                    Text("Agent response")
-                        .modifier(ChatBubbleSurface())
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Your message")
-                        .modifier(ChatBubbleSurface(isUser: true))
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-                .padding(.vertical, 8)
-                .accessibilityElement(children: .contain)
-            }
-        }
-        .wonderGroupedStyle()
-        .navigationTitle("Chat bubbles")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -242,8 +195,6 @@ struct ConnectionDetail: View {
                     .accessibilityIdentifier("connection-projects")
                 NavigationLink("Automations") { AutomationsView(model: model) }
                     .accessibilityIdentifier("connection-automations")
-                NavigationLink("Default models") { DefaultModelsView(model: model) }
-                    .accessibilityIdentifier("connection-default-models")
                 NavigationLink("Connected apps") { ConnectedAppsView(model: model) }
             }
             CodexUsageSection(model: model)
@@ -284,6 +235,7 @@ struct ProviderUsageView: View {
                 if family == .codex { CodexUsageSection(model: model) }
                 else { ClaudeUsageSection(model: model) }
             }
+            .wonderGroupedStyle()
             .navigationTitle("\(family.title) usage")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Done") { dismiss() } }
@@ -477,6 +429,7 @@ struct PairComputerView: View {
                 }
                 if let error = model.error { FailureDetails("Couldn’t connect", message: error) }
             }
+            .wonderGroupedStyle()
             .safeAreaInset(edge: .bottom) {
                 if !model.busy {
                     Button(enteringCode ? "Connect with code" : "Connect to computer") {
@@ -670,6 +623,7 @@ struct ConnectedAppsView: View {
                 }
             }
         }
+        .wonderGroupedStyle()
         .navigationTitle("Connected apps")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { Button("Refresh", systemImage: "arrow.clockwise") { Task { await load(refresh: true) } }.disabled(loading) }

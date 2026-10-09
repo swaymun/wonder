@@ -79,7 +79,10 @@ result. Archive logs and identity/encryption checks use the existing script.
 
 ## Upload from the Mac mini
 
-The Mac mini is the upload machine. Its Xcode is the one in
+The Mac mini is the upload machine; signing credentials stay there. Build and
+test on the MacBook, and use `wonder-remote` for signing and release only. Merging an iOS change to `main` runs both
+uploads automatically (the Wonder Release workflow); the commands below are for
+running them by hand. Its Xcode is the one in
 `~/Applications/Xcode.app`, currently Xcode 27.1. Run each channel from this Mac
 with `scripts/wonder-remote`, which copies exactly the given commit to the mini,
 runs the lane there and brings the `.local/testflight-*` evidence back:

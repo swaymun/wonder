@@ -145,10 +145,27 @@ pub async fn codex_rpc(state: &AppState) -> Result<RpcClient, String> {
     let _start = runtime.start.lock().await;
     let mut client = runtime.codex.lock().await;
     if !client.health().is_alive() {
-        client.restart(runtime.config.clone()).await.map_err(|_| {
-            "Codex could not start on your Mac. Check that ChatGPT is installed and signed in."
-                .to_owned()
-        })?;
+        if let Err(error) = client.restart(runtime.config.clone()).await {
+            let incompatible = error.is_incompatible();
+            state
+                .ingestion
+                .set_runtime_incompatible(AgentFamily::Codex, incompatible);
+            return Err(if incompatible {
+                // The technical reason (failing contract path) stays in the log.
+                let _ = state.logger.record(
+                    "error",
+                    "codex_runtime_incompatible",
+                    serde_json::json!({"error": error.to_string()}),
+                );
+                crate::ingestion::CODEX_UNSUPPORTED_DETAIL.to_owned()
+            } else {
+                "Codex could not start on your Mac. Check that ChatGPT is installed and signed in."
+                    .to_owned()
+            });
+        }
+        state
+            .ingestion
+            .set_runtime_incompatible(AgentFamily::Codex, false);
         if let Err(error) = crate::rediscover_runtime(state, &mut client, false).await {
             let _ = client.shutdown().await;
             return Err(error);
@@ -638,7 +655,7 @@ pub(crate) fn validate_execution_roots(
     Ok(())
 }
 
-fn validate_folders(
+pub(crate) fn validate_folders(
     paths: &[String],
     denied: &[String],
 ) -> Result<Vec<ProjectRootInput>, &'static str> {

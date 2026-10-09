@@ -67,3 +67,99 @@ public struct DefaultModelChoices: Sendable {
         return ModelDefaults.summary(model: model, effort: selected.effort)
     }
 }
+
+/// One harness's default across every paired Mac. The picker lists the union of
+/// the Macs' catalogs; a choice is written to each Mac that offers that model.
+public struct AppDefaultModels: Sendable {
+    public struct Mac: Sendable, Identifiable {
+        public let id: String
+        public let name: String
+        public let models: [BotOptions.Model]
+        public let stored: DefaultModelPreferences
+        public init(id: String, name: String, models: [BotOptions.Model], stored: DefaultModelPreferences) {
+            self.id = id; self.name = name; self.models = models; self.stored = stored
+        }
+    }
+    public struct Option: Identifiable, Sendable, Equatable {
+        public let id: String
+        public let displayName: String
+        /// Names of the Macs that offer this model.
+        public let macNames: [String]
+        /// True when some paired Mac does not offer it.
+        public let partial: Bool
+    }
+    public struct Write: Equatable, Sendable {
+        public let macID: String
+        public let entry: DefaultModelPreferences.Entry
+    }
+
+    public let family: AgentFamily
+    public let macs: [Mac]
+    private let perMac: [(mac: Mac, choices: DefaultModelChoices)]
+
+    public init(family: AgentFamily, macs: [Mac]) {
+        self.family = family
+        self.macs = macs
+        perMac = macs.map { ($0, DefaultModelChoices(family: family, options: $0.models, stored: $0.stored.entry(family))) }
+    }
+
+    public var options: [Option] {
+        var order: [String] = []
+        var names: [String: String] = [:]
+        var holders: [String: [String]] = [:]
+        for (mac, choices) in perMac {
+            for model in choices.models {
+                if names[model.id] == nil { order.append(model.id); names[model.id] = model.displayName }
+                holders[model.id, default: []].append(mac.name)
+            }
+        }
+        return order.map { id in
+            Option(id: id, displayName: names[id] ?? id, macNames: holders[id] ?? [], partial: (holders[id] ?? []).count < macs.count)
+        }
+    }
+
+    /// The first Mac with a valid stored model speaks for the picker; with none, Wonder's default.
+    private var reference: DefaultModelChoices? {
+        perMac.first { $0.choices.selected.model != nil }?.choices
+    }
+    public var selected: DefaultModelPreferences.Entry { reference?.selected ?? .init(family: family) }
+    public var efforts: [BotOptions.Choice] { reference?.efforts ?? [] }
+    public var speeds: [BotOptions.Choice] { reference?.speeds ?? [] }
+
+    private func offering(_ id: String?) -> [(mac: Mac, choices: DefaultModelChoices)] {
+        guard let id else { return perMac }
+        return perMac.filter { $0.choices.models.contains { $0.id == id } }
+    }
+
+    /// True when the Macs that offer the chosen model do not store the same choice.
+    public var differsBetweenComputers: Bool {
+        let entries = offering(selected.model).map(\.choices.selected)
+        return entries.contains { $0 != entries[0] }
+    }
+
+    /// Macs that do not offer the chosen model and keep their own default.
+    public var computersWithoutSelection: [String] {
+        guard let id = selected.model else { return [] }
+        return perMac.filter { !$0.choices.models.contains { $0.id == id } }.map(\.mac.name)
+    }
+
+    public func writes(choosing model: String?) -> [Write] {
+        let entry = model == nil ? DefaultModelPreferences.Entry(family: family)
+            : .init(family: family, model: model, effort: selected.effort, serviceTier: selected.serviceTier)
+        return writes(applying: entry, to: offering(model))
+    }
+    public func writes(choosingEffort effort: String?) -> [Write] {
+        var entry = selected; entry.effort = effort
+        return writes(applying: entry, to: offering(selected.model))
+    }
+    public func writes(choosingSpeed speed: String?) -> [Write] {
+        var entry = selected; entry.serviceTier = speed
+        return writes(applying: entry, to: offering(selected.model))
+    }
+
+    /// Each Mac keeps only what its own catalog offers for the model.
+    private func writes(applying entry: DefaultModelPreferences.Entry,
+                        to targets: [(mac: Mac, choices: DefaultModelChoices)]) -> [Write] {
+        targets.map { Write(macID: $0.mac.id, entry: DefaultModelChoices(family: family, options: $0.mac.models, stored: entry).selected) }
+    }
+}

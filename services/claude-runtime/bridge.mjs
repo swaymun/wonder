@@ -37,6 +37,29 @@ function page(data, params) {
   return { data: data.slice(offset, offset + limit), nextCursor: offset + limit < data.length ? `${fingerprint}:${offset + limit}` : null };
 }
 
+// An unbounded input queue for one Claude process. Later replies are pushed
+// into the same open prompt stream instead of starting a new process.
+function channel() {
+  const queue = []; let wake = null, closed = false;
+  return { push(message) { queue.push(message); wake?.(); }, close() { closed = true; wake?.(); },
+    async next() {
+      while (!queue.length) { if (closed) return undefined; await new Promise(resolve => { wake = resolve; }); }
+      return queue.shift();
+    } };
+}
+
+// What a running Claude process was started with. A new reply may reuse the
+// process only when this matches (the model and permission mode are checked
+// separately); anything else needs a new process, which ends spared agents.
+function processShape(options, policy) {
+  const computer = options.config?.["mcp_servers.cua_repl"]?.enabled === true;
+  return JSON.stringify({ model: selectedModel(options.model), effort: options.effort ?? null, schema: options.outputSchema ?? null,
+    cwd: options.cwd, dirs: options.wonderProject?.additionalDirectories ?? [], tools: advertisedTools(options).map(t => t.name),
+    plan: policy.planMode, unsandboxed: policy.unsandboxed, sandbox: policy.sandbox(),
+    // Native computer use is a fresh runtime per reply, so it never carries over.
+    computer: computer ? randomUUID() : false });
+}
+
 export function selectedModel(value) {
   if (value === "claude:haiku" || value === HAIKU_MODEL) return HAIKU_MODEL;
   if (typeof value !== "string" || !/^claude:[a-zA-Z0-9._\[\]-]{1,100}$/.test(value)) throw new Error("Choose a Claude model for this Bot.");
@@ -116,7 +139,7 @@ export class ClaudeBridge {
     Object.assign(this, { updates, sessions, send, inspect, onFatal, claudeSessionsDir });
     this.sessionFiles = new ClaudeSessionFiles(claudeProjectsDir);
     this.transcripts = new Map();
-    this.active = new Map(); this.pending = new Map(); this.inspection = null; this.inspectionAt = 0;
+    this.active = new Map(); this.lingering = new Map(); this.pending = new Map(); this.inspection = null; this.inspectionAt = 0;
   }
   async catalog(refresh = false) {
     // Account, model and app requests can arrive together during startup.
@@ -200,9 +223,10 @@ export class ClaudeBridge {
     }
     if (session.options.wonderProject && method === "thread/backgroundTasks/list") {
       const tasks = await this.projectTasks(session);
-      return { data: tasks.map(({ request, result, outputFile, ...summary }) => summary) };
+      return { data: tasks.map(({ request, result, outputFile, taskId, ...summary }) => summary) };
     }
     if (session.options.wonderProject && method === "thread/backgroundTask/read") return this.backgroundTask(session, params.taskId);
+    if (session.options.wonderProject && method === "thread/backgroundTask/stop") return this.stopBackgroundTask(session, params.taskId);
     if (method === "thread/read") return { thread: this.sessions.describe(session, params.includeTurns === true) };
     if (method === "thread/turns/list") return page([...session.turns].reverse().map(t => params.itemsView === "notLoaded" ? { ...t, items: [] } : t), params);
     if (method === "thread/items/list") {
@@ -237,7 +261,15 @@ export class ClaudeBridge {
       const content = await sdkInput(params.input, policy);
       const { turn, duplicate } = await this.sessions.accept(session, params);
       if (!duplicate) {
-        const run = { turn, abort: new AbortController(), query: null, children: new Map(), childTasks: new Map(), stopped: false, authorizedTools: new Map(), toolResults: new Map() };
+        // A reply sent after an interrupt goes into the still-running process,
+        // so agents spared by the interrupt keep running. A different process
+        // shape (model, effort, folders, tools, sandbox) needs a new process.
+        let reuse = this.lingering.get(session.id);
+        if (reuse) {
+          if (reuse.shape === processShape(options, policy)) { this.lingering.delete(session.id); reuse.draining = false; }
+          else { await this.endLinger(session.id); reuse = null; }
+        }
+        const run = { reuse, turn, abort: new AbortController(), query: null, children: new Map(), childTasks: new Map(), stopped: false, authorizedTools: new Map(), toolResults: new Map() };
         this.active.set(session.id, run);
         // Return the durable receipt before the SDK can produce an event.
         run.finished = new Promise((resolve, reject) => setImmediate(() => {
@@ -249,7 +281,16 @@ export class ClaudeBridge {
     }
     if (method === "turn/interrupt") {
       const run = this.active.get(session.id);
-      if (run && run.turn.id === params.turnId) { run.stopped = true; run.abort.abort(); run.query?.close(); }
+      if (run && run.turn.id === params.turnId) {
+        run.stopped = true;
+        // Project turns declare perTaskStopAffordance, so a soft interrupt ends
+        // only the reply; running agents stay until the user stops each one.
+        if (run.sparesTasks && typeof run.query?.interrupt === "function") {
+          run.interrupting = true;
+          try { await run.query.interrupt(); return {}; } catch { run.interrupting = false; }
+        }
+        run.hardStop = true; run.abort.abort(); run.query?.close();
+      }
       return {};
     }
     // No silent no-ops for features that the SDK cannot faithfully provide.
@@ -318,6 +359,7 @@ export class ClaudeBridge {
     const project = session.options.wonderProject;
     if (!project || !session.sdkStarted) throw new Error("Send a message first. There is nothing to fork yet.");
     if (this.active.has(session.id)) throw new Error("Wait for Claude to finish before forking this conversation.");
+    await this.endLinger(session.id);
     if (await claudeSessionBusy(session.sdkSessionId, this.claudeSessionsDir))
       throw new Error("Claude is working on this conversation on your Mac. Fork it when it finishes.");
     let upToMessageId;
@@ -343,7 +385,9 @@ export class ClaudeBridge {
       const recent = await this.withSdk(sdk => sdk.getSessionMessages(session.sdkSessionId, { dir: cwd }));
       // The SDK reader begins at the latest compaction; keep the turns before it.
       const earlier = recent.length ? await this.sessionFiles.earlierMessages(session.sdkSessionId, cwd, recent[0].uuid) : [];
-      messages = earlier.length ? [...earlier, ...recent] : recent;
+      const edits = recent.length ? await this.sessionFiles.fileEdits(session.sdkSessionId, cwd) : new Map();
+      const withEdits = recent.map(m => m.type === "user" && edits.has(m.uuid) ? { ...m, tool_use_result: edits.get(m.uuid) } : m);
+      messages = earlier.length ? [...earlier, ...withEdits] : withEdits;
       this.transcripts.delete(session.sdkSessionId);
       if (stamp) this.transcripts.set(session.sdkSessionId, { stamp, messages });
       while (this.transcripts.size > 4) this.transcripts.delete(this.transcripts.keys().next().value);
@@ -355,7 +399,32 @@ export class ClaudeBridge {
   async projectTasks(session) {
     const { messages, desktop } = await this.projectMessages(session);
     const files = session.sdkStarted ? await this.sessionFiles.agentTasks(session.sdkSessionId, session.options.wonderProject.cwd) : [];
-    return backgroundTasks(messages, desktop || this.active.has(session.id), files);
+    const run = this.active.get(session.id) ?? this.lingering.get(session.id);
+    const tasks = backgroundTasks(messages, desktop || Boolean(run), files);
+    // Wonder can stop only tasks inside a session it is driving right now; a
+    // session running in Claude on the Mac keeps its own stop controls.
+    return tasks.map(task => {
+      if (task.status === "running" && run?.stoppedTasks?.has(task.id)) task = { ...task, status: "interrupted" };
+      const running = task.status === "running";
+      return { ...task, canStop: running && Boolean(run?.query) && Boolean(task.taskId),
+        runningElsewhere: running && desktop && !run };
+    });
+  }
+  // Ask Claude Code to stop one running agent task or background command. The
+  // SDK's stop_task control is the same one the Claude desktop app sends. The
+  // outcome is data, not an exception, so the host can explain each case.
+  async stopBackgroundTask(session, taskId) {
+    if (typeof taskId !== "string" || !taskId || taskId.length > 256) throw new Error("Choose an agent task.");
+    const task = (await this.projectTasks(session)).find(t => t.id === taskId);
+    if (!task) return { outcome: "notFound" };
+    const { request, result, outputFile, taskId: sdkTaskId, ...summary } = task;
+    if (task.runningElsewhere) return { outcome: "runningElsewhere", task: summary };
+    if (task.status !== "running") return { outcome: "notRunning", task: summary };
+    const run = this.active.get(session.id) ?? this.lingering.get(session.id);
+    if (!task.canStop || typeof run?.query?.stopTask !== "function") return { outcome: "unsupported", task: summary };
+    await run.query.stopTask(sdkTaskId);
+    (run.stoppedTasks ??= new Set()).add(task.id);
+    return { outcome: "stopped", task: { ...summary, status: "interrupted", canStop: false } };
   }
   async projectTurns(session) {
     if (!session.sdkStarted) return session.turns;
@@ -478,14 +547,18 @@ export class ClaudeBridge {
     return { behavior: "deny", message: `The owner did not allow ${host}. Continue without it, or ask the owner to allow it or choose Full access.` };
   }
   async execute(session, run, options, policy, content) {
-    let lease, query;
-    const done = Promise.withResolvers(), submit = Promise.withResolvers();
+    let lease, query, iterator, handle, first = null;
+    const reuse = run.reuse;
+    const input = reuse?.input ?? channel(), done = { resolve: () => input.close() }, submit = Promise.withResolvers();
+    const live = reuse?.live ?? { run, policy };
+    const userMessage = () => ({ type: "user", session_id: session.sdkSessionId, parent_tool_use_id: null,
+      ...(options.wonderProject ? { uuid: run.turn.id } : {}), message: { role: "user", content } });
     const output = [];
     const projection = new TurnProjection({ threadId: session.id, turnId: run.turn.id, internal: policy.internal,
       promptUuid: options.wonderProject ? run.turn.id : null,
       emit: event => output.push(event), onSession: id => { session.sdkSessionId = id; session.sdkStarted = true; },
       onChild: message => { if (!options.wonderPlanning) run.childMessages.push(message); } });
-    run.childMessages = [];
+    run.childMessages = reuse?.childMessages ?? [];
     const flush = async (terminal = false) => {
       // Child cleanup may append its last parent activity after the parent's
       // result. Publish all item updates before the terminal turn snapshot.
@@ -494,92 +567,119 @@ export class ClaudeBridge {
     };
     try {
       projection.start(); await flush();
-      lease = await this.updates.acquire();
-      const { sdk } = lease.runtime;
-      const tools = advertisedTools(options)
-        .filter(spec => spec.name !== "wonder_computer_use")
-        .map(spec => sdk.tool(spec.name, spec.description,
-        z.fromJSONSchema(spec.inputSchema).shape, async (input) => {
-          const callId = run.authorizedTools.get(toolCallKey(spec.name, input))?.shift();
-          if (!callId) throw new Error("The Wonder tool call could not be correlated with its permission check.");
-          if (!run.toolResults.has(callId)) run.toolResults.set(callId, this.serverCall("item/tool/call", { threadId: session.id, turnId: run.turn.id,
-            callId, tool: spec.name, arguments: input, agentFamily: "claude" }, run.abort.signal));
-          const result = await run.toolResults.get(callId);
-          const response = sdkToolResult(result);
-          if (policy.internal && spec.name === "wonder_ask_question" && result?.success === true) {
-            const posted = response.content.some(c => { try { return JSON.parse(c.text).posted === true; } catch { return false; } });
-            if (posted) run.initialized = true;
+      if (reuse) {
+        // Same process: the new reply joins the open prompt stream.
+        lease = reuse.lease; query = reuse.query; handle = reuse; live.run = run; live.policy = policy;
+        run.query = query; run.sparesTasks = true; run.stoppedTasks = reuse.stoppedTasks;
+        run.children = reuse.children; run.childTasks = reuse.childTasks;
+        // Agents spared earlier report into this reply's stream from now on.
+        for (const child of run.children.values()) if (child.parentProjection === reuse.topProjection) child.parentProjection = projection;
+        if (reuse.permissionMode !== policy.permissionMode) { await query.setPermissionMode(policy.permissionMode); reuse.permissionMode = policy.permissionMode; }
+        first = reuse.pending; reuse.pending = null; iterator = reuse.iterator;
+        input.push(userMessage());
+      } else {
+        lease = await this.updates.acquire();
+        const { sdk } = lease.runtime;
+        const tools = advertisedTools(options)
+          .filter(spec => spec.name !== "wonder_computer_use")
+          .map(spec => sdk.tool(spec.name, spec.description,
+          z.fromJSONSchema(spec.inputSchema).shape, async (input) => {
+            const callId = live.run.authorizedTools.get(toolCallKey(spec.name, input))?.shift();
+            if (!callId) throw new Error("The Wonder tool call could not be correlated with its permission check.");
+            if (!live.run.toolResults.has(callId)) live.run.toolResults.set(callId, this.serverCall("item/tool/call", { threadId: session.id, turnId: live.run.turn.id,
+              callId, tool: spec.name, arguments: input, agentFamily: "claude" }, live.run.abort.signal));
+            const result = await live.run.toolResults.get(callId);
+            const response = sdkToolResult(result);
+            if (live.policy.internal && spec.name === "wonder_ask_question" && result?.success === true) {
+              const posted = response.content.some(c => { try { return JSON.parse(c.text).posted === true; } catch { return false; } });
+              if (posted) live.run.initialized = true;
+            }
+            return response;
+          }));
+        const model = selectedModel(options.model);
+        const project = options.wonderProject;
+        const base = baseOptions(lease.runtime, { connectors: !project && options.wonderConnectors === true && !options.wonderPlanning && !policy.internal });
+        const computer = options.config?.["mcp_servers.cua_repl"];
+        let computerUnavailable = false;
+        if (computer?.enabled === true && !options.wonderPlanning && !policy.planMode && !policy.internal) {
+          try {
+            run.nativeCua = await createNativeCua({ sdk, server: computer, environment: base.env,
+              sessionId: session.sdkSessionId, threadId: session.id, turnId: run.turn.id, signal: run.abort.signal,
+              requestElicitation: (params, signal) => this.serverCall("mcpServer/elicitation/request", params, signal) });
+          } catch (error) {
+            run.abort.signal.throwIfAborted();
+            computerUnavailable = true;
           }
-          return response;
-        }));
-      const model = selectedModel(options.model);
-      const project = options.wonderProject;
-      const base = baseOptions(lease.runtime, { connectors: !project && options.wonderConnectors === true && !options.wonderPlanning && !policy.internal });
-      const computer = options.config?.["mcp_servers.cua_repl"];
-      let computerUnavailable = false;
-      if (computer?.enabled === true && !options.wonderPlanning && !policy.planMode && !policy.internal) {
-        try {
-          run.nativeCua = await createNativeCua({ sdk, server: computer, environment: base.env,
-            sessionId: session.sdkSessionId, threadId: session.id, turnId: run.turn.id, signal: run.abort.signal,
-            requestElicitation: (params, signal) => this.serverCall("mcpServer/elicitation/request", params, signal) });
-        } catch (error) {
-          run.abort.signal.throwIfAborted();
-          computerUnavailable = true;
         }
-      }
-      const sdkOptions = { ...base, cwd: options.cwd, model, abortController: run.abort,
-        systemPrompt: [options.developerInstructions ?? "You are a helpful Wonder Bot.",
-          ...(run.nativeCua ? ["This response has a fresh cua_repl runtime. Follow its first-call instructions and initialize an app or browser before using it. JavaScript variables from earlier responses are not available."] : []),
-          ...(computerUnavailable ? ["Native computer use could not connect for this turn. If asked to control the computer, report that it is unavailable; do not substitute another implementation."] : []),
-          ...Object.values(options.additionalContext ?? {}).filter(v => v?.kind === "application" && typeof v.value === "string").map(v => v.value)].join("\n\n"),
-        tools: policy.internal || options.wonderPlanning ? [] : BUILTINS,
-        mcpServers: { ...(tools.length ? { wonder: sdk.createSdkMcpServer({ name: "wonder", version: "1.0.0", tools }) } : {}),
-          ...(run.nativeCua ? { cua_repl: run.nativeCua.server } : {}) },
-        canUseTool: (name, input, context) => this.permission(session, run, policy, name, input, context),
-        hooks: { PreToolUse: [{ hooks: [(input) => policy.beforeTool(input)] }],
-          PostToolUse: [{ hooks: [async () => run.initialized ? { continue: false, stopReason: "The optional question was posted. Initialization is complete." } : {}] }] },
-        permissionMode: policy.permissionMode, sandbox: policy.sandbox(), includePartialMessages: true,
-        // Ordinary tasks run until completion, cancellation, or the subscription limit.
-        // A fixed tool-turn cap otherwise abandons valid long-running work.
-        persistSession: true, verbatimPrompts: true,
-        settings: { ...base.settings, availableModels: [model], enforceAvailableModels: true },
-        ...(model === HAIKU_MODEL ? { thinking: { type: "disabled" } } : options.effort ? { effort: options.effort } : {}),
-        ...(options.outputSchema ? { outputFormat: { type: "json_schema", schema: options.outputSchema } } : {}),
-        ...(session.sdkStarted ? { resume: session.sdkSessionId } : { sessionId: session.sdkSessionId }) };
-      // A killed process can have persisted an SDK transcript before our init
-      // event was saved. Query the exact owned UUID before deciding to resume.
-      if (!session.sdkStarted && typeof sdk.getSessionInfo === "function") {
-        if (await sdk.getSessionInfo(session.sdkSessionId, { dir: options.cwd })) {
-          delete sdkOptions.sessionId; sdkOptions.resume = session.sdkSessionId; session.sdkStarted = true;
+        run.sparesTasks = Boolean(project);
+        handle = { query: null, iterator: null, input, shape: processShape(options, policy), model, permissionMode: policy.permissionMode,
+          abort: run.abort, live, session, lease, draining: false, pending: null };
+        const sdkOptions = { ...base, cwd: options.cwd, model, abortController: run.abort,
+          systemPrompt: [options.developerInstructions ?? "You are a helpful Wonder Bot.",
+            ...(run.nativeCua ? ["This response has a fresh cua_repl runtime. Follow its first-call instructions and initialize an app or browser before using it. JavaScript variables from earlier responses are not available."] : []),
+            ...(computerUnavailable ? ["Native computer use could not connect for this turn. If asked to control the computer, report that it is unavailable; do not substitute another implementation."] : []),
+            ...Object.values(options.additionalContext ?? {}).filter(v => v?.kind === "application" && typeof v.value === "string").map(v => v.value)].join("\n\n"),
+          tools: policy.internal || options.wonderPlanning ? [] : BUILTINS,
+          mcpServers: { ...(tools.length ? { wonder: sdk.createSdkMcpServer({ name: "wonder", version: "1.0.0", tools }) } : {}),
+            ...(run.nativeCua ? { cua_repl: run.nativeCua.server } : {}) },
+          canUseTool: (name, input, context) => this.permission(session, live.run, live.policy, name, input, context),
+          hooks: { PreToolUse: [{ hooks: [(input) => live.policy.beforeTool(input)] }],
+            PostToolUse: [{ hooks: [async () => live.run.initialized ? { continue: false, stopReason: "The optional question was posted. Initialization is complete." } : {}] }] },
+          permissionMode: policy.permissionMode, sandbox: policy.sandbox(), includePartialMessages: true,
+          // Ordinary tasks run until completion, cancellation, or the subscription limit.
+          // A fixed tool-turn cap otherwise abandons valid long-running work.
+          persistSession: true, verbatimPrompts: true,
+          // Only Projects offer a per-task Stop (thread/backgroundTask/stop); Bots keep the default.
+          ...(project ? { perTaskStopAffordance: true } : {}),
+          settings: { ...base.settings, availableModels: [model], enforceAvailableModels: true },
+          ...(model === HAIKU_MODEL ? { thinking: { type: "disabled" } } : options.effort ? { effort: options.effort } : {}),
+          ...(options.outputSchema ? { outputFormat: { type: "json_schema", schema: options.outputSchema } } : {}),
+          ...(session.sdkStarted ? { resume: session.sdkSessionId } : { sessionId: session.sdkSessionId }) };
+        // A killed process can have persisted an SDK transcript before our init
+        // event was saved. Query the exact owned UUID before deciding to resume.
+        if (!session.sdkStarted && typeof sdk.getSessionInfo === "function") {
+          if (await sdk.getSessionInfo(session.sdkSessionId, { dir: options.cwd })) {
+            delete sdkOptions.sessionId; sdkOptions.resume = session.sdkSessionId; session.sdkStarted = true;
+          }
         }
+        if (project) {
+          // Normal Claude Code behavior and project configuration, still bounded
+          // by Wonder's PreToolUse/canUseTool policy and Claude Code's sandbox.
+          const append = [...(policy.unsandboxed ? [] : [SANDBOX_GUIDANCE]),
+            ...(run.nativeCua ? ["Use the native cua_repl tools for computer use. This turn has a fresh runtime: follow its first-call instructions before using it."]
+              : computerUnavailable ? ["Native computer use could not connect for this turn. Report it as unavailable; do not substitute another implementation."] : [])];
+          Object.assign(sdkOptions, { systemPrompt: { type: "preset", preset: "claude_code", ...(append.length ? { append: append.join("\n\n") } : {}) },
+            settingSources: ["user", "project", "local"], additionalDirectories: project.additionalDirectories,
+            // Planning ends by proposing its plan through ExitPlanMode, which the
+            // policy turns into a plan for the owner to review in Wonder.
+            tools: [...BUILTINS, "Glob", "Grep", ...(policy.planMode ? ["ExitPlanMode"] : [])], strictMcpConfig: false,
+            settings: { ...sdkOptions.settings, disableClaudeAiConnectors: true } });
+          delete sdkOptions.hooks.PostToolUse;
+        }
+        query = sdk.query({ prompt: (async function* () {
+          await submit.promise;
+          // Project turns name their transcript entry after the Wonder turn so
+          // native history and live events reconcile by the same identity.
+          if (!run.abort.signal.aborted) yield userMessage();
+          // Later replies join this open stream until the process is closed.
+          for (let next = await input.next(); next; next = await input.next()) yield next;
+        })(), options: sdkOptions });
+        run.query = query;
+        await query.initializationResult();
+        if (!isSubscription(await query.accountInfo())) throw new Error("Sign in to a Claude subscription on your Mac before using this Bot.");
       }
-      if (project) {
-        // Normal Claude Code behavior and project configuration, still bounded
-        // by Wonder's PreToolUse/canUseTool policy and Claude Code's sandbox.
-        const append = [...(policy.unsandboxed ? [] : [SANDBOX_GUIDANCE]),
-          ...(run.nativeCua ? ["Use the native cua_repl tools for computer use. This turn has a fresh runtime: follow its first-call instructions before using it."]
-            : computerUnavailable ? ["Native computer use could not connect for this turn. Report it as unavailable; do not substitute another implementation."] : [])];
-        Object.assign(sdkOptions, { systemPrompt: { type: "preset", preset: "claude_code", ...(append.length ? { append: append.join("\n\n") } : {}) },
-          settingSources: ["user", "project", "local"], additionalDirectories: project.additionalDirectories,
-          // Planning ends by proposing its plan through ExitPlanMode, which the
-          // policy turns into a plan for the owner to review in Wonder.
-          tools: [...BUILTINS, "Glob", "Grep", ...(policy.planMode ? ["ExitPlanMode"] : [])], strictMcpConfig: false,
-          settings: { ...sdkOptions.settings, disableClaudeAiConnectors: true } });
-        delete sdkOptions.hooks.PostToolUse;
-      }
-      query = sdk.query({ prompt: (async function* () {
-        await submit.promise;
-        // Project turns name their transcript entry after the Wonder turn so
-        // native history and live events reconcile by the same identity.
-        if (!run.abort.signal.aborted) yield { type: "user", session_id: session.sdkSessionId, parent_tool_use_id: null,
-          ...(project ? { uuid: run.turn.id } : {}), message: { role: "user", content } };
-        await done.promise;
-      })(), options: sdkOptions });
-      run.query = query;
-      await query.initializationResult();
-      if (!isSubscription(await query.accountInfo())) throw new Error("Sign in to a Claude subscription on your Mac before using this Bot.");
       submit.resolve();
-      for await (const message of query) {
+      // Iterate by hand: leaving a `for await` calls return(), which would end
+      // the query that a soft interrupt keeps alive for its spared agents.
+      if (!reuse) { iterator = query[Symbol.asyncIterator](); handle.query = query; handle.iterator = iterator; }
+      for (;;) {
+        const next = await (first ?? iterator.next());
+        first = null;
+        if (next.done) break;
+        const message = next.value;
+        // An interrupted reply ends at the SDK's result for the interrupt, which
+        // is not a failure; running agents are left to their own Stop.
+        if (run.interrupting && message.type === "result") { projection.finish("interrupted"); await flush(); break; }
         projection.accept(message);
         if (message.type === "system" && message.subtype === "init") await this.sessions.save(session);
         while (run.childMessages.length) await this.child(session, run, run.childMessages.shift(), projection);
@@ -595,13 +695,23 @@ export class ClaudeBridge {
     } catch (error) {
       projection.finish(run.initialized ? "completed" : run.stopped ? "interrupted" : "failed", run.initialized ? undefined : error.message);
     } finally {
-      submit.resolve(); done.resolve(); query?.close(); run.abort.abort();
+      submit.resolve();
+      // A soft interrupt leaves the process (and the agents it spared) running.
+      // A reply that joined a surviving process keeps it while agents still run.
+      let spared = Boolean(handle && handle.query === query && !run.abort.signal.aborted && !run.hardStop);
+      if (spared && !run.interrupting) {
+        spared = Boolean(reuse && projection.terminal && run.sparesTasks);
+        if (spared) { try { spared = (await this.projectTasks(session)).some(task => task.status === "running"); } catch { spared = false; } }
+      }
+      if (spared) { this.linger(session, run, handle, lease, projection); lease = null; }
+      else { done.resolve(); query?.close(); handle?.abort.abort(); run.abort.abort(); }
       try { await run.nativeCua?.close(); }
       catch { process.stderr.write("Native computer-use cleanup could not be confirmed.\n"); }
       // Finish descendants first so each owner's durable snapshot includes its
       // children's final state, including when the whole query is interrupted.
       for (const child of [...run.children.values()].reverse()) {
-        if (!child.projection.terminal) child.projection.finish(run.stopped ? "interrupted" : "failed", "The parent response ended before this task confirmed completion.");
+        // A spared agent is still running: its own notification finishes its card.
+        if (!spared && !child.projection.terminal) child.projection.finish(run.stopped ? "interrupted" : "failed", "The parent response ended before this task confirmed completion.");
         await child.flush();
       }
       projection.result.items = [...run.turn.items.filter(i => i.type === "userMessage"), ...projection.result.items];
@@ -610,6 +720,49 @@ export class ClaudeBridge {
       await flush(true); this.active.delete(session.id);
       await lease?.release();
     }
+  }
+  // After a soft interrupt the Claude process stays up so spared agents keep
+  // running and stay stoppable. The next reply joins it (see turn/start). It
+  // ends when no task is left running, when a reply needs a differently shaped
+  // process (model, effort, folders, tools or sandbox change), on fork, or when
+  // Wonder closes; each of those ends any agent still running in it.
+  linger(session, run, handle, lease, projection) {
+    Object.assign(handle, { lease, topProjection: projection, childMessages: run.childMessages, stoppedTasks: run.stoppedTasks, children: run.children, childTasks: run.childTasks, draining: true });
+    this.lingering.set(session.id, handle);
+    (async () => {
+      try {
+        while (handle.draining) {
+          // A new reply adopts this pending read instead of racing it.
+          handle.pending ??= handle.iterator.next();
+          const next = await handle.pending;
+          if (!handle.draining) return;
+          handle.pending = null;
+          if (next.done) break;
+          if (next.value.type !== "result") continue;
+          if (!(await this.projectTasks(session)).some(task => task.status === "running")) break;
+        }
+      } catch {}
+      if (handle.draining && this.lingering.get(session.id) === handle) await this.endLinger(session.id);
+    })();
+  }
+  async endLinger(sessionId, lookup = true) {
+    const handle = this.lingering.get(sessionId);
+    if (!handle) return;
+    let tasks = [];
+    if (lookup) try { tasks = await this.projectTasks(handle.session); } catch {}
+    if (this.lingering.get(sessionId) !== handle) return;
+    this.lingering.delete(sessionId); handle.draining = false;
+    // Agents shown as running end with the process; report what the transcript knows.
+    for (const [toolId, child] of [...(handle.children ?? [])].reverse()) {
+      if (!child.projection.terminal) {
+        const status = tasks.find(task => task.id === toolId)?.status;
+        const outcome = status === "completed" || status === "failed" ? status : "interrupted";
+        child.projection.finish(outcome, outcome === "failed" ? "The agent task failed." : undefined);
+      }
+      await child.flush();
+    }
+    handle.input.close(); handle.query.close(); handle.abort.abort();
+    await handle.lease?.release();
   }
   async child(parent, run, message, parentProjection) {
     const taskId = message.task_id ?? message.result?.agentId;
@@ -638,12 +791,12 @@ export class ClaudeBridge {
       const session = await this.sessions.create(parent.options, { threadId: parent.id, depth,
         name: String(message.description ?? "Helper").slice(0, 100), role: message.subagent_type ?? "Helper" });
       const turn = { id: randomUUID(), status: "inProgress", items: [] }; session.turns.push(turn);
-      const output = [];
+      const output = [], childMessages = run.childMessages;
       const projection = new TurnProjection({ threadId: session.id, turnId: turn.id, emit: event => output.push(event),
-        onChild: message => run.childMessages.push(message) });
+        onChild: message => childMessages.push(message) });
       const activity = { type: "subAgentActivity", id: toolId, agentThreadId: session.id,
         agentNickname: session.parent.name, agentRole: session.parent.role, kind: "started", status: "running" };
-      child = { session, turn, projection, flush: async () => {
+      child = { session, turn, projection, parentProjection, flush: async () => {
         const terminal = output.findLast(e => e.method === "turn/completed")?.params.turn;
         // History reads while the task is running must see the same items as
         // the stream. Persist once at completion, not once per text delta.
@@ -652,7 +805,7 @@ export class ClaudeBridge {
           Object.assign(turn, terminal); await this.sessions.save(session);
           activity.status = terminal.status; activity.kind = terminal.status;
           if (terminal.error) activity.error = terminal.error;
-          parentProjection.notify("item/completed", { item: { ...activity } });
+          child.parentProjection.notify("item/completed", { item: { ...activity } });
         }
         while (output.length) await this.send(output.shift());
         await owner?.flush();
@@ -682,6 +835,7 @@ export class ClaudeBridge {
   async close() {
     for (const run of this.active.values()) { run.stopped = true; run.abort.abort(); run.query?.close(); }
     await Promise.allSettled([...this.active.values()].map(run => run.finished));
+    for (const id of [...this.lingering.keys()]) await this.endLinger(id, false);
     for (const pending of this.pending.values()) { pending.cleanup(); pending.reject(new Error("Wonder closed the Claude runtime.")); }
     this.pending.clear();
   }

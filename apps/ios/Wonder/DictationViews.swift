@@ -371,9 +371,10 @@ struct DictationPlaceholder: View {
     let conversationID: String
     let text: String
     let isEmpty: Bool
+    @Environment(\.wonderTypography) private var typography
     var body: some View {
         if isEmpty && controller.nativeConversationID != conversationID {
-            Text(text).foregroundStyle(.secondary)
+            Text(text).font(typography.font(.body)).foregroundStyle(.secondary)
                 .padding(.top, 12).padding(.leading, 5)
                 .allowsHitTesting(false).accessibilityHidden(true)
         }

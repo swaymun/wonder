@@ -3366,9 +3366,9 @@ import UIKit
         retainMenuScreenshot(app, name: "Project turn running on the Mac")
     }
 
-    // Claude's access menu offers Ask, Auto and Full access, with
-    // Plan separate. Each choice saves through the existing settings endpoint,
-    // shows the saved level and never sends a message.
+    // Claude's access menu offers Auto, Ask, Accept edits, Plan and Full access.
+    // Each choice saves through the existing settings endpoint, shows the saved
+    // level and never sends a message.
     func testProjectClaudeAccessPickerSavesAccessLevels() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
@@ -3380,10 +3380,9 @@ import UIKit
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         let access = app.buttons["project-composer-access"]
         XCTAssertTrue(access.waitForExistence(timeout: 15)); access.tap()
-        for id in ["access-choice-manual", "access-choice-auto", "access-choice-fullAccess", "access-choice-plan"] {
+        for id in ["access-choice-auto", "access-choice-manual", "access-choice-acceptEdits", "access-choice-plan", "access-choice-fullAccess"] {
             XCTAssertTrue(app.buttons[id].waitForExistence(timeout: 5), id)
         }
-        XCTAssertFalse(app.buttons["access-choice-acceptEdits"].exists, "Accept edits is no longer offered")
         XCTAssertFalse(app.buttons["project-unsandboxed-commands"].exists, "Full access replaces the separate sandbox switch")
         app.buttons["access-choice-fullAccess"].tap()
         let full = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Full access"), object: access)
@@ -3864,7 +3863,8 @@ import UIKit
         XCTAssertTrue(app.textViews["message-draft"].exists)
     }
 
-    func testProjectTitleMenuOpensDetailsAppsAndUsage() throws {
+    // Usage is shown in the header itself, not as a title menu entry.
+    func testProjectTitleMenuOpensDetailsAndApps() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: appBundleIdentifier)
         app.launchArguments = ["-read-preview", "-send-preview", "-project-files-conversation-preview"]
@@ -3876,15 +3876,9 @@ import UIKit
         title.tap()
         XCTAssertTrue(app.buttons["Conversation details"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Connected apps"].exists)
-        XCTAssertTrue(app.buttons["Codex usage"].exists)
+        XCTAssertFalse(app.buttons["Codex usage"].exists)
         retainMenuScreenshot(app, name: "Project title menu")
 
-        app.buttons["Codex usage"].tap()
-        XCTAssertTrue(app.navigationBars["Codex usage"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Usage is unavailable right now."].exists)
-        app.buttons["Done"].tap()
-
-        title.tap()
         app.buttons["Connected apps"].tap()
         XCTAssertTrue(app.navigationBars["Connected apps"].waitForExistence(timeout: 5))
         app.buttons["Done"].tap()

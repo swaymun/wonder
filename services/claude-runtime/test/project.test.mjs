@@ -9,6 +9,7 @@ import { ClaudeBridge } from "../bridge.mjs";
 import { ToolPolicy } from "../permissions.mjs";
 import { backgroundTasks, claudeSessionBusy, nativeTurns, turnEndMessageId } from "../project-history.mjs";
 import { ClaudeSessionFiles, projectFolderName } from "../session-file.mjs";
+import { TurnProjection } from "../projection.mjs";
 
 // Contract owner: project conversations continue the owner's native Claude Code
 // session by exact UUID, read history from that transcript, and never receive
@@ -20,7 +21,11 @@ async function fixture(t, { transcripts = {} } = {}) {
   const primary = join(root, "app"), secondary = join(root, "docs");
   await mkdir(primary); await mkdir(secondary);
   const sessions = await new Sessions(join(root, "sessions")).initialize();
-  const frames = [], inputs = [], capturedOptions = [];
+  const frames = [], inputs = [], capturedOptions = [], interrupts = [], closes = [];
+  const lingers = { current: false }; // The fake process stays up after a reply, as Claude Code does.
+  const emitQueue = [], emitWaiters = [];
+  const emits = { push: message => (emitWaiters.shift() ?? (m => emitQueue.push(m)))(message),
+    next: () => emitQueue.length ? Promise.resolve(emitQueue.shift()) : new Promise(resolve => emitWaiters.push(resolve)) };
   const sdk = {
     tool: (name, _description, _schema, handler) => ({ name, handler }), createSdkMcpServer: ({ tools }) => ({ tools }),
     listSessions: async ({ dir }) => Object.entries(transcripts).filter(([, s]) => s.cwd === dir)
@@ -29,21 +34,44 @@ async function fixture(t, { transcripts = {} } = {}) {
     getSessionMessages: async id => transcripts[id]?.messages ?? [],
     query: ({ prompt, options }) => {
       capturedOptions.push(options);
+      let interrupted = false;
       const query = (async function* () {
-        for await (const input of prompt) {
+        const prompts = prompt[Symbol.asyncIterator]();
+        let nextPrompt = prompts.next(), nextEmit = null;
+        for (;;) {
+          // Messages the process produces on its own, such as an agent finishing.
+          nextEmit ??= emits.next();
+          const got = await Promise.race([nextPrompt, nextEmit.then(message => ({ emitted: message }))]);
+          if (got.emitted) { nextEmit = null; yield got.emitted; continue; }
+          if (got.done) return;
+          const input = got.value;
           inputs.push(input);
           yield { type: "system", subtype: "init", session_id: options.sessionId ?? options.resume };
-          await gate.current?.promise;
+          // While held, the process can still report what an agent does.
+          for (let held = gate.current; held;) {
+            nextEmit ??= emits.next();
+            const event = await Promise.race([held.promise.then(() => null), nextEmit]);
+            if (!event) break;
+            nextEmit = null; yield event;
+          }
+          if (interrupted) { // Like Claude Code: the interrupt result, then the process stays up.
+            interrupted = false;
+            yield { type: "result", subtype: "error_during_execution", is_error: true, user_message_uuid: input.uuid };
+            nextPrompt = prompts.next();
+            continue;
+          }
           yield { type: "result", subtype: "success" }; // A leftover background notice.
           yield { type: "assistant", user_message_uuid: input.uuid,
             message: { id: "reply", content: [{ type: "text", text: "Answered the new prompt." }] } };
           yield { type: "result", subtype: "success", user_message_uuid: input.uuid };
-          return;
+          if (!lingers.current) return;
+          nextPrompt = prompts.next();
         }
       })();
       query.initializationResult = async () => ({});
       query.accountInfo = async () => ({ apiProvider: "firstParty", subscriptionType: "Claude Max" });
-      query.close = () => {};
+      query.close = () => { closes.push(1); };
+      query.interrupt = async () => { interrupts.push(1); interrupted = true; gate.current?.resolve(); };
       return query;
     },
   };
@@ -51,7 +79,7 @@ async function fixture(t, { transcripts = {} } = {}) {
   const bridge = new ClaudeBridge({ updates, sessions, send: async frame => { frames.push(frame); } });
   const policy = { mode: "workspace", approvalMode: "ask", readRoots: ["/"], writeRoots: [primary, secondary], deniedRoots: [] };
   const project = { cwd: primary, additionalDirectories: [secondary] };
-  return { root, primary, secondary, sessions, bridge, frames, inputs, capturedOptions, policy, project, gate };
+  return { root, primary, secondary, sessions, bridge, frames, inputs, capturedOptions, interrupts, closes, lingers, emits, policy, project, gate };
 }
 
 test("project turns use the native coding preset and name the transcript entry after the Wonder turn", async t => {
@@ -68,6 +96,8 @@ test("project turns use the native coding preset and name the transcript entry a
   assert.deepEqual(options.settingSources, ["user", "project", "local"]);
   assert.deepEqual(options.additionalDirectories, [f.secondary]);
   assert.deepEqual(options.mcpServers, {});
+  // Projects offer a per-task Stop, so a turn interrupt may spare background agents.
+  assert.equal(options.perTaskStopAffordance, true);
   assert.equal(options.sessionId, thread.sessionId);
   assert.equal(f.inputs[0].uuid, turn.id);
   const saved = f.sessions.get(thread.id).turns[0];
@@ -277,6 +307,25 @@ test("desktop pastes appear as their pasted text, not as pasted_content tags", (
   assert.equal(text(two), "one\n\ntwo");
 });
 
+test("a shell or slash command and its output form one turn whose prompt keeps the command markup", () => {
+  // Shapes recorded by Claude Code: `!` runs, local and prompt slash commands (meta entries are filtered upstream).
+  const messages = [
+    { type: "user", uuid: "c1", message: { content: "<bash-input>git status --short</bash-input>" } },
+    { type: "user", uuid: "c1o", message: { content: "<bash-stdout> M README.md</bash-stdout><bash-stderr></bash-stderr>" } },
+    { type: "user", uuid: "c2", message: { content: "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>" } },
+    { type: "user", uuid: "c2o", message: { content: "<local-command-stdout>Set model to \u001b[1mOpus\u001b[22m</local-command-stdout>" } },
+    { type: "user", uuid: "c3", message: { content: "<command-message>review is running…</command-message>\n<command-name>/review</command-name>\n<command-args>42</command-args>" } },
+    { type: "assistant", uuid: "a3", message: { id: "m3", content: [{ type: "text", text: "Reviewed." }] } },
+  ];
+  const turns = nativeTurns(messages);
+  assert.deepEqual(turns.map(t => t.id), ["c1", "c2", "c3"]);
+  assert.equal(turns[0].items[0].content[0].text, "<bash-input>git status --short</bash-input>\n<bash-stdout> M README.md</bash-stdout><bash-stderr></bash-stderr>");
+  assert.match(turns[1].items[0].content[0].text, /<command-name>\/model<\/command-name>[\s\S]*\n<local-command-stdout>Set model to/);
+  assert.equal(turns[2].items.at(-1).text, "Reviewed.");
+  // Forking at the shell command keeps its output.
+  assert.equal(turnEndMessageId(messages, "c1"), "c1o");
+});
+
 test("text between Claude tool calls is commentary; text after the last one is the reply", () => {
   const [turn] = nativeTurns([
     { type: "user", uuid: "turn-1", message: { content: "Fix it" } },
@@ -307,6 +356,60 @@ test("Claude file tools become file changes with patches, including failures", (
   assert.equal(edit.error.message, "String not found");
   assert.equal(multi.changes[0].diff, "@@ @@\n-x\n+y\n@@ @@\n-z");
   assert.equal(read.type, "mcpToolCall");
+});
+
+// Shapes copied from a real Claude Code transcript: Edit records the hunk it
+// applied (3 context lines, 14 added, 3 context), Write of a new file records
+// "create". The pill must read +14 -0 and +2 -0, not the tool input's counts.
+const historyHunk = { oldStart: 19, oldLines: 6, newStart: 19, newLines: 20, lines: [
+  "             .fetch_optional(&self.pool).await", "     }", " ",
+  ...Array.from({ length: 14 }, (_, i) => `+    line ${i}`), "     pub async fn next() {", "         todo!()", "     }"] };
+const fileEditRows = () => [
+  { type: "user", uuid: "turn-1", message: { content: "Edit" } },
+  { type: "assistant", uuid: "a1", message: { id: "m1", content: [
+    { type: "tool_use", id: "e", name: "Edit", input: { file_path: "/p/history.rs", old_string: "a\nb\nc\nd\ne\nf", new_string: "x".repeat(20).split("").join("\n") } },
+    { type: "tool_use", id: "w", name: "Write", input: { file_path: "/p/new.rs", content: "one\ntwo\n" } },
+    { type: "tool_use", id: "o", name: "Write", input: { file_path: "/p/old.rs", content: "kept\nnew\n" } },
+    { type: "tool_use", id: "x", name: "Edit", input: { file_path: "/p/other.rs", old_string: "a", new_string: "b" } }] } },
+  { type: "user", uuid: "r-e", message: { content: [{ type: "tool_result", tool_use_id: "e", content: "ok" }] },
+    toolUseResult: { filePath: "/p/history.rs", oldString: "…", newString: "…", originalFile: null, structuredPatch: [historyHunk], userModified: false, replaceAll: false } },
+  { type: "user", uuid: "r-w", message: { content: [{ type: "tool_result", tool_use_id: "w", content: "ok" }] },
+    toolUseResult: { type: "create", filePath: "/p/new.rs", content: "one\ntwo\n", structuredPatch: [], originalFile: null } },
+  { type: "user", uuid: "r-o", message: { content: [{ type: "tool_result", tool_use_id: "o", content: "ok" }] },
+    toolUseResult: { type: "update", filePath: "/p/old.rs", content: "kept\nnew\n", originalFile: "kept\nold\n",
+      structuredPatch: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: [" kept", "-old", "+new"] }] } },
+  // A result naming another file is not this edit's record.
+  { type: "user", uuid: "r-x", message: { content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }] },
+    toolUseResult: { filePath: "/p/elsewhere.rs", structuredPatch: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 9, lines: ["+z"] }] } },
+];
+const counts = diff => ["+", "-"].map(m => diff.split("\n").filter(l => l.startsWith(m)).length);
+
+test("Claude file edits count the hunks Claude Code applied, from the transcript and live", async t => {
+  // History: the SDK reader drops toolUseResult, so the session file restores it by uuid.
+  const root = await mkdtemp(join(tmpdir(), "claude-edits-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const session = "11111111-2222-4333-8444-555555555555";
+  await mkdir(join(root, projectFolderName("/p")));
+  await writeFile(join(root, projectFolderName("/p"), `${session}.jsonl`), fileEditRows().map(r => JSON.stringify(r)).join("\n") + "\n");
+  const edits = await new ClaudeSessionFiles(root).fileEdits(session, "/p");
+  assert.deepEqual([...edits.keys()], ["r-e", "r-w", "r-o", "r-x"]);
+  const fromSdk = fileEditRows().map(({ toolUseResult, ...row }) => edits.has(row.uuid) ? { ...row, tool_use_result: edits.get(row.uuid) } : row);
+  const [edit, write, overwrite, other] = nativeTurns(fromSdk)[0].items.slice(1);
+  assert.deepEqual(counts(edit.changes[0].diff), [14, 0]);
+  assert.ok(edit.changes[0].diff.startsWith("@@ -19,6 +19,20 @@\n             .fetch_optional"));
+  assert.deepEqual(write.changes[0], { path: "/p/new.rs", kind: { type: "add" }, diff: "one\ntwo\n" });
+  assert.deepEqual([overwrite.changes[0].kind, counts(overwrite.changes[0].diff)], [{ type: "update" }, [1, 1]]);
+  assert.equal(other.changes[0].diff, "@@ @@\n-a\n+b");
+
+  // Live: the SDK hands the same record to the turn as tool_use_result.
+  const events = [];
+  const live = new TurnProjection({ threadId: "t", turnId: "turn", emit: e => events.push(e) });
+  live.start();
+  const [, assistant, editResult] = fileEditRows();
+  live.accept({ ...assistant, type: "assistant" });
+  live.accept({ type: "user", message: editResult.message, tool_use_result: editResult.toolUseResult });
+  const done = events.find(e => e.method === "item/completed" && e.params.item.id === "e").params.item;
+  assert.deepEqual(counts(done.changes[0].diff), [14, 0]);
 });
 
 test("project search is allowed only where no protected folder can be traversed", async t => {
@@ -584,4 +687,156 @@ test("forking copies the native session through the chosen turn and leaves the s
   bridge.active.delete(thread.id);
   const draft = await bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
   await assert.rejects(bridge.request("project/session/fork", { threadId: draft.thread.id }), /Send a message first/);
+});
+
+// Contract: Wonder stops an agent task or background command only while it
+// drives the session, through Claude Code's own stop_task control. A session
+// running in Claude on the Mac keeps its own controls.
+test("stopping an agent task or background command needs a session Wonder drives", async t => {
+  const f = await fixture(t);
+  const dir = await mkdtemp(join(tmpdir(), "wonder-claude-sessions-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sdkSessionId = "11111111-2222-3333-4444-555555555555";
+  const messages = [
+    { type: "user", uuid: "turn-1", origin: { kind: "human" }, message: { content: "Go" } },
+    { type: "assistant", uuid: "a1", timestamp: "2026-10-06T20:00:00Z", message: { id: "m1", content: [
+      { type: "tool_use", id: "tu-agent", name: "Agent", input: { description: "Audit", subagent_type: "Explore", prompt: "Look", run_in_background: true } },
+      { type: "tool_use", id: "tu-cmd", name: "Bash", input: { command: "make watch", run_in_background: true } },
+      { type: "tool_use", id: "tu-done", name: "Bash", input: { command: "make", run_in_background: true } }] } },
+    { type: "user", uuid: "r1", message: { content: [
+      { type: "tool_result", tool_use_id: "tu-agent", content: [{ type: "text", text: "Async agent launched successfully.\nagentId: a0b1c2" }] },
+      { type: "tool_result", tool_use_id: "tu-cmd", content: "Command running in background with ID: bwatch1. Output is being written to: /tmp/x" },
+      { type: "tool_result", tool_use_id: "tu-done", content: "Command running in background with ID: bdone1." }] } },
+    { type: "user", uuid: "n1", message: { content: "<task-notification>\n<task-id>bdone1</task-id>\n<tool-use-id>tu-done</tool-use-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>" } },
+  ];
+  const sdk = { getSessionMessages: async () => messages, getSessionInfo: async (id, { dir: cwd }) => ({ sessionId: id, cwd, lastModified: 1 }) };
+  const bridge = new ClaudeBridge({ updates: { acquire: async () => ({ runtime: { sdk }, release: async () => {} }) },
+    sessions: f.sessions, send: async () => {}, claudeSessionsDir: dir });
+  const { thread } = await bridge.request("project/session/attach", { sessionId: sdkSessionId, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+  const list = async () => Object.fromEntries((await bridge.request("thread/backgroundTasks/list", { threadId: thread.id })).data.map(task => [task.id, task]));
+  const stop = taskId => bridge.request("thread/backgroundTask/stop", { threadId: thread.id, taskId });
+
+  // Nothing is running without a live session: states are unknown and Stop is refused.
+  assert.equal((await list())["tu-cmd"].canStop, false);
+  assert.equal((await stop("tu-cmd")).outcome, "notRunning");
+
+  // Running in Claude on the Mac: explain instead of stopping.
+  await writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sdkSessionId, status: "busy" }));
+  const elsewhere = await list();
+  assert.deepEqual([elsewhere["tu-cmd"].status, elsewhere["tu-cmd"].canStop, elsewhere["tu-cmd"].runningElsewhere], ["running", false, true]);
+  assert.equal((await stop("tu-cmd")).outcome, "runningElsewhere");
+  await writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sdkSessionId, status: "idle" }));
+
+  // Wonder drives the session: running tasks with a task ID can stop; finished ones cannot.
+  const stopped = [];
+  bridge.active.set(thread.id, { turn: { id: "t" }, query: { stopTask: async id => { stopped.push(id); } } });
+  const tasks = await list();
+  assert.deepEqual(["tu-agent", "tu-cmd", "tu-done"].map(id => [tasks[id].status, tasks[id].canStop]),
+    [["running", true], ["running", true], ["completed", false]]);
+  assert.ok(!("taskId" in tasks["tu-cmd"]), "SDK task IDs stay inside the bridge");
+  assert.equal((await stop("tu-done")).outcome, "notRunning");
+  assert.equal((await stop("nope")).outcome, "notFound");
+  assert.deepEqual(stopped, []);
+  const result = await stop("tu-agent");
+  assert.deepEqual(stopped, ["a0b1c2"]);
+  assert.deepEqual([result.outcome, result.task.status], ["stopped", "interrupted"]);
+  assert.equal((await list())["tu-agent"].status, "interrupted");
+  await stop("tu-cmd");
+  assert.deepEqual(stopped, ["a0b1c2", "bwatch1"]);
+  assert.equal((await stop("tu-cmd")).outcome, "notRunning");
+  assert.deepEqual(stopped, ["a0b1c2", "bwatch1"]);
+  bridge.active.delete(thread.id);
+});
+
+// Like Claude Desktop, interrupting a reply ends the reply but spares running
+// agents; the user stops each from the task list, and the next message joins
+// the same Claude process instead of ending it.
+const agentTranscript = (...extra) => [
+  { type: "user", uuid: "turn-1", origin: { kind: "human" }, message: { content: "Go" } },
+  { type: "assistant", uuid: "a1", timestamp: "2026-10-06T20:00:00Z", message: { id: "m1", content: [
+    { type: "tool_use", id: "tu-agent", name: "Agent", input: { description: "Audit", subagent_type: "Explore", prompt: "Look", run_in_background: true } }] } },
+  { type: "user", uuid: "r1", message: { content: [
+    { type: "tool_result", tool_use_id: "tu-agent", content: [{ type: "text", text: "Async agent launched successfully.\nagentId: a0b1c2" }] }] } },
+  { type: "user", uuid: "stop", message: { content: [{ type: "text", text: "[Request interrupted by user]" }] } },
+  ...extra];
+const settle = async (check) => { for (let i = 0; i < 400 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 5)); };
+
+async function interruptedAgent(t) {
+  const f = await fixture(t);
+  f.lingers.current = true;
+  const { thread } = await f.bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+  f.gate.current = Promise.withResolvers();
+  const { turn } = await f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Run it" }] });
+  await settle(() => f.bridge.active.get(thread.id)?.query);
+  const run = f.bridge.active.get(thread.id);
+  f.emits.push({ type: "system", subtype: "task_started", task_type: "local_agent", task_id: "a0b1c2", tool_use_id: "tu-agent", description: "Audit" });
+  await settle(() => run.children.size);
+  await f.bridge.request("turn/interrupt", { threadId: thread.id, turnId: turn.id });
+  await run.finished;
+  let transcript = agentTranscript();
+  f.bridge.projectMessages = async () => ({ messages: transcript, desktop: false });
+  const stopped = [];
+  f.bridge.lingering.get(thread.id).query.stopTask = async id => { stopped.push(id); };
+  const list = async () => Object.fromEntries((await f.bridge.request("thread/backgroundTasks/list", { threadId: thread.id })).data.map(task => [task.id, task]));
+  return { f, thread, stopped, list, setTranscript: value => { transcript = value; } };
+}
+
+test("interrupting a project turn spares a running agent and its card", async t => {
+  const { f, thread, list } = await interruptedAgent(t);
+  assert.equal(f.interrupts.length, 1);
+  assert.equal(f.closes.length, 0, "the interrupt must not kill the Claude process");
+  assert.equal(f.sessions.get(thread.id).turns.at(-1).status, "interrupted");
+  assert.ok(f.bridge.lingering.has(thread.id));
+  const agent = (await list())["tu-agent"];
+  assert.deepEqual([agent.status, agent.canStop], ["running", true]);
+  // The agent's activity card keeps running until the agent's own notice.
+  const card = [...f.bridge.lingering.get(thread.id).children.values()][0];
+  assert.equal(card.projection.terminal, false);
+  assert.equal(f.frames.some(frame => frame.method === "item/completed" && frame.params.item?.type === "subAgentActivity"), false);
+  await f.bridge.close();
+});
+
+test("a message after an interrupt joins the same Claude process and the agent stays stoppable", async t => {
+  const { f, thread, stopped, list, setTranscript } = await interruptedAgent(t);
+  const process = f.bridge.lingering.get(thread.id).query;
+  f.gate.current = Promise.withResolvers();
+  await f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Next" }] });
+  await settle(() => f.inputs.length === 2);
+  assert.equal(f.capturedOptions.length, 1, "no second process");
+  assert.equal(f.bridge.active.get(thread.id).query, process);
+  assert.equal(f.closes.length, 0);
+  assert.equal(f.inputs[1].message.content[0].text, "Next");
+  const during = (await list())["tu-agent"];
+  assert.deepEqual([during.status, during.canStop], ["running", true]);
+
+  // The reply finishes while the agent still runs: the process stays, and Stop works.
+  f.gate.current.resolve();
+  await f.bridge.active.get(thread.id)?.finished;
+  assert.equal(f.sessions.get(thread.id).turns.at(-1).status, "completed");
+  assert.equal(f.closes.length, 0);
+  assert.ok(f.bridge.lingering.has(thread.id));
+  assert.equal((await f.bridge.request("thread/backgroundTask/stop", { threadId: thread.id, taskId: "tu-agent" })).outcome, "stopped");
+  assert.deepEqual(stopped, ["a0b1c2"]);
+  assert.equal((await list())["tu-agent"].status, "interrupted");
+
+  // The agent's completion notice, then the process's own result, ends the process.
+  setTranscript(agentTranscript({ type: "user", uuid: "n1", message: { content:
+    "<task-notification>\n<task-id>a0b1c2</task-id>\n<tool-use-id>tu-agent</tool-use-id>\n<status>completed</status>\n<summary>Agent \"Audit\" done</summary>\n</task-notification>" } }));
+  assert.equal((await list())["tu-agent"].status, "completed");
+  f.emits.push({ type: "result", subtype: "success" });
+  await settle(() => f.closes.length);
+  assert.equal(f.closes.length, 1);
+  assert.ok(!f.bridge.lingering.has(thread.id));
+});
+
+// A different model needs a different process: the SDK pins the model for a
+// process's lifetime, so the spared agent ends with it. Documented restart.
+test("changing the model after an interrupt starts a new process", async t => {
+  const { f, thread } = await interruptedAgent(t);
+  f.gate.current = null;
+  await f.bridge.request("turn/start", { threadId: thread.id, model: "claude:sonnet", input: [{ type: "text", text: "Switch" }] });
+  await f.bridge.active.get(thread.id)?.finished;
+  assert.ok(f.closes.length >= 1, "the old process ended");
+  assert.equal(f.capturedOptions.length, 2);
+  assert.equal(f.capturedOptions[1].model, "sonnet");
 });

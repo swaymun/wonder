@@ -6,7 +6,6 @@ import Foundation
 struct ProjectWidgetSnapshot: Codable, Equatable, Sendable {
     static let version = 2
     static let widgetKind = "WonderProjectWidget"
-    static let showNamesPreferenceKey = "wonder.widgets.showNames"
     static let staleAfter: TimeInterval = 60 * 60
     static let maxBytes = 32 * 1024
     static let maxProjects = 8
@@ -18,18 +17,16 @@ struct ProjectWidgetSnapshot: Codable, Equatable, Sendable {
 
     let schemaVersion: Int
     let savedAt: Date
-    let showNamesOnWidgets: Bool
     /// The Mac last used for a new chat; nil when none is paired.
     let hostID: String?
     let hostName: String
     /// That Mac's Projects, most recently used first.
     let projects: [Project]
 
-    init(savedAt: Date = Date(), showNamesOnWidgets: Bool = false, hostID: String?, hostName: String,
+    init(savedAt: Date = Date(), hostID: String?, hostName: String,
          projects: [Project]) {
         self.schemaVersion = Self.version
         self.savedAt = savedAt
-        self.showNamesOnWidgets = showNamesOnWidgets
         self.hostID = hostID
         self.hostName = hostName
         self.projects = projects
@@ -40,19 +37,16 @@ struct ProjectWidgetSnapshot: Codable, Equatable, Sendable {
     func validated() -> Self? {
         guard schemaVersion == Self.version, savedAt.timeIntervalSince1970.isFinite else { return nil }
         guard let hostID, ProjectWidgetLink.validID(hostID) else {
-            return Self(savedAt: savedAt, showNamesOnWidgets: showNamesOnWidgets, hostID: nil, hostName: "Mac", projects: [])
+            return Self(savedAt: savedAt, hostID: nil, hostName: "Mac", projects: [])
         }
         var seen = Set<String>()
         var safe: [Project] = []
         for project in projects {
             if safe.count == Self.maxProjects { break }
             guard ProjectWidgetLink.validID(project.id), seen.insert(project.id).inserted else { continue }
-            let name = showNamesOnWidgets ? Self.safeLabel(project.name, fallback: "Project") :
-                "Project \(safe.count + 1)"
-            safe.append(Project(id: project.id, name: name))
+            safe.append(Project(id: project.id, name: Self.safeLabel(project.name, fallback: "Project")))
         }
-        let host = showNamesOnWidgets ? Self.safeLabel(hostName, fallback: "Mac") : "Mac"
-        return Self(savedAt: savedAt, showNamesOnWidgets: showNamesOnWidgets, hostID: hostID, hostName: host, projects: safe)
+        return Self(savedAt: savedAt, hostID: hostID, hostName: Self.safeLabel(hostName, fallback: "Mac"), projects: safe)
     }
 
     func isStale(at date: Date) -> Bool {
@@ -133,8 +127,8 @@ enum ProjectWidgetSnapshotStore {
         return save(snapshot, in: directory)
     }
 
-    /// Replaces the old file atomically, including when names are switched off
-    /// or a previously corrupt snapshot needs to be recovered.
+    /// Replaces the old file atomically, including when a previously corrupt
+    /// snapshot needs to be recovered.
     @discardableResult static func save(_ snapshot: ProjectWidgetSnapshot, in directory: URL) -> Bool {
         guard let validated = snapshot.validated(),
               let data = try? JSONEncoder().encode(validated), data.count <= ProjectWidgetSnapshot.maxBytes else {

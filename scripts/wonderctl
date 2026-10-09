@@ -5,6 +5,7 @@ See apps/ios/CONTROL.md. Pass --host (or WONDER_CONTROL_HOST) to run on another 
 """
 import argparse
 import fcntl
+import filecmp
 import hashlib
 import json
 import os
@@ -35,6 +36,9 @@ REMOTE_DIR = f"wonder-control/{ROOT.name}-{hashlib.sha1(str(ROOT).encode()).hexd
 LOCKS = Path.home() / "Library/Caches/wonderctl"
 REMOTE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 SYNC_COMMANDS = {"sync", "build", "run"}
+
+
+HOLDS_LOCK = False
 
 
 class ControlError(Exception):
@@ -85,11 +89,15 @@ def create_device():
     ios = sorted((r for r in runtimes if r["platform"] == "iOS"), key=lambda r: r["version"])
     if not ios:
         raise ControlError("no available iOS simulator runtime")
-    runtime = ios[-1]
-    supported = {t["name"]: t["identifier"] for t in runtime.get("supportedDeviceTypes", [])}
-    kind = next((supported[name] for name in DEVICE_TYPES if name in supported), None)
-    if not kind:
-        raise ControlError(f"none of {DEVICE_TYPES} supported by {runtime['name']}")
+    # A runtime can support only some devices (iOS 27.1 ships for the Duo alone), so
+    # take the newest runtime that supports one of this profile's device types.
+    for runtime in reversed(ios):
+        supported = {t["name"]: t["identifier"] for t in runtime.get("supportedDeviceTypes", [])}
+        kind = next((supported[name] for name in DEVICE_TYPES if name in supported), None)
+        if kind:
+            break
+    else:
+        raise ControlError(f"no installed iOS runtime supports any of {DEVICE_TYPES}")
     simctl("create", DEVICE_NAME, kind, runtime["identifier"])
     return find_device()
 
@@ -164,6 +172,24 @@ def matches(node, args):
     if getattr(args, "contains", None) and args.contains not in (node.get("AXLabel") or "") + str(node.get("AXValue") or ""):
         return False
     return True
+
+
+def on_screen(nodes):
+    """Nodes whose frame overlaps the app window. Off-screen views stay in the tree (a
+    closed sidebar sits at negative x), so they must not satisfy a wait or take a tap."""
+    nodes = list(nodes)
+    screen = next((n["frame"] for n in nodes if n.get("type") == "Application" and n.get("frame")), None)
+    for node in nodes:
+        f = node.get("frame")
+        # At least a point of overlap: a sidebar parked at x = -342.67 has x + width ≈ 1e-13.
+        if not screen or (f and min(f["x"] + f["width"], screen["width"]) - max(f["x"], 0) >= 1
+                          and min(f["y"] + f["height"], screen["height"]) - max(f["y"], 0) >= 1):
+            yield node
+
+
+def visible_matches(args):
+    return [n for n in on_screen(walk(ui_tree())) if matches(n, args)
+            and (not getattr(args, "type", None) or n.get("type") == args.type)]
 
 
 def selector(args):
@@ -250,7 +276,27 @@ def cmd_install(args):
     print(f"installed {BUNDLE}")
 
 
+def ensure_own_build():
+    """Agents and CI share these simulators and lock them one command at a
+    time, so another checkout may have installed its build since this one's."""
+    # Debug builds keep the app's code in Wonder.debug.dylib, not the stub executable.
+    built = app_path() / "Wonder.debug.dylib"
+    if not built.exists():
+        built = app_path() / "Wonder"
+    # Only while this process holds the simulator lock, so it never replaces
+    # the app under another checkout's running scenario.
+    if not HOLDS_LOCK or not built.exists():
+        return
+    container = simctl("get_app_container", udid(), BUNDLE, check=False).stdout.strip()
+    installed = Path(container) / built.name if container else None
+    if installed and installed.exists() and filecmp.cmp(built, installed, shallow=False):
+        return
+    print("installing this checkout's build (another one was installed)", file=sys.stderr, flush=True)
+    simctl("install", udid(), str(app_path()))
+
+
 def cmd_launch(args):
+    ensure_own_build()
     known = set(fixture_flags())
     flags = [f if f.startswith("-") or f"-diagnostics-{f}" not in known else f"-diagnostics-{f}"
              for f in args.fixture or []]
@@ -286,10 +332,21 @@ def cmd_tap(args):
         x, y = args.xy.split(",")
         target = ["-x", x, "-y", y]
     else:
+        # Tap the centre of the Nth on-screen match ourselves. AXe's own --id lookup also
+        # takes off-screen copies (a row of the closed sidebar, a dialog hidden under a
+        # popover), reporting success while nothing changes, and costs a second tree read.
         selector(args)
-        target = ["--id", args.id] if args.id else ["--label", args.label]
-        if args.type:
-            target += ["--element-type", args.type]
+        nth = args.nth or 0
+        deadline = time.time() + args.timeout
+        while True:
+            found = visible_matches(args)
+            if len(found) > nth:
+                break
+            if time.time() > deadline:
+                raise ControlError(f"nothing on screen to tap for {vars(args)}")
+            time.sleep(0.4)
+        f = found[nth]["frame"]
+        target = ["-x", f"{f['x'] + f['width'] / 2:.0f}", "-y", f"{f['y'] + f['height'] / 2:.0f}"]
     sh([axe_binary(), "tap", *target, "--wait-timeout", str(args.timeout), "--udid", udid()])
     print("tapped")
 
@@ -299,11 +356,11 @@ def cmd_hold(args):
     selector(args)
     deadline = time.time() + args.timeout
     while True:
-        found = [n for n in walk(ui_tree()) if matches(n, args) and n.get("frame")]
+        found = visible_matches(args)
         if len(found) > args.nth:
             break
         if time.time() > deadline:
-            raise ControlError(f"nothing to hold for {vars(args)}")
+            raise ControlError(f"nothing on screen to hold for {vars(args)}")
         time.sleep(0.4)
     f = found[args.nth]["frame"]
     x, y = f["x"] + f["width"] / 2, f["y"] + min(f["height"] / 2, args.max_y_offset)
@@ -320,11 +377,7 @@ def cmd_back(args):
     the Duo, and an id can match several hidden copies, so take the on-screen one."""
     deadline = time.time() + args.timeout
     while True:
-        nodes = list(walk(ui_tree()))
-        screen = next((n["frame"] for n in nodes if n.get("type") == "Application" and n.get("frame")), None)
-        found = [n for n in nodes if n.get("AXUniqueId") == "BackButton" and n.get("frame")
-                 and screen and 0 <= n["frame"]["x"] < screen["width"] and 0 <= n["frame"]["y"] < screen["height"]
-                 and n["frame"]["width"] > 0]
+        found = [n for n in on_screen(walk(ui_tree())) if n.get("AXUniqueId") == "BackButton" and n.get("frame")]
         if found:
             break
         if time.time() > deadline:
@@ -386,12 +439,35 @@ def cmd_wait(args):
     selector(args)
     deadline = time.time() + args.timeout
     while True:
-        found = [n for n in walk(ui_tree()) if matches(n, args)]
+        found = visible_matches(args)
         if bool(found) != args.gone:
             print("gone" if args.gone else f"found {len(found)}")
             return
         if time.time() > deadline:
             raise ControlError(f"timed out after {args.timeout}s waiting for {'absence of ' if args.gone else ''}{vars(args)}")
+        time.sleep(0.4)
+
+
+def cmd_order(args):
+    """Assert that the elements with these accessibility ids appear top to bottom in this order."""
+    ids = [i for i in args.ids.split(",") if i]
+    if len(ids) < 2:
+        raise ControlError("pass at least two comma-separated --ids")
+    deadline = time.time() + args.timeout
+    while True:
+        by_id = {}
+        for node in walk(ui_tree()):
+            ident = node.get("AXUniqueId")
+            if ident in ids and ident not in by_id:
+                by_id[ident] = (node.get("frame") or {}).get("y", 0)
+        missing = [i for i in ids if i not in by_id]
+        ordered = not missing and all(by_id[a] < by_id[b] for a, b in zip(ids, ids[1:]))
+        if ordered:
+            print("order ok: " + " < ".join(f"{i}@{by_id[i]:.0f}" for i in ids))
+            return
+        if time.time() > deadline:
+            detail = f"missing {missing}" if missing else "found " + ", ".join(f"{i}@{by_id[i]:.0f}" for i in ids)
+            raise ControlError(f"elements are not in the expected order after {args.timeout}s: {detail}")
         time.sleep(0.4)
 
 
@@ -443,6 +519,7 @@ def cmd_run(args):
     lines = [l.strip() for l in script.read_text().splitlines()]
     steps = [l for l in lines if l and not l.startswith("#")]
     started = time.time()
+    ensure_own_build()
     for number, step in enumerate(steps, 1):
         words = shlex.split(step)
         if words[0] in {"run", "sync"}:
@@ -459,7 +536,14 @@ def cmd_run(args):
     print(f"PASS {script.name}: {len(steps)} steps in {time.time() - started:.1f}s")
 
 
+# A loaded CI runner can take several seconds per tap or accessibility query, so every
+# timeout stretches there. A wait returns as soon as it succeeds; only failures slow down.
+TIMEOUT_SCALE = float(os.environ.get("WONDER_CONTROL_TIMEOUT_SCALE") or (3 if os.environ.get("CI") else 1))
+
+
 def dispatch(args):
+    if getattr(args, "timeout", None) is not None:
+        args.timeout *= TIMEOUT_SCALE
     return args.func(args)
 
 
@@ -501,6 +585,7 @@ def parser():
         c.add_argument("--timeout", type=float, default=10)
         if name == "tap":
             c.add_argument("--xy", help="x,y in points")
+            c.add_argument("--nth", type=int, help="tap the centre of the Nth match (0-based) when an id matches several elements")
             c.add_argument("--type", help="accessibility type when an id matches several elements, e.g. Button")
         else:
             c.add_argument("--contains", help="substring of label or value")
@@ -522,6 +607,9 @@ def parser():
     c.add_argument("name", choices=["home", "lock", "side-button", "siri", "apple-pay"])
     c = add("tree", cmd_tree, "print the accessibility tree")
     c.add_argument("--json", action="store_true")
+    c = add("order", cmd_order, "assert elements (by accessibility id) appear top to bottom in this order")
+    c.add_argument("--ids", required=True, help="comma-separated accessibility ids, topmost first")
+    c.add_argument("--timeout", type=float, default=10)
     c = add("shot", cmd_shot, "save a screenshot under .local/control/evidence")
     c.add_argument("name", nargs="?", default="screen")
     c = add("clipboard", cmd_clipboard, "check or clear the simulator pasteboard")
@@ -596,6 +684,8 @@ def main(argv):
             except BlockingIOError:
                 print(f"another wonderctl build/run owns '{DEVICE_NAME}' on this Mac; wait for it", file=sys.stderr)
                 return 75
+        global HOLDS_LOCK
+        HOLDS_LOCK = exclusive
         try:
             return dispatch(args) or 0
         except (ControlError, subprocess.TimeoutExpired) as error:

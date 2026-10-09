@@ -5,6 +5,13 @@ import WonderComputerView
 
 private struct ComputerEmptyReply: Decodable, Sendable {}
 
+extension WonderTheme {
+    /// The computer view and its Take control area share the chat's page colour, so the
+    /// letterbox and header follow the theme instead of a fixed black.
+    var computerBackground: Color { page }
+    var computerForeground: Color { isDefault ? .primary : primaryText }
+}
+
 enum ComputerControlState: Equatable {
     case viewOnly
     case starting
@@ -1114,6 +1121,7 @@ private struct ComputerConnectionSessionView: View {
     let selectConnection: (SavedConnection) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.wonderTheme) private var theme
     @StateObject private var sessionModel: ComputerSessionModel
 
     init(model: ConnectionModel, chat: ChatSummary, library: ConnectionLibrary,
@@ -1128,7 +1136,7 @@ private struct ComputerConnectionSessionView: View {
 
     var body: some View {
         viewerLayout
-            .background(.black)
+            .background(theme.computerBackground.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .task { await sessionModel.start() }
             .onDisappear { Task { await closeComputer() } }
@@ -1257,11 +1265,10 @@ private struct ComputerConnectionSessionView: View {
             .accessibilityIdentifier("computer-session-more")
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.white)
+        .foregroundStyle(theme.computerForeground)
         .padding(.horizontal, 8)
         .frame(height: 52)
-        .background(.black)
-        .environment(\.colorScheme, .dark)
+        .background(theme.computerBackground)
     }
 
     private var computerContent: some View {
@@ -1271,7 +1278,7 @@ private struct ComputerConnectionSessionView: View {
             if let message = sessionModel.qualityMessage {
                 Text(message)
                     .font(.footnote)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.computerForeground)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
@@ -1403,6 +1410,7 @@ private struct ComputerSessionHeader: View {
 
 struct ComputerViewport: View {
     @ObservedObject var model: ComputerSessionModel
+    @Environment(\.wonderTheme) private var theme
 
     private var message: String {
         if model.isClosed { return "Computer view closed" }
@@ -1413,12 +1421,12 @@ struct ComputerViewport: View {
     }
 
     var body: some View {
-        // Fit the source inside the viewport; gestures also need its black area.
+        // Fit the source inside the viewport; gestures also need its letterbox area.
         GeometryReader { proxy in
             let transform = model.viewportTransform(in: proxy.size)
             let videoFrame = transform.videoFrame(encodedAspect: ComputerSessionModel.encodedAspectRatio(model.session))
             ZStack {
-                Color.black
+                theme.computerBackground
                 if model.session?.capability.available == true {
                     ComputerVideoView(receiver: model.receiver)
                         .frame(width: videoFrame.width, height: videoFrame.height)
@@ -1436,7 +1444,7 @@ struct ComputerViewport: View {
                             Text(reason).font(.footnote).multilineTextAlignment(.center)
                         }
                     }
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.computerForeground)
                     .padding(.horizontal, 28)
                 }
             }
@@ -1625,7 +1633,7 @@ struct ComputerSessionControls: View {
         .font(.body)
         .foregroundStyle(theme.accent)
         .buttonStyle(.plain)
-        .background(sidePlacement ? Color.black : model.isControlActive ? Color(uiColor: .secondarySystemBackground) : Color(uiColor: .systemBackground))
+        .background(model.isControlActive && !sidePlacement ? theme.surface : theme.computerBackground)
         .background(alignment: .bottomLeading) {
             ComputerNativeKeyboard(
                 presented: model.isControlActive && model.keyboardPresented,
@@ -1758,7 +1766,7 @@ struct ComputerSessionDiagnosticFixtureView: View {
     var body: some View {
         Text("Computer viewer closed")
             .fullScreenCover(isPresented: $isPresented) {
-                NavigationStack { ComputerSessionView(model: model, chat: chat) }
+                NavigationStack { ComputerSessionView(model: model, chat: chat) } // theme-exempt: Diagnostics fixture host
             }
     }
 }

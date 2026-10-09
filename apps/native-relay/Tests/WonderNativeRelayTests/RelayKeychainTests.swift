@@ -4,6 +4,13 @@ import XCTest
 @testable import WonderNativeRelay
 
 final class RelayKeychainTests: XCTestCase {
+    override func setUpWithError() throws {
+        // The Mac mini CI runners cannot use the login Keychain (errSecInteractionNotAllowed),
+        // so CI sets this; the tests still run on developer Macs.
+        try XCTSkipIf(ProcessInfo.processInfo.environment["WONDER_SKIP_KEYCHAIN_TESTS"] == "1",
+                      "Login Keychain unavailable on this CI runner")
+    }
+
     func testRawKeyIsDeviceOnlyAndNonSynchronizing() throws {
         let service = "com.saimun.wonder.native-relay.test.\(UUID().uuidString)"
         let account = "noise-static"

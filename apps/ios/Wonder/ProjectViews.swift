@@ -95,17 +95,9 @@ struct ProjectAccessMenu: View {
     let choose: (ProjectAccessChoice) -> Void
     var body: some View {
         let selected = ProjectAccessChoice.selected(for: access, family: family, supportsModes: supportsModes)
-        let plan = ProjectAccessChoice.planChoice(family: family, supportsModes: supportsModes)
-        // With Plan shown separately, the level keeps its checkmark while planning.
-        let level = plan == nil ? selected : ProjectAccessChoice.selected(
-            for: ProjectAccess(accessMode: access.accessMode, claudeApproval: access.claudeApproval), family: family, supportsModes: supportsModes)
         Menu {
             ForEach(ProjectAccessChoice.choices(family: family, supportsModes: supportsModes, current: access)) { choice in
-                row(choice, isSelected: choice == level)
-            }
-            if let plan {
-                Divider()
-                row(plan, isSelected: access.planMode)
+                row(choice, isSelected: choice == selected)
             }
         } label: {
             Image(systemName: "shield").font(.system(size: 18)).frame(width: 44, height: 44)
@@ -131,7 +123,8 @@ struct ProjectAccessMenu: View {
 
 // MARK: - Conversation chrome
 
-/// Compact title with the provider icon and project name.
+/// Compact title with the project name. Threads can switch providers, so only
+/// VoiceOver names the current one.
 struct ProjectConversationHeader: View {
     let detail: ProjectConversationDetail
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -139,10 +132,7 @@ struct ProjectConversationHeader: View {
         VStack(spacing: 1) {
             Text(detail.title).font(.headline).lineLimit(1)
             if !dynamicTypeSize.isAccessibilitySize {
-                HStack(spacing: 4) {
-                    ProviderIcon(family: detail.family, size: 12)
-                    Text(detail.projectName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
+                Text(detail.projectName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         }
         .frame(maxWidth: 240)
@@ -274,6 +264,7 @@ struct ProjectComposerSettings: View {
                     }
                     if let failure { FailureDetails("Settings not saved", message: failure) }
                 }
+                .wonderGroupedStyle()
                 .disabled(saving || model.accessEnded)
                 .pinnedSheetHeader("Model") { showingModel = false }
             }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
@@ -400,6 +391,7 @@ struct ProjectConversationDetailsView: View {
                 }
                 if let failure { FailureDetails(message: failure) }
             }
+            .wonderGroupedStyle()
             .disabled(saving || model.accessEnded)
             .navigationTitle("Thread").navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -496,6 +488,7 @@ struct ProjectEditorView: View {
                 }
                 if let failure { FailureDetails(message: failure) }
             }
+            .wonderGroupedStyle()
             .disabled(saving || frozen)
             .navigationTitle(project == nil ? "New project" : "Edit project").navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -638,6 +631,7 @@ struct ManageProjectsView: View {
                 }
                 if let failure { FailureDetails(message: failure) }
             }
+            .wonderGroupedStyle()
             .searchable(text: $search, prompt: "Search projects")
             .navigationTitle("Projects on \(model.macName)").navigationBarTitleDisplayMode(.inline)
             .refreshable { await library.refresh() }
@@ -705,6 +699,7 @@ struct ChooseProjectsView: View {
                     Button("Try again") { Task { await load() } }
                 }
             }
+            .wonderGroupedStyle()
             .navigationTitle("Choose projects").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Skip") { onFinish(); dismiss() } }

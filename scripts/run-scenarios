@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Run every feature-map scenario on one simulator and report the results.
+
+  scripts/run-scenarios --device duo            # run all, print a summary
+  scripts/run-scenarios --device iphone --pr 42 # also post the table to the PR
+
+Each scenario keeps its last screenshot (the failing step's on failure). With --pr the
+screenshots go up through scripts/pr-evidence and one comment per device is updated.
+Exits nonzero if any scenario fails.
+"""
+import argparse
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SCENARIOS = ROOT / "apps/ios/control/scenarios"
+SHOT = re.compile(r"(\.local/control/evidence/\S+\.png)")
+
+
+def run(device, scenario):
+    started = time.time()
+    result = subprocess.run([str(ROOT / "scripts/wonderctl"), "--device", device, "run", str(scenario)],
+                            cwd=ROOT, text=True, capture_output=True)
+    output = result.stdout + result.stderr
+    shots = SHOT.findall(output)
+    failure = next((line for line in output.splitlines() if line.startswith("error:")), "")
+    return {
+        "name": scenario.stem,
+        "passed": result.returncode == 0,
+        "seconds": time.time() - started,
+        "shot": ROOT / shots[-1] if shots else None,
+        "failure": failure.removeprefix("error: ").split("\n")[0][:300],
+        "output": output,
+    }
+
+
+def report(device, results, images):
+    passed = sum(r["passed"] for r in results)
+    status = "✅" if passed == len(results) else "❌"
+    lines = [f"## {status} iOS scenarios on {device}: {passed}/{len(results)} passed", "",
+             "| Scenario | Result | Time | Screen |", "| --- | --- | ---: | --- |"]
+    for r in results:
+        image = images.get(r["name"], "")
+        cell = image.replace("![", "<img width=\"180\" alt=\"").replace("](", "\" src=\"").rstrip(")") + "\">" if image else ""
+        result = "pass" if r["passed"] else f"**fail**: {r['failure']}"
+        lines.append(f"| `{r['name']}` | {result} | {r['seconds']:.0f}s | {cell} |")
+    return "\n".join(lines) + "\n"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--device", default="iphone", choices=["iphone", "duo"])
+    parser.add_argument("--pr", type=int)
+    args = parser.parse_args()
+
+    results = []
+    for scenario in sorted(SCENARIOS.glob("*.wctl")):
+        r = run(args.device, scenario)
+        print(f"{'PASS' if r['passed'] else 'FAIL'} {r['name']} ({r['seconds']:.0f}s){'' if r['passed'] else ': ' + r['failure']}",
+              flush=True)
+        if not r["passed"]:
+            print(r["output"], file=sys.stderr)
+        results.append(r)
+
+    if args.pr:
+        shots = {r["name"]: r["shot"] for r in results if r["shot"] and r["shot"].exists()}
+        images = {}
+        if shots:
+            names = list(shots)
+            out = subprocess.run([str(ROOT / "scripts/pr-evidence"), "upload", "--pr", str(args.pr),
+                                  "--label", f"scenarios-{args.device}", *[str(shots[n]) for n in names]],
+                                 cwd=ROOT, text=True, capture_output=True)
+            if out.returncode == 0:
+                markdown = out.stdout.splitlines()
+                images = {name: line for name, line in zip(names, markdown)}
+            else:
+                print(f"evidence upload failed: {out.stderr.strip()}", file=sys.stderr)
+        body = ROOT / ".local/control" / f"scenarios-{args.device}.md"
+        body.parent.mkdir(parents=True, exist_ok=True)
+        body.write_text(report(args.device, results, images))
+        subprocess.run([str(ROOT / "scripts/pr-evidence"), "comment", "--pr", str(args.pr),
+                        "--key", f"scenarios-{args.device}", "--body-file", str(body)], cwd=ROOT)
+
+    return 0 if all(r["passed"] for r in results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

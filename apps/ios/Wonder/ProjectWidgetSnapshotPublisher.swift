@@ -11,18 +11,16 @@ import WonderPairing
               ProjectWidgetSnapshotStore.containerURL(bundleIdentifier: Bundle.main.bundleIdentifier) != nil else {
             return false
         }
-        let showNames = UserDefaults.standard.bool(forKey: ProjectWidgetSnapshot.showNamesPreferenceKey)
         let (hostID, hostName, projects) = lastMacRows(from: library)
         let previous = ProjectWidgetSnapshotStore.load(bundleIdentifier: Bundle.main.bundleIdentifier)
-        let candidate = ProjectWidgetSnapshot(savedAt: previous?.savedAt ?? Date(), showNamesOnWidgets: showNames,
+        let candidate = ProjectWidgetSnapshot(savedAt: previous?.savedAt ?? Date(),
                                               hostID: hostID, hostName: hostName, projects: projects).validated()
         if let candidate, let previous,
-           candidate.showNamesOnWidgets == previous.showNamesOnWidgets, candidate.hostID == previous.hostID,
-           candidate.hostName == previous.hostName, candidate.projects == previous.projects {
+           candidate.hostID == previous.hostID, candidate.hostName == previous.hostName, candidate.projects == previous.projects {
             let age = Date().timeIntervalSince(previous.savedAt)
             if !refreshIfUnchanged || (age >= 0 && age < 15 * 60) { return true }
         }
-        let snapshot = ProjectWidgetSnapshot(showNamesOnWidgets: showNames, hostID: hostID, hostName: hostName, projects: projects)
+        let snapshot = ProjectWidgetSnapshot(hostID: hostID, hostName: hostName, projects: projects)
         guard ProjectWidgetSnapshotStore.save(snapshot, bundleIdentifier: Bundle.main.bundleIdentifier) else { return false }
         WidgetCenter.shared.reloadTimelines(ofKind: ProjectWidgetSnapshot.widgetKind)
         return true

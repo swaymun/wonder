@@ -63,8 +63,25 @@ def read_inventory(root):
     return names
 
 
+# Unmodified SIL OFL 1.1 fonts from google/fonts; licenses and provenance in apps/ios/Wonder/Fonts.
+REVIEWED_FONTS = {
+    'apps/ios/Wonder/Fonts/AtkinsonHyperlegible-Bold.ttf',
+    'apps/ios/Wonder/Fonts/AtkinsonHyperlegible-BoldItalic.ttf',
+    'apps/ios/Wonder/Fonts/AtkinsonHyperlegible-Italic.ttf',
+    'apps/ios/Wonder/Fonts/AtkinsonHyperlegible-Regular.ttf',
+    'apps/ios/Wonder/Fonts/IBMPlexMono-Bold.ttf',
+    'apps/ios/Wonder/Fonts/IBMPlexMono-Italic.ttf',
+    'apps/ios/Wonder/Fonts/IBMPlexMono-Regular.ttf',
+    'apps/ios/Wonder/Fonts/Inter-Italic.ttf',
+    'apps/ios/Wonder/Fonts/Inter.ttf',
+    'apps/ios/Wonder/Fonts/JetBrainsMono-Italic.ttf',
+    'apps/ios/Wonder/Fonts/JetBrainsMono.ttf',
+}
+
+
 def reviewed_binary(name):
-    return (name in {'apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/AppIcon.png',
+    return (name in REVIEWED_FONTS
+            or name in {'apps/ios/Wonder/Assets.xcassets/AppIcon.appiconset/AppIcon.png',
                      'apps/ios/Wonder/Assets.xcassets/AppIconTesting.appiconset/AppIcon.png'}
             or name in {
                 'apps/ios/Wonder/Assets.xcassets/ConnectorClaudeDocs.imageset/claude-docs.png',

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "available": true,
+  "detail": "Some pull requests could not be loaded.",
+  "pullRequests": [
+    {
+      "number": 12,
+      "repository": "example/wonder",
+      "title": "Show a thread's pull requests",
+      "state": "draft",
+      "checks": { "state": "pending", "passed": 3, "failed": 0, "pending": 2 },
+      "url": "https://github.com/example/wonder/pull/12"
+    },
+    {
+      "number": 9,
+      "repository": "example/wonder",
+      "title": "Fix the composer inset",
+      "state": "merged",
+      "checks": { "state": "failing", "passed": 4, "failed": 1, "pending": 0 },
+      "url": "https://github.com/example/wonder/pull/9"
+    },
+    {
+      "number": 3,
+      "repository": "example/site.docs",
+      "title": "Document pairing",
+      "state": "closed",
+      "checks": { "state": "none", "passed": 0, "failed": 0, "pending": 0 },
+      "url": "https://github.com/example/site.docs/pull/3"
+    }
+  ]
+}

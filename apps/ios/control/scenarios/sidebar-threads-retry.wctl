@@ -1,0 +1,14 @@
+# When Codex does not answer the Mac's thread list, the expanded project says
+# why in plain words and offers Retry; while Codex still does not answer, the
+# explanation and Retry stay.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-actions --fixture project-threads-partial
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --label "Collapse Read status" --timeout 10
+wait --id threads-retry:read-project --timeout 15
+wait --contains "Codex didn’t respond on Synthetic fixture, so some threads may be missing."
+wait --contains "Codex threads could not be loaded" --gone
+shot sidebar-threads-notice
+tap --id threads-retry:read-project
+wait --id threads-retry:read-project --timeout 15
+wait --contains "Codex didn’t respond on"

@@ -281,7 +281,7 @@ public struct ThreadProjection: Codable, Sendable {
             merged[turn.id] = ReadTurn(id: turn.id, items: items,
                                        startedAt: turn.startedAt ?? merged[turn.id]?.startedAt,
                                        completedAt: turn.completedAt ?? merged[turn.id]?.completedAt,
-                                       status: turn.status)
+                                       status: turn.status, editedFiles: turn.editedFiles ?? merged[turn.id]?.editedFiles)
         }
         return Self(threadId: threadId ?? older.threadId, nextCursor: older.nextCursor, hydrated: hydrated, turns: merged.isEmpty ? nil : order.compactMap { merged[$0] })
     }
@@ -299,14 +299,18 @@ public struct ReadTurn: Codable, Sendable {
     /// Running in a desktop or terminal app on the Mac. Wonder shows it but
     /// cannot steer, stop, or add a turn until it finishes.
     public var runningElsewhere = false
+    /// Every file the turn changed, from the agent's whole-turn diff, shaped
+    /// like a `fileChange` payload. Absent when the Mac did not observe one.
+    public var editedFiles: [String: ThreadValue]? = nil
     public init(id: String, items: [ReadItem], startedAt: String? = nil, completedAt: String? = nil, status: String = "unknown",
-                runningElsewhere: Bool = false) {
+                runningElsewhere: Bool = false, editedFiles: [String: ThreadValue]? = nil) {
         self.id = id
         self.items = items
         self.startedAt = startedAt
         self.completedAt = completedAt
         self.status = status
         self.runningElsewhere = runningElsewhere
+        self.editedFiles = editedFiles
     }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -318,8 +322,9 @@ public struct ReadTurn: Codable, Sendable {
         // unknown instead of being inferred from stale delivery receipts.
         status = try container.decodeIfPresent(String.self, forKey: .status) ?? "unknown"
         runningElsewhere = try container.decodeIfPresent(Bool.self, forKey: .runningElsewhere) ?? false
+        editedFiles = try container.decodeIfPresent([String: ThreadValue].self, forKey: .editedFiles)
     }
-    private enum CodingKeys: String, CodingKey { case id, items, startedAt, completedAt, status, runningElsewhere }
+    private enum CodingKeys: String, CodingKey { case id, items, startedAt, completedAt, status, runningElsewhere, editedFiles }
     public var isInProgress: Bool { status == "inProgress" }
     public var terminalLabel: String? {
         switch status {
@@ -575,6 +580,8 @@ public struct ReadRow: Identifiable, Sendable {
     /// never runs from a SwiftUI body update.
     public let commandSummary: CommandSummary?
     public let fileChangeSummary: FileChangeSummary?
+    /// A shell or slash command the owner ran in Claude Code, shown as a command card.
+    public let commandBlock: ClaudeCommandBlock?
     public let id: String
     public let author: String
     public let authorId: String?
@@ -604,8 +611,10 @@ public struct ReadRow: Identifiable, Sendable {
         self.fileChangeSummary = item.flatMap(FileChangeSummary.prepare)
         nativeQuestion = item.flatMap(NativeQuestionPresentation.prepare)
         nativeQuestionReplies = isUser ? NativeQuestionReply.parse(text) : nil
+        commandBlock = isUser && nativeQuestionReplies == nil ? ClaudeCommandBlock.parse(text) : nil
         self.id = id; self.author = author; self.authorId = authorId
-        self.text = nativeQuestionReplies?.map { $0.question + "\n" + $0.answer }.joined(separator: "\n\n") ?? text
+        self.text = nativeQuestionReplies?.map { $0.question + "\n" + $0.answer }.joined(separator: "\n\n")
+            ?? commandBlock?.plainText ?? text
         self.isUser = isUser; self.timestamp = timestamp
         time = Double(timestamp).map { $0 / 1000 } ?? ReadTimestamp.seconds(timestamp) ?? 0
         profileStatus = makeProfileStatus()

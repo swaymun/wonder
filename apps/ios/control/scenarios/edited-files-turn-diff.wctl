@@ -1,0 +1,11 @@
+# A Codex reply's edited-files pill counts the whole-turn diff, including a page
+# the agent wrote from the shell that no edit row shows (+5 −1 across 2 files,
+# where the rows alone say 1 file, +12 −4).
+launch --fixture read-preview --fixture send-preview --fixture activity-preview --fixture response-turn-diff-preview
+wait --id response-edits-pill
+wait --label "Edited 2 files, 5 added lines, 1 removed lines"
+tap --id response-edits-pill
+wait --id "response-edited-file:comic/index.html"
+tap --id "response-edited-file:comic/index.html"
+wait --contains "<title>Comic</title>"
+shot edited-files-turn-diff

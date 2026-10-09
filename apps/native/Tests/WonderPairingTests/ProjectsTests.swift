@@ -268,7 +268,14 @@ final class ProjectsTests: XCTestCase {
         let rows = SidebarProjection.projectRows(hosts: hosts, expanded: [], selectedConversation: nil, selectedProject: nil, search: "reconnect")
         XCTAssertEqual(rows.map(\.id), ["host:mac", "project:mac:a", "thread:mac:a:codex:1", "notice:mac:a", "host:old", "update:old"])
         let plain = SidebarProjection.projectRows(hosts: hosts, expanded: [SidebarProjection.expansionKey(host: "mac", project: "a")], selectedConversation: nil, selectedProject: nil)
-        XCTAssertTrue(plain.contains { if case .threadsNotice(_, _, let message, _) = $0 { return message.contains("Claude") }; return false })
+        XCTAssertTrue(plain.contains { if case .threadsNotice(_, _, let message, true, false) = $0 { return message == "Claude didn’t respond on Studio, so some threads may be missing." }; return false })
+        // A provider the Mac cannot run has no recovery, and an offline Mac has its own notice.
+        for (online, unavailable) in [(true, Set([AgentFamily.claude])), (false, Set<AgentFamily>())] {
+            let host = SidebarHostProjects(hostID: "mac", name: "Studio", isOnline: online, supportsProjects: true,
+                                           projects: [project("a")], threads: ["a": state], unavailableFamilies: unavailable)
+            let rows = SidebarProjection.projectRows(hosts: [host], expanded: [SidebarProjection.expansionKey(host: "mac", project: "a")], selectedConversation: nil, selectedProject: nil)
+            XCTAssertFalse(rows.contains { $0.id == "notice:mac:a" })
+        }
         XCTAssertTrue(plain.contains { $0.id == "thread:mac:a:codex:2" })
         let named = SidebarProjection.projectRows(hosts: hosts, expanded: [SidebarProjection.expansionKey(host: "mac", project: "a")], selectedConversation: nil, selectedProject: nil, search: "A")
         XCTAssertTrue(named.contains { $0.id == "thread:mac:a:codex:1" })
@@ -441,21 +448,16 @@ final class ProjectComposerContractTests: XCTestCase {
 
     // Contract: each provider offers its own access rows, older hosts keep the
     // original three, and every choice changes only fields the host accepts.
-    // Claude offers Ask, Auto (sandboxed, the default) and Full access, with
-    // Plan separate; a retired setting stays visible on threads that use it.
+    // Claude lists Auto, Ask, Accept edits, Plan and Full access in that order;
+    // a retired Read only setting stays visible on threads that use it.
     func testAccessMenusPerProviderAndHost() {
         func titles(_ family: AgentFamily, modes: Bool, current: ProjectAccess = ProjectAccess()) -> [String] {
             ProjectAccessChoice.choices(family: family, supportsModes: modes, current: current).map { $0.title(for: family, supportsModes: modes) }
         }
         XCTAssertEqual(titles(.codex, modes: true), ["Read only", "Auto", "Full access"])
-        XCTAssertEqual(titles(.claude, modes: true), ["Ask", "Auto", "Full access"])
+        XCTAssertEqual(titles(.claude, modes: true), ["Auto", "Ask", "Accept edits", "Plan", "Full access"])
         XCTAssertEqual(titles(.claude, modes: true, current: ProjectAccess(accessMode: .readOnly)),
-                       ["Read only", "Ask", "Auto", "Full access"])
-        XCTAssertEqual(titles(.claude, modes: true, current: ProjectAccess(claudeApproval: .acceptEdits, planMode: true)),
-                       ["Accept edits", "Ask", "Auto", "Full access"])
-        XCTAssertEqual(ProjectAccessChoice.planChoice(family: .claude, supportsModes: true), .plan)
-        XCTAssertNil(ProjectAccessChoice.planChoice(family: .codex, supportsModes: true))
-        XCTAssertNil(ProjectAccessChoice.planChoice(family: .claude, supportsModes: false))
+                       ["Read only", "Auto", "Ask", "Accept edits", "Plan", "Full access"])
         XCTAssertEqual(titles(.codex, modes: false), ["Read only", "Edit project", "Full access"])
         XCTAssertEqual(titles(.claude, modes: false), ["Read only", "Ask for approval", "Full access"])
         XCTAssertTrue(ProjectAccessChoice.fullAccess.isElevated)
@@ -537,5 +539,58 @@ final class ProjectComposerContractTests: XCTestCase {
         var none = NewChatDraft(text: "Nowhere to go")
         XCTAssertFalse(none.settle(in: []))
         XCTAssertNil(none.destination)
+    }
+
+    // Contract: Claude agent tasks list running work first, then finished work
+    // (failed and stopped included), each by recent activity, without reordering
+    // on a refresh; Codex helpers keep their names and avatars.
+    func testClaudeAgentTasksGroupRunningFirstAndDropAvatars() throws {
+        func task(_ id: String, _ status: String, _ at: String?, kind: String = "agent", role: String? = "Explore",
+                  canStop: Bool = false, elsewhere: Bool = false) throws -> ProjectSubagentSummary {
+            var json: [String: Any] = ["parentConversationId": "p", "threadId": id, "title": "Task " + id,
+                "agentNickname": NSNull(), "agentRole": role as Any? ?? NSNull(), "status": status,
+                "isArchived": false, "canAcceptDirectInput": false, "namedSubagents": false, "kind": kind,
+                "canStop": canStop, "runningElsewhere": elsewhere]
+            json["updatedAt"] = at ?? NSNull()
+            return try JSONDecoder().decode(ProjectSubagentSummary.self, from: JSONSerialization.data(withJSONObject: json))
+        }
+        let tasks = [
+            try task("done-new", "completed", "2026-10-08T10:00:00Z"),
+            try task("run-old", "running", "2026-10-08T08:00:00Z", canStop: true),
+            try task("failed", "failed", "2026-10-08T09:00:00Z"),
+            try task("run-new", "running", "2026-10-08T09:30:00Z", kind: "command", role: nil, canStop: true),
+            try task("stopped", "interrupted", "2026-10-08T07:00:00Z"),
+            try task("unknown", "unknown", nil),
+            try task("mac", "running", "2026-10-08T06:00:00Z", elsewhere: true),
+        ]
+        let sections = tasks.sectioned()
+        XCTAssertEqual(sections.running.map(\.threadId), ["run-new", "run-old", "mac"])
+        XCTAssertEqual(sections.completed.map(\.threadId), ["done-new", "failed", "stopped", "unknown"])
+        XCTAssertEqual(tasks.runningCount, 3)
+        XCTAssertEqual(tasks.reversed().sectioned(), tasks.reversed().sectioned(), "grouping is deterministic")
+        // A task that finishes moves down; nothing else changes order.
+        var after = tasks
+        after[3] = try task("run-new", "completed", "2026-10-08T10:30:00Z", kind: "command", role: nil)
+        XCTAssertEqual(after.sectioned().running.map(\.threadId), ["run-old", "mac"])
+        XCTAssertEqual(after.sectioned().completed.map(\.threadId), ["run-new", "done-new", "failed", "stopped", "unknown"])
+
+        let command = sections.running[0], mac = sections.running[2], stopped = sections.completed[2]
+        XCTAssertFalse(command.usesAvatar)
+        XCTAssertEqual(command.kindLabel, "Background command")
+        XCTAssertEqual(sections.running[1].kindLabel, "Explore")
+        XCTAssertTrue(command.isStoppable)
+        XCTAssertFalse(mac.isStoppable, "a session running on the Mac keeps its own controls")
+        XCTAssertTrue(mac.isRunningElsewhere)
+        XCTAssertEqual(stopped.statusLabel, "Stopped")
+        XCTAssertFalse(stopped.isStoppable)
+        XCTAssertEqual(stopped.statusSymbol, "stop.circle")
+        XCTAssertEqual(try ProjectSubagentPaths.stop(parentConversationId: "project parent", threadId: "tool/use"),
+                       "/api/v1/project-conversations/project%20parent/subagents/tool%2Fuse/stop")
+
+        // Hosts that predate the field, and Codex helpers, keep avatars and their order.
+        let codex = try JSONDecoder().decode(ProjectSubagentSummary.self, from: Data(#"{"parentConversationId":"p","threadId":"c","title":"Scout","agentNickname":"Scout","agentRole":"research","status":"active","isArchived":false,"canAcceptDirectInput":false}"#.utf8))
+        XCTAssertTrue(codex.usesAvatar)
+        XCTAssertNil(codex.kindLabel)
+        XCTAssertFalse(codex.isStoppable)
     }
 }

@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Remove worktrees and local branches whose pull request has merged.
+
+PRs are squash-merged, so a merged branch's commits never become reachable
+from main and `git branch --merged` cannot tell. This asks GitHub instead.
+A worktree is removed only when its PR merged, its HEAD is the PR's merged
+head commit, it has no uncommitted or untracked changes, and no process is
+working inside it. Its private evidence (`.local/` except build output) moves
+to the main checkout's `.local/merged-worktrees/<branch>/` first.
+
+Local branches that no worktree uses go too, when their PR merged at their
+current commit or they hold nothing beyond origin/main (a worktree's starting
+branch). GitHub deletes the remote branch on merge.
+
+Dry run by default; pass --apply to remove. Run from any checkout.
+"""
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def git(*args, cwd=None, check=True):
+    return subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=check).stdout
+
+
+def worktrees(root):
+    entries, current = [], {}
+    for line in git("worktree", "list", "--porcelain", cwd=root).splitlines() + [""]:
+        if not line:
+            if current:
+                entries.append(current)
+            current = {}
+            continue
+        key, _, value = line.partition(" ")
+        current[key] = value or True
+    return entries
+
+
+def merged_pr(branch, root):
+    out = subprocess.run(["gh", "pr", "list", "--state", "merged", "--head", branch, "--limit", "1",
+                          "--json", "number,headRefOid,mergedAt"], cwd=root, text=True, capture_output=True)
+    if out.returncode != 0:
+        raise SystemExit(f"gh failed: {out.stderr.strip()}")
+    prs = json.loads(out.stdout or "[]")
+    return prs[0] if prs else None
+
+
+def busy(path):
+    """Processes whose working directory is inside the worktree."""
+    out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fn"], text=True, capture_output=True).stdout
+    prefix = str(path.resolve()) + "/"
+    return any(line[1:] + "/" == prefix or line[1:].startswith(prefix)
+               for line in out.splitlines() if line.startswith("n"))
+
+
+def keep_evidence(worktree, branch, main):
+    local = worktree / ".local"
+    if not local.is_dir():
+        return
+    target = main / ".local/merged-worktrees" / branch.replace("/", "-")
+    for item in local.iterdir():
+        if item.name == "build":
+            continue
+        destination = target / item.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            destination = destination.with_name(destination.name + f"-{worktree.name}")
+        shutil.move(str(item), str(destination))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--apply", action="store_true", help="remove the worktrees (default: only list them)")
+    args = parser.parse_args()
+    root = Path(git("rev-parse", "--show-toplevel").strip())
+    entries = worktrees(root)
+    main_checkout = Path(entries[0]["worktree"])
+    removed = 0
+    for entry in entries[1:]:
+        path, branch = Path(entry["worktree"]), entry.get("branch", "").removeprefix("refs/heads/")
+        if not branch:
+            continue
+        pr = merged_pr(branch, root)
+        reason = None
+        if not pr:
+            reason = "no merged PR"
+        elif not path.is_dir():
+            reason = "missing on disk (run git worktree prune)"
+        elif entry.get("HEAD") != pr["headRefOid"]:
+            reason = f"HEAD differs from PR #{pr['number']}'s merged head (commits after merge?)"
+        elif git("status", "--porcelain", cwd=path).strip():
+            reason = "uncommitted or untracked changes"
+        elif busy(path):
+            reason = "a process is working inside it"
+        if reason:
+            if pr:
+                print(f"keep   {path.name} [{branch}]: {reason}")
+            continue
+        size = subprocess.run(["du", "-sh", str(path)], text=True, capture_output=True).stdout.split("\t")[0].strip()
+        print(f"{'remove' if args.apply else 'would remove'} {path.name} [{branch}] PR #{pr['number']} ({size})")
+        if args.apply:
+            keep_evidence(path, branch, main_checkout)
+            # Ignored build output is all that remains; status above found nothing else.
+            git("worktree", "remove", "--force", str(path), cwd=root)
+            git("branch", "-D", branch, cwd=root, check=False)
+            removed += 1
+    if args.apply:
+        git("worktree", "prune", cwd=root)
+        print(f"removed {removed} worktree(s)")
+    prune_branches(root, args.apply)
+    return 0
+
+
+def prune_branches(root, apply):
+    git("fetch", "--quiet", "--prune", "origin", cwd=root, check=False)
+    in_use = {e.get("branch", "").removeprefix("refs/heads/") for e in worktrees(root)}
+    for line in git("for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads", cwd=root).splitlines():
+        branch, tip = line.split()
+        if branch in in_use or branch in {"main", "pr-evidence"}:
+            continue
+        on_main = subprocess.run(["git", "merge-base", "--is-ancestor", tip, "origin/main"], cwd=root).returncode == 0
+        pr = None if on_main else merged_pr(branch, root)
+        if not on_main and not (pr and pr["headRefOid"] == tip):
+            continue
+        why = "nothing beyond origin/main" if on_main else f"PR #{pr['number']} merged"
+        print(f"{'delete' if apply else 'would delete'} branch {branch} ({why})")
+        if apply:
+            git("branch", "-D", branch, cwd=root)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

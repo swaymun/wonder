@@ -309,6 +309,41 @@ enum DiagnosticTextViewerFixtures {
         }
     }
     static func data(name: String) -> Data? { files[name]?.data }
+
+    /// A project README in a folder, whose images and links are relative:
+    /// one image and one guide exist, one image is missing, one points outside.
+    static let readme = """
+    # Tag Mails
+
+    Sort incoming mail into tags.
+
+    ![Inbox with tags](./docs/screenshot.png)
+
+    ![Architecture diagram](docs/missing.png)
+
+    ![Outside the project](../../secret.png)
+
+    Read the [usage guide](docs/USAGE.md).
+    """
+    static let screenshot = UIGraphicsImageRenderer(size: CGSize(width: 600, height: 340)).pngData { context in
+        UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 600, height: 340))
+        ("Tag Mails inbox" as NSString).draw(at: CGPoint(x: 40, y: 150),
+            withAttributes: [.font: UIFont.boldSystemFont(ofSize: 40), .foregroundColor: UIColor.white])
+    }
+    static let project: [String: (mime: String?, data: Data?)] = [
+        "tag-mails": (nil, nil), "tag-mails/docs": (nil, nil),
+        "tag-mails/README.md": ("text/markdown", Data(readme.utf8)),
+        "tag-mails/docs/screenshot.png": ("image/png", screenshot),
+        "tag-mails/docs/USAGE.md": ("text/markdown", Data("# Usage\n\nRun `tagmails sync` to tag new mail.\n".utf8)),
+    ]
+    /// The listing of a folder of the README project, or nil for other folders.
+    static func projectEntries(in folder: String) -> [WorkspaceEntry]? {
+        guard folder.hasPrefix("tag-mails") else { return nil }
+        return project.keys.sorted().filter { $0.hasPrefix(folder + "/") && !$0.dropFirst(folder.count + 1).contains("/") }.map { path in
+            WorkspaceEntry(name: String(path.split(separator: "/").last!), path: path, isDirectory: project[path]!.data == nil,
+                           byteSize: project[path]!.data.map { UInt64($0.count) }, mimeType: project[path]!.mime)
+        }
+    }
 }
 
 enum DiagnosticSubagentFixture {
@@ -334,6 +369,12 @@ enum DiagnosticSubagentFixture {
     static var defaultModelsFailsOnce: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-default-models-fail-once") }
     static var projectProviderSwitchFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-provider-switch") }
     static var projectSubagentFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-subagents") }
+    /// The Mac lists pull requests for the Project thread through its GitHub CLI.
+    static var projectPullRequestsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-pull-requests") }
+    /// The same Mac with the GitHub CLI signed out: the pill stays hidden.
+    static var projectPullRequestsSignedOut: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-pull-requests-signed-out") }
+    /// Refreshes after the first fail, so reopening the sheet shows its failure state.
+    static var projectPullRequestsRefreshFails: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-pull-requests-refresh-fails") }
     static var projectFilesSendFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-send") }
     static var projectFilesRefreshFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-refresh") }
     static var projectFilesRootPathFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-files-root-path-changed") }
@@ -343,7 +384,9 @@ enum DiagnosticSubagentFixture {
     static var questionResolutionFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-question-resolution") }
     /// A started Codex Project thread that can be forked, copied and read as Markdown.
     static var projectActionsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-actions") }
-    static var projectReadFixture: Bool { projectActionsFixture || projectArchiveFixture || projectSpeedFixture || defaultModelsFixture || projectSubagentFixture || projectFilesSendFixture || projectProviderSwitchFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
+    /// Adds a Claude Code `!` command and slash command to the project-actions thread.
+    static var projectCommandBlocksFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-command-blocks") }
+    static var projectReadFixture: Bool { projectActionsFixture || projectArchiveFixture || projectSpeedFixture || defaultModelsFixture || projectSubagentFixture || projectFilesSendFixture || projectProviderSwitchFixture || projectPullRequestsFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
     static let hostID = "diagnostic-host"
     static let parentID = "fixture-parent-conversation"
     static let childID = "fixture-child-conversation"
@@ -351,6 +394,9 @@ enum DiagnosticSubagentFixture {
     static let parentThreadID = "fixture-parent-thread"
     static let childThreadID = "fixture-child-thread"
     static let secondChildThreadID = "fixture-second-child-thread"
+    /// Claude tasks: a second running agent (stoppable) and a failed one.
+    static let thirdChildThreadID = "fixture-third-child-thread"
+    static let failedChildThreadID = "fixture-failed-child-thread"
     static let unavailableChildID = "fixture-unavailable-child-conversation"
     static let unavailableChildThreadID = "fixture-unavailable-child-thread"
     static let ordinaryTaskThreadID = "fixture-created-task-thread"
@@ -461,6 +507,19 @@ enum DiagnosticSubagentFixture {
             turns.append(["id": "layout-turn-13", "status": "completed", "createdAt": "13000", "updatedAt": "13900", "items": [
                 ["id": "layout-reply-13", "type": "agentMessage", "state": "completed", "createdAt": "13900", "text": "Reply 13. Continuing the project at /p/app.\n\n```swift\nstruct Trip { let days: Int }\nlet trip = Trip(days: 2) // short\nprint(\"Days: \\(trip.days)\", 42, true)\n```"]]])
         }
+        if projectActionsFixture && projectCommandBlocksFixture {
+            // A `!` command and a slash command run in Claude Code, as the host joins
+            // each command to its output (claude-runtime nativeTurns).
+            let shell = "<bash-input>git status --short && ls missing</bash-input>\n<bash-stdout> M README.md\n?? notes/</bash-stdout><bash-stderr>ls: missing: No such file or directory</bash-stderr>"
+            let slash = "<command-message>review is running…</command-message>\n<command-name>/review</command-name>\n<command-args>42</command-args>"
+            for (index, body) in [(15, shell), (16, slash)] {
+                messages.append(["messageId": "layout-question-\(index)", "body": body, "state": "completed",
+                    "codexTurnId": "layout-turn-\(index)", "codexThreadId": parentThreadID, "createdAt": "\(index)000", "attachmentIds": []])
+            }
+            turns.append(["id": "layout-turn-15", "status": "completed", "createdAt": "15000", "updatedAt": "15000", "items": []])
+            turns.append(["id": "layout-turn-16", "status": "completed", "createdAt": "16000", "updatedAt": "16900", "items": [
+                ["id": "layout-reply-16", "type": "agentMessage", "state": "completed", "createdAt": "16900", "text": "Reviewed pull request 42."]]])
+        }
         if projectProviderSwitchFixture {
             // Another thread's message, Wonder's finished-tasks report, and the host's switch rows.
             messages.append(["messageId": "layout-from-thread", "body": "Please summarise the failing tests.", "state": "completed",
@@ -492,6 +551,8 @@ enum DiagnosticSubagentFixture {
             state.childRevision = 2
             state.childStatus = "completed"
             state.projectSubagentRosterFails = false
+            state.projectTasksStopped = []
+            state.pullRequestRefreshes = 0
             state.projectServiceTier = "default"
             state.projectAccessMode = "read_only"
             state.projectSavedModel = nil
@@ -535,6 +596,10 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var childRevision = 2
         var childStatus = "completed"
         var projectSubagentRosterFails = false
+        /// Pull request refreshes answered, so only later ones fail.
+        var pullRequestRefreshes = 0
+        /// Claude fixture tasks the owner stopped from the roster.
+        var projectTasksStopped: Set<String> = []
         var projectUnread = true
         var projectArchived = false
         var projectServiceTier = "default"
@@ -545,6 +610,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         var projectSavedModel: String?
         var projectSentModel: String?
         var projectClaudeApproval = "ask"
+        var projectPlanMode = false
         var archiveFailures = 1
         var questionResolved = false
         var connectedAppsUnavailable = false
@@ -646,17 +712,21 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     "pinned": archived ? [] : [["projectId": "read-project", "thread": projectReadThread()]]
                 ])); return
             case "/api/v1/projects/read-project/threads":
-                finish(status: 200, body: json(["threads": archived ? [] : [projectReadThread()], "nextCursor": NSNull(), "partial": []])); return
+                // Codex keeps not answering the Mac's thread list.
+                let partial = ProcessInfo.processInfo.arguments.contains("-diagnostics-project-threads-partial")
+                finish(status: 200, body: json(["threads": archived ? [] : [projectReadThread()], "nextCursor": NSNull(),
+                    "partial": partial ? [["family": "codex", "detail": "Codex threads could not be loaded."]] : []])); return
             case "/api/v1/projects/read-project/threads/attach":
                 finish(status: 200, body: json(projectReadThread())); return
             case "/api/v1/conversations/\(conversation)/history/refresh":
                 finish(status: 200, body: json(["state": "completed"])); return
             case "/api/v1/project-conversations/\(conversation)/fork" where DiagnosticSubagentFixture.projectActionsFixture && method == "POST":
-                // Slow enough for the "Forking…" state to be observed.
+                // Slow enough for the "Forking…" state to be observed: on a loaded CI runner the
+                // tap that starts the fork alone has taken 4.2s, longer than a 1.2s window.
                 if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-fork-conflict") {
-                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(1200)) { [self] in finish(status: 409, body: Data("{}".utf8)) }
+                    DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(8)) { [self] in finish(status: 409, body: Data("{}".utf8)) }
                 } else {
-                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(1200)) { [self] in
+                    DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(8)) { [self] in
                         finish(status: 200, body: json(["reference": "codex:fork-fixture", "conversationId": DiagnosticSubagentFixture.forkID,
                             "title": "Read status fixture (fork)", "family": "codex", "updatedAt": 2, "isPinned": false,
                             "hasUnread": false, "isWorking": false]))
@@ -687,6 +757,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     if let unread = fields["hasUnread"] as? Bool { Self.state.lock.withLock { Self.state.projectUnread = unread } }
                     if let access = fields["accessMode"] as? String { Self.state.lock.withLock { Self.state.projectAccessMode = access } }
                     if let approval = fields["claudeApproval"] as? String { Self.state.lock.withLock { Self.state.projectClaudeApproval = approval } }
+                    if let plan = fields["planMode"] as? Bool { Self.state.lock.withLock { Self.state.projectPlanMode = plan } }
                     if let tier = fields["serviceTier"] as? String { Self.state.lock.withLock { Self.state.projectServiceTier = tier } }
                     if let saved = fields["model"] as? String { Self.state.lock.withLock { Self.state.projectSavedModel = saved } }
                 }
@@ -697,9 +768,45 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     "accessMode": Self.state.lock.withLock { Self.state.projectAccessMode },
                     "workingFolder": "/fixture", "workingFolderName": "fixture",
                     "isPinned": true, "hasUnread": Self.state.lock.withLock { Self.state.projectUnread },
-                    "hasNativeSession": DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture, "folderInProject": true, "claudeApproval": Self.state.lock.withLock { Self.state.projectClaudeApproval }, "planMode": false,
+                    "hasNativeSession": DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture, "folderInProject": true, "claudeApproval": Self.state.lock.withLock { Self.state.projectClaudeApproval }, "planMode": Self.state.lock.withLock { Self.state.projectPlanMode },
                     "isArchived": Self.state.lock.withLock { Self.state.projectArchived }
                 ])); return
+            case "/api/v1/project-conversations/\(conversation)/pull-requests" where DiagnosticSubagentFixture.projectPullRequestsFixture:
+                // As the Mac reports them: a draft from the thread's branch with
+                // checks running, a merged one it linked whose checks failed, and
+                // a closed one in another repository.
+                let refresh = request.url?.query?.contains("refresh=true") == true
+                let refreshes = refresh ? Self.state.lock.withLock { Self.state.pullRequestRefreshes += 1; return Self.state.pullRequestRefreshes } : 0
+                if refreshes > 1 && DiagnosticSubagentFixture.projectPullRequestsRefreshFails {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(800)) { [self] in
+                        finish(status: 503, body: Data("GitHub could not be reached from your Mac. Try again.".utf8))
+                    }
+                    return
+                }
+                func pr(_ number: Int, _ repository: String, _ title: String, _ state: String, _ checks: [String: Any]) -> [String: Any] {
+                    ["number": number, "repository": repository, "title": title, "state": state, "checks": checks,
+                     "url": "https://github.com/\(repository)/pull/\(number)"]
+                }
+                let signedOut = DiagnosticSubagentFixture.projectPullRequestsSignedOut
+                finish(status: 200, body: json(["version": 1, "available": !signedOut,
+                    "detail": signedOut ? "Sign in with the GitHub CLI (gh auth login) on your Mac to see pull requests." : NSNull(),
+                    "pullRequests": signedOut ? [] : [
+                        pr(128, "example/wonder", "Show a thread's pull requests", "draft",
+                           ["state": "pending", "passed": 3, "failed": 0, "pending": 2]),
+                        pr(121, "example/wonder", "Keep the composer above the keyboard", "merged",
+                           ["state": "failing", "passed": 4, "failed": 1, "pending": 0]),
+                        pr(7, "example/wonder-docs", "Document GitHub sign-in", "closed",
+                           ["state": "none", "passed": 0, "failed": 0, "pending": 0]),
+                    ]])); return
+            case "/api/v1/project-conversations/\(conversation)/subagents/\(DiagnosticSubagentFixture.thirdChildThreadID)/stop" where DiagnosticSubagentFixture.projectSubagentFixture && method == "POST":
+                if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-claude-stop-fails") {
+                    finish(status: 409, body: Data("This task is running in Claude on your Mac. Stop it there.".utf8)); return
+                }
+                Self.state.lock.withLock { _ = Self.state.projectTasksStopped.insert(DiagnosticSubagentFixture.thirdChildThreadID) }
+                finish(status: 200, body: json(["parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.thirdChildThreadID,
+                    "title": "Audit the release checklist", "agentNickname": NSNull(), "agentRole": "general-purpose",
+                    "status": "interrupted", "isArchived": false, "canAcceptDirectInput": false, "namedSubagents": false,
+                    "kind": "agent", "canStop": false, "runningElsewhere": false, "updatedAt": "2026-10-08T10:30:00Z"])); return
             case "/api/v1/project-conversations/\(conversation)/subagents" where DiagnosticSubagentFixture.projectSubagentFixture:
                 if Self.state.lock.withLock({ Self.state.projectSubagentRosterFails }) {
                     finish(status: 503, body: Data("Agent tasks could not be loaded".utf8)); return
@@ -719,14 +826,25 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     "status": "completed", "isArchived": false, "canAcceptDirectInput": false
                 ]
                 if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-claude-tasks") {
-                    // Claude Code background commands and agents, as the host lists them.
-                    let command: [String: Any] = ["parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.childThreadID,
-                        "title": "Run focused UI tests", "agentNickname": NSNull(), "agentRole": "Background command",
-                        "status": "running", "isArchived": false, "canAcceptDirectInput": false]
-                    let agent: [String: Any] = ["parentConversationId": conversation, "threadId": DiagnosticSubagentFixture.secondChildThreadID,
-                        "title": "Review the parser", "agentNickname": NSNull(), "agentRole": "Explore",
-                        "status": "completed", "isArchived": false, "canAcceptDirectInput": false]
-                    finish(status: 200, body: json(["available": true, "detail": NSNull(), "subagents": [command, agent],
+                    // Claude Code background commands and agents, as the host lists them: no
+                    // nicknames, listed in an order that is not grouped, with a stoppable agent.
+                    let stopped = Self.state.lock.withLock { Self.state.projectTasksStopped }
+                    func task(_ id: String, _ title: String, _ kind: String, _ role: String, _ status: String,
+                              _ updatedAt: String, canStop: Bool = false) -> [String: Any] {
+                        ["parentConversationId": conversation, "threadId": id, "title": title,
+                         "agentNickname": NSNull(), "agentRole": role, "status": status, "isArchived": false,
+                         "canAcceptDirectInput": false, "namedSubagents": false, "kind": kind,
+                         "canStop": canStop && status == "running", "runningElsewhere": false, "updatedAt": updatedAt]
+                    }
+                    let thirdStopped = stopped.contains(DiagnosticSubagentFixture.thirdChildThreadID)
+                    let tasks: [[String: Any]] = [
+                        task(DiagnosticSubagentFixture.secondChildThreadID, "Review the parser", "agent", "Explore", "completed", "2026-10-08T10:00:00Z"),
+                        task(DiagnosticSubagentFixture.failedChildThreadID, "Check the lockfile", "agent", "general-purpose", "failed", "2026-10-08T09:00:00Z"),
+                        task(DiagnosticSubagentFixture.thirdChildThreadID, "Audit the release checklist", "agent", "general-purpose",
+                             thirdStopped ? "interrupted" : "running", thirdStopped ? "2026-10-08T10:30:00Z" : "2026-10-08T08:00:00Z", canStop: true),
+                        task(DiagnosticSubagentFixture.childThreadID, "Run focused UI tests", "command", "Background command", "running", "2026-10-08T09:30:00Z", canStop: true),
+                    ]
+                    finish(status: 200, body: json(["available": true, "detail": NSNull(), "subagents": tasks,
                         "nextCurrentCursor": NSNull(), "nextArchivedCursor": NSNull()])); return
                 }
                 if pagedProbe && cursor == "older-page" {
@@ -1887,9 +2005,10 @@ private final class DiagnosticDictationProtocol: URLProtocol, @unchecked Sendabl
 /// `-diagnostics-theme <id>` forces a theme (for example `nord` or `misty-forest`)
 /// so one screen can be captured in each palette without touching Settings.
 enum DiagnosticTheme {
-    static var forcedID: String? {
+    static var forcedID: String? { value(after: "-diagnostics-theme") }
+    static func value(after flag: String) -> String? {
         let arguments = ProcessInfo.processInfo.arguments
-        guard let index = arguments.firstIndex(of: "-diagnostics-theme"), arguments.indices.contains(index + 1) else { return nil }
+        guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else { return nil }
         return arguments[index + 1]
     }
 }

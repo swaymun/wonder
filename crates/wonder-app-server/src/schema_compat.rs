@@ -47,9 +47,40 @@ pub(super) fn verify(stable: &[u8], experimental: &[u8]) -> Result<(), String> {
             candidate["definitions"]["ThreadItemsListParams"]["properties"]["cursor"] =
                 reference["definitions"]["ThreadItemsListParams"]["properties"]["cursor"].clone();
         }
+        accept_widened_error_info(&reference, &mut candidate);
         preserve(&reference, &candidate, name)?;
     }
     Ok(())
+}
+
+/// 0.162 regroups `CodexErrorInfo` from `oneOf` to `anyOf` and appends one
+/// catch-all variant (any string or object) so unknown error labels still
+/// deserialize. The type is reachable only from `TurnError`, which the runtime
+/// sends in `Turn`, `ErrorNotification` and timeline entries; Wonder never sends
+/// or reads it, so it cannot carry authority. Accept exactly that shape: every
+/// earlier variant is still compared by `preserve` (added labels are allowed
+/// there). Any other `anyOf` shape, or a changed catch-all, still fails.
+fn accept_widened_error_info(reference: &Value, candidate: &mut Value) {
+    let Some(old) = reference["definitions"]["CodexErrorInfo"]["oneOf"].as_array() else {
+        return;
+    };
+    let Some(info) = candidate["definitions"]["CodexErrorInfo"].as_object_mut() else {
+        return;
+    };
+    if info.contains_key("oneOf") {
+        return;
+    }
+    let Some(variants) = info.get("anyOf").and_then(Value::as_array) else {
+        return;
+    };
+    if variants.len() != old.len() + 1
+        || variants.last() != Some(&serde_json::json!({"type": ["string", "object"]}))
+    {
+        return;
+    }
+    let kept = Value::Array(variants[..old.len()].to_vec());
+    info.remove("anyOf");
+    info.insert("oneOf".into(), kept);
 }
 
 fn preserve(reference: &Value, candidate: &Value, path: &str) -> Result<(), String> {
@@ -325,6 +356,86 @@ mod tests {
         assert!(check(&stable, &experimental).is_err());
         let (stable, mut experimental) = baseline();
         experimental["definitions"]["TurnStartParams"]["additionalProperties"] = json!(false);
+        assert!(check(&stable, &experimental).is_err());
+    }
+
+    const V162_STABLE: &[u8] = include_bytes!(
+        "../../../research/codex-app-server/0.162.0-alpha.2/stable/codex_app_server_protocol.v2.schemas.json"
+    );
+    const V162_EXPERIMENTAL: &[u8] = include_bytes!(
+        "../../../research/codex-app-server/0.162.0-alpha.2/experimental/codex_app_server_protocol.v2.schemas.json"
+    );
+
+    fn v162() -> (Value, Value) {
+        (
+            serde_json::from_slice(V162_STABLE).unwrap(),
+            serde_json::from_slice(V162_EXPERIMENTAL).unwrap(),
+        )
+    }
+
+    #[test]
+    fn generated_0_162_schemas_pass_the_additive_check_without_the_hash_shortcut() {
+        // Regression: 0.162 regrouped CodexErrorInfo as anyOf and every unknown
+        // version path then failed with "CodexErrorInfo.oneOf missing".
+        assert_eq!(verify(V162_STABLE, V162_EXPERIMENTAL), Ok(()));
+    }
+
+    #[test]
+    fn permission_and_sandbox_contract_changes_still_fail_on_0_162() {
+        let (stable, experimental) = v162();
+        for (path, mutate) in [
+            (
+                "permissions type",
+                Box::new(|schema: &mut Value| {
+                    schema["definitions"]["TurnStartParams"]["properties"]["permissions"]["type"] =
+                        json!("object");
+                }) as Box<dyn Fn(&mut Value)>,
+            ),
+            (
+                "permissions removed",
+                Box::new(|schema: &mut Value| {
+                    schema["definitions"]["ThreadStartParams"]["properties"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("permissions");
+                }),
+            ),
+            (
+                "approval policy enum widened",
+                Box::new(|schema: &mut Value| {
+                    schema["definitions"]["AskForApproval"]["oneOf"][0]["enum"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!("future-auto-approve"));
+                }),
+            ),
+        ] {
+            let (mut changed_stable, mut changed_experimental) =
+                (stable.clone(), experimental.clone());
+            mutate(&mut changed_stable);
+            mutate(&mut changed_experimental);
+            assert!(
+                check(&changed_stable, &changed_experimental).is_err(),
+                "{path} must need a Wonder release"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_exact_error_info_widening_is_accepted() {
+        let (mut stable, experimental) = v162();
+        let variants = stable["definitions"]["CodexErrorInfo"]["anyOf"]
+            .as_array_mut()
+            .unwrap();
+        // A different catch-all is a different contract.
+        *variants.last_mut().unwrap() = json!({"type": "string"});
+        assert!(check(&stable, &experimental).is_err());
+        let (mut stable, experimental) = v162();
+        // An existing variant disappearing is not a widening.
+        let variants = stable["definitions"]["CodexErrorInfo"]["anyOf"]
+            .as_array_mut()
+            .unwrap();
+        variants.remove(1);
         assert!(check(&stable, &experimental).is_err());
     }
 }

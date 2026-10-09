@@ -48,3 +48,39 @@ final class DefaultModelsTests: XCTestCase {
         XCTAssertNil(preferences.entry(.codex).model)
     }
 }
+
+// Contract: with several paired Macs a choice reaches every Mac that offers the
+// model, each Mac keeps only the effort it offers, and Macs without it are named.
+final class AppDefaultModelsTests: XCTestCase {
+    private func mac(_ id: String, _ models: [String], stored: String? = nil, effort: String? = nil) throws -> AppDefaultModels.Mac {
+        let list = models.map { name -> String in
+            let high = name == "a" ? #",{"id":"high","label":"High"}"# : ""
+            return #"{"id":"\#(name)","agentFamily":"codex","displayName":"\#(name.uppercased())","hidden":false,"reasoningEfforts":[{"id":"low","label":"Low"}\#(high)]}"#
+        }.joined(separator: ",")
+        let catalog = try JSONDecoder().decode(BotOptions.self, from: Data(#"{"models":[\#(list)],"allowedApprovalPolicies":[],"approvalModes":[]}"#.utf8)).models
+        let effortJSON = effort.map { "\"\($0)\"" } ?? "null"
+        let entry = stored.map { #"{"family":"codex","model":"\#($0)","effort":\#(effortJSON)}"# } ?? #"{"family":"codex"}"#
+        let prefs = try JSONDecoder().decode(DefaultModelPreferences.self, from: Data(#"{"families":[\#(entry)]}"#.utf8))
+        return .init(id: id, name: id.uppercased(), models: catalog, stored: prefs)
+    }
+
+    func testChoiceGoesToEveryMacThatOffersTheModelAndPartialModelsAreFlagged() throws {
+        let plan = AppDefaultModels(family: .codex, macs: [try mac("m1", ["a", "b"]), try mac("m2", ["a"])])
+        XCTAssertEqual(plan.options.map(\.id), ["a", "b"])
+        XCTAssertEqual(plan.options.map(\.partial), [false, true])
+        XCTAssertEqual(plan.options[1].macNames, ["M1"])
+        XCTAssertEqual(plan.writes(choosing: "b").map(\.macID), ["m1"])
+        XCTAssertEqual(plan.writes(choosing: "a").map(\.macID), ["m1", "m2"])
+        XCTAssertEqual(plan.writes(choosing: nil).map(\.entry), [.init(family: .codex), .init(family: .codex)])
+    }
+
+    func testEffortIsAppliedWhereOfferedAndComputersWithoutTheModelAreNamed() throws {
+        let plan = AppDefaultModels(family: .codex, macs: [try mac("m1", ["a", "b"], stored: "b", effort: "low"), try mac("m2", ["a"], stored: "a")])
+        XCTAssertEqual(plan.selected.model, "b")
+        XCTAssertEqual(plan.computersWithoutSelection, ["M2"])
+        XCTAssertEqual(plan.writes(choosingEffort: "low").map(\.macID), ["m1"])
+        let both = AppDefaultModels(family: .codex, macs: [try mac("m1", ["a"], stored: "a", effort: "low"), try mac("m2", ["a"], stored: "a")])
+        XCTAssertTrue(both.differsBetweenComputers)
+        XCTAssertEqual(both.writes(choosingEffort: "high").map(\.entry.effort), ["high", "high"])
+    }
+}

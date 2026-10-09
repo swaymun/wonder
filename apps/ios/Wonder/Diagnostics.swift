@@ -371,7 +371,7 @@ struct DiagnosticsView: View {
                 if let exportURL { ShareLink("Share diagnostics", item: exportURL) }
                 if let failure { Text(failure).foregroundStyle(.red) }
             }
-        }.navigationTitle("Diagnostics")
+        }.wonderGroupedStyle().navigationTitle("Diagnostics")
             .onAppear { selectedHost=UserDefaults.standard.string(forKey:"diagnostics.reportingHost") ?? library.saved.connections.first?.credential.hostInstallationId ?? "" }
     }
 }

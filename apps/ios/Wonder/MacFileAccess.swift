@@ -37,6 +37,7 @@ struct MacLocationBrowser: View {
                 }
                 if let failure { FailureDetails(message: failure); Button("Try again") { Task { await load(requestedPath) } } }
             }
+            .wonderGroupedStyle()
             .overlay { if page == nil && busy { ProgressView("Loading folders…") } }
             .overlay(alignment: .topTrailing) {
                 ProgressView().controlSize(.small).padding()
@@ -174,6 +175,7 @@ struct FolderRequestsView: View {
 }
 
 struct FolderRequestCard: View {
+    @Environment(\.wonderTheme) private var theme
     let request: BotFolderRequest
     let status: String
     let busy: Bool
@@ -202,7 +204,7 @@ struct FolderRequestCard: View {
             }
         }
         .padding(12)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: 12))
     }
 
     @ViewBuilder private var actionButtons: some View {

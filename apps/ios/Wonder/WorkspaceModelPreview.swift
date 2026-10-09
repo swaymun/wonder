@@ -101,7 +101,7 @@ private struct WorkspaceModelPreviewContent: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        NavigationStack {
+        NavigationStack { // theme-exempt: shown inside WorkspaceBrowser over its host's page
             Group {
                 if let prepared = session.prepared {
                     VStack(spacing: 0) {

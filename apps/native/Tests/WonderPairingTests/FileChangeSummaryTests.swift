@@ -116,6 +116,29 @@ final class FileChangeSummaryTests: XCTestCase {
 }
 
 extension FileChangeSummaryTests {
+    func testTurnDiffReplacesEditRowsIncludingFilesTheRowsMissed() throws {
+        let edit = ReadRow(id: "edit", author: "Bot", text: "", isUser: false, timestamp: "1000", turnId: "turn",
+            item: item(["diffs": .array([.object(["path": .string("app.js"), "diff": .string("-a\n+b")])])]))
+        let reply = ReadRow(id: "reply", author: "Bot", text: "Done", isUser: false, timestamp: "2000", turnId: "turn")
+        let entries = ChatFeedEntry.grouping([edit, reply])
+        // The shape the Mac sends, saved and reloaded with the thread.
+        let json = #"{"id":"turn","items":[],"status":"completed","editedFiles":{"paths":["app.js","comic.html"],"additions":4,"deletions":1,"diffs":[{"path":"app.js","kind":"update","diff":"@@ -1 +1 @@\n-a\n+b","additions":1,"deletions":1},{"path":"comic.html","kind":"add","diff":"@@ -0,0 +1,3 @@\n+<html>\n+<body>\n+</html>","additions":3,"deletions":0}]}}"#
+        let decoded = try JSONDecoder().decode(ReadTurn.self, from: Data(json.utf8))
+        let turn = try JSONDecoder().decode(ReadTurn.self, from: JSONEncoder().encode(decoded))
+        let all = try XCTUnwrap(ResponseEditedFiles.conversation(entries: entries, activeTurnIDs: [], turns: ["turn": turn]))
+        XCTAssertEqual(all.files.map(\.path), ["app.js", "comic.html"])
+        XCTAssertEqual(all.files.map(\.additions), [1, 3])
+        XCTAssertEqual(all.files.map(\.deletions), [1, 0])
+        XCTAssertEqual(all.files[1].patches, ["@@ -0,0 +1,3 @@\n+<html>\n+<body>\n+</html>"])
+        // A turn whose diff is empty edited nothing, whatever its rows said.
+        let empty = ReadTurn(id: "turn", items: [], status: "completed", editedFiles: ["paths": .array([]), "diffs": .array([])])
+        XCTAssertNil(ResponseEditedFiles.conversation(entries: entries, activeTurnIDs: [], turns: ["turn": empty]))
+        // Pages merged from the cache keep the diff.
+        let older = ThreadProjection(nextCursor: nil, hydrated: true, turns: [turn])
+        let newer = ThreadProjection(nextCursor: nil, hydrated: true, turns: [ReadTurn(id: "turn", items: [], status: "completed")])
+        XCTAssertNotNil(newer.mergingOlder(older).turns?.first?.editedFiles)
+    }
+
     func testConversationEditsAccumulateCompletedResponsesInFirstEditOrder() throws {
         func edit(_ id: String, _ turn: String, _ path: String, _ patch: String) -> ReadRow {
             let value = ReadItem(id: id, type: "fileChange", state: "completed", text: nil, createdAt: "1000",

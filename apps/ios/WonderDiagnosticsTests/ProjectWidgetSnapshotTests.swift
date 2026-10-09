@@ -24,7 +24,7 @@ final class ProjectWidgetSnapshotTests: XCTestCase {
         let saved = Date(timeIntervalSince1970: 1_000_000)
         let projects = (0..<12).map { ProjectWidgetSnapshot.Project(id: "project-\($0)", name: "  Launch\nProject  ") }
         let unsafe = ProjectWidgetSnapshot.Project(id: "bad/path", name: "Unsafe")
-        let snapshot = try XCTUnwrap(ProjectWidgetSnapshot(savedAt: saved, showNamesOnWidgets: true, hostID: "mac",
+        let snapshot = try XCTUnwrap(ProjectWidgetSnapshot(savedAt: saved, hostID: "mac",
             hostName: " Studio\n", projects: [unsafe] + projects).validated())
         XCTAssertEqual(snapshot.projects.count, ProjectWidgetSnapshot.maxProjects)
         XCTAssertFalse(snapshot.projects.contains { $0.id == unsafe.id })
@@ -45,9 +45,9 @@ final class ProjectWidgetSnapshotTests: XCTestCase {
         XCTAssertNil(WonderDeepLink.parse(URL(string: "wonder://v1/hosts/mac_1/computer/x")!, scheme: "wonder"))
     }
 
-    // Names are absent from persisted bytes until the person opts in. An
-    // atomic valid rewrite recovers a corrupt or oversized snapshot.
-    func testSnapshotStoreDefaultsToGenericLabelsAndRecoversCorruption() throws {
+    // An atomic valid rewrite recovers a corrupt or oversized snapshot, and
+    // names are stored as the widget shows them.
+    func testSnapshotStoreRecoversCorruption() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("wonder-widget-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -57,22 +57,13 @@ final class ProjectWidgetSnapshotTests: XCTestCase {
         let snapshot = ProjectWidgetSnapshot(savedAt: Date(timeIntervalSince1970: 1_000_000), hostID: "mac",
                                              hostName: "Studio", projects: [project])
         XCTAssertTrue(ProjectWidgetSnapshotStore.save(snapshot, in: directory))
-        XCTAssertEqual(ProjectWidgetSnapshotStore.load(from: directory)?.projects.first?.name, "Project 1")
-        XCTAssertEqual(ProjectWidgetSnapshotStore.load(from: directory)?.hostName, "Mac")
-        let genericBytes = try String(contentsOf: file, encoding: .utf8)
-        XCTAssertFalse(genericBytes.contains("Roadmap"))
-        XCTAssertFalse(genericBytes.contains("Studio"))
+        XCTAssertEqual(ProjectWidgetSnapshotStore.load(from: directory)?.projects.first?.name, "Roadmap")
+        XCTAssertEqual(ProjectWidgetSnapshotStore.load(from: directory)?.hostName, "Studio")
         try Data("{".utf8).write(to: file, options: .atomic)
         XCTAssertNil(ProjectWidgetSnapshotStore.load(from: directory))
         try Data(repeating: 0, count: ProjectWidgetSnapshot.maxBytes + 1).write(to: file, options: .atomic)
         XCTAssertNil(ProjectWidgetSnapshotStore.load(from: directory))
-        let optedIn = ProjectWidgetSnapshot(savedAt: snapshot.savedAt, showNamesOnWidgets: true, hostID: "mac",
-                                            hostName: "Studio", projects: [project])
-        XCTAssertTrue(ProjectWidgetSnapshotStore.save(optedIn, in: directory))
-        XCTAssertEqual(ProjectWidgetSnapshotStore.load(from: directory)?.projects.first?.name, "Roadmap")
-        XCTAssertEqual(ProjectWidgetSnapshotStore.load(from: directory)?.hostName, "Studio")
         XCTAssertTrue(ProjectWidgetSnapshotStore.save(snapshot, in: directory))
-        let hiddenBytes = try String(contentsOf: file, encoding: .utf8)
-        XCTAssertFalse(hiddenBytes.contains("Roadmap"))
+        XCTAssertEqual(ProjectWidgetSnapshotStore.load(from: directory)?.projects.first?.name, "Roadmap")
     }
 }

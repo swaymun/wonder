@@ -5,6 +5,7 @@
 import { lstat, open, readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileEditResult } from "./projection.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_SESSION_BYTES = 512 * 1024 * 1024;
@@ -68,6 +69,19 @@ export class ClaudeSessionFiles {
     this.files.set(path, cached);
     while (this.files.size > CACHED_FILES) this.files.delete(this.files.keys().next().value);
     return cached;
+  }
+
+  // The SDK's reader drops Claude Code's `toolUseResult`; file edits keep
+  // theirs here, by message uuid, so history counts the lines really changed.
+  async fileEdits(sessionId, cwd) {
+    const path = await this.locate(sessionId, cwd);
+    const file = path ? await this.entries(path) : null;
+    const edits = new Map();
+    for (const row of file?.rows ?? []) {
+      const edit = row.type === "user" && typeof row.uuid === "string" ? fileEditResult(row.toolUseResult) : null;
+      if (edit) edits.set(row.uuid, edit);
+    }
+    return edits;
   }
 
   // Messages before the transcript point where the SDK's reader begins.
@@ -154,7 +168,8 @@ function sdkShape(row, sessionId) {
   const base = { uuid: row.uuid, session_id: sessionId, parent_tool_use_id: null, timestamp: row.timestamp ?? null };
   if (row.type === "assistant" && row.message) return { ...base, type: "assistant", message: row.message };
   if (row.type === "user" && row.message && !row.isMeta && !row.isCompactSummary) {
-    return { ...base, type: "user", message: row.message, ...(row.origin ? { origin: row.origin } : {}) };
+    const edit = fileEditResult(row.toolUseResult);
+    return { ...base, type: "user", message: row.message, ...(row.origin ? { origin: row.origin } : {}), ...(edit ? { tool_use_result: edit } : {}) };
   }
   // Task completions are stored as queued-command attachments; the SDK presents them as user notices.
   const attachment = row.attachment;

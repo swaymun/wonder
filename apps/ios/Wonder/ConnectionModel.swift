@@ -43,6 +43,30 @@ struct CodexUsageCacheEntry: Sendable {
     }
 }
 
+/// The 5-hour and weekly percentages used, as the thread header shows them.
+/// Claude names its windows; Codex reports primary (5 hours) and secondary
+/// (weekly). Nil when neither window is known.
+struct HeaderUsage: Equatable, Sendable {
+    let fiveHourUsed: Int?
+    let weeklyUsed: Int?
+
+    init?(_ response: CodexUsageResponse) {
+        func used(_ ids: Set<String>, minutes: UInt64) -> Int? {
+            let window = response.windows.first { ids.contains($0.id) }
+                ?? response.windows.first { $0.windowDurationMins == minutes }
+            return window.map { Int(min(max($0.usedPercent, 0), 100).rounded()) }
+        }
+        fiveHourUsed = used(["five_hour", "primary"], minutes: 300)
+        weeklyUsed = used(["seven_day", "secondary"], minutes: 10_080)
+        if fiveHourUsed == nil && weeklyUsed == nil { return nil }
+    }
+
+    var accessibilityLabel: String {
+        let weekly = weeklyUsed.map { (fiveHourUsed == nil ? "Weekly limit " : "weekly ") + "\($0)% used" }
+        return [fiveHourUsed.map { "5-hour limit \($0)% used" }, weekly].compactMap { $0 }.joined(separator: ", ")
+    }
+}
+
 struct ConversationGoal: Decodable, Equatable, Sendable {
     let objective: String
     let status: String
@@ -245,7 +269,7 @@ struct ManagedBotListMutationState {
     @Published var busy = false
     @Published var verification: String?
     @Published var error: String?
-    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; projectSubagents = [:]; projectSubagentLookup = [:]; projectSubagentFreshIDs = [:]; projectSubagentAvailability = [:]; projectSubagentErrors = [:]; projectSubagentNextCurrentCursor = [:]; projectSubagentNextArchivedCursor = [:]; projectSubagentInitialCurrentCursor = [:]; projectSubagentInitialArchivedCursor = [:]; projectSubagentSeenCurrentCursors = [:]; projectSubagentSeenArchivedCursors = [:]; projectSubagentExpandedParents = []; projectSubagentPagingLimited = []; projectSubagentRefreshPending = []; projectSubagentPageRevision = [:]; loadingOlderProjectSubagents = []; projectSubagentLoadTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
+    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; projectSubagents = [:]; pullRequests = [:]; pullRequestErrors = [:]; pullRequestLoadTokens = [:]; projectSubagentLookup = [:]; projectSubagentFreshIDs = [:]; projectSubagentAvailability = [:]; projectSubagentErrors = [:]; projectSubagentNextCurrentCursor = [:]; projectSubagentNextArchivedCursor = [:]; projectSubagentInitialCurrentCursor = [:]; projectSubagentInitialArchivedCursor = [:]; projectSubagentSeenCurrentCursors = [:]; projectSubagentSeenArchivedCursors = [:]; projectSubagentExpandedParents = []; projectSubagentPagingLimited = []; projectSubagentRefreshPending = []; projectSubagentPageRevision = [:]; loadingOlderProjectSubagents = []; projectSubagentLoadTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
     @Published var chats: [ChatSummary] = [] { didSet { noteListChange() } }
     @Published var subagents: [String: [SubagentSummary]] = [:] { didSet { noteListChange() } }
     @Published var subagentAvailability: [String: Bool] = [:]
@@ -255,6 +279,14 @@ struct ManagedBotListMutationState {
     private var projectSubagentLookup: [String: [String: ProjectSubagentSummary]] = [:]
     @Published var projectSubagentAvailability: [String: Bool] = [:]
     @Published var projectSubagentErrors: [String: String] = [:]
+    /// Pull requests per Project thread, read through the Mac's GitHub CLI.
+    @Published var pullRequests: [String: ThreadPullRequests] = [:]
+    @Published var pullRequestErrors: [String: String] = [:]
+    @Published var refreshingPullRequests: Set<String> = []
+    private var pullRequestLoadTokens: [String: UUID] = [:]
+    /// Task IDs (tool-use IDs) with a Stop request in flight, per parent conversation.
+    @Published var stoppingProjectSubagents: [String: Set<String>] = [:]
+    @Published var projectSubagentStopErrors: [String: String] = [:]
     @Published var projectSubagentNextCurrentCursor: [String: String] = [:]
     @Published var projectSubagentNextArchivedCursor: [String: String] = [:]
     @Published var loadingOlderProjectSubagents: Set<String> = []
@@ -710,8 +742,8 @@ struct ManagedBotListMutationState {
                     : ["tool":"fetch_document", "arguments":["document":"Project notes"], "result":["text":"Keep the chat compact and accessible."]]
                 if mixed {
                     let data = UIGraphicsImageRenderer(size: CGSize(width: 480, height: 240)).pngData { context in
-                        UIColor.secondarySystemBackground.setFill(); context.fill(CGRect(x: 0, y: 0, width: 480, height: 240))
-                        ("Project notes" as NSString).draw(at: CGPoint(x: 24, y: 24), withAttributes: [.font: UIFont.systemFont(ofSize: 24, weight: .semibold), .foregroundColor: UIColor.label])
+                        UIColor.secondarySystemBackground.setFill(); context.fill(CGRect(x: 0, y: 0, width: 480, height: 240)) // theme-exempt: draws a fixture image, not UI
+                        ("Project notes" as NSString).draw(at: CGPoint(x: 24, y: 24), withAttributes: [.font: UIFont.systemFont(ofSize: 24, weight: .semibold), .foregroundColor: UIColor.label]) // theme-exempt: draws a fixture image, not UI
                         for (index, height) in [55, 92, 126, 105, 142].enumerated() {
                             UIColor.systemTeal.setFill(); context.fill(CGRect(x: 32 + index * 84, y: 210 - height, width: 44, height: height))
                         }
@@ -766,9 +798,18 @@ struct ManagedBotListMutationState {
                 if mixed {
                     items.insert(["id":"z-commentary", "type":"agentMessage", "state":"completed", "text":"I’ll check the project files and notes.", "createdAt":"1500", "payload":["phase":"commentary"]], at: 1)
                 }
+                var turn: [String: Any] = ["id":"turn", "status":running ? "inProgress" : "completed", "items":running ? Array(items.dropLast()) : items]
+                if ProcessInfo.processInfo.arguments.contains("-response-turn-diff-preview") {
+                    // Codex's whole-turn diff also has a page the agent wrote from the shell.
+                    let page = "@@ -0,0 +1,3 @@\n+<!doctype html>\n+<title>Comic</title>\n+<main id=\"panels\"></main>"
+                    turn["editedFiles"] = ["paths": ["Sources/ChatView.swift", "comic/index.html"], "additions": 5, "deletions": 1, "diffs": [
+                        ["path": "Sources/ChatView.swift", "kind": "update", "additions": 2, "deletions": 1,
+                         "diff": "@@ -12,2 +12,3 @@\n let title = \"Wonder\"\n-let label = \"Files\"\n+let label = \"Edited files\"\n+let accessible = true"],
+                        ["path": "comic/index.html", "kind": "add", "additions": 3, "deletions": 0, "diff": page]]]
+                }
                 let fixture: [String: Any] = ["conversationId":"preview", "hostEpoch":"fixture", "lastSequence":1,
                     "messages":[["messageId":"stored", "clientMessageId":"fixture-user", "codexTurnId":"turn", "body":"Check the project and summarize the changes.", "state":running ? "streaming" : "completed", "createdAt":"1000", "attachmentIds":[]]],
-                    "assistantMessages":[], "thread":["hydrated":true, "turns":[["id":"turn", "status":running ? "inProgress" : "completed", "items":running ? Array(items.dropLast()) : items]]]]
+                    "assistantMessages":[], "thread":["hydrated":true, "turns":[turn]]]
                 if let data = try? JSONSerialization.data(withJSONObject: fixture),
                    let snapshot = try? JSONDecoder().decode(ConversationSnapshot.self, from: data) {
                     groups.removeValue(forKey: "preview")
@@ -1053,8 +1094,10 @@ struct ManagedBotListMutationState {
         guard partition != key else { await preparation?.value; return }
         stopReading()
         partition = key
+        stoppingProjectSubagents = [:]; projectSubagentStopErrors = [:]
         projectSubagentLoadTokens = [:]
         projectSubagentAvailability = [:]
+        pullRequests = [:]; pullRequestErrors = [:]; pullRequestLoadTokens = [:]; refreshingPullRequests = []
         projectSubagentLookup = [:]
         projectSubagentFreshIDs = [:]
         projectSubagentNextCurrentCursor = [:]
@@ -1167,6 +1210,7 @@ struct ManagedBotListMutationState {
                     else if isProject(parent) { await loadProjectSubagents(parent) }
                 }
                 await refreshConversation(chat)
+                if isProject(chat) { Task { [weak self] in await self?.loadPullRequests(chat) } }
                 await loadAsyncQuestions(chat)
                 // Project sends use the same queue even though they have no Bot ID.
                 if chat.botId != nil || isProject(chat) { try? await loadQueue(chat) }
@@ -1437,6 +1481,32 @@ struct ManagedBotListMutationState {
         }
     }
 
+    /// Reads the thread's pull requests. A Mac without GitHub CLI sign-in, or
+    /// without this method, hides the pill; a failed refresh keeps the last list.
+    func loadPullRequests(_ chat: ChatSummary, refresh: Bool = false) async {
+        guard isProject(chat), !previewMode, let saved = connection, !accessEnded else { return }
+        let key = partition
+        let token = UUID()
+        pullRequestLoadTokens[chat.id] = token
+        if refresh { refreshingPullRequests.insert(chat.id) }
+        defer { if pullRequestLoadTokens[chat.id] == token { refreshingPullRequests.remove(chat.id) } }
+        do {
+            let path = try ThreadPullRequests.path(conversationId: chat.id, refresh: refresh)
+            let response: ThreadPullRequests = try await api.request(path, origin: saved.origin, credential: saved.credential)
+            guard key == partition, pullRequestLoadTokens[chat.id] == token, !Task.isCancelled else { return }
+            pullRequests[chat.id] = response
+            pullRequestErrors[chat.id] = response.detail.flatMap { response.available ? $0 : nil }
+        } catch PairingFailure.response(let status) where [403, 404, 409].contains(status) {
+            guard key == partition, pullRequestLoadTokens[chat.id] == token else { return }
+            pullRequests[chat.id] = nil
+            pullRequestErrors[chat.id] = nil
+        } catch is CancellationError {
+        } catch {
+            guard key == partition, pullRequestLoadTokens[chat.id] == token, !Task.isCancelled else { return }
+            pullRequestErrors[chat.id] = "Pull requests could not be loaded from your Mac. Try again."
+        }
+    }
+
     func hasOlderProjectSubagents(_ conversationID: String) -> Bool {
         projectSubagentNextCurrentCursor[conversationID] != nil
             || projectSubagentNextArchivedCursor[conversationID] != nil
@@ -1519,6 +1589,35 @@ struct ManagedBotListMutationState {
         }
     }
 
+    /// Stops one running Claude agent task or background command. The host
+    /// rechecks ownership; the row shows progress, then "Stopped" or why not.
+    func stopProjectSubagent(parent: ChatSummary, child: ProjectSubagentSummary) async {
+        guard isProject(parent), !previewMode, child.parentConversationId == parent.id, child.isStoppable,
+              stoppingProjectSubagents[parent.id]?.contains(child.threadId) != true,
+              let saved = connection, !accessEnded else { return }
+        let key = partition
+        stoppingProjectSubagents[parent.id, default: []].insert(child.threadId)
+        projectSubagentStopErrors[parent.id] = nil
+        do {
+            let path = try ProjectSubagentPaths.stop(parentConversationId: parent.id, threadId: child.threadId)
+            let updated: ProjectSubagentSummary = try await api.request(path,
+                origin: saved.origin, credential: saved.credential, method: "POST")
+            guard key == partition else { return }
+            if updated.threadId == child.threadId, updated.parentConversationId == parent.id {
+                setProjectSubagents((projectSubagents[parent.id] ?? []).map { $0.threadId == updated.threadId ? updated : $0 },
+                                    for: parent.id)
+                projectSubagentFreshIDs[parent.id, default: []].insert(updated.threadId)
+            }
+        } catch {
+            guard key == partition else { return }
+            if case PairingFailure.hostMessage(_, let detail) = error { projectSubagentStopErrors[parent.id] = detail }
+            else { projectSubagentStopErrors[parent.id] = "Couldn't stop “\(child.title)”. Check your connection and try again." }
+        }
+        stoppingProjectSubagents[parent.id]?.remove(child.threadId)
+        // Reconcile with what Claude reports now, including a task that already finished.
+        await loadProjectSubagents(parent)
+    }
+
     func projectSubagentTranscript(parent: ChatSummary, child: ProjectSubagentSummary,
                                    cursor: String? = nil) async throws -> ProjectSubagentTranscript {
         guard isProject(parent), child.parentConversationId == parent.id,
@@ -1592,6 +1691,7 @@ struct ManagedBotListMutationState {
         if chat.botId != nil { await loadSubagents(chat) }
         else if isProject(chat) { await loadProjectSubagents(chat) }
         await refreshConversation(chat)
+        if isProject(chat) { Task { [weak self] in await self?.loadPullRequests(chat) } }
         await loadAttention()
         try? await loadQueue(chat)
         if !readOnly, !isSubagent(chat), !chat.isArchived, composers[chat.id]?.pending?.receipt == nil, composers[chat.id]?.pending != nil {
@@ -1780,6 +1880,14 @@ struct ManagedBotListMutationState {
             let exhausted = cached.exhaustedWindow(model: selected) else { return nil }
         let provider = exhausted.id == "seven_day_sonnet" ? "Claude Sonnet" : exhausted.id == "seven_day_opus" ? "Claude Opus" : family.title
         return "\(provider) usage limit reached. Try another model or wait for usage to reset."
+    }
+
+    /// Usage for the thread header, hidden once it is too old to trust.
+    func headerUsage(_ chat: ChatSummary, now: Date = Date()) -> HeaderUsage? {
+        let family = agentFamily(chat)
+        guard let entry = (family == .claude ? claudeUsageCache : codexUsageCache)[assignmentScope],
+              now.timeIntervalSince(entry.fetchedAt) < 600 else { return nil }
+        return HeaderUsage(entry.response)
     }
 
     func refreshComposerUsage(_ chat: ChatSummary) async {
@@ -2592,7 +2700,15 @@ struct ManagedBotListMutationState {
     }
     private func previewWorkspaceDirectory(root: WorkspaceRoot, path: String, showHidden: Bool, offset: Int) -> WorkspaceDirectoryPage {
         let values: [WorkspaceEntry]
-        if path == "Sources" {
+        #if WONDER_DIAGNOSTICS
+        let readmeProject = ProcessInfo.processInfo.arguments.contains("-workspace-viewer-preview")
+            ? DiagnosticTextViewerFixtures.projectEntries(in: path) : nil
+        #else
+        let readmeProject: [WorkspaceEntry]? = nil
+        #endif
+        if let readmeProject {
+            values = readmeProject
+        } else if path == "Sources" {
             values = [WorkspaceEntry(name: "Authentication.swift", path: "Sources/Authentication.swift", isDirectory: false, byteSize: nil, mimeType: "text/plain")]
         } else if path == "Projects" {
             values = [WorkspaceEntry(name: "Plan.md", path: "Projects/Plan.md", isDirectory: false, byteSize: 44, mimeType: "text/markdown")]
@@ -2617,6 +2733,7 @@ struct ManagedBotListMutationState {
             }
             if ProcessInfo.processInfo.arguments.contains("-workspace-viewer-preview") {
                 rootEntries += DiagnosticTextViewerFixtures.entries
+                rootEntries.append(WorkspaceEntry(name: "tag-mails", path: "tag-mails", isDirectory: true, byteSize: nil, mimeType: nil))
             }
             if ProcessInfo.processInfo.arguments.contains("-workspace-html-scroll-preview") ||
                ProcessInfo.processInfo.arguments.contains("-workspace-html-script-preview") {
@@ -2637,7 +2754,7 @@ struct ManagedBotListMutationState {
         #endif
         let entries = Array(values.dropFirst(offset).prefix(pageSize))
         let nextOffset = offset + entries.count < values.count ? offset + entries.count : nil
-        return WorkspaceDirectoryPage(rootId: root.id, path: path, parentPath: path.isEmpty ? nil : "",
+        return WorkspaceDirectoryPage(rootId: root.id, path: path, parentPath: path.isEmpty ? nil : (path as NSString).deletingLastPathComponent,
                                       entries: entries, nextOffset: nextOffset)
     }
     private func previewWorkspaceData(entry: WorkspaceEntry) -> Data {
@@ -2648,7 +2765,7 @@ struct ManagedBotListMutationState {
         if ProcessInfo.processInfo.arguments.contains("-workspace-document-preview"),
            let data = DiagnosticWorkspaceFileFixtures.data(name: entry.name) { return data }
         if ProcessInfo.processInfo.arguments.contains("-workspace-viewer-preview"),
-           let data = DiagnosticTextViewerFixtures.data(name: entry.name) { return data }
+           let data = DiagnosticTextViewerFixtures.project[entry.path]?.data ?? DiagnosticTextViewerFixtures.data(name: entry.name) { return data }
         if ProcessInfo.processInfo.arguments.contains("-workspace-html-script-preview"), entry.name == "reader.html" {
             return Data("<h1>Script safety page</h1><p id='result'>Safe content remains</p><script>document.getElementById('result').textContent='SCRIPT EXECUTED'</script>".utf8)
         }
@@ -3357,6 +3474,7 @@ struct ManagedBotListMutationState {
             if let persistConnection { try persistConnection(nil) }
             else { try identity.forgetConnection() }
             partition = nil; store = nil; writer = nil; projection = ProjectionState(); publish(.everything)
+            stoppingProjectSubagents = [:]; projectSubagentStopErrors = [:]
             projectSubagentLoadTokens = [:]
             projectSubagentAvailability = [:]
             projectSubagentLookup = [:]
@@ -3408,12 +3526,12 @@ struct ConversationTimeline {
         self.rows = rows
         previous = Dictionary(zip(rows.dropFirst(), rows).map { ($0.0.id, $0.1) }, uniquingKeysWith: { first, _ in first })
         entries = ChatFeedEntry.grouping(rows, activeTurnIDs: activeTurnIDs, focusedRowID: focusedRowID)
-        conversationEdits = ResponseEditedFiles.conversation(entries: entries, activeTurnIDs: activeTurnIDs)
         latestActivityEntryIDs = ChatFeedEntry.latestActivityEntryIDs(entries)
         latestActiveActivityEntryID = ChatFeedEntry.latestActivityEntryID(entries, turnID: activeTurnID)
         var byID: [String: ReadTurn] = [:]
         for turn in turns ?? [] where byID[turn.id] == nil { byID[turn.id] = turn }
         self.turns = byID
+        conversationEdits = ResponseEditedFiles.conversation(entries: entries, activeTurnIDs: activeTurnIDs, turns: byID)
         disclosureEntries = entries.compactMap { entry in
             guard entry.isActivity, let turnID = entry.rows.first?.turnId else { return nil }
             return ActivityDisclosurePolicy.Entry(conversationID: chatID, turnID: turnID, entryID: entry.id,

@@ -18,7 +18,40 @@ public struct ProjectSubagentSummary: Codable, Hashable, Identifiable, Sendable 
     public let status: String
     public let isArchived: Bool
     public let canAcceptDirectInput: Bool
+    /// Absent from hosts that predate Claude agent tasks; those name their subagents.
+    public let namedSubagents: Bool?
+    /// `agent` or `command` for Claude tasks, which have no names of their own.
+    public let kind: String?
+    /// Wonder is driving the session, so a running task can be stopped here.
+    public let canStop: Bool?
+    /// The session is running in Claude on the Mac, which keeps its own Stop control.
+    public let runningElsewhere: Bool?
+    public let updatedAt: String?
     public var id: String { threadId }
+
+    /// Codex helpers have nicknames; Claude tasks show their description and a status glyph.
+    public var usesAvatar: Bool { namedSubagents ?? true }
+    public var isRunning: Bool { ["active", "running", "inProgress"].contains(status) }
+    public var isStoppable: Bool { isRunning && canStop == true }
+    public var isRunningElsewhere: Bool { isRunning && runningElsewhere == true }
+
+    /// SF Symbol for the task's state, so Claude tasks need no avatar.
+    public var statusSymbol: String {
+        switch status {
+        case "active", "running", "inProgress": "circle.dotted"
+        case "completed": "checkmark.circle"
+        case "interrupted", "shutdown": "stop.circle"
+        case "failed", "errored": "exclamationmark.triangle"
+        default: "questionmark.circle"
+        }
+    }
+
+    /// What the task is: its agent type, or "Background command".
+    public var kindLabel: String? {
+        guard !usesAvatar else { return nil }
+        if let role = agentRole, !role.isEmpty { return role }
+        return kind == "command" ? "Background command" : "Agent"
+    }
 
     public var statusLabel: String {
         let state: String = switch status {
@@ -38,6 +71,33 @@ public struct ProjectSubagentSummary: Codable, Hashable, Identifiable, Sendable 
 
     public func statusLabel(available: Bool) -> String {
         available ? statusLabel : "Last known: " + statusLabel
+    }
+}
+
+public struct ProjectSubagentSections: Equatable, Sendable {
+    public let running: [ProjectSubagentSummary]
+    /// Finished tasks, including failed and stopped ones; each row labels its outcome.
+    public let completed: [ProjectSubagentSummary]
+}
+
+public extension Array where Element == ProjectSubagentSummary {
+    var runningCount: Int { filter(\.isRunning).count }
+
+    /// Running tasks first, then the rest, each by most recent activity. The sort
+    /// is stable and keyed on fields that change only when a task changes state,
+    /// so a streaming refresh does not reorder rows.
+    func sectioned() -> ProjectSubagentSections {
+        func recent(_ list: [ProjectSubagentSummary]) -> [ProjectSubagentSummary] {
+            list.enumerated().sorted { a, b in
+                switch (a.element.updatedAt, b.element.updatedAt) {
+                case let (x?, y?) where x != y: return x > y
+                case (nil, _?): return false
+                case (_?, nil): return true
+                default: return a.offset < b.offset
+                }
+            }.map(\.element)
+        }
+        return ProjectSubagentSections(running: recent(filter(\.isRunning)), completed: recent(filter { !$0.isRunning }))
     }
 }
 
@@ -74,6 +134,10 @@ public enum ProjectSubagentPaths {
         guard let cursor else { return path }
         guard cursor.count <= 2048 else { throw PairingFailure.invalidLink }
         return path + "&cursor=\(try component(cursor))"
+    }
+
+    public static func stop(parentConversationId: String, threadId: String) throws -> String {
+        try roster(parentConversationId: parentConversationId) + "/\(try component(threadId))/stop"
     }
 
     public static func transcript(parentConversationId: String, threadId: String, cursor: String? = nil) throws -> String {
@@ -257,18 +321,13 @@ public enum ProjectAccessChoice: String, CaseIterable, Identifiable, Sendable {
     case readOnly, workspace, manual, acceptEdits, auto, plan, fullAccess
     public var id: String { rawValue }
 
-    /// Read only and Accept edits stay out of Claude's menu unless the thread
-    /// already uses them, so its current setting is always shown.
+    /// Claude lists its permission modes in Claude Code's order, Plan included.
+    /// Read only stays out of Claude's menu unless the thread already uses it,
+    /// so its current setting is always shown.
     public static func choices(family: AgentFamily, supportsModes: Bool, current: ProjectAccess) -> [Self] {
         guard supportsModes, family == .claude else { return [.readOnly, .workspace, .fullAccess] }
-        let legacy = selected(for: ProjectAccess(accessMode: current.accessMode, claudeApproval: current.claudeApproval),
-                              family: family, supportsModes: supportsModes)
-        return ([.readOnly, .acceptEdits].contains(legacy) ? [legacy] : []) + [.manual, .auto, .fullAccess]
-    }
-
-    /// Plan mode is separate from how much the thread may do.
-    public static func planChoice(family: AgentFamily, supportsModes: Bool) -> Self? {
-        supportsModes && family == .claude ? .plan : nil
+        let legacy = current.accessMode == .readOnly
+        return (legacy ? [.readOnly] : []) + [.auto, .manual, .acceptEdits, .plan, .fullAccess]
     }
 
     public static func selected(for access: ProjectAccess, family: AgentFamily, supportsModes: Bool) -> Self {
@@ -688,7 +747,7 @@ public enum SidebarRow: Hashable, Identifiable, Sendable {
     case project(hostID: String, project: ProjectSummary, isExpanded: Bool, isSelected: Bool)
     case thread(hostID: String, projectID: String, thread: ProjectThreadSummary, isSelected: Bool)
     case threadsLoading(hostID: String, projectID: String)
-    case threadsNotice(hostID: String, projectID: String, message: String, canRetry: Bool)
+    case threadsNotice(hostID: String, projectID: String, message: String, canRetry: Bool, isRetrying: Bool = false)
     case moreThreads(hostID: String, projectID: String, isLoading: Bool)
     case updateRequired(hostID: String)
     case newProject(hostID: String)
@@ -703,7 +762,7 @@ public enum SidebarRow: Hashable, Identifiable, Sendable {
         case .project(let host, let project, _, _): return "project:\(host):\(project.id)"
         case .thread(let host, let project, let thread, _): return "thread:\(host):\(project):\(thread.reference)"
         case .threadsLoading(let host, let project): return "loading:\(host):\(project)"
-        case .threadsNotice(let host, let project, _, _): return "notice:\(host):\(project)"
+        case .threadsNotice(let host, let project, _, _, _): return "notice:\(host):\(project)"
         case .moreThreads(let host, let project, _): return "more:\(host):\(project)"
         case .updateRequired(let host): return "update:\(host)"
         case .newProject(let host): return "new-project:\(host)"
@@ -759,12 +818,15 @@ public struct SidebarHostProjects: Sendable {
     /// Pinned threads the Mac reported; empty for older Macs, whose loaded pages still show pins.
     public let pinned: [PinnedProjectThread]
     public let notice: SidebarHostNotice?
+    /// Providers the Mac reports it cannot run, so retrying their threads cannot help.
+    public let unavailableFamilies: Set<AgentFamily>
     public init(hostID: String, name: String, isOnline: Bool, supportsProjects: Bool?,
                 projects: [ProjectSummary], threads: [String: ProjectThreadsState],
-                pinned: [PinnedProjectThread] = [], notice: SidebarHostNotice? = nil) {
+                pinned: [PinnedProjectThread] = [], notice: SidebarHostNotice? = nil,
+                unavailableFamilies: Set<AgentFamily> = []) {
         self.hostID = hostID; self.name = name; self.isOnline = isOnline
         self.supportsProjects = supportsProjects; self.projects = projects; self.threads = threads
-        self.pinned = pinned; self.notice = notice
+        self.pinned = pinned; self.notice = notice; self.unavailableFamilies = unavailableFamilies
     }
 }
 
@@ -895,9 +957,13 @@ public enum SidebarProjection {
                 if state.isLoading && state.threads.isEmpty {
                     rows.append(.threadsLoading(hostID: host.hostID, projectID: project.id))
                 } else if let failure = state.failure {
-                    rows.append(.threadsNotice(hostID: host.hostID, projectID: project.id, message: failure, canRetry: true))
-                } else if let partial = state.partial.first {
-                    rows.append(.threadsNotice(hostID: host.hostID, projectID: project.id, message: partial.detail, canRetry: true))
+                    rows.append(.threadsNotice(hostID: host.hostID, projectID: project.id, message: failure, canRetry: true, isRetrying: state.isLoading))
+                } else if host.isOnline, let partial = state.partial.first(where: { !host.unavailableFamilies.contains($0.family) }) {
+                    // A provider the Mac cannot run has no recovery from here, so
+                    // only a provider that failed to answer offers Retry.
+                    rows.append(.threadsNotice(hostID: host.hostID, projectID: project.id,
+                                               message: "\(partial.family.title) didn’t respond on \(host.name), so some threads may be missing.",
+                                               canRetry: true, isRetrying: state.isLoading))
                 } else if state.hasLoaded && state.threads.isEmpty && nameMatches {
                     rows.append(.threadsNotice(hostID: host.hostID, projectID: project.id, message: "No threads yet", canRetry: false))
                 }

@@ -6,14 +6,14 @@ public extension Data {
 }
 
 public enum PairingFailure: LocalizedError {
-    case invalidLink, wrongHost, expired, response(Int), annotationRejected(Int, String), missingIdentity
+    case invalidLink, wrongHost, expired, response(Int), annotationRejected(Int, String), hostMessage(Int, String), missingIdentity
     public var errorDescription: String? {
         switch self {
         case .invalidLink: "Use the complete HTTPS address or pairing QR code shown on your Mac."
         case .wrongHost: "This connection does not match your Mac. Create a new pairing code on the intended Mac."
         case .expired: "This pairing request expired. Create a new code on your Mac."
         case .response(let code): code == 409 ? "Confirm this phone on your Mac." : code == 410 ? "This request expired or was rejected. Create a new code on your Mac." : code == 401 || code == 404 ? "Access is no longer available. Check this phone in Wonder on your Mac." : "Wonder could not connect (\(code)). Check your Mac and try again."
-        case .annotationRejected(_, let detail): detail
+        case .annotationRejected(_, let detail), .hostMessage(_, let detail): detail
         case .missingIdentity: "This phone’s saved identity is unavailable. Pair again from your Mac."
         }
     }
@@ -320,6 +320,13 @@ public final class PairingAPI: Sendable {
                 message.hasPrefix("Project folders changed. Reopen the annotation preview") ||
                 message.hasPrefix("An annotated Project folder changed. Reopen the preview")) {
                 throw PairingFailure.annotationRejected(status, message)
+            }
+            // The host words a refused Stop in plain language (running on the Mac, finished).
+            if path.hasPrefix("/api/v1/project-conversations/"), path.hasSuffix("/stop"),
+               [409, 422, 503].contains(status),
+               let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !message.isEmpty, message.utf8.count <= 512 {
+                throw PairingFailure.hostMessage(status, message)
             }
             throw PairingFailure.response(status)
         }

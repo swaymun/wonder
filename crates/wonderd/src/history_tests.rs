@@ -929,3 +929,108 @@ fn codex_rollout_reports_only_a_recent_unfinished_turn() {
     std::fs::write(&other, event("task_started", "four")).unwrap();
     assert_eq!(codex_rollout_open_turn(&other, now), None);
 }
+
+#[tokio::test]
+async fn codex_turn_diff_becomes_the_turns_edited_files() {
+    let (_dir, state) = crate::ingestion::tests::fixture().await;
+    state
+        .store
+        .bind_runtime("bot", AgentFamily::Codex, "thread", None, "now")
+        .await
+        .unwrap();
+    let wonder_store::MessageInsert::Inserted(message) = state
+        .store
+        .insert_dispatch_message(
+            "owner",
+            "edit",
+            "edit the app",
+            "hash",
+            "bot",
+            &[],
+            "now",
+            true,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("message");
+    };
+    state
+        .store
+        .update_message_delivery(
+            &message.id,
+            "accepted_by_codex",
+            Some("thread"),
+            Some("turn"),
+        )
+        .await
+        .unwrap();
+    let notify = |method: &str, params: serde_json::Value| {
+        crate::process_app_server_notification(
+            &state,
+            serde_json::json!({"method": method, "params": params}),
+            false,
+        )
+    };
+    // One row-level edit, while the turn also wrote a file through the shell.
+    assert!(notify("item/completed", serde_json::json!({"threadId": "thread", "turnId": "turn",
+        "item": {"id": "edit", "type": "fileChange", "status": "completed",
+                 "changes": [{"path": "app.js", "kind": {"type": "update"}, "diff": "@@ -1 +1 @@\n-a\n+b"}]}})).await);
+    assert!(
+        notify(
+            "turn/diff/updated",
+            serde_json::json!({"threadId": "thread", "turnId": "turn",
+        "diff": "diff --git a/app.js b/app.js\n--- a/app.js\n+++ b/app.js\n@@ -1 +1 @@\n-a\n+b\n"})
+        )
+        .await
+    );
+    assert!(notify("turn/diff/updated", serde_json::json!({"threadId": "thread", "turnId": "turn",
+        "diff": "diff --git a/app.js b/app.js\n--- a/app.js\n+++ b/app.js\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/comic.html b/comic.html\nnew file mode 100644\n--- /dev/null\n+++ b/comic.html\n@@ -0,0 +1,3 @@\n+<html>\n+<body>\n+</html>\n"})).await);
+    assert!(
+        notify(
+            "turn/completed",
+            serde_json::json!({"threadId": "thread",
+        "turn": {"id": "turn", "status": "completed"}})
+        )
+        .await
+    );
+
+    let page = state
+        .store
+        .conversation_history_page(&state.host_epoch, "bot", None, 50)
+        .await
+        .unwrap()
+        .unwrap();
+    let projection = conversation_thread_projection(
+        None,
+        &page.messages,
+        &page.assistant_messages,
+        &page.events,
+    );
+    let turn = projection
+        .turns
+        .iter()
+        .find(|turn| turn.id == "turn")
+        .unwrap();
+    let edited = turn
+        .edited_files
+        .as_ref()
+        .expect("turn diff saved on the turn");
+    assert_eq!(edited["paths"], serde_json::json!(["app.js", "comic.html"]));
+    assert_eq!(
+        (edited["additions"].as_u64(), edited["deletions"].as_u64()),
+        (Some(4), Some(1))
+    );
+    assert!(
+        turn.items.iter().all(|item| item.item_type != "turnDiff"),
+        "the diff is not a row"
+    );
+    assert_eq!(
+        turn.items
+            .iter()
+            .filter(|item| item.item_type == "fileChange")
+            .count(),
+        1
+    );
+    state.app_server.lock().await.shutdown().await.unwrap();
+}

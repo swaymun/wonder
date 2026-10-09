@@ -46,6 +46,15 @@ struct WonderTheme: Equatable {
     /// Controls that sit on the page, such as the composer and its pills: the system
     /// fill on the default theme, the agent bubble's colour on any other.
     var surface: Color { isDefault ? Color(uiColor: .secondarySystemBackground) : Color(hex: palette.agentBubble) }
+    /// A plain screen or sheet: the system background on the default theme.
+    var page: Color { isDefault ? Color(uiColor: .systemBackground) : background }
+    /// Body text on the page, for SwiftUI and for UIKit text views.
+    var text: Color { isDefault ? Color.primary : primaryText }
+    var textUIColor: UIColor { isDefault ? .label : UIColor(hex: palette.primaryText) }
+    /// Small chips and choices that sit on a surface or the page.
+    var chip: Color { isDefault ? Color(uiColor: .tertiarySystemBackground) : surface }
+    /// Hairlines between columns, such as a split diff's.
+    var rule: Color { isDefault ? Color(uiColor: .separator) : separator }
 
     func bubble(isUser: Bool) -> Color {
         Color(hex: isUser ? palette.userBubble : palette.agentBubble).opacity(photo == nil ? 1 : 0.92)
@@ -75,6 +84,8 @@ extension EnvironmentValues {
 /// forced appearance, the tint and the navigation background.
 struct WonderThemeHost: ViewModifier {
     @AppStorage(WonderTheme.storageKey) private var themeID = WonderThemeCatalog.defaultID
+    @AppStorage(WonderTypography.messageKey) private var messageFontID = MessageFont.system.rawValue
+    @AppStorage(WonderTypography.codeKey) private var codeFontID = CodeFont.system.rawValue
     @Environment(\.colorScheme) private var systemScheme
 
     func body(content: Content) -> some View {
@@ -83,6 +94,9 @@ struct WonderThemeHost: ViewModifier {
         return content
             .onChange(of: theme.spec, initial: true) { _, spec in SyntaxColors.activate(spec) }
             .environment(\.wonderTheme, theme)
+            .environment(\.wonderTypography, WonderTypography(
+                messageID: ProcessInfo.processInfo.diagnosticFontOverride ?? messageFontID,
+                codeID: ProcessInfo.processInfo.diagnosticCodeFontOverride ?? codeFontID))
             .preferredColorScheme(theme.forcedScheme)
             // Actions read as plain text, not blue links; the default theme keeps `.primary`.
             .tint(theme.isDefault ? Color.primary : theme.primaryText)
@@ -92,9 +106,11 @@ struct WonderThemeHost: ViewModifier {
 
 /// Settings-style Lists and Forms: on a non-default theme the page takes the theme's
 /// background and rows sit on its surface colour. The Wonder theme keeps the system
-/// grouped look. One owner, applied once per screen, never per row.
+/// grouped look. One owner, applied once per screen, never per row. `overBackdrop`
+/// leaves the page clear for a list drawn over the conversation's own backdrop.
 private struct WonderGroupedStyle: ViewModifier {
     @Environment(\.wonderTheme) private var theme
+    let overBackdrop: Bool
 
     @ViewBuilder func body(content: Content) -> some View {
         if theme.isDefault {
@@ -102,8 +118,26 @@ private struct WonderGroupedStyle: ViewModifier {
         } else {
             content
                 .scrollContentBackground(.hidden)
-                .background(theme.background)
+                .background(overBackdrop ? Color.clear : theme.background)
                 .listRowBackground(theme.surface)
+        }
+    }
+}
+
+/// A screen or sheet that is not a grouped List: the theme's page (with its photo)
+/// behind it, under the navigation bar and behind a presented sheet, and the theme's
+/// text colour. The Wonder theme keeps the system look.
+private struct WonderPage: ViewModifier {
+    @Environment(\.wonderTheme) private var theme
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if theme.isDefault {
+            content
+        } else {
+            content
+                .foregroundStyle(theme.primaryText)
+                .containerBackground(for: .navigation) { ThemeBackdrop() }
+                .presentationBackground { ThemeBackdrop() }
         }
     }
 }
@@ -136,7 +170,10 @@ extension View {
     func pinnedSheetHeader(_ title: String, onDone: @escaping () -> Void) -> some View {
         modifier(PinnedSheetHeader(title: title, onDone: onDone))
     }
-    func wonderGroupedStyle() -> some View { modifier(WonderGroupedStyle()) }
+    func wonderGroupedStyle(overBackdrop: Bool = false) -> some View {
+        modifier(WonderGroupedStyle(overBackdrop: overBackdrop))
+    }
+    func wonderPage() -> some View { modifier(WonderPage()) }
 }
 
 extension ProcessInfo {
@@ -144,6 +181,16 @@ extension ProcessInfo {
     var diagnosticThemeOverride: String? {
         #if WONDER_DIAGNOSTICS
         DiagnosticTheme.forcedID
+        #else
+        nil
+        #endif
+    }
+    /// `-diagnostics-font MESSAGE[+CODE]` forces the faces, for example `serif+jetBrains`.
+    var diagnosticFontOverride: String? { diagnosticFonts?.first }
+    var diagnosticCodeFontOverride: String? { diagnosticFonts.flatMap { $0.count > 1 ? $0[1] : nil } }
+    private var diagnosticFonts: [String]? {
+        #if WONDER_DIAGNOSTICS
+        DiagnosticTheme.value(after: "-diagnostics-font").map { $0.split(separator: "+").map(String.init) }
         #else
         nil
         #endif
@@ -194,6 +241,40 @@ struct ThemeBackdrop: View {
             }
             .ignoresSafeArea()
             .accessibilityHidden(true)
+        }
+    }
+}
+
+/// The composer and its pills belong to the chat: they draw nothing of their own, so the
+/// theme's background or photo shows through. With Reduce Transparency on they take the
+/// solid chat background instead, so a photo never sits behind their text.
+struct ChatBottomUnit: ViewModifier {
+    @Environment(\.wonderTheme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    func body(content: Content) -> some View {
+        content.background(reduceTransparency
+            ? (theme.isDefault ? Color(uiColor: .systemBackground) : theme.background)
+            : Color.clear)
+    }
+}
+
+/// Lets the timeline fade out over its last few points instead of ending in a hard edge
+/// above the composer. A mask keeps layout, scroll geometry and the backdrop untouched;
+/// shorter than the timeline's bottom margin, so the last message is never dimmed.
+/// With Reduce Transparency on, the composer is solid and the timeline simply ends.
+struct TimelineBottomFade: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        // Always masked, so toggling never rebuilds the timeline's identity.
+        content.mask {
+            VStack(spacing: 0) {
+                Rectangle()
+                LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                    .frame(height: enabled && !reduceTransparency ? 14 : 0)
+            }
         }
     }
 }

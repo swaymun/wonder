@@ -55,7 +55,13 @@ struct ProviderStatus {
     recovering: bool,
     needs_validation: bool,
     reconcile_requested: bool,
+    /// The installed runtime was rejected as unsupported at its last start.
+    incompatible: bool,
 }
+
+/// Shown for a provider whose installed runtime Wonder refuses to start.
+pub(crate) const CODEX_UNSUPPORTED_DETAIL: &str =
+    "Codex was updated to a version Wonder doesn't support yet. Update Wonder on your Mac.";
 
 struct RuntimeRegistration {
     family: AgentFamily,
@@ -316,8 +322,45 @@ impl Ingestion {
             .any(|r| r.message_id.as_deref() == Some(message_id) && r.health.is_alive())
     }
 
+    /// Whether work can start. Gating stays "any provider usable" so a broken
+    /// Codex does not stop Claude chats.
     pub async fn readiness(&self, store: &Store) -> Readiness {
         self.provider_readiness(store, None).await
+    }
+
+    /// What `/readyz` and host status report: the gating answer, except that an
+    /// otherwise-ready host with a rejected runtime says so instead of "Ready".
+    pub async fn readiness_report(&self, store: &Store) -> Readiness {
+        let readiness = self.readiness(store).await;
+        if readiness.ready && self.provider_incompatible(None) {
+            return Readiness {
+                ready: false,
+                detail: CODEX_UNSUPPORTED_DETAIL,
+                reason: "runtime_incompatible",
+            };
+        }
+        readiness
+    }
+
+    /// Record the outcome of starting a provider runtime: rejected as
+    /// unsupported, or not (started, or failed for another reason).
+    pub(crate) fn set_runtime_incompatible(&self, family: AgentFamily, incompatible: bool) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .providers
+            .entry(family)
+            .or_default()
+            .incompatible = incompatible;
+    }
+
+    fn provider_incompatible(&self, family: Option<AgentFamily>) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .providers
+            .iter()
+            .any(|(id, p)| p.incompatible && family.is_none_or(|family| family == *id))
     }
 
     pub(crate) async fn readiness_for(&self, store: &Store, family: AgentFamily) -> Readiness {
@@ -325,6 +368,13 @@ impl Ingestion {
     }
 
     async fn provider_readiness(&self, store: &Store, family: Option<AgentFamily>) -> Readiness {
+        if family.is_some() && self.provider_incompatible(family) {
+            return Readiness {
+                ready: false,
+                detail: CODEX_UNSUPPORTED_DETAIL,
+                reason: "runtime_incompatible",
+            };
+        }
         let issue = {
             let status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let available = (family.is_none()
@@ -736,7 +786,7 @@ async fn recover(state: &AppState, family: AgentFamily, recover_all: bool) -> Re
                 .entry(family)
                 .or_default()
                 .needs_validation = true;
-            match family {
+            let started = match family {
                 AgentFamily::Codex => {
                     runtime
                         .restart(state.launch_config.lock().await.clone())
@@ -754,8 +804,21 @@ async fn recover(state: &AppState, family: AgentFamily, recover_all: bool) -> Re
                         )
                         .await
                 }
+            };
+            if family == AgentFamily::Codex {
+                let incompatible = started.as_ref().err().is_some_and(|e| e.is_incompatible());
+                state
+                    .ingestion
+                    .set_runtime_incompatible(family, incompatible);
+                if incompatible {
+                    let _ = state.logger.record(
+                        "error",
+                        "codex_runtime_incompatible",
+                        json!({"error": started.as_ref().err().map(|e| e.to_string())}),
+                    );
+                }
             }
-            .map_err(|e| e.to_string())?;
+            started.map_err(|e| e.to_string())?;
         }
         state
             .ingestion
@@ -1701,6 +1764,72 @@ for line in sys.stdin:
             .await
             .unwrap();
         message
+    }
+
+    /// Codex bundled with ChatGPT was updated past what Wonder supports. The
+    /// host must say so everywhere an owner or the phone looks, while the other
+    /// provider keeps working and gating stays "any provider usable".
+    #[tokio::test]
+    async fn unsupported_codex_is_reported_not_ready_in_user_language() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut state) = fixture().await;
+        // Present and executable, but without the code-mode helper Wonder
+        // requires: the same Incompatible class as an unknown protocol contract.
+        fs::create_dir(dir.path().join("updated")).unwrap();
+        let codex = dir.path().join("updated/codex");
+        fs::write(&codex, "#!/bin/sh\necho 'codex-cli 9.9.9'\n").unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        state.projects = crate::projects::ProjectRuntime::configured(
+            codex,
+            "test".into(),
+            dir.path(),
+            dir.path(),
+            notification_sink(state.store.clone()),
+        );
+        let _service = spawn(state.clone()).await;
+        ready(&state).await;
+        assert!(state.ingestion.readiness_report(&state.store).await.ready);
+
+        let error = crate::projects::codex_rpc(&state).await.err().unwrap();
+        assert_eq!(error, CODEX_UNSUPPORTED_DETAIL);
+        let codex = state
+            .ingestion
+            .readiness_for(&state.store, AgentFamily::Codex)
+            .await;
+        assert!(!codex.ready);
+        assert_eq!(codex.reason, "runtime_incompatible");
+        assert_eq!(codex.detail, CODEX_UNSUPPORTED_DETAIL);
+        // Gating is unchanged (Claude must keep working); the report is not.
+        assert!(state.ingestion.readiness(&state.store).await.ready);
+        let report = state.ingestion.readiness_report(&state.store).await;
+        assert!(!report.ready);
+        assert_eq!(report.reason, "runtime_incompatible");
+        use tower::ServiceExt;
+        let response = crate::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/readyz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 503);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        crate::tests::validate_http_contract("executionReadiness", &body);
+        assert_eq!(body["reason"], "runtime_incompatible");
+
+        // A later successful start clears it.
+        state
+            .ingestion
+            .set_runtime_incompatible(AgentFamily::Codex, false);
+        assert!(state.ingestion.readiness_report(&state.store).await.ready);
+        state.app_server.lock().await.shutdown().await.unwrap();
     }
 
     #[tokio::test]

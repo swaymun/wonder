@@ -90,39 +90,58 @@ struct SubagentDock: View {
 }
 
 /// Project helpers are provider threads, not Wonder conversations. Keep their
-/// roster and history read-only under the parent Project thread.
+/// roster and history read-only under the parent Project thread; the one action
+/// is stopping a running Claude task. Codex helpers have names and keep their
+/// roster; Claude tasks have only a description, so they are grouped into Running
+/// and Completed and show a status glyph instead of an avatar.
 struct ProjectSubagentDock: View {
     let agents: [ProjectSubagentSummary]
     let available: Bool
     let freshIDs: Set<String>
     let detail: String?
+    let stoppingIDs: Set<String>
+    let stopError: String?
     let hasOlder: Bool
     let loadingOlder: Bool
     @Binding var isPresented: Bool
     let loadOlder: () -> Void
+    let stop: (ProjectSubagentSummary) -> Void
     let open: (ProjectSubagentSummary) -> Void
+    @State private var confirmingStop: ProjectSubagentSummary?
+
+    private var tasksOnly: Bool { !agents.isEmpty && !agents.contains(where: \.usesAvatar) }
+    private var runningCount: Int { agents.runningCount }
 
     var body: some View {
         if !agents.isEmpty || hasOlder {
             Button { isPresented.toggle() } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "person.2")
-                    Text(agents.count.formatted()).monospacedDigit()
+                    Image(systemName: tasksOnly ? (runningCount > 0 ? "circle.dotted" : "checkmark.circle") : "person.2")
+                    if tasksOnly && available && runningCount > 0 {
+                        Text("\(runningCount.formatted()) running").monospacedDigit()
+                    } else {
+                        Text(agents.count.formatted()).monospacedDigit()
+                    }
                 }
                 .modifier(ComposerStatusPill())
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("project-subagent-status-pill")
-            .accessibilityLabel((available ? "" : "Last known: ")
-                                + "\(agents.count) Project \(agents.count == 1 ? "agent task" : "agent tasks")")
+            .accessibilityLabel(pillLabel)
             .accessibilityValue(isPresented ? "Expanded" : "Collapsed")
-            .accessibilityHint("Show agent tasks in this Project thread")
+            .accessibilityHint(tasksOnly ? "Show running and completed agent tasks" : "Show agent tasks in this Project thread")
             .popover(isPresented: $isPresented, arrowEdge: .bottom) {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
                         Text("Agent tasks").font(.headline).accessibilityAddTraits(.isHeader)
-                        ForEach(agents) { agent in
-                            rosterButton(agent)
+                        if tasksOnly {
+                            let sections = agents.sectioned()
+                            taskSection("Running", sections.running)
+                            taskSection("Completed", sections.completed)
+                        } else {
+                            ForEach(agents) { agent in
+                                rosterButton(agent)
+                            }
                         }
                         if hasOlder {
                             Button(action: loadOlder) {
@@ -133,6 +152,11 @@ struct ProjectSubagentDock: View {
                             .frame(minHeight: 44)
                             .accessibilityIdentifier("project-subagent-roster-load-older")
                         }
+                        if let stopError {
+                            Text(stopError).font(.caption).foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("project-subagent-stop-error")
+                        }
                         if let detail {
                             Text(detail).font(.caption).foregroundStyle(.secondary)
                                 .accessibilityIdentifier("project-subagent-roster-detail")
@@ -142,6 +166,79 @@ struct ProjectSubagentDock: View {
                 }
                 .frame(idealWidth: 320, maxWidth: 360, idealHeight: 280, maxHeight: 360)
                 .presentationCompactAdaptation(.popover)
+                .confirmationDialog("Stop this task?", isPresented: Binding(
+                    get: { confirmingStop != nil }, set: { if !$0 { confirmingStop = nil } }),
+                    titleVisibility: .visible, presenting: confirmingStop) { task in
+                    Button("Stop task", role: .destructive) { stop(task) }
+                        .accessibilityIdentifier("project-subagent-stop-confirm")
+                    Button("Keep running", role: .cancel) {}
+                } message: { task in
+                    Text("Claude will stop \u{201C}\(task.title)\u{201D}. Work it already finished is kept.")
+                }
+            }
+        }
+    }
+
+    private var pillLabel: String {
+        let prefix = available ? "" : "Last known: "
+        guard tasksOnly else {
+            return prefix + "\(agents.count) Project \(agents.count == 1 ? "agent task" : "agent tasks")"
+        }
+        return prefix + (runningCount > 0
+            ? "\(runningCount) agent \(runningCount == 1 ? "task" : "tasks") running"
+            : "\(agents.count) agent \(agents.count == 1 ? "task" : "tasks")")
+    }
+
+    @ViewBuilder private func taskSection(_ title: String, _ tasks: [ProjectSubagentSummary]) -> some View {
+        if !tasks.isEmpty {
+            Text("\(title) \u{00B7} \(tasks.count.formatted())").font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary).padding(.top, 4)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("project-subagent-section:" + title.lowercased())
+            // A task keeps its row identity within a state; moving to Completed is a new row.
+            ForEach(tasks) { agent in taskRow(agent).id(agent.threadId + "|" + agent.status) }
+        }
+    }
+
+    private func taskRow(_ agent: ProjectSubagentSummary) -> some View {
+        let fresh = available && freshIDs.contains(agent.threadId)
+        let stopping = stoppingIDs.contains(agent.threadId)
+        let status = agent.isRunningElsewhere ? "Running on your Mac" : agent.statusLabel(available: fresh)
+        return HStack(spacing: 8) {
+            Button { open(agent) } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: agent.statusSymbol)
+                        .foregroundStyle(agent.isRunning ? Color.accentColor : .secondary)
+                        .frame(width: 22)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(agent.title).foregroundStyle(.primary).lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                        Text([agent.kindLabel, status].compactMap { $0 }.joined(separator: " \u{00B7} "))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                }
+                .frame(minHeight: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("project-subagent-roster:" + agent.threadId)
+            .accessibilityLabel(agent.title + ", " + (agent.kindLabel.map { $0 + ", " } ?? "") + status)
+            .accessibilityHint("Open read-only agent task")
+            if stopping {
+                ProgressView().frame(width: 56, height: 44)
+                    .accessibilityLabel("Stopping")
+                    .accessibilityIdentifier("project-subagent-stopping:" + agent.threadId)
+            } else if agent.isStoppable && fresh {
+                Button("Stop", role: .destructive) { confirmingStop = agent }
+                    .font(.subheadline.weight(.medium))
+                    .buttonStyle(.bordered)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityLabel("Stop " + agent.title)
+                    .accessibilityIdentifier("project-subagent-stop:" + agent.threadId)
+            } else {
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
             }
         }
     }
@@ -218,6 +315,7 @@ struct ProjectSubagentTranscriptView: View {
                 }
                 .padding(16)
             }
+            .wonderPage()
             .accessibilityIdentifier("project-subagent-transcript")
             .navigationTitle(child.title)
             .navigationBarTitleDisplayMode(.inline)
@@ -484,6 +582,7 @@ struct GoalDock: View {
 }
 
 private struct GoalDetailsSheet: View {
+    @Environment(\.wonderTheme) private var theme
     let goal: ConversationGoal
     let error: String?
     let save: (String, Int?, Int?) async -> Bool
@@ -534,7 +633,7 @@ private struct GoalDetailsSheet: View {
                         TextEditor(text: $objectiveDraft)
                             .frame(minHeight: 100)
                             .padding(6)
-                            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+                            .background(theme.surface, in: RoundedRectangle(cornerRadius: 12))
                             .accessibilityIdentifier("goal-objective-editor")
                         TextField("Token budget (optional)", text: $budgetDraft)
                             .keyboardType(.numberPad)
@@ -592,6 +691,7 @@ private struct GoalDetailsSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
             }
+            .wonderPage()
             .accessibilityIdentifier("goal-details-scroll")
             .navigationTitle("Goal")
             .navigationBarTitleDisplayMode(.inline)
@@ -731,5 +831,169 @@ private struct GoalDetailsSheet: View {
             await action()
             saving = false
         }
+    }
+}
+
+/// Pull requests the thread worked with, read through the GitHub CLI signed in
+/// on the Mac. Shown only when there are some; tapping refreshes and lists them
+/// with their state and checks, and a row opens the pull request in Safari.
+struct PullRequestDock: View {
+    let pullRequests: ThreadPullRequests
+    let error: String?
+    let refreshing: Bool
+    @Binding var isPresented: Bool
+    let refresh: () async -> Void
+    @ScaledMetric(relativeTo: .subheadline) private var markSize: CGFloat = 17
+
+    private var items: [ThreadPullRequests.PullRequest] { pullRequests.pullRequests }
+    /// The checks that need attention most, among pull requests still open.
+    private var checks: ThreadPullRequests.PullRequest.Checks.State {
+        let open = items.filter { $0.state == .open || $0.state == .draft }.map(\.checks.state)
+        if open.contains(.failing) { return .failing }
+        if open.contains(.pending) { return .pending }
+        return open.contains(.passing) ? .passing : .none
+    }
+    private var title: String { items.count == 1 ? "#\(items[0].number)" : items.count.formatted() }
+    private var accessibilityText: String {
+        let base = items.count == 1 ? "Pull request \(items[0].number), \(items[0].state.title)" : "\(items.count) pull requests"
+        switch checks {
+        case .failing: return base + ", checks failing"
+        case .pending: return base + ", checks running"
+        case .passing: return base + ", checks passed"
+        case .none: return base
+        }
+    }
+
+    var body: some View {
+        Button { isPresented = true } label: {
+            HStack(spacing: 6) {
+                Image("ConnectorGitHub")
+                    .resizable().scaledToFit()
+                    .frame(width: markSize, height: markSize)
+                Text(title)
+                if checks != .none { PullRequestChecksGlyph(state: checks) }
+            }
+            .monospacedDigit()
+            .lineLimit(1)
+            .fixedSize()
+            .modifier(ComposerStatusPill())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("pull-requests-pill")
+        .accessibilityLabel(accessibilityText)
+        .accessibilityValue(isPresented ? "Expanded" : "Collapsed")
+        .accessibilityHint("Show this thread's pull requests")
+        .sheet(isPresented: $isPresented) {
+            PullRequestSheet(pullRequests: pullRequests, error: error, refreshing: refreshing, refresh: refresh)
+        }
+    }
+}
+
+private struct PullRequestChecksGlyph: View {
+    let state: ThreadPullRequests.PullRequest.Checks.State
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        switch state {
+        case .failing: Image(systemName: "xmark.circle.fill").foregroundStyle(DiffColors.removed(scheme))
+        case .pending: Image(systemName: "clock.fill").foregroundStyle(.orange)
+        case .passing: Image(systemName: "checkmark.circle.fill").foregroundStyle(DiffColors.added(scheme))
+        case .none: EmptyView()
+        }
+    }
+}
+
+private struct PullRequestSheet: View {
+    let pullRequests: ThreadPullRequests
+    let error: String?
+    let refreshing: Bool
+    let refresh: () async -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let error {
+                    Section {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("pull-requests-error")
+                        Button("Try again") { Task { await refresh() } }
+                            .disabled(refreshing)
+                            .accessibilityIdentifier("pull-requests-retry")
+                    }
+                }
+                Section {
+                    ForEach(pullRequests.pullRequests) { pr in
+                        Button { openURL(pr.url) } label: { PullRequestRow(pr: pr) }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("pull-request-row:\(pr.number)")
+                            .accessibilityHint("Opens in Safari")
+                    }
+                } footer: {
+                    Text("From the GitHub CLI signed in on your Mac.")
+                }
+            }
+            .wonderGroupedStyle()
+            .refreshable { await refresh() }
+            // Opening asks for current states; the Mac answers from its cache
+            // when it read GitHub moments ago.
+            .task { await refresh() }
+            .accessibilityIdentifier("pull-requests-list")
+            .navigationTitle("Pull Requests")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.accessibilityIdentifier("pull-requests-done")
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+private struct PullRequestRow: View {
+    let pr: ThreadPullRequests.PullRequest
+    @Environment(\.colorScheme) private var scheme
+
+    private var stateSymbol: String {
+        switch pr.state {
+        case .open: "arrow.triangle.pull"
+        case .draft: "circle.dashed"
+        case .merged: "arrow.triangle.merge"
+        case .closed: "xmark.circle"
+        case .unknown: "questionmark.circle"
+        }
+    }
+    private var stateColor: Color {
+        switch pr.state {
+        case .open: DiffColors.added(scheme)
+        case .merged: .purple
+        case .closed: DiffColors.removed(scheme)
+        case .draft, .unknown: .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: stateSymbol).foregroundStyle(stateColor)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(pr.title).font(.body).foregroundStyle(.primary).lineLimit(3)
+                Text("\(pr.repository) #\(pr.number) · \(pr.state.title)")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let summary = pr.checks.summary {
+                    HStack(spacing: 4) {
+                        PullRequestChecksGlyph(state: pr.checks.state)
+                        Text(summary)
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "arrow.up.right").font(.caption).foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }

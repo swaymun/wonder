@@ -108,26 +108,24 @@ forward rules for an older feature or workflow.
 
 ## Verification and diagnostics
 
-- Maintain the existing master feature test workbook. Its absolute path is stored
-  privately in `.local/testing/master-workbook-path.txt`; use the user's supplied
-  workbook path when that local pointer is unavailable. Do not commit the workbook
-  or its private path to public source.
-  For implemented or changed user-visible behavior, update its scenario in this
-  same document with a short plain-language test, the expected result, and an
-  embedded screenshot of the verified working behavior when capture is possible.
-  Capture the actual app; never substitute a mockup or treat an old screenshot as
-  current verification. Briefly label evidence as simulator, Mac, or physical device
-  and note any limitation. Keep original captures privately under `.local/`.
-  Preserve user notes and blank space for failure screenshots. Do not reintroduce
-  device/build forms or "What happened / Not tested" fields. Treat scenarios the
-  user deletes as accepted; do not restore them unless affected behavior changes.
-  Use the documents skill to edit and render-check the workbook. If the workbook
-  is unavailable or a screenshot cannot be captured, report the gap without
-  claiming verification; preserve available evidence for a later update.
-- Prove iOS behavior with `scripts/wonderctl` scenarios on the Mac mini
-  (`--host mac-mini`, on `iphone` and `duo`) rather than local simulators or
-  screenshot-driven computer use; see [apps/ios/CONTROL.md](apps/ios/CONTROL.md).
-  Extend the feature map when you add user-visible behavior.
+- Put the evidence for every user-visible change on its pull request, not in a
+  separate document. Capture the actual app (never a mockup or an old capture),
+  upload with `scripts/pr-evidence upload --pr N --label before|after FILES` and
+  show Before/After in the PR description. Label evidence as simulator, Mac or
+  physical device and state limitations. If a capture is impossible, say so in
+  the PR rather than claiming verification. CI adds the scenario results for both
+  simulators, and the release workflow adds TestFlight builds, as PR comments.
+- Prove iOS behavior with `scripts/wonderctl` scenarios on `iphone` and `duo`
+  rather than screenshot-driven computer use; run them on this Mac's simulators
+  (no `--host`) while developing. CI runs the feature map on the Mac mini for
+  every pull request. See [apps/ios/CONTROL.md](apps/ios/CONTROL.md). Extend the
+  feature map when you add user-visible behavior. Run the scenarios a change
+  affects locally before opening its PR.
+- A scenario must not depend on state an earlier run left (saved settings, a
+  previous install, a shared cache): select the state it needs. Hold a brief state
+  (a progress overlay) in its fixture rather than lengthening the wait. Treat a
+  "flaky" failure as a deterministic bug until its screenshot says otherwise; read
+  it before rerunning.
 - **For now, physical iPhone/iPad testing is optional and runs only when explicitly
   requested.** Use relevant unit/model/contract checks and focused simulator UI
   checks by default. Physical sessions, mirroring and device availability must not
@@ -147,6 +145,11 @@ forward rules for an older feature or workflow.
 - UI tests use unique accessibility IDs, fully visible controls and assertions of
   the resulting state. Use complete `-only-testing:Target/Class/testMethod` filters
   and confirm nonzero executed tests. A skip or successful tap alone is not a pass.
+- CI skips `RelayKeychainTests` (`apps/native-relay`) because the Mac mini runners
+  cannot use the login Keychain. When a change touches `RelayKeychain` or how the
+  relay identity is stored, run them on a developer Mac with
+  `WONDER_LOCAL_BUILD=1 WONDER_RELAY_LIB_DIR="$PWD/$(apps/native-relay/scripts/build-relay-ffi.sh macos)" swift test --package-path apps/native-relay --filter RelayKeychainTests`
+  and report the result under Verification in the PR.
 - Live tests send no messages or start model work without explicit authorization.
   Use existing owned read-only fixtures; recover interrupted cleanup and remove or
   archive only the exact fixture created by the run. Never alter unrelated chats.
@@ -165,18 +168,25 @@ forward rules for an older feature or workflow.
   separate candidate approval is required.** Respect an explicit request to defer
   uploads. Documentation/source-sync/tooling-only changes that do not alter the
   shipped app need no new binary.
-- Upload from the Mac mini. Commit and push first, then run these sequentially
-  from the repository root (see [fastlane/USAGE.md](fastlane/USAGE.md)):
+- Uploads are automatic: when an iOS change merges to `main`, the Wonder Release
+  workflow uploads both channels from the Mac mini and comments the build numbers
+  on the PR. Check that comment. To upload by hand (a failed or deferred release),
+  run these sequentially from the repository root on a pushed commit (see
+  [fastlane/USAGE.md](fastlane/USAGE.md)):
 
   ```sh
   scripts/wonder-remote --ref HEAD --signing --lock testflight -- bundle exec fastlane ios beta channel:testing profile:release
   scripts/wonder-remote --ref HEAD --signing --lock testflight -- bundle exec fastlane ios beta channel:production profile:release
   ```
 
-- Run builds and test suites on the Mac mini with `scripts/wonder-remote -- <command>`
-  rather than on this Mac. In a session on the Mac mini itself (marked by
-  `~/.config/wonder/is-build-host`), the same `wonder-remote` and `wonderctl --host`
-  commands run locally.
+- Develop on the MacBook: run agent sessions, Rust/Swift/Xcode builds and test
+  suites locally. The Mac mini (marked by `~/.config/wonder/is-build-host`) is
+  reserved for the two self-hosted CI runners and their simulators, TestFlight
+  uploads and Mac signing/notarization; use `scripts/wonder-remote` only for
+  signing, notarization and release. Do not run agent sessions on the mini.
+- Keep at most 2–3 concurrent agent sessions, each in its own worktree. Keep at
+  most two app PRs waiting on CI; land a stack one PR at a time. One session at a
+  time changes CI, workflows or `wonderctl`; others report problems to it.
 
 - Keep blue `com.swaymun.wonder.testing` and orange `com.swaymun.wonder` identities,
   pairing, drafts and Keychain access separate. Do not install development or
@@ -211,17 +221,26 @@ forward rules for an older feature or workflow.
 
 ## Delivery and cleanup
 
-- Commit and push verified, coherent changes owned by this thread before ending,
-  unless explicitly deferred. Inspect status, branch, remotes and staged paths;
-  stage only intended changes. Preserve concurrent work without reset/stash/force-push.
+- Deliver every change as a pull request that merges itself. Work on a branch
+  (`agent/<topic>`), stage only intended paths, push, and open it with
+  `gh pr create --label automerge` using the PR template: what changed for the
+  user, Before/After evidence, Verification (what was and was not checked) and
+  the model that made it. CI squash-merges it once every job passes; fix failures
+  on the same branch. CI runs only the jobs a change needs (`scripts/ci-changes`),
+  so docs-only PRs merge within minutes. Do not push to `main` directly. Preserve concurrent
+  work without reset/stash/force-push.
 - If selected public source changes, sync the existing public checkout using
   [RELEASING.md](RELEASING.md) and `scripts/public-source-files.txt`. Review new
   inclusions, run the audit and verify bytes/executable modes. Make a separate public
   commit; never publish internal history, private evidence, credentials or artifacts.
-- A TestFlight task must push its accepted source internally and sync corresponding
-  public source before completion. Verify remote heads and report commit IDs, checks,
+- After a merge that ships an app, check the release comment on the PR and sync
+  corresponding public source before completion. Verify remote heads and report commit IDs, checks,
   excluded work and concrete blockers. Do not make empty commits or rebuild unchanged
   shipped code just for source synchronization.
+- Once your PR merges, delete its worktree and branch: run `scripts/prune-merged-worktrees`
+  and then `--apply`. It removes only clean worktrees and local branches whose PR merged,
+  and moves their `.local/` evidence to the main checkout. GitHub deletes the remote
+  branch on merge. Each Rust/iOS worktree holds several GB.
 - For build/test/upload tasks, follow [RELEASING.md](RELEASING.md#build-and-installation-cleanup).
   Reuse one DerivedData directory per platform/configuration under `.local/build/`;
   never clean another task's active build. After dependent checks, preview

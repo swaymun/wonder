@@ -38,6 +38,16 @@ pub(crate) struct ProjectSubagentSummary {
     status: String,
     is_archived: bool,
     can_accept_direct_input: bool,
+    /// Whether the provider names its subagents; without names the app shows
+    /// the task and a status glyph instead of an avatar.
+    named_subagents: bool,
+    /// `agent` or `command` for transcript-derived tasks, otherwise absent.
+    kind: Option<String>,
+    /// Wonder is driving the session and the task can be stopped from here.
+    can_stop: bool,
+    /// The task is running in Claude on the Mac, which keeps its own controls.
+    running_elsewhere: bool,
+    updated_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -202,6 +212,11 @@ fn verified_child(
         status: project_child_status(thread, &verified.status),
         is_archived: archived,
         can_accept_direct_input: false,
+        named_subagents: parent.conversation.family.provider().named_subagents,
+        kind: None,
+        can_stop: false,
+        running_elsewhere: false,
+        updated_at: None,
     })
 }
 
@@ -528,10 +543,69 @@ pub(crate) async fn transcript(
     .into_response()
 }
 
+/// Stops one running Claude agent task or background command. Ownership is
+/// rechecked like every Project read; the bridge decides whether Wonder is
+/// driving the session and answers each case in user language.
+pub(crate) async fn stop(
+    State(state): State<AppState>,
+    Extension(_authority): Extension<OwnerAuthority>,
+    Path((conversation_id, thread_id)): Path<(String, String)>,
+) -> Response {
+    if thread_id.is_empty() || thread_id.len() > 256 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let parent = match parent(&state, &conversation_id).await {
+        Ok(parent) => parent,
+        Err(response) => return *response,
+    };
+    if !parent.conversation.family.provider().transcript_agent_tasks {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Wonder can't stop this kind of agent task.",
+        )
+            .into_response();
+    }
+    let result = match request(
+        &parent.rpc,
+        "thread/backgroundTask/stop",
+        json!({"threadId": parent.thread_id, "taskId": thread_id}),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => return unavailable("The task could not be stopped. Try again."),
+    };
+    let summary = result
+        .get("task")
+        .and_then(|task| claude_task_summary(&parent.conversation.conversation_id, task))
+        .filter(|task| task.thread_id == thread_id);
+    match (result.get("outcome").and_then(Value::as_str), summary) {
+        (Some("stopped"), Some(task)) => Json(task).into_response(),
+        (Some("notFound"), _) => StatusCode::NOT_FOUND.into_response(),
+        (Some("runningElsewhere"), _) => (
+            StatusCode::CONFLICT,
+            "This task is running in Claude on your Mac. Stop it there.",
+        )
+            .into_response(),
+        (Some("notRunning"), _) => (
+            StatusCode::CONFLICT,
+            "This task is no longer running. Refresh to see its latest state.",
+        )
+            .into_response(),
+        (Some("unsupported"), _) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Wonder can't stop this task. It may have been started outside this session.",
+        )
+            .into_response(),
+        _ => unavailable("Claude returned an invalid answer. Try again."),
+    }
+}
+
 fn claude_task_summary(
     parent_conversation_id: &str,
     task: &Value,
 ) -> Option<ProjectSubagentSummary> {
+    let provider = AgentFamily::Claude.provider();
     let id = task
         .get("id")
         .and_then(Value::as_str)
@@ -541,7 +615,8 @@ fn claude_task_summary(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|title| !title.is_empty())?;
-    let role = match task.get("kind").and_then(Value::as_str)? {
+    let kind = task.get("kind").and_then(Value::as_str)?;
+    let role = match kind {
         "agent" => task
             .get("role")
             .and_then(Value::as_str)
@@ -554,6 +629,7 @@ fn claude_task_summary(
         status @ ("running" | "completed" | "failed" | "interrupted") => status,
         _ => "unknown",
     };
+    let flag = |name: &str| task.get(name).and_then(Value::as_bool) == Some(true);
     Some(ProjectSubagentSummary {
         parent_conversation_id: parent_conversation_id.to_owned(),
         thread_id: id.to_owned(),
@@ -563,6 +639,15 @@ fn claude_task_summary(
         status: status.to_owned(),
         is_archived: false,
         can_accept_direct_input: false,
+        named_subagents: provider.named_subagents,
+        kind: Some(kind.to_owned()),
+        can_stop: status == "running" && flag("canStop"),
+        running_elsewhere: status == "running" && flag("runningElsewhere"),
+        updated_at: task
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .filter(|at| !at.is_empty() && at.len() <= 64)
+            .map(str::to_owned),
     })
 }
 
@@ -716,6 +801,21 @@ mod tests {
             (Some("Background command"), "running")
         );
         assert!(!command.can_accept_direct_input);
+        // Claude subagents carry no names, so the app shows no avatar for them.
+        assert!(!command.named_subagents);
+        assert_eq!(command.kind.as_deref(), Some("command"));
+        assert!(!command.can_stop, "Stop needs the bridge to confirm it");
+        let stoppable = row(json!({"id":"toolu_5","kind":"agent","title":"Run","status":"running","canStop":true,"updatedAt":"2026-10-08T00:00:00Z"})).unwrap();
+        assert!(stoppable.can_stop);
+        assert_eq!(
+            stoppable.updated_at.as_deref(),
+            Some("2026-10-08T00:00:00Z")
+        );
+        let finished = row(json!({"id":"toolu_6","kind":"agent","title":"Done","status":"completed","canStop":true,"runningElsewhere":true})).unwrap();
+        assert!(
+            !finished.can_stop && !finished.running_elsewhere,
+            "only running tasks are controllable"
+        );
         let agent = row(json!({"id":"toolu_2","kind":"agent","title":"Review","role":"Explore","status":"completed"})).unwrap();
         assert_eq!(agent.agent_role.as_deref(), Some("Explore"));
         assert_eq!(
@@ -1110,5 +1210,208 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // Contract: Stop rechecks Project ownership, reaches only a Claude task the
+    // bridge confirms it can stop, and explains every refusal in user language.
+    #[tokio::test]
+    async fn stopping_a_claude_task_rechecks_ownership_and_maps_each_outcome() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        use wonder_app_server::{AppServerClient, BridgeLaunchConfig};
+
+        let (dir, mut state) = crate::ingestion::tests::fixture().await;
+        let source = dir.path().join("project-source");
+        std::fs::create_dir(&source).unwrap();
+        let roots =
+            crate::projects::validate_folders(&[source.to_string_lossy().into_owned()], &[])
+                .unwrap();
+        state
+            .store
+            .create_project("project", "request", "hash", "Test", &roots, 0, "now")
+            .await
+            .unwrap();
+        state.projects = crate::projects::ProjectRuntime::configured(
+            dir.path().join("codex"),
+            "test".into(),
+            &dir.path().join("home"),
+            &dir.path().join("claude"),
+            crate::ingestion::notification_sink(state.store.clone()),
+        );
+        let session = "11111111-2222-4333-8444-555555555555";
+        let entrypoint = dir.path().join("claude-bridge.py");
+        std::fs::write(
+            &entrypoint,
+            format!(
+                r#"import json, sys, os
+root = os.path.dirname(__file__)
+task = lambda id, status: {{'id': id, 'kind': 'agent', 'title': 'Audit', 'role': 'Explore', 'status': status, 'canStop': False, 'runningElsewhere': False, 'updatedAt': '2026-10-08T00:00:00Z'}}
+for line in sys.stdin:
+    r = json.loads(line)
+    if 'id' not in r: continue
+    m = r.get('method'); p = r.get('params', {{}}); result = {{}}
+    with open(root + '/claude-requests', 'a') as log: log.write(json.dumps({{'method': m, 'params': p}}) + '\n')
+    if m == 'initialize': result = {{'wonderBridge': {{'protocolVersion': 1, 'family': 'claude'}}, 'capabilities': {{'experimentalApi': True}}}}
+    elif m == 'thread/read': result = {{'thread': {{'id': 'claude-{session}', 'sessionId': '{session}', 'cwd': '{cwd}'}}}}
+    elif m == 'thread/backgroundTask/stop':
+        outcome = {{'stop-me': 'stopped', 'finished': 'notRunning', 'on-mac': 'runningElsewhere', 'odd': 'unsupported', 'gone': 'notFound'}}[p['taskId']]
+        result = {{'outcome': outcome}}
+        if outcome != 'notFound': result['task'] = task(p['taskId'], 'interrupted' if outcome == 'stopped' else 'running')
+        if outcome == 'stopped': result['task']['kind'] = 'agent'
+    print(json.dumps({{'id': r['id'], 'result': result}}), flush=True)
+"#,
+                cwd = source.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let config = BridgeLaunchConfig {
+            node_bin: "/usr/bin/python3".into(),
+            entrypoint,
+            state_dir: dir.path().join("claude-state"),
+            npm_cli: None,
+            wonder_version: "test".into(),
+        };
+        let client = Arc::new(Mutex::new(AppServerClient::unavailable(
+            "test".into(),
+            crate::ingestion::notification_sink(state.store.clone()),
+        )));
+        client
+            .lock()
+            .await
+            .restart_bridge(config.clone())
+            .await
+            .unwrap();
+        state.claude = Some(Arc::new(crate::claude::Runtime { client, config }));
+        state
+            .store
+            .create_project_conversation(wonder_store::ProjectConversationInsert {
+                conversation_id: "claude-chat",
+                project_id: "project",
+                family: AgentFamily::Claude,
+                provider_store: &state.projects.claude_store,
+                native_session_id: Some(session),
+                cwd: source.to_str().unwrap(),
+                roots_revision: 1,
+                title: "Refactor",
+                model: Some("claude:sonnet"),
+                effort: None,
+                service_tier: None,
+                access_mode: "workspace",
+                claude_approval: "accept_edits",
+                plan_mode: false,
+                creation_request_id: None,
+                now: "now",
+            })
+            .await
+            .unwrap();
+        state
+            .store
+            .bind_project_runtime(
+                "claude-chat",
+                AgentFamily::Claude,
+                &state.projects.claude_store,
+                &format!("claude-{session}"),
+                Some(session),
+                "now",
+            )
+            .await
+            .unwrap();
+        let stop_task = |chat: &'static str, task: &'static str| {
+            stop(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path((chat.into(), task.into())),
+            )
+        };
+        let stop_calls = || {
+            std::fs::read_to_string(dir.path().join("claude-requests"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("thread/backgroundTask/stop"))
+                .count()
+        };
+
+        let first = stop_task("claude-chat", "stop-me").await;
+        let first_status = first.status();
+        let first_bytes = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            first_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&first_bytes)
+        );
+        let stopped: Value = serde_json::from_slice(&first_bytes).unwrap();
+        assert_eq!(
+            (
+                stopped["status"].as_str(),
+                stopped["kind"].as_str(),
+                stopped["namedSubagents"].as_bool()
+            ),
+            (Some("interrupted"), Some("agent"), Some(false))
+        );
+        assert_eq!(stopped["canStop"], false);
+        crate::tests::validate_http_contract("projectSubagentSummary", &stopped);
+        for (task, expected, words) in [
+            ("finished", StatusCode::CONFLICT, "no longer running"),
+            (
+                "on-mac",
+                StatusCode::CONFLICT,
+                "running in Claude on your Mac",
+            ),
+            ("odd", StatusCode::UNPROCESSABLE_ENTITY, "can't stop"),
+            ("gone", StatusCode::NOT_FOUND, ""),
+        ] {
+            let response = stop_task("claude-chat", task).await;
+            let status = response.status();
+            let text = String::from_utf8(
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert_eq!(status, expected, "{task}: {text}");
+            assert!(text.contains(words), "{task}: {text}");
+        }
+        assert_eq!(stop_calls(), 5);
+
+        // Ownership is rechecked on every call, before the bridge is reached.
+        assert_eq!(
+            stop_task("missing-chat", "stop-me").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        state
+            .store
+            .update_project_metadata("project", None, Some(false), None, "later")
+            .await
+            .unwrap();
+        assert_eq!(
+            stop_task("claude-chat", "stop-me").await.status(),
+            StatusCode::FORBIDDEN,
+            "an excluded Project cannot stop tasks"
+        );
+        state
+            .store
+            .update_project_metadata("project", None, Some(true), None, "later")
+            .await
+            .unwrap();
+        let pool = sqlx::SqlitePool::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("state.db").display()
+        ))
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM runtime_bindings WHERE conversation_id='claude-chat'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            stop_task("claude-chat", "stop-me").await.status(),
+            StatusCode::CONFLICT,
+            "a stale binding cannot authorize a stop"
+        );
+        assert_eq!(stop_calls(), 5, "refused requests never reach Claude");
     }
 }

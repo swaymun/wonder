@@ -16,7 +16,8 @@ tap --id activity-group:project-child-turn/task-command
 wait --contains "swift test --filter ParserTests" --timeout 5
 wait --contains "Edited Parser.swift" --timeout 5
 shot claude-agent-transcript-work
-swipe up
-swipe up
+# Scroll the sheet, not the screen centre: on the Duo the half sheet sits below it.
+swipe up --in project-subagent-transcript
+swipe up --in project-subagent-transcript
 wait --label "Grep, Running" --timeout 10
 shot claude-agent-transcript-running

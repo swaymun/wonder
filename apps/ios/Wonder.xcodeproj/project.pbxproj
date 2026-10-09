@@ -32,6 +32,8 @@
 		A10000000000000000000014 /* CameraCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* CameraCapture.swift */; };
 		A10000000000000000000015 /* ScienceAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* ScienceAvatar.swift */; };
 		A100000000000000000F0001 /* WonderTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000F0002 /* WonderTheme.swift */; };
+		A1000000000000000F0A0001 /* WonderTypography.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000F0A0002 /* WonderTypography.swift */; };
+		A1000000000000000F0A0003 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000F0A0004 /* Fonts */; };
 		A100000000000000000F0003 /* CodeBlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000F0004 /* CodeBlockView.swift */; };
 		A100000000000000000F0005 /* TextFileViewers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000F0006 /* TextFileViewers.swift */; };
 		A10000000000000000000017 /* ComputerSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* ComputerSessionView.swift */; };
@@ -151,6 +153,8 @@
 		A10000000000000000000013 /* CameraCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCapture.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* ScienceAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScienceAvatar.swift; sourceTree = "<group>"; };
 		A100000000000000000F0002 /* WonderTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WonderTheme.swift; sourceTree = "<group>"; };
+		A1000000000000000F0A0002 /* WonderTypography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WonderTypography.swift; sourceTree = "<group>"; };
+		A1000000000000000F0A0004 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
 		A100000000000000000F0004 /* CodeBlockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlockView.swift; sourceTree = "<group>"; };
 		A100000000000000000F0006 /* TextFileViewers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextFileViewers.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* ComputerSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerSessionView.swift; sourceTree = "<group>"; };
@@ -288,6 +292,8 @@
 				A10000000000000000000011 /* GroupCollaborationViews.swift */,
 				A10000000000000000000016 /* ScienceAvatar.swift */,
 				A100000000000000000F0002 /* WonderTheme.swift */,
+				A1000000000000000F0A0002 /* WonderTypography.swift */,
+				A1000000000000000F0A0004 /* Fonts */,
 				A100000000000000000F0004 /* CodeBlockView.swift */,
 				A100000000000000000F0006 /* TextFileViewers.swift */,
 				A10000000000000000000092 /* ScienceAvatarGeometry.swift */,
@@ -556,6 +562,7 @@
 			files = (
 				F30000000000000000000008 /* EPUB-LICENSES.md in Resources */,
 				000000000000000000000018 /* Assets.xcassets in Resources */,
+				A1000000000000000F0A0003 /* Fonts in Resources */,
 				A1000000000000000000001A /* WebRTC-LICENSE.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -627,6 +634,7 @@
 				A10000000000000000000012 /* GroupCollaborationViews.swift in Sources */,
 				A10000000000000000000015 /* ScienceAvatar.swift in Sources */,
 				A100000000000000000F0001 /* WonderTheme.swift in Sources */,
+				A1000000000000000F0A0001 /* WonderTypography.swift in Sources */,
 				A100000000000000000F0003 /* CodeBlockView.swift in Sources */,
 				A100000000000000000F0005 /* TextFileViewers.swift in Sources */,
 				A10000000000000000000091 /* ScienceAvatarGeometry.swift in Sources */,

@@ -49,12 +49,14 @@ mod provider_switch;
 #[cfg(test)]
 mod provider_switch_tests;
 mod providers;
+mod pull_requests;
 pub mod push;
 mod questions;
 mod queue;
 mod subagents;
 mod teaching;
 mod thread_tools;
+mod turn_diff;
 pub mod update_admission;
 mod update_handoff;
 
@@ -979,8 +981,16 @@ pub fn router(state: AppState) -> Router {
             get(project_subagents::list),
         )
         .route(
+            "/api/v1/project-conversations/{conversation_id}/pull-requests",
+            get(pull_requests::list),
+        )
+        .route(
             "/api/v1/project-conversations/{conversation_id}/subagents/{thread_id}/transcript",
             get(project_subagents::transcript),
+        )
+        .route(
+            "/api/v1/project-conversations/{conversation_id}/subagents/{thread_id}/stop",
+            post(project_subagents::stop),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/desktop-continuation",
@@ -1468,6 +1478,16 @@ async fn process_app_server_notification(
                 .map(str::to_owned)
         })
         .or_else(|| item.and_then(|item| string_field(item, "turnId")));
+    if method == "turn/diff/updated" {
+        if let (Some(thread), Some(turn), Some(diff)) = (
+            thread_id.as_deref(),
+            turn_id.as_deref(),
+            params.get("diff").and_then(serde_json::Value::as_str),
+        ) {
+            turn_diff::record(thread, turn, diff);
+        }
+        return true;
+    }
     let item_id = string_field(&params, "itemId").or_else(|| {
         params
             .get("item")
@@ -2465,21 +2485,31 @@ async fn process_app_server_notification(
     if method == "turn/completed" {
         computer_runtime::turn_ended(state, &params);
     }
+    // The turn's saved diff is published as an item just before its terminal
+    // state so history lifts it onto the turn as `editedFiles`.
+    let turn_diff_item = (method == "turn/completed")
+        .then(|| thread_id.as_deref().zip(turn_id.as_deref()))
+        .flatten()
+        .and_then(|(thread, turn)| {
+            turn_diff::take(thread, turn).map(|diff| turn_diff::item(turn, &diff))
+        });
     // Preserve the complete App Server item in the event stream as a
     // loss-minimized projection. Older clients still see a normal activity
     // event; newer clients consume its thread_item_upsert category.
     if let (Some(turn_id), Some(item)) = (
         turn_id.as_deref(),
-        params.get("item").filter(|_| {
-            matches!(
-                method,
-                "item/started"
-                    | "item/completed"
-                    | "item/commandExecution/started"
-                    | "item/commandExecution/completed"
-                    | "item/fileChange/started"
-                    | "item/fileChange/completed"
-            )
+        turn_diff_item.as_ref().or_else(|| {
+            params.get("item").filter(|_| {
+                matches!(
+                    method,
+                    "item/started"
+                        | "item/completed"
+                        | "item/commandExecution/started"
+                        | "item/commandExecution/completed"
+                        | "item/fileChange/started"
+                        | "item/fileChange/completed"
+                )
+            })
         }),
     ) {
         let workspace = match conversation_id.as_deref() {
@@ -3563,7 +3593,7 @@ fn matches_public_origin(request: &Request<axum::body::Body>, public_origin: &st
 }
 
 async fn readyz(State(state): State<AppState>) -> Response {
-    let readiness = state.ingestion.readiness(&state.store).await;
+    let readiness = state.ingestion.readiness_report(&state.store).await;
     (
         if readiness.ready {
             StatusCode::OK
@@ -3600,7 +3630,7 @@ fn host_display_name() -> &'static str {
 
 async fn host_status(State(state): State<AppState>) -> impl IntoResponse {
     let public_origin = current_public_origin(&state).await;
-    let execution = state.ingestion.readiness(&state.store).await;
+    let execution = state.ingestion.readiness_report(&state.store).await;
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(HostStatus {

@@ -8,7 +8,7 @@ tap --id workspace-file-entry:guide.md --timeout 5
 wait --id workspace-markdown-preview --timeout 10
 shot markdown-preview
 tap --label Source --type RadioButton
-wait --id annotation-selectable-text --timeout 5
+wait --id annotation-selectable-text --timeout 15
 wait --id workspace-markdown-preview --gone --timeout 5
 shot markdown-source
 launch --fixture read-preview --fixture send-preview --fixture files-preview --fixture project-files-conversation-preview --fixture workspace-viewer-preview

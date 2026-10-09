@@ -22,7 +22,7 @@ struct WorkspacePublicationPreview: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack { // theme-exempt: shown inside WorkspaceBrowser over its host's page
             VStack(spacing: 0) {
                 if let navigator = reader.navigator {
                     PublicationNavigator(navigator: navigator)

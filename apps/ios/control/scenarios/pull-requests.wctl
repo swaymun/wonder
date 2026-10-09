@@ -1,0 +1,30 @@
+# A Project thread's pull requests: a GitHub pill with the count and the most
+# urgent check state of the open ones, and a sheet that refreshes on opening and
+# lists each with its state and checks in the Mac's order. Reopening it, the
+# fixture's refresh fails: the sheet explains it and keeps the list. The fixture
+# stands in for the Mac's GitHub CLI.
+launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-pull-requests --fixture project-pull-requests-refresh-fails
+wait --id open-sidebar --timeout 30
+tap --id open-sidebar --type Button
+wait --id pinned-thread:claude:read-fixture --timeout 20
+tap --id pinned-thread:claude:read-fixture
+wait --id pull-requests-pill --timeout 15
+wait --label "3 pull requests, checks running" --timeout 5
+shot pull-requests-pill
+tap --id pull-requests-pill
+wait --id pull-request-row:128 --timeout 10
+order --ids pull-request-row:128,pull-request-row:121,pull-request-row:7
+wait --contains "Show a thread's pull requests" --timeout 5
+wait --contains "2 of 5 checks running" --timeout 5
+wait --contains "1 of 5 checks failed" --timeout 5
+shot pull-requests-sheet
+tap --id pull-requests-done --nth 0
+wait --id pull-request-row:128 --gone --timeout 10
+tap --id pull-requests-pill
+wait --id pull-requests-error --timeout 10
+wait --id pull-requests-retry --timeout 5
+wait --id pull-request-row:128 --timeout 5
+shot pull-requests-refresh-failed
+tap --id pull-requests-done --nth 0
+wait --id pull-request-row:128 --gone --timeout 10
+wait --id pull-requests-pill --timeout 5

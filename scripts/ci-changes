@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Decide which CI jobs a change needs. Prints one `job=true|false` line per job.
+
+  scripts/ci-changes BASE HEAD         # changed files from git diff
+  scripts/ci-changes --files a b c     # explicit file list (for checks)
+
+Each job lists the paths that can change its result. A file that matches no job
+and is not known to be outside CI runs every job, so a new area is never silently
+untested. Changing this script or the CI workflow also runs everything.
+"""
+import re
+import subprocess
+import sys
+
+JOBS = {
+    "rust": [r"^crates/", r"^Cargo\.(toml|lock)$", r"^rust-toolchain", r"^packages/protocol/",
+             r"^compatibility-manifest\.json$"],
+    "tunnel": [r"^cmd/wonder-tunnel/"],
+    "native": [r"^apps/native/", r"^apps/menubar/", r"^native/computer-use/",
+               r"^scripts/verify-computer-use\.mjs$", r"^packages/protocol/"],
+    "push": [r"^services/push/"],
+    "claude_runtime": [r"^services/claude-runtime/"],
+    "relay": [r"^services/relay/"],
+    "accounts": [r"^services/accounts/"],
+    "native_relay": [r"^apps/native-relay/", r"^crates/wonder-relay(-ffi)?/"],
+    "desktop": [r"^apps/desktop/"],
+    # The scenarios run Wonder Testing against built-in fixtures, so only iOS code,
+    # the shared Swift package and the protocol fixtures can change their outcome.
+    "ios": [r"^apps/ios/", r"^apps/native/", r"^packages/protocol/",
+            r"^scripts/(wonderctl|run-scenarios|pr-evidence|check-theme)$"],
+}
+EVERYTHING = [r"^\.github/workflows/ci\.yml$", r"^scripts/ci-changes$"]
+# Areas no CI job builds or tests; changing them alone runs nothing.
+OUTSIDE_CI = [r"\.md$", r"^\.github/", r"^\.claude/", r"^\.gitignore$", r"^fastlane/", r"^Gemfile",
+              r"^docs/", r"^research/", r"^assets/", r"^evidence/", r"^artifacts/", r"^output/",
+              r"^dist/", r"^licenses/", r"^LICENSE$", r"^provenance\.json$", r"^justfile$",
+              r"^apps/pwa/",
+              r"^scripts/"]
+
+
+def decide(files):
+    needed = {job: False for job in JOBS}
+    for path in files:
+        if any(re.search(p, path) for p in EVERYTHING):
+            return {job: True for job in JOBS}
+        matched = [job for job, patterns in JOBS.items() if any(re.search(p, path) for p in patterns)]
+        for job in matched:
+            needed[job] = True
+        if not matched and not any(re.search(p, path) for p in OUTSIDE_CI):
+            return {job: True for job in JOBS}
+    return needed
+
+
+def main(argv):
+    if argv[:1] == ["--files"]:
+        files = argv[1:]
+    elif len(argv) == 2:
+        diff = subprocess.run(["git", "diff", "--name-only", f"{argv[0]}...{argv[1]}"],
+                              text=True, capture_output=True)
+        if diff.returncode != 0:
+            print(f"git diff failed ({diff.stderr.strip()}); running everything", file=sys.stderr)
+            files = ["<unknown>"]
+        else:
+            files = diff.stdout.split()
+    else:
+        sys.exit(__doc__)
+    for job, run in decide(files).items():
+        print(f"{job}={'true' if run else 'false'}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

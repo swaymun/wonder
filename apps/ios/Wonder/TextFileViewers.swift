@@ -13,8 +13,8 @@ final class TextViewerCache: @unchecked Sendable {
         return cache
     }()
 
-    static func key(sha: String, view: String, theme: WonderTheme? = nil) -> String {
-        "\(sha)|\(view)|\(theme?.cacheKey ?? "-")"
+    static func key(sha: String, view: String, theme: WonderTheme? = nil, typography: WonderTypography? = nil) -> String {
+        "\(sha)|\(view)|\(theme?.cacheKey ?? "-")|\(typography?.cacheKey ?? "-")"
     }
     func value<T: AnyObject>(_ type: T.Type, for key: String) -> T? { cache.object(forKey: key as NSString) as? T }
     func store(_ value: AnyObject, for key: String, cost: Int) {
@@ -71,21 +71,59 @@ struct TextViewerModeBar: View {
 /// few KB off the main thread and shown in a lazy stack, so each parse is small
 /// and only visible chunks are laid out. Past a size limit the rest waits behind
 /// "Show all"; the Source view is always the whole file.
+/// What a Markdown Preview needs to show a project file's local images and
+/// open its relative links. Absent for a file that is not in a project root,
+/// such as an attachment.
+struct MarkdownReferenceContext {
+    /// The file's root-relative path, which relative references resolve against.
+    let documentPath: String
+    /// Loads a root-relative image, bounded and downsampled off the main thread.
+    let loadImage: @MainActor (String) async throws -> UIImage
+    /// Opens a root-relative file in the viewer; returns why it could not.
+    let open: @MainActor (String) async -> String?
+}
+
+enum MarkdownImageFailure: Error {
+    case missing, notImage, tooLarge, unreadable
+    var message: String {
+        switch self {
+        case .missing: "Image not found in the project"
+        case .notImage: "This file isn't an image"
+        case .tooLarge: "Image is too large to show here"
+        case .unreadable: "Image can't be shown"
+        }
+    }
+}
+
 struct MarkdownFileView: View {
     let text: String
     let sha: String
+    @Environment(\.wonderTypography) private var typography
+    var references: MarkdownReferenceContext? = nil
     static let initialLimitBytes = 64 * 1024
-    @State private var chunks: [String]?
+    @State private var chunks: [[MarkdownPreviewPiece]]?
+    @State private var chunkTexts: [String] = []
     @State private var showAll = false
+    @State private var linkNotice: String?
 
     var body: some View {
         ScrollView {
             if let chunks {
-                let visible = showAll ? chunks.count : MarkdownChunker.visibleCount(of: chunks, limitBytes: Self.initialLimitBytes)
+                let visible = showAll ? chunks.count : MarkdownChunker.visibleCount(of: chunkTexts, limitBytes: Self.initialLimitBytes)
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(0..<visible, id: \.self) { index in
-                        BotMessageText(text: chunks[index])
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(Array(chunks[index].enumerated()), id: \.offset) { _, piece in
+                                switch piece {
+                                case .markdown(let text):
+                                    BotMessageText(text: text, keepsRelativeLinks: true)
+                                case .image(let alt, let source, let link):
+                                    MarkdownLocalImage(alt: alt, source: source, link: link, references: references,
+                                                       openLocal: openLocal)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if visible < chunks.count {
                         Button("Show all (\(ByteCountFormatter.string(fromByteCount: Int64(text.utf8.count), countStyle: .file)))") { showAll = true }
@@ -101,21 +139,136 @@ struct MarkdownFileView: View {
                 ProgressView().padding(40).frame(maxWidth: .infinity)
             }
         }
+        .font(typography.font(.body))
+        .safeAreaInset(edge: .bottom) {
+            if let linkNotice {
+                Text(linkNotice).font(.footnote)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.bottom, 8)
+                    .accessibilityIdentifier("workspace-markdown-link-notice")
+                    .task(id: linkNotice) {
+                        try? await Task.sleep(for: .seconds(4))
+                        if !Task.isCancelled { self.linkNotice = nil }
+                    }
+            }
+        }
+        .environment(\.openURL, OpenURLAction { url in
+            guard url.scheme == nil else { return .systemAction }
+            openLocal(MarkdownReference.resolve(url.relativeString, documentPath: references?.documentPath ?? ""))
+            return .handled
+        })
         .accessibilityIdentifier("workspace-markdown-preview")
-        .task(id: sha) {
+        .task(id: sha + (references?.documentPath ?? "")) {
             showAll = false
-            let key = TextViewerCache.key(sha: sha, view: "markdown-chunks")
-            if let cached = TextViewerCache.shared.value(ChunkBox.self, for: key) { chunks = cached.chunks; return }
+            let path = references?.documentPath ?? ""
+            let key = TextViewerCache.key(sha: sha, view: "markdown-pieces:" + path)
+            if let cached = TextViewerCache.shared.value(ChunkBox.self, for: key) {
+                chunkTexts = cached.texts; chunks = cached.chunks; return
+            }
             chunks = nil
             let source = text
-            let result = await Task.detached(priority: .userInitiated) { MarkdownChunker.chunks(source) }.value
+            let result = await Task.detached(priority: .userInitiated) {
+                let texts = MarkdownChunker.chunks(source)
+                return ChunkBox(texts: texts, chunks: texts.map { MarkdownPreviewPiece.pieces($0, documentPath: path) })
+            }.value
             guard !Task.isCancelled else { return }
-            TextViewerCache.shared.store(ChunkBox(result), for: key, cost: source.utf8.count * 2)
-            chunks = result
+            TextViewerCache.shared.store(result, for: key, cost: source.utf8.count * 3)
+            chunkTexts = result.texts; chunks = result.chunks
         }
     }
 
-    private final class ChunkBox { let chunks: [String]; init(_ chunks: [String]) { self.chunks = chunks } }
+    private func openLocal(_ reference: MarkdownReference) {
+        switch reference {
+        case .local(let path):
+            guard let references else { linkNotice = "Open this file from the project's Files to follow its links."; return }
+            Task { linkNotice = await references.open(path) }
+        case .web(let url): UIApplication.shared.open(url)
+        case .anchor: break
+        case .blocked: linkNotice = "This link points outside the project."
+        }
+    }
+
+    private final class ChunkBox: @unchecked Sendable {
+        let texts: [String]
+        let chunks: [[MarkdownPreviewPiece]]
+        init(texts: [String], chunks: [[MarkdownPreviewPiece]]) { self.texts = texts; self.chunks = chunks }
+    }
+}
+
+/// An image a project README shows from its own folder. It loads through the
+/// workspace file path; a missing, blocked or unreadable image says so in place.
+private struct MarkdownLocalImage: View {
+    let alt: String
+    let source: MarkdownReference
+    let link: MarkdownReference?
+    let references: MarkdownReferenceContext?
+    let openLocal: (MarkdownReference) -> Void
+    @Environment(\.wonderTheme) private var theme
+    @State private var loaded: (path: String, result: Result<UIImage, MarkdownImageFailure>)?
+
+    var body: some View {
+        Group {
+            if case .local(let path) = source, references != nil {
+                if let loaded, loaded.path == path {
+                    switch loaded.result {
+                    case .success(let image): imageView(image)
+                    case .failure(let failure): placeholder(failure.message, detail: path, symbol: "photo.badge.exclamationmark")
+                    }
+                } else {
+                    ProgressView().frame(maxWidth: .infinity, minHeight: 120)
+                        .accessibilityLabel("Loading image \(alt)")
+                }
+            } else if case .local(let path) = source {
+                placeholder("Open this file from the project's Files to see its images", detail: path, symbol: "photo")
+            } else {
+                placeholder("Image outside this project isn't shown", detail: nil, symbol: "lock")
+            }
+        }
+        .accessibilityIdentifier("workspace-markdown-image")
+        .task(id: localPath) {
+            guard let localPath, let references else { return }
+            await load(localPath, references)
+        }
+    }
+    private var localPath: String? { if case .local(let path) = source { path } else { nil } }
+
+    @ViewBuilder private func imageView(_ image: UIImage) -> some View {
+        let view = Image(uiImage: image).resizable().scaledToFit()
+            .frame(maxWidth: min(image.size.width, 728), maxHeight: 520, alignment: .leading)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .accessibilityLabel(alt.isEmpty ? "Image" : alt)
+        if let link, link != .anchor {
+            Button { openLocal(link) } label: { view }.buttonStyle(.plain)
+        } else {
+            view.accessibilityAddTraits(.isImage)
+        }
+    }
+
+    private func placeholder(_ message: String, detail: String?, symbol: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol).foregroundStyle(theme.secondaryText).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(alt.isEmpty ? message : "\(alt): \(message)").font(.subheadline)
+                if let detail { Text(detail).font(.caption.monospaced()).foregroundStyle(theme.secondaryText).lineLimit(2) }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.codeBackground, in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+    }
+
+    private func load(_ path: String, _ references: MarkdownReferenceContext) async {
+        if loaded?.path == path { return }
+        let result: Result<UIImage, MarkdownImageFailure>
+        do { result = .success(try await references.loadImage(path)) }
+        catch is CancellationError { return }
+        catch let failure as MarkdownImageFailure { result = .failure(failure) }
+        catch { result = .failure(.unreadable) }
+        guard !Task.isCancelled else { return }
+        loaded = (path, result)
+    }
 }
 
 /// Source and raw text is monospaced and exact: long tokens break at any character
@@ -175,15 +328,16 @@ private final class PreparedJSON: @unchecked Sendable {
 
     /// Pure: formats and colours off the main thread. Files cut at the preview
     /// limit cannot be valid JSON, so they are shown as written.
-    static func make(text: String, truncated: Bool, palette: ThemePalette) -> PreparedJSON {
+    static func make(text: String, truncated: Bool, palette: ThemePalette, typography: WonderTypography) -> PreparedJSON {
+        let font = typography.codeUIFont(.body, size: 15)
         func plain(_ notice: String) -> PreparedJSON {
-            PreparedJSON(shown: text, attributed: attributed(lines: nil, plain: text, palette: palette), notice: notice)
+            PreparedJSON(shown: text, attributed: attributed(lines: nil, plain: text, palette: palette, font: font), notice: notice)
         }
         if truncated { return plain("This file is too large to format here, so the first part is shown as written.") }
         switch JSONFormatter.format(text) {
         case .formatted(let pretty):
             return PreparedJSON(shown: pretty, attributed: attributed(lines: JSONFormatter.highlightedLines(pretty),
-                                                                      plain: pretty, palette: palette), notice: nil)
+                                                                      plain: pretty, palette: palette, font: font), notice: nil)
         case .invalid(let error):
             return plain("This file isn't valid JSON; showing it as-is. \(error.summary).")
         case .tooLarge:
@@ -192,8 +346,7 @@ private final class PreparedJSON: @unchecked Sendable {
     }
 
     /// Coloured when `lines` are given, otherwise `plain` in the theme's text colour.
-    private static func attributed(lines: [[SyntaxSpan]]?, plain: String, palette: ThemePalette) -> NSAttributedString {
-        let font = UIFontMetrics(forTextStyle: .body).scaledFont(for: .monospacedSystemFont(ofSize: 15, weight: .regular))
+    private static func attributed(lines: [[SyntaxSpan]]?, plain: String, palette: ThemePalette, font: UIFont) -> NSAttributedString {
         let base = UIColor(hex: palette.primaryText)
         guard let lines else {
             return NSAttributedString(string: plain, attributes: [.font: font, .foregroundColor: base])
@@ -213,12 +366,13 @@ private final class PreparedJSON: @unchecked Sendable {
 private struct ViewerNotice: View {
     let text: String
     let id: String
+    @Environment(\.wonderTheme) private var theme
     var body: some View {
         Text(text)
             .font(.footnote)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(Color(uiColor: .secondarySystemBackground))
+            .background(theme.surface)
             .accessibilityIdentifier(id)
     }
 }
@@ -232,10 +386,11 @@ struct JSONFileView: View {
     let truncated: Bool
     let onShownText: (String) -> Void
     @Environment(\.wonderTheme) private var theme
+    @Environment(\.wonderTypography) private var typography
     @State private var prepared: PreparedJSON?
 
     var body: some View {
-        let key = TextViewerCache.key(sha: sha, view: "json-formatted", theme: theme)
+        let key = TextViewerCache.key(sha: sha, view: "json-formatted", theme: theme, typography: typography)
         VStack(spacing: 0) {
             if let notice = prepared?.notice { ViewerNotice(text: notice, id: "workspace-json-notice") }
             if let prepared {
@@ -250,9 +405,9 @@ struct JSONFileView: View {
                 prepared = cached; onShownText(cached.shown); return
             }
             prepared = nil
-            let (source, truncated, palette) = (text, truncated, theme.palette)
+            let (source, truncated, palette, typography) = (text, truncated, theme.palette, typography)
             let result = await Task.detached(priority: .userInitiated) {
-                PreparedJSON.make(text: source, truncated: truncated, palette: palette)
+                PreparedJSON.make(text: source, truncated: truncated, palette: palette, typography: typography)
             }.value
             guard !Task.isCancelled else { return }
             TextViewerCache.shared.store(result, for: key, cost: source.utf8.count * 6)
@@ -278,6 +433,7 @@ private struct RecordText: View {
     let sha: String
     let line: Int
     @Environment(\.wonderTheme) private var theme
+    @Environment(\.wonderTypography) private var typography
     @State private var colored: (key: String, text: AttributedString)?
 
     var body: some View {
@@ -285,7 +441,7 @@ private struct RecordText: View {
         let shown = TextViewerCache.shared.value(PreparedRecordText.self, for: key)?.value
             ?? (colored?.key == key ? colored?.text : nil)
         Text(shown ?? AttributedString(text))
-            .font(.system(.footnote, design: .monospaced))
+            .font(typography.codeFont(.footnote))
             .foregroundStyle(theme.primaryText)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -310,6 +466,7 @@ struct JSONLFileView: View {
     let sha: String
     let truncated: Bool
     let onShownText: (String) -> Void
+    @Environment(\.wonderTypography) private var typography
     @State private var document: JSONLDocument?
     @State private var expanded: Set<Int> = []
 
@@ -354,7 +511,7 @@ struct JSONLFileView: View {
                             .rotationEffect(.degrees(isOpen ? 90 : 0)).foregroundStyle(.secondary)
                         Text("Line \(record.line)").font(.caption.weight(.semibold).monospacedDigit())
                         if !isOpen {
-                            Text(record.raw).font(.system(.caption, design: .monospaced))
+                            Text(record.raw).font(typography.codeFont(.caption))
                                 .foregroundStyle(.secondary).lineLimit(1)
                         }
                         Spacer(minLength: 0)
@@ -375,7 +532,7 @@ struct JSONLFileView: View {
                     Text(record.isOversize ? "Too large to format" : "Not valid JSON")
                         .font(.caption).foregroundStyle(.orange)
                 }
-                Text(record.raw).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
+                Text(record.raw).font(typography.codeFont(.footnote)).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if let error = record.error {
                     Text(error.summary).font(.caption).foregroundStyle(.secondary)

@@ -302,6 +302,7 @@ private struct ConversationPresentationReady: UIViewControllerRepresentable {
 }
 
 private struct ConversationScroller<Content: View>: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var model: ConnectionModel
     @ObservedObject var projects: ProjectLibrary
     let chat: ChatSummary
@@ -384,7 +385,7 @@ private struct ConversationScroller<Content: View>: View {
 
     var body: some View {
         Group {
-            List {
+            List { // theme-exempt: the conversation timeline over ConversationView's ThemeBackdrop
                 content
                     .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                     .listRowSeparator(.hidden)
@@ -468,7 +469,7 @@ private struct ConversationScroller<Content: View>: View {
                             .font(.system(size: 17, weight: .semibold))
                             .frame(width: 44, height: 44)
                             .foregroundStyle(.primary)
-                            .background(Color(uiColor: .secondarySystemBackground), in: Circle())
+                            .background(theme.surface, in: Circle())
                             .overlay(Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
@@ -564,10 +565,38 @@ private struct RunningElsewhereRefresh: ViewModifier {
                     await model.reloadNativeHistory(chat)
                     if changed {
                         await model.loadProjectSubagents(chat)
+                        await model.loadPullRequests(chat)
                         await model.projects.refresh() // Sidebar working state.
                     }
                 }
             }
+        }
+    }
+}
+
+/// The 5-hour and weekly percentages used; tapping shows usage details.
+private struct HeaderUsagePill: View {
+    let usage: HeaderUsage
+    let showDetails: () -> Void
+    var body: some View {
+        Button(action: showDetails) {
+            HStack(spacing: 5) {
+                if let used = usage.fiveHourUsed { part("5h", used) }
+                if let used = usage.weeklyUsed { part("wk", used) }
+            }
+            .font(.caption.weight(.medium)).monospacedDigit().lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 2).frame(minHeight: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(usage.accessibilityLabel)
+        .accessibilityHint("Shows usage details")
+        .accessibilityIdentifier("header-usage")
+    }
+    private func part(_ name: String, _ used: Int) -> some View {
+        HStack(spacing: 2) {
+            Text(name).foregroundStyle(.secondary)
+            Text("\(used)%").foregroundStyle(used >= 90 ? Color.orange : Color.primary)
         }
     }
 }
@@ -619,6 +648,7 @@ struct ConversationView: View {
     @State private var workspaceRequest: WorkspaceBrowserRequest?
     @State private var showingAttention = false
     @State private var editedFilesReview: EditedFilesReviewRequest?
+    @State private var showingPullRequests = false
     @State private var showingApps = false
     @State private var showingDetails = false
     @State private var showingUsage = false
@@ -1052,9 +1082,11 @@ struct ConversationView: View {
             }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .modifier(TimelineBottomFade(enabled: workspaceRequest == nil && editedFilesReview == nil && !showingAttention))
             if !readOnly {
+                // The composer and its pills sit on the chat's own background: no panel colour.
                 composer(latestEdits: latestEdits)
-                    .background(theme.chrome)
+                    .modifier(ChatBottomUnit())
             }
         }
         .background { ThemeBackdrop() }
@@ -1098,6 +1130,11 @@ struct ConversationView: View {
                 if readOnly { conversationHeader }
                 else { conversationTitleMenu }
             }
+            if !readOnly, chat.botId != nil || model.isProject(chat), let usage = model.headerUsage(chat) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    HeaderUsagePill(usage: usage) { showingUsage = true }
+                }
+            }
         }
         .overlay(alignment: .top) {
             if forking {
@@ -1118,10 +1155,10 @@ struct ConversationView: View {
             else { ConversationDetails(model: model, chat: chat) }
         }
         .fullScreenCover(isPresented: $showingComputer) {
-            NavigationStack { ComputerSessionView(model: model, chat: chat) }
+            NavigationStack { ComputerSessionView(model: model, chat: chat) } // theme-exempt: ComputerSessionView draws theme.computerBackground
         }
 
-        .sheet(isPresented: $showingApps) { NavigationStack { ConnectedAppsView(model: model, conversationId: chat.id).toolbar { Button("Done") { showingApps = false } } } }
+        .sheet(isPresented: $showingApps) { NavigationStack { ConnectedAppsView(model: model, conversationId: chat.id).toolbar { Button("Done") { showingApps = false } } } } // theme-exempt: ConnectedAppsView applies wonderGroupedStyle
         .sheet(isPresented: $showingUsage) { ProviderUsageView(model: model, family: model.agentFamily(chat)) }
         .modifier(PhotoAttachmentPicker(model: model, chat: chat, isPresented: $selectingPhoto, scope: importScope))
         .sheet(isPresented: $showingCamera, onDismiss: { cameraScope = nil }) {
@@ -1347,7 +1384,6 @@ struct ConversationView: View {
             }
             if chat.botId != nil || model.isProject(chat) {
                 Button("Connected apps", systemImage: "square.grid.2x2") { showingApps = true }
-                Button("\(model.agentFamily(chat).title) usage", systemImage: "chart.bar") { showingUsage = true }
             }
         } label: {
             HStack(spacing: 5) {
@@ -1372,7 +1408,7 @@ struct ConversationView: View {
     }
     @ViewBuilder private func sendSymbol(preparing: Bool) -> some View {
         if preparing {
-            ProgressView().tint(Color(uiColor: .systemBackground)).frame(width: 44, height: 44)
+            ProgressView().tint(theme.page).frame(width: 44, height: 44)
         } else {
             Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44)
         }
@@ -1425,6 +1461,11 @@ struct ConversationView: View {
                                     } else { editedFilesReview = nil }
                                 }
                             }
+                            if model.isProject(chat), let pulls = model.pullRequests[chat.id], pulls.showsPill {
+                                PullRequestDock(pullRequests: pulls, error: model.pullRequestErrors[chat.id],
+                                    refreshing: model.refreshingPullRequests.contains(chat.id),
+                                    isPresented: $showingPullRequests) { await model.loadPullRequests(chat, refresh: true) }
+                            }
                             AttentionDock(model: model, chat: chat, isPresented: showingAttention) {
                                 if !showingAttention { workspaceRequest = nil; editedFilesReview = nil }
                                 showingAttention.toggle()
@@ -1460,10 +1501,13 @@ struct ConversationView: View {
                                     available: model.macConnected == true && model.projectSubagentAvailability[chat.id] != false,
                                     freshIDs: model.projectSubagentFreshIDs[chat.id] ?? [],
                                     detail: model.projectSubagentErrors[chat.id],
+                                    stoppingIDs: model.stoppingProjectSubagents[chat.id] ?? [],
+                                    stopError: model.projectSubagentStopErrors[chat.id],
                                     hasOlder: model.hasOlderProjectSubagents(chat.id),
                                     loadingOlder: model.loadingOlderProjectSubagents.contains(chat.id),
                                     isPresented: $showingProjectSubagents,
-                                    loadOlder: { Task { await model.loadOlderProjectSubagents(chat) } }) { child in
+                                    loadOlder: { Task { await model.loadOlderProjectSubagents(chat) } },
+                                    stop: { child in Task { await model.stopProjectSubagent(parent: chat, child: child) } }) { child in
                                     showingProjectSubagents = false
                                     Task { @MainActor in
                                         await Task.yield()
@@ -1495,7 +1539,8 @@ struct ConversationView: View {
                             .padding(.horizontal, 12).padding(.top, 8)
                             .accessibilityIdentifier("composer-usage-limit")
                     }
-                    if model.isProject(chat), supportsModes, planModeOn {
+                    // Claude's Plan is a permission mode: the shield menu shows it.
+                    if model.isProject(chat), supportsModes, planModeOn, model.agentFamily(chat) != .claude {
                         HStack(spacing: 0) {
                             PlanModeChip(isDisabled: model.savingComposerSettings.contains(chat.id) || model.accessEnded) {
                                 Task { await setPlanMode(false, model: model, library: model.projects, chat: chat) }
@@ -1509,7 +1554,7 @@ struct ConversationView: View {
                             Menu {
                                 // The menu opens upward and lists bottom-up, so Plan mode
                                 // appears below the attachment actions.
-                                if model.isProject(chat), supportsModes {
+                                if model.isProject(chat), supportsModes, model.agentFamily(chat) != .claude {
                                     Toggle(isOn: Binding(get: { planModeOn }, set: { value in
                                         Task { await setPlanMode(value, model: model, library: model.projects, chat: chat) }
                                     })) { Label("Plan mode", systemImage: "list.bullet.clipboard") }
@@ -1555,8 +1600,8 @@ struct ConversationView: View {
                         DictationSendControls(controller: model.dictation, conversationID: chat.id) {
                         if chat.botId == nil || model.agentFamily(chat) == .claude {
                             Button { Task { await model.send(chat) } } label: { sendSymbol(preparing: preparingSend) }
-                            .foregroundStyle(Color(uiColor: .systemBackground))
-                            .background(model.canSend(chat) ? Color.primary : Color.secondary.opacity(0.35), in: Circle())
+                            .foregroundStyle(theme.page)
+                            .background(model.canSend(chat) ? theme.text : Color.secondary.opacity(0.35), in: Circle())
                             .accessibilityLabel(model.turnRunsElsewhere(chat.id) ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
                             .accessibilityValue(preparingSend ? "Preparing" : "")
                             .keyboardShortcut(.return, modifiers: .command)
@@ -1574,8 +1619,8 @@ struct ConversationView: View {
                         }
                         .menuOrder(.fixed)
                         .menuStyle(.borderlessButton)
-                        .foregroundStyle(Color(uiColor: .systemBackground))
-                        .background(model.canSend(chat) ? Color.primary : Color.secondary.opacity(0.35), in: Circle())
+                        .foregroundStyle(theme.page)
+                        .background(model.canSend(chat) ? theme.text : Color.secondary.opacity(0.35), in: Circle())
                         .accessibilityLabel(model.botWorking(chat.id) && chat.botId != nil ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
                         .accessibilityValue(preparingSend ? "Preparing" : "")
                         .accessibilityHint("Touch and hold for message actions.")
@@ -1744,6 +1789,7 @@ struct ComposerAttachmentStrip: View {
 }
 
 private struct ComposerAttachmentItem: View {
+    @Environment(\.wonderTheme) private var theme
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     let attachment: ComposerAttachment
@@ -1794,7 +1840,7 @@ private struct ComposerAttachmentItem: View {
         ZStack(alignment: .topTrailing) {
             Button { openPhoto(attachment) } label: {
                 ZStack {
-                    Color(uiColor: .secondarySystemBackground)
+                    theme.surface
                     if let thumbnail {
                         Image(uiImage: thumbnail)
                             .resizable()
@@ -1852,7 +1898,7 @@ private struct ComposerAttachmentItem: View {
             .padding(.leading, 10)
             .padding(.trailing, 24)
             .frame(minHeight: typeSize.isAccessibilitySize ? 64 : 44)
-            .background(Color(uiColor: .tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(theme.chip, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
@@ -1931,7 +1977,7 @@ struct BoundedComposerEditor: UIViewRepresentable {
         view.delegate = context.coordinator
         context.coordinator.view = view
         view.backgroundColor = .clear
-        view.textColor = .label
+        view.textColor = context.environment.wonderTheme.textUIColor
         view.accessibilityIdentifier = "message-draft"
         view.textContainerInset = UIEdgeInsets(top: 12, left: 0, bottom: 12, right: 0)
         view.isScrollEnabled = true
@@ -1948,8 +1994,10 @@ struct BoundedComposerEditor: UIViewRepresentable {
         if let conversationID { dictation?.attachEditor(context.coordinator, conversationID: conversationID) }
         view.canPasteImages = canPasteImages
         view.pasteImages = pasteImages
-        let font = UIFont.preferredFont(forTextStyle: .body)
+        let font = context.environment.wonderTypography.uiFont(.body)
         if view.font != font { view.font = font }
+        let textColor = context.environment.wonderTheme.textUIColor
+        if view.textColor != textColor { view.textColor = textColor }
         if view.isEditable != editable { view.isEditable = editable }
         if view.accessibilityLabel != label { view.accessibilityLabel = label }
         if view.markedTextRange != nil {
@@ -2243,6 +2291,7 @@ private struct MessageAttachmentStrip: View {
 }
 
 private struct MessageAttachmentItem: View {
+    @Environment(\.wonderTheme) private var theme
     let attachment: MessageAttachmentPresentation
     let imagePosition: Int?
     let imageCount: Int
@@ -2265,7 +2314,7 @@ private struct MessageAttachmentItem: View {
             if attachment.isImage {
                 Button { openImage(attachment) } label: {
                     ZStack {
-                        Color(uiColor: .secondarySystemBackground)
+                        theme.surface
                         if let thumbnail {
                             Image(uiImage: thumbnail)
                                 .resizable()
@@ -2301,7 +2350,7 @@ private struct MessageAttachmentItem: View {
                         .padding(.horizontal, 10)
                 }
                 .buttonStyle(.plain)
-                .background(Color(uiColor: .tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(theme.chip, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
@@ -2357,6 +2406,7 @@ struct AgentTasksFinishedRow: View {
 }
 
 struct MessageRow: View {
+    @Environment(\.wonderTypography) private var typography
     let row: ReadRow
     var isGroup = false
     var showIdentity = false
@@ -2454,11 +2504,12 @@ struct MessageRow: View {
                                 openDocument: openDocument
                             )
                         }
-                        if !row.text.isEmpty { BotMessageText(text: row.text) }
+                        if let block = row.commandBlock { CommandBlockCard(block: block) }
+                        else if !row.text.isEmpty { BotMessageText(text: row.text) }
                     }
                 }
                 else { BotMessageText(text: row.text) }
-            }.font(row.isCommentary ? .subheadline : .body)
+            }.font(typography.font(row.isCommentary ? .subheadline : .body))
                 .modifier(ChatBubbleSurface(isUser: row.isUser))
                 .contextMenu {
                     if !row.text.isEmpty {
@@ -2475,7 +2526,7 @@ struct MessageRow: View {
                     }
                 }
         }
-            .accessibilityElement(children: row.attachmentIds.isEmpty && !recoveredBeforeReconnect ? .combine : .contain)
+            .accessibilityElement(children: row.attachmentIds.isEmpty && !recoveredBeforeReconnect && row.commandBlock == nil ? .combine : .contain)
             .accessibilityLabel(row.isUser ? (row.source?.fromLabel.map { "\($0): " } ?? "") + ChatPlainText.of(row.text) : "\(row.author): \(ChatPlainText.of(row.text))")
             .accessibilityAction(named: "Copy message") { if !row.text.isEmpty { UIPasteboard.general.string = row.text } }
             .sheet(isPresented: $selectingText) { MessageTextSelectionSheet(text: row.text) }
@@ -2504,7 +2555,7 @@ struct MessageTextSelectionSheet: View {
                         .font(.footnote).foregroundStyle(.secondary).padding([.horizontal, .bottom])
                 }
             }
-            .background(theme.isDefault ? Color(uiColor: .systemBackground) : theme.background)
+            .wonderPage()
             .navigationTitle("Select text")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.accessibilityIdentifier("select-message-done") } }
@@ -2513,68 +2564,14 @@ struct MessageTextSelectionSheet: View {
     }
 }
 
-enum ChatBubblePalette: String, CaseIterable {
-    case standard, ocean, violet
-    static let storageKey = "chatBubblePalette"
-    var title: String {
-        switch self {
-        case .standard: "Standard"
-        case .ocean: "Ocean"
-        case .violet: "Violet"
-        }
-    }
-    func fill(isUser: Bool) -> Color {
-        switch self {
-        case .standard:
-            Color(uiColor: isUser ? .systemGray4 : .secondarySystemBackground)
-        case .ocean:
-            isUser ? Self.oceanUser : Self.oceanAgent
-        case .violet:
-            isUser ? Self.violetUser : Self.violetAgent
-        }
-    }
-    private static let oceanUser = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.10, green: 0.25, blue: 0.36, alpha: 1)
-            : UIColor(red: 0.84, green: 0.92, blue: 0.97, alpha: 1)
-    })
-    private static let oceanAgent = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.15, green: 0.20, blue: 0.24, alpha: 1)
-            : UIColor(red: 0.94, green: 0.97, blue: 0.99, alpha: 1)
-    })
-    private static let violetUser = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.29, green: 0.19, blue: 0.35, alpha: 1)
-            : UIColor(red: 0.93, green: 0.86, blue: 0.97, alpha: 1)
-    })
-    private static let violetAgent = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.22, green: 0.18, blue: 0.25, alpha: 1)
-            : UIColor(red: 0.97, green: 0.95, blue: 0.98, alpha: 1)
-    })
-}
-
-private struct ChatBubblePaletteKey: EnvironmentKey {
-    static let defaultValue: ChatBubblePalette = .standard
-}
-
-extension EnvironmentValues {
-    var chatBubblePalette: ChatBubblePalette {
-        get { self[ChatBubblePaletteKey.self] }
-        set { self[ChatBubblePaletteKey.self] = newValue }
-    }
-}
-
 struct ChatBubbleSurface: ViewModifier {
     var isUser = false
-    @Environment(\.chatBubblePalette) private var palette
     @Environment(\.wonderTheme) private var theme
     func body(content: Content) -> some View {
-        // The Wonder theme keeps the chosen bubble palette; other themes bring their own.
+        // The Wonder theme keeps the standard system look; other themes bring their own bubbles.
         content.padding(.horizontal, 14).padding(.vertical, 10)
             .foregroundStyle(theme.isDefault ? Color.primary : theme.primaryText)
-            .background(theme.isDefault ? palette.fill(isUser: isUser) : theme.bubble(isUser: isUser),
+            .background(theme.isDefault ? Color(uiColor: isUser ? .systemGray4 : .secondarySystemBackground) : theme.bubble(isUser: isUser),
                         in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
@@ -2582,6 +2579,7 @@ struct ChatBubbleSurface: ViewModifier {
 /// A plan the agent proposed, shown as the answer to review rather than as
 /// work. The newest finished plan in a plan-mode thread can be implemented.
 struct PlanCard: View {
+    @Environment(\.wonderTheme) private var theme
     let text: String?
     let isRunning: Bool
     let canImplement: Bool
@@ -2608,7 +2606,7 @@ struct PlanCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plan-card")
     }
@@ -2630,6 +2628,10 @@ struct PlanCard: View {
 
 struct BotMessageText: View {
     let text: String
+    @Environment(\.wonderTypography) private var typography
+    /// A Markdown file's Preview keeps relative links (`docs/USAGE.md`); its
+    /// viewer resolves them inside the project. Messages keep web links only.
+    var keepsRelativeLinks = false
     /// A block with its inline Markdown prepared.
     fileprivate enum Block {
         case text(AttributedString, style: TextStyle)
@@ -2653,31 +2655,39 @@ struct BotMessageText: View {
         }()
     }
     private var parsedBlocks: [Block] {
-        let key = text as NSString
+        // Inline code carries the chosen code font, so the cache is per code font.
+        let codeFont = typography.code == .system ? nil : typography.codeFont(.body)
+        let key = (typography.code.rawValue + "|" + (keepsRelativeLinks ? "relative:" : "") + text) as NSString
         if let hit = Parsed.cache.object(forKey: key) { return hit.blocks }
+        let keepsRelativeLinks = keepsRelativeLinks
+        let inline = { (source: String) in Self.inline(source, codeFont: codeFont, keepsRelativeLinks: keepsRelativeLinks) }
         let parsed = MarkdownBlock.parse(text).map { block -> Block in
             switch block {
-            case .paragraph(let text): .text(Self.inline(text), style: .body)
-            case .heading(let level, let text): .text(Self.inline(text), style: level == 1 ? .heading1 : level == 2 ? .heading2 : .heading3)
-            case .listItem(let marker, let depth, let text): .item(marker: marker, depth: depth, Self.inline(text))
-            case .quote(let text): .quote(Self.inline(text))
+            case .paragraph(let text): .text(inline(text), style: .body)
+            case .heading(let level, let text): .text(inline(text), style: level == 1 ? .heading1 : level == 2 ? .heading2 : .heading3)
+            case .listItem(let marker, let depth, let text): .item(marker: marker, depth: depth, inline(text))
+            case .quote(let text): .quote(inline(text))
             case .code(let language, let text): .code(language: language, text: text)
-            case .table(let header, let rows): .table(header: header.map(Self.inline), rows: rows.map { $0.map(Self.inline) })
+            case .table(let header, let rows): .table(header: header.map(inline), rows: rows.map { $0.map(inline) })
             case .rule: .rule
             }
         }
         Parsed.cache.setObject(Parsed(parsed), forKey: key, cost: key.length)
         return parsed
     }
-    private static func inline(_ source: String) -> AttributedString {
+    private static func inline(_ source: String, codeFont: Font?, keepsRelativeLinks: Bool) -> AttributedString {
         var value = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)
         // Model text cannot turn a chat link into a local-file or app-control link.
         for run in Array(value.runs) {
-            if let url = run.link, !["https", "http"].contains(url.scheme?.lowercased() ?? "") {
+            if let url = run.link, !["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+               !(keepsRelativeLinks && url.scheme == nil) {
                 value[run.range].link = nil
             } else if run.link != nil {
                 // Wonder's tint is neutral, so a link is marked by its underline.
                 value[run.range].underlineStyle = .single
+            }
+            if let codeFont, run.inlinePresentationIntent?.contains(.code) == true {
+                value[run.range].font = codeFont
             }
         }
         return value
@@ -2713,7 +2723,7 @@ struct BotMessageText: View {
                                 GridRow { ForEach(Array(row.enumerated()), id: \.offset) { Text($0.element) } }
                             }
                         }
-                        .font(.subheadline).textSelection(.enabled).padding(.vertical, 4)
+                        .font(typography.font(.subheadline)).textSelection(.enabled).padding(.vertical, 4)
                     }
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(([header] + rows).map { $0.map { String($0.characters) }.joined(separator: ", ") }.joined(separator: "\n"))
@@ -2725,10 +2735,10 @@ struct BotMessageText: View {
     }
     private func font(_ style: TextStyle) -> Font {
         switch style {
-        case .body: .body
-        case .heading1: .title3.weight(.semibold)
-        case .heading2: .headline
-        case .heading3: .subheadline.weight(.semibold)
+        case .body: typography.font(.body)
+        case .heading1: typography.font(.title3).weight(.semibold)
+        case .heading2: typography.font(.headline)
+        case .heading3: typography.font(.subheadline).weight(.semibold)
         }
     }
 }
@@ -3740,7 +3750,7 @@ private struct WorkspaceFileLoadOverlay: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
+        .background(theme.page)
         .transition(.opacity)
     }
 }
@@ -3753,6 +3763,7 @@ struct WorkspaceSheet<Content: View>: View {
     var body: some View {
         NavigationStack {
             content
+                .wonderPage()
                 .navigationTitle("Files").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
@@ -3765,6 +3776,7 @@ struct WorkspaceSheet<Content: View>: View {
 
 struct WorkspaceBrowser: View {
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.wonderTheme) private var theme
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
@@ -3805,6 +3817,14 @@ struct WorkspaceBrowser: View {
     @State private var returnEntryPath: String?
     @State private var selection: WorkspacePreviewSelection?
     @State private var documentSelection: WorkspacePreviewSelection?
+    /// Images a Markdown Preview showed from this root, bounded and dropped on
+    /// memory pressure or when the preview closes.
+    @State private var markdownImages: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 24
+        cache.totalCostLimit = 48 * 1024 * 1024
+        return cache
+    }()
     @State private var previewRevision: WorkspaceRevisionState?
     @State private var mediaSelection: WorkspaceMediaSelection?
     @State private var attachmentPhoto: ConversationFile?
@@ -3953,6 +3973,7 @@ struct WorkspaceBrowser: View {
                 fileBrowser
             }
         }
+            .foregroundStyle(theme.text)
             .task(id: model.assignmentScope) {
                 let scope = model.assignmentScope
                 // Switching between the list and an inline preview can remount
@@ -4074,6 +4095,8 @@ struct WorkspaceBrowser: View {
                     .modifier(PreviewWindowControlsLayout())
                     previewContent
                 }
+                .foregroundStyle(theme.text)
+                .wonderPage()
             }
             .confirmationDialog("Choose diff", isPresented: Binding(get: { diffChoice != nil }, set: { if !$0 { diffChoice = nil } })) {
                 if let change = diffChoice {
@@ -4124,7 +4147,7 @@ struct WorkspaceBrowser: View {
             }
             .padding(.horizontal, 12)
             .modifier(PreviewWindowControlsLayout())
-            .background(Color(uiColor: .secondarySystemBackground))
+            .background(theme.surface)
             // The full-screen cover owns the preview while expanded. PDFKit,
             // WebKit and large text/diff layouts must not stay mounted twice.
             if !expandedPreview { previewContent }
@@ -4200,7 +4223,7 @@ struct WorkspaceBrowser: View {
                     guard let context else { throw FileFailure.integrity }
                     try stagePreviewAnnotation(annotation, context: context, replacing: replacement?.id)
                 }, refresh: revisionRefresh(for: item), onRevision: revisionNotice(for: item),
-                                         onClose: closePreview)
+                                         onClose: closePreview, markdownReferences: markdownReferences(for: item))
             }
         } else if let item = mediaSelection {
             WorkspaceMediaPreview(selection: item, onClose: closePreview)
@@ -4240,6 +4263,7 @@ struct WorkspaceBrowser: View {
         attachmentPhoto = nil; attachmentSelection = nil; attachmentData = nil; attachmentDigest = nil
         diffRequestID = UUID(); selectedDiff = nil; diffText = nil
         addedAnnotationID = nil
+        markdownImages.removeAllObjects()
     }
 
     private func stagePreviewAnnotation(_ annotation: ArtifactAnnotation, context: ArtifactPreviewContext,
@@ -4318,6 +4342,7 @@ struct WorkspaceBrowser: View {
                 }
                 if let failure { Section { FailureDetails(message: failure) } }
             }
+            .wonderGroupedStyle(overBackdrop: true)
             .accessibilityIdentifier("workspace-file-list")
             .onAppear {
                 if let path = returnEntryPath { proxy.scrollTo("workspace-row:" + path, anchor: .center) }
@@ -4356,6 +4381,7 @@ struct WorkspaceBrowser: View {
                     .accessibilityIdentifier("workspace-modified-entry:\(change.path)")
                 }
             }
+            .wonderGroupedStyle(overBackdrop: true)
             .accessibilityIdentifier("workspace-modified-list")
         } else {
             ProgressView("Checking changes…").frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -4662,6 +4688,54 @@ struct WorkspaceBrowser: View {
         if entry.isDirectory { returnEntryPath = nil; navigate(to: entry.path) }
         else { returnEntryPath = entry.path; startFileLoad(entry) }
     }
+    /// A Markdown file in a project root shows its local images and follows its
+    /// relative links inside the same root.
+    private func markdownReferences(for item: WorkspacePreviewSelection) -> MarkdownReferenceContext? {
+        guard TextViewerKind.detect(name: item.name, mimeType: item.mimeType) == .markdown,
+              let rootID = item.rootID, let path = item.path, !path.isEmpty,
+              let root = selectedRoot, root.id == rootID, item.scope == model.assignmentScope else { return nil }
+        let images = markdownImages
+        return MarkdownReferenceContext(documentPath: path, loadImage: { target in
+            let key = "\(model.assignmentScope):\(chat.id):\(root.id):\(target)"
+            if let hit = images.object(forKey: key as NSString) { return hit }
+            guard let entry = try await workspaceEntry(target, in: root), !entry.isDirectory else { throw MarkdownImageFailure.missing }
+            guard let mime = entry.mimeType?.lowercased(), PhotoViewerRouting.isImage(mimeType: mime) else { throw MarkdownImageFailure.notImage }
+            guard let size = entry.byteSize, size <= 8 * 1024 * 1024 else { throw MarkdownImageFailure.tooLarge }
+            let data = try await model.downloadWorkspaceFile(chat, root: root, entry: entry, countsAsOpen: false)
+            guard data.count <= 8 * 1024 * 1024 else { throw MarkdownImageFailure.tooLarge }
+            do { try ConversationFile.validateContent(data, mime: mime) } catch { throw MarkdownImageFailure.unreadable }
+            guard let image = await Task.detached(priority: .utility, operation: { ToolPreviewImage.decode(data) }).value else {
+                throw MarkdownImageFailure.unreadable
+            }
+            images.setObject(image, forKey: key as NSString, cost: image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0)
+            return image
+        }, open: { target in
+            do {
+                guard let entry = try await workspaceEntry(target, in: root), !entry.isDirectory else {
+                    return "\(target) isn't in this project."
+                }
+                open(entry)
+                return nil
+            } catch {
+                return "Can't reach your Mac to open \(target)."
+            }
+        })
+    }
+    /// Finds a root-relative path in its folder's listing, which also supplies
+    /// the size and type the download is checked against.
+    private func workspaceEntry(_ path: String, in root: WorkspaceRoot) async throws -> WorkspaceEntry? {
+        let (folder, name) = MarkdownReference.split(path)
+        var offset = 0
+        for _ in 0..<10 {
+            let page: WorkspaceDirectoryPage
+            do { page = try await model.loadWorkspaceDirectory(chat, root: root, path: folder, showHidden: true, offset: offset) }
+            catch PairingFailure.response(404) { return nil }
+            if let entry = page.entries.first(where: { $0.name == name }) { return entry }
+            guard let next = page.nextOffset, next > offset else { return nil }
+            offset = next
+        }
+        return nil
+    }
     private func openRootFile(_ root: WorkspaceRoot) {
         let name = URL(fileURLWithPath: root.path).lastPathComponent
         let mime: String
@@ -4886,7 +4960,7 @@ private struct WorkspaceMediaPreview: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        NavigationStack { // theme-exempt: shown inside WorkspaceBrowser over its host's page
             Group {
                 if let failure = selection.failure {
                     ContentUnavailableView("Playback unavailable", systemImage: "play.slash",
@@ -4925,6 +4999,7 @@ private struct WorkspaceRootMenuButton: View {
 }
 
 private struct WorkspaceImagePreview: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
     let item: WorkspacePreviewSelection
@@ -4965,7 +5040,7 @@ private struct WorkspaceImagePreview: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
                         .foregroundStyle(.primary)
-                        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                        .background(theme.surface, in: RoundedRectangle(cornerRadius: 10))
                         .padding(.horizontal, 16).padding(.top, 8)
                         .accessibilityIdentifier("workspace-image-refresh-error")
                 }
@@ -5041,6 +5116,7 @@ private struct WorkspaceRegionEditor: View {
                     ContentUnavailableView("Preview unavailable", systemImage: "doc", description: Text("This file could not be prepared for annotation."))
                 }
             }
+            .wonderPage()
             .navigationTitle(name).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -5159,7 +5235,7 @@ private struct WorkspaceRegionCanvas: View {
         GeometryReader { geometry in
             let fit = fittedRect(in: geometry.size)
             ZStack(alignment: .topLeading) {
-                Color(uiColor: .secondarySystemBackground)
+                theme.surface
                 Image(uiImage: image)
                     .resizable()
                     .frame(width: fit.width, height: fit.height)
@@ -5245,13 +5321,16 @@ private struct SelectablePreviewText: UIViewRepresentable {
         view.isSelectable = true
         view.isScrollEnabled = true
         view.backgroundColor = .clear
-        view.textColor = .label
+        let textColor = context.environment.wonderTheme.textUIColor
+        view.textColor = textColor
+        context.coordinator.appliedTextColor = textColor
         view.tintColor = .tintColor
         view.textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
         view.textContainer.lineFragmentPadding = 0
         view.adjustsFontForContentSizeCategory = true
-        view.font = UIFontMetrics(forTextStyle: .body).scaledFont(
-            for: .monospacedSystemFont(ofSize: 15, weight: .regular))
+        let font = context.environment.wonderTypography.codeUIFont(.body, size: 15)
+        view.font = font
+        context.coordinator.appliedFont = font
         view.text = text
         SourceTextLayout.apply(to: view.textStorage)
         if let selectedRange { view.selectedRange = selectedRange }
@@ -5263,7 +5342,7 @@ private struct SelectablePreviewText: UIViewRepresentable {
         }
         context.coordinator.appliedRange = selectedRange
         context.coordinator.appliedRevision = revision
-        if let colors { colors.apply(to: view.textStorage, base: .label); context.coordinator.appliedColors = colors.key }
+        if let colors { colors.apply(to: view.textStorage, base: textColor); context.coordinator.appliedColors = colors.key }
         context.coordinator.onComment = onComment
         context.coordinator.onSelecting = onSelecting
         context.coordinator.isUpdating = false
@@ -5290,8 +5369,20 @@ private struct SelectablePreviewText: UIViewRepresentable {
             view.contentOffset = CGPoint(x: offset.x, y: min(offset.y, maxY))
             context.coordinator.appliedColors = nil
         }
+        let font = context.environment.wonderTypography.codeUIFont(.body, size: 15)
+        if context.coordinator.appliedFont != font {
+            context.coordinator.appliedFont = font
+            view.font = font
+        }
+        // A theme change recolours the text; syntax colours are applied again on top.
+        let textColor = context.environment.wonderTheme.textUIColor
+        if context.coordinator.appliedTextColor != textColor {
+            context.coordinator.appliedTextColor = textColor
+            view.textColor = textColor
+            context.coordinator.appliedColors = nil
+        }
         if let colors, context.coordinator.appliedColors != colors.key {
-            colors.apply(to: view.textStorage, base: .label)
+            colors.apply(to: view.textStorage, base: textColor)
             context.coordinator.appliedColors = colors.key
         }
         // The reader's own selection stays until a comment pins or clears one.
@@ -5329,6 +5420,8 @@ private struct SelectablePreviewText: UIViewRepresentable {
         var onSelecting: ((Bool) -> Void)?
         var appliedRevision: String?
         var appliedColors: String?
+        var appliedTextColor: UIColor?
+        var appliedFont: UIFont?
         var isUpdating = false
         private var selecting = false
         init(selectedRange: Binding<NSRange?>, selectionResetID: UUID) {
@@ -5411,6 +5504,7 @@ private struct WorkspaceDocumentPreview: View {
     let refresh: (() async throws -> Data)?
     let onRevision: ((String) async -> Void)?
     let onClose: (() -> Void)?
+    let markdownReferences: MarkdownReferenceContext?
     @ObservedObject var revision: WorkspaceRevisionState
     @ObservedObject var draft: WorkspaceTextAnnotationDraft
     init(name: String, mimeType: String, revision: WorkspaceRevisionState,
@@ -5422,8 +5516,10 @@ private struct WorkspaceDocumentPreview: View {
          onAnnotation: ((ArtifactAnnotation) throws -> Void)? = nil,
          refresh: (() async throws -> Data)? = nil,
          onRevision: ((String) async -> Void)? = nil,
-         onClose: (() -> Void)? = nil) {
+         onClose: (() -> Void)? = nil,
+         markdownReferences: MarkdownReferenceContext? = nil) {
         self.name = name; self.mimeType = mimeType; self.pdfSession = pdfSession
+        self.markdownReferences = markdownReferences
         self.htmlSession = htmlSession
         self.revision = revision
         self.draft = draft
@@ -5437,6 +5533,7 @@ private struct WorkspaceDocumentPreview: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.wonderTheme) private var theme
+    @Environment(\.wonderTypography) private var typography
     @State private var pdfComment: PDFTextComment?
     @State private var showingHTMLSource = false
     @State private var viewerMode: TextViewerMode
@@ -5444,7 +5541,7 @@ private struct WorkspaceDocumentPreview: View {
     /// What Copy puts on the pasteboard while a formatted JSON view is shown.
     @State private var shownCopyText: String?
     var body: some View {
-        NavigationStack {
+        NavigationStack { // theme-exempt: shown inside WorkspaceBrowser over its host's page
             Group {
                 if mimeType == "application/pdf" {
                     PDFPreview(data: revision.currentData, revision: revision.currentSha256,
@@ -5476,9 +5573,9 @@ private struct WorkspaceDocumentPreview: View {
                     // Raw source: a text view that breaks long tokens by character, never with a hyphen.
                     ReadOnlyAttributedTextView(
                         text: NSAttributedString(string: text, attributes: [
-                            .font: UIFontMetrics(forTextStyle: .body).scaledFont(for: .monospacedSystemFont(ofSize: 15, weight: .regular)),
-                            .foregroundColor: UIColor.label]),
-                        identity: revision.currentSha256)
+                            .font: typography.codeUIFont(.body, size: 15),
+                            .foregroundColor: theme.textUIColor]),
+                        identity: "\(revision.currentSha256)|\(theme.cacheKey)|\(typography.cacheKey)")
                 }
                 else {
                     ContentUnavailableView("Preview unavailable", systemImage: "doc",
@@ -5510,7 +5607,7 @@ private struct WorkspaceDocumentPreview: View {
                         .font(.footnote)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(Color(uiColor: .secondarySystemBackground))
+                        .background(theme.surface)
                         .accessibilityIdentifier("workspace-document-truncated")
                 }
                 if mimeType == "application/pdf", annotationContext != nil,
@@ -5627,7 +5724,7 @@ private struct WorkspaceDocumentPreview: View {
     }
     @ViewBuilder private func renderedViewer(_ kind: TextViewerKind, text: String) -> some View {
         switch kind {
-        case .markdown: MarkdownFileView(text: text, sha: revision.currentSha256)
+        case .markdown: MarkdownFileView(text: text, sha: revision.currentSha256, references: markdownReferences)
         case .json:
             JSONFileView(text: text, sha: revision.currentSha256, truncated: revision.previewTruncated) { shownCopyText = $0 }
         case .jsonl:
@@ -5750,6 +5847,7 @@ private struct ArtifactNoteEditor: View {
                 }
                 if let failure { Text(failure).foregroundStyle(.red).accessibilityIdentifier("annotation-edit-error") }
             }
+            .wonderGroupedStyle()
             .navigationTitle("Comment")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -5934,6 +6032,7 @@ struct PreparedDiff: Sendable {
 
 /// Files with collapsible diffs in one lazy stack.
 private struct DiffDocument: View {
+    @Environment(\.wonderTheme) private var theme
     struct Section: Identifiable {
         let id: String
         let title: String
@@ -5978,7 +6077,7 @@ private struct DiffDocument: View {
             .font(.caption.monospacedDigit())
             .padding(.horizontal, 16).frame(minHeight: 44)
             .frame(maxWidth: min(width, 900), alignment: .leading)
-            .background(Color(uiColor: .systemBackground))
+            .background(theme.page)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -6034,6 +6133,7 @@ private struct DiffLineView: View {
 }
 
 private struct SplitDiffRowView: View {
+    @Environment(\.wonderTheme) private var theme
     let row: SplitDiffRow
     let digits: Int
     let column: CGFloat
@@ -6048,7 +6148,7 @@ private struct SplitDiffRowView: View {
                 side(row.left, number: row.left?.oldNumber)
                 side(row.right, number: row.right?.newNumber)
             }
-            .background(Color(uiColor: .separator))
+            .background(theme.rule)
         }
     }
     private func side(_ line: DiffLine?, number: Int?) -> some View {
@@ -6058,7 +6158,7 @@ private struct SplitDiffRowView: View {
         }
         .frame(width: column - 0.5, alignment: .leading)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(line.map { DiffBackground.color($0.kind, scheme) } ?? Color(uiColor: .secondarySystemBackground))
+        .background(line.map { DiffBackground.color($0.kind, scheme) } ?? theme.surface)
     }
 }
 
@@ -6079,13 +6179,14 @@ private struct DiffText: View {
     let highlighted: AttributedString?
     /// Read so a theme change re-resolves the syntax colours baked into `highlighted`.
     @Environment(\.wonderTheme) private var theme
+    @Environment(\.wonderTypography) private var typography
     private var plain: AttributedString {
         let sign: String = switch line.kind { case .added: "+"; case .removed: "−"; default: " " }
         return AttributedString((line.kind == .hunk || line.kind == .note ? "" : sign + " ") + line.text)
     }
     var body: some View {
         Text(highlighted ?? plain)
-            .font(.system(.footnote, design: .monospaced))
+            .font(typography.codeFont(.footnote))
             .foregroundStyle(line.kind == .hunk || line.kind == .note ? Color.secondary : Color.primary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 1).padding(.trailing, 8)
@@ -6116,7 +6217,7 @@ struct WorkspaceDiffPreview: View {
     @AppStorage("wonder.diff.layout") private var layout = DiffLayout.automatic
     @State private var prepared: PreparedDiff?
     var body: some View {
-        NavigationStack {
+        NavigationStack { // theme-exempt: shown inside WorkspaceBrowser over its host's page
             Group {
                 if diff.isEmpty {
                     Text("No textual diff is available for this change.").foregroundStyle(.secondary)
@@ -6194,7 +6295,7 @@ struct PreviewDeck: View {
                         }
                         .disabled(!PhotoViewerRouting.isImage(file) && file.state != "available")
                         .accessibilityIdentifier("file-preview:\(file.id)")
-                    }.overlay { if listedFiles.isEmpty { ContentUnavailableView(attachmentIDs == nil ? "No files yet" : "Attachments unavailable", systemImage: "doc", description: attachmentIDs == nil ? nil : Text("These attachments could not be found on your Mac.")) } }
+                    }.wonderGroupedStyle().overlay { if listedFiles.isEmpty { ContentUnavailableView(attachmentIDs == nil ? "No files yet" : "Attachments unavailable", systemImage: "doc", description: attachmentIDs == nil ? nil : Text("These attachments could not be found on your Mac.")) } }
                 }
             }
             .safeAreaInset(edge: .bottom) { if let failure { VStack { FailureDetails(message: failure); Button("Try again") { if let selected { open(selected) } else { refresh() } } }.padding() } }
@@ -6327,12 +6428,12 @@ private final class PDFPreviewView: PDFView {
     private lazy var failureLabel: UILabel = {
         let label = UILabel()
         label.text = "Can't open this PDF. Try again."
-        label.textColor = .secondaryLabel
+        label.textColor = .secondaryLabel // theme-exempt: a notice on PDFKit's own page
         label.font = .preferredFont(forTextStyle: .body)
         label.adjustsFontForContentSizeCategory = true
         label.textAlignment = .center
         label.numberOfLines = 0
-        label.backgroundColor = .systemBackground
+        label.backgroundColor = .systemBackground // theme-exempt: a notice on PDFKit's own page
         label.translatesAutoresizingMaskIntoConstraints = false
         label.accessibilityIdentifier = "workspace-pdf-error"
         return label
@@ -6485,6 +6586,7 @@ private struct WorkspacePDFCommentSheet: View {
                     if let failure { Text(failure).font(.footnote).foregroundStyle(.red) }
                 }
             }
+            .wonderGroupedStyle()
             .navigationTitle("Comment").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -6527,7 +6629,7 @@ private struct WorkspaceAnnotationNoteField: UIViewRepresentable {
         view.delegate = context.coordinator
         view.font = .preferredFont(forTextStyle: .body)
         view.adjustsFontForContentSizeCategory = true
-        view.textColor = .label
+        view.textColor = context.environment.wonderTheme.textUIColor
         view.tintColor = .tintColor
         view.backgroundColor = .clear
         view.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
@@ -6549,6 +6651,8 @@ private struct WorkspaceAnnotationNoteField: UIViewRepresentable {
 
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.draft = draft
+        let textColor = context.environment.wonderTheme.textUIColor
+        if view.textColor != textColor { view.textColor = textColor }
         guard draft.activeNoteFieldID == context.coordinator.id,
               view.markedTextRange == nil,
               view.text != draft.note else { return }
@@ -6827,7 +6931,7 @@ struct QueueDock: View {
                         if !model.isSubagent(chat), let botID = chat.botId {
                             ComposerSettings(model: model, chat: chat, botID: botID, queuedMessage: item)
                         }
-                    }.navigationTitle("Queued message")
+                    }.wonderGroupedStyle().navigationTitle("Queued message")
                         .toolbar { Button("Done") { settingsMessage = nil } }
                 }
             }
@@ -6879,7 +6983,7 @@ struct QueueView: View {
                 if let failure { FailureDetails(message: failure); Button("Refresh queue") { refresh() } }
                 if busy { ProgressView("Updating queue…") }
                 if !busy && (model.queues[chat.id] ?? []).isEmpty { Text("No messages waiting.").foregroundStyle(.secondary) }
-            }.disabled(busy || model.accessEnded || model.previewMode)
+            }.wonderGroupedStyle().disabled(busy || model.accessEnded || model.previewMode)
             .navigationTitle("Queue")
             .toolbar { Button("Done") { dismiss() } }
             .sheet(item: $editing) { QueueEditor(model: model, chat: chat, original: $0) }
@@ -6914,7 +7018,7 @@ struct QueueEditor: View {
                     .onChange(of: text) { _, value in model.saveAnswerDraft(["body": value], id: "queue-" + original.id) }
                 if let failure { FailureDetails(message: failure); Text("Your attempted edit remains saved here. Close and reopen the editor to review the latest queue revision.").font(.caption) }
                 if busy { ProgressView("Saving edit…") }
-            }.disabled(busy)
+            }.wonderGroupedStyle().disabled(busy)
             .navigationTitle("Edit queued message")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
@@ -7122,7 +7226,7 @@ struct ConversationChoice: View {
                 Spacer(minLength: 0)
             }.padding(.horizontal, 10).padding(.vertical, 8)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .background(selected == true ? theme.accent.opacity(0.10) : Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+                .background(selected == true ? theme.accent.opacity(0.10) : theme.chip, in: RoundedRectangle(cornerRadius: 8))
                 .contentShape(Rectangle())
         }.buttonStyle(.plain).accessibilityAddTraits(selected == true ? [.isSelected] : [])
     }
@@ -7340,6 +7444,8 @@ private struct FileChangeDisclosureLabel: View {
 private struct SubagentActivityLabel: View {
     let title: String
     let statusLabel: String
+    /// A Claude task shows its status glyph; Codex helpers keep the group icon.
+    var symbol = "person.2"
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
@@ -7352,7 +7458,7 @@ private struct SubagentActivityLabel: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                Label(title, systemImage: "person.2")
+                Label(title, systemImage: symbol)
                     .font(.subheadline.weight(.medium)).lineLimit(1)
                 Spacer()
                 Text(statusLabel).font(.caption).foregroundStyle(.secondary)
@@ -7423,7 +7529,8 @@ struct ActivityItemView: View {
                         openProjectSubagent(projectSubagent)
                     } label: {
                         SubagentActivityLabel(title: projectSubagent.title,
-                                              statusLabel: projectSubagent.statusLabel(available: available))
+                                              statusLabel: projectSubagent.statusLabel(available: available),
+                                              symbol: projectSubagent.usesAvatar ? "person.2" : projectSubagent.statusSymbol)
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("project-subagent-row:" + projectSubagent.threadId)
@@ -7564,17 +7671,20 @@ private struct ToolTextView: UIViewRepresentable {
         let view=UITextView(usingTextLayoutManager: false)
         view.isEditable=false; view.isSelectable=true; view.backgroundColor = .clear
         view.textContainerInset=UIEdgeInsets(top:10,left:10,bottom:10,right:10)
-        view.font = .monospacedSystemFont(ofSize:16,weight:.regular)
+        view.font = context.environment.wonderTypography.codeUIFont(.callout, size: 16)
         view.adjustsFontForContentSizeCategory=true
         view.isAccessibilityElement=accessible
         view.accessibilityElementsHidden = !accessible
         return view
     }
     func updateUIView(_ view: UITextView, context: Context) {
-        guard context.coordinator.text != text || context.coordinator.diff != diff else { return }
-        context.coordinator.text=text; context.coordinator.diff=diff
+        let color = context.environment.wonderTheme.textUIColor
+        let font = context.environment.wonderTypography.codeUIFont(.callout, size: 16)
+        guard context.coordinator.text != text || context.coordinator.diff != diff || context.coordinator.color != color
+                || context.coordinator.font != font else { return }
+        context.coordinator.text=text; context.coordinator.diff=diff; context.coordinator.color=color; context.coordinator.font=font
         if accessible { view.accessibilityLabel = text }
-        let output=NSMutableAttributedString(string:text,attributes:[.font:UIFontMetrics(forTextStyle:.callout).scaledFont(for:.monospacedSystemFont(ofSize:16,weight:.regular)),.foregroundColor:UIColor.label])
+        let output=NSMutableAttributedString(string:text,attributes:[.font:font,.foregroundColor:color])
         if diff {
             let source=text as NSString
             source.enumerateSubstrings(in:NSRange(location:0,length:source.length),options:.byLines) { line, range, _, _ in
@@ -7586,7 +7696,7 @@ private struct ToolTextView: UIViewRepresentable {
         view.attributedText=output
     }
     func makeCoordinator() -> Coordinator { Coordinator() }
-    final class Coordinator { var text: String?; var diff=false }
+    final class Coordinator { var text: String?; var diff=false; var color: UIColor?; var font: UIFont? }
 }
 
 
@@ -7651,8 +7761,9 @@ struct ToolFilePreview: View {
 struct ToolImageCanvas: View {
     let image: UIImage?
     let failed: Bool
+    @Environment(\.wonderTheme) private var theme
     var body: some View {
-        Color(uiColor: .secondarySystemBackground)
+        theme.surface
             .frame(maxWidth: 360).frame(height: 220)
             .overlay {
                 if let image { Image(uiImage: image).resizable().scaledToFit() }
@@ -8029,6 +8140,7 @@ struct ComposerSettings: View {
                     if let failure { FailureDetails("Settings not saved", message: failure) }
                     if saving { ProgressView("Saving…") }
                 }
+                .wonderGroupedStyle()
                 .navigationTitle("Model").navigationBarTitleDisplayMode(.inline)
                 .toolbar { Button("Done") { showingModel = false } }
             }.presentationDetents([.medium, .large], selection: $modelDetent).presentationDragIndicator(.visible)

@@ -67,6 +67,10 @@ pub(super) struct ConversationTurn {
     /// Running in a desktop or terminal app on the Mac; Wonder can't steer it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(super) running_elsewhere: bool,
+    /// Every file the turn changed, from the provider's whole-turn diff
+    /// (`paths`, `diffs`, `additions`, `deletions`, as on a `fileChange`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) edited_files: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,6 +171,7 @@ pub(super) fn ensure_conversation_turn(
                 updated_at: updated_at.to_owned(),
                 items: Vec::new(),
                 running_elsewhere: false,
+                edited_files: None,
             },
         );
     }
@@ -322,6 +327,7 @@ pub(super) fn known_thread_item_type(item_type: &str) -> bool {
             | "reasoning"
             | "commandExecution"
             | "fileChange"
+            | "turnDiff"
             | "mcpToolCall"
             | "dynamicToolCall"
             | "subAgentActivity"
@@ -588,7 +594,9 @@ pub(super) fn sanitize_typed_item(
             object.remove("commandActions");
             object.remove("processId");
         }
-        if item_type == "fileChange" && object.get("changes").is_some() {
+        if matches!(item_type.as_str(), "fileChange" | "turnDiff")
+            && object.get("changes").is_some()
+        {
             let mut paths = Vec::new();
             let mut diffs = Vec::new();
             let mut additions = 0usize;
@@ -1149,6 +1157,19 @@ pub(super) fn conversation_thread_projection_with_items(
         .collect::<Vec<_>>();
     result.sort_by(|left, right| left.created_at.cmp(&right.created_at));
     for turn in &mut result {
+        if let Some(index) = turn
+            .items
+            .iter()
+            .position(|item| item.item_type == "turnDiff")
+        {
+            let mut diff = turn.items.remove(index).payload;
+            if let Some(object) = diff.as_object_mut() {
+                object.retain(|key, _| {
+                    matches!(key.as_str(), "paths" | "diffs" | "additions" | "deletions")
+                });
+            }
+            turn.edited_files = Some(diff);
+        }
         turn.items
             .sort_by(|left, right| left.created_at.cmp(&right.created_at));
         // Individual commands can fail, finish, or retain stale running state
@@ -2070,6 +2091,7 @@ mod commentary_tests {
                 updated_at: "1000".into(),
                 items: vec![],
                 running_elsewhere: false,
+                edited_files: None,
             };
             if lifecycle_first {
                 upsert_conversation_thread_item_at(&mut turn, lifecycle(), 1);
@@ -2105,6 +2127,7 @@ mod commentary_tests {
             updated_at: "2000".into(),
             items: vec![],
             running_elsewhere: false,
+            edited_files: None,
         };
         upsert_conversation_thread_item_at(&mut turn, started, 1);
         upsert_conversation_thread_item_at(&mut turn, hydrated, 3);
@@ -2132,6 +2155,7 @@ mod commentary_tests {
             updated_at: "1000".into(),
             items: vec![],
             running_elsewhere: false,
+            edited_files: None,
         };
         upsert_conversation_thread_item_at(&mut turn, running, 1);
         upsert_conversation_thread_item_at(&mut turn, hydrated, 3);

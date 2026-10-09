@@ -124,7 +124,8 @@ def main():
         push(args.host, ROOT, remote_dir)
         mark(args.host, remote_dir)
 
-    steps = [f"export PATH={REMOTE_PATH}", f"cd {remote_dir}", "export BUNDLE_PATH=.local/fastlane-bundle"]
+    steps = [f"export PATH={REMOTE_PATH}", f"cd {remote_dir}", "export BUNDLE_PATH=.local/fastlane-bundle",
+             "{ [ ! -x scripts/disk-guard ] || scripts/disk-guard --keep . ; }"]
     if not args.ref:
         head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         commit = f"{head}+working-tree"

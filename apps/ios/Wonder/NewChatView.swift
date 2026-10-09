@@ -160,6 +160,7 @@ enum NewChatDraftStore {
 /// The normal cold-launch surface: a draft chat addressed to a Mac and one of
 /// its projects. Choosing either never starts work.
 struct NewChatView: View {
+    @Environment(\.wonderTheme) private var theme
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
     @State private var hostID: String?
@@ -203,6 +204,10 @@ struct NewChatView: View {
                 noConnection
             }
         }
+        // Drawn like a conversation: the theme's backdrop and navigation bar.
+        .background { ThemeBackdrop() }
+        .toolbarBackground(theme.chrome, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .navigationTitle("New chat")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: restore)
@@ -677,7 +682,7 @@ private struct NewChatContent: View {
             }
         }
         .fullScreenCover(isPresented: $showingComputer) {
-            NavigationStack { ComputerSessionView(model: model, chat: hostViewChat) }
+            NavigationStack { ComputerSessionView(model: model, chat: hostViewChat) } // theme-exempt: ComputerSessionView draws theme.computerBackground
         }
         .onChange(of: projectFilesChat?.id) { _, _ in showingFiles = false }
         .onChange(of: showingComputer) { _, showing in
@@ -792,7 +797,7 @@ private struct NewChatContent: View {
                             editingAnnotation = draft.annotations?.first(where: { $0.id == item.id })
                         })
                 }
-                if projects.supportsModes, draft.planMode == true {
+                if projects.supportsModes, draft.planMode == true, draft.family != .claude {
                     HStack(spacing: 0) {
                         PlanModeChip(isDisabled: sending || draft.isSubmitted) { draft.planMode = nil }
                         Spacer(minLength: 0)
@@ -820,7 +825,8 @@ private struct NewChatContent: View {
                 HStack(alignment: .center, spacing: 4) {
                     Menu {
                         // Listed bottom-up when the menu opens above the composer.
-                        if projects.supportsModes {
+                        // Claude's Plan lives in the access menu with its other modes.
+                        if projects.supportsModes, draft.family != .claude {
                             Toggle(isOn: Binding(get: { draft.planMode == true }, set: { draft.planMode = $0 ? true : nil })) {
                                 Label("Plan mode", systemImage: "list.bullet.clipboard")
                             }.accessibilityIdentifier("new-chat-plan-mode")
@@ -848,8 +854,8 @@ private struct NewChatContent: View {
                         if sending { ProgressView().frame(width: 44, height: 44) }
                         else { Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44) }
                     }
-                    .foregroundStyle(Color(uiColor: .systemBackground))
-                    .background(canSend ? Color.primary : Color.secondary.opacity(0.35), in: Circle())
+                    .foregroundStyle(theme.page)
+                    .background(canSend ? theme.text : Color.secondary.opacity(0.35), in: Circle())
                     .disabled(!canSend)
                     .keyboardShortcut(.return, modifiers: .command)
                     .accessibilityLabel(draft.isSubmitted ? "Send again" : "Send")
@@ -860,7 +866,7 @@ private struct NewChatContent: View {
             }
             .padding(5)
             .foregroundStyle(.primary)
-            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 28))
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: 28))
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("new-chat-composer")
         }
@@ -1102,6 +1108,7 @@ private struct NewChatContent: View {
                     }
                 }
             }
+            .wonderGroupedStyle()
             .foregroundStyle(.primary)
             .disabled(sending || draft.isSubmitted)
             .pinnedSheetHeader("Model") { showingModel = false }
@@ -1368,6 +1375,7 @@ private struct NewChatAnnotationEditor: View {
                 }
                 if let failure { Text(failure).foregroundStyle(.red) }
             }
+            .wonderGroupedStyle()
             .navigationTitle("Comment")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

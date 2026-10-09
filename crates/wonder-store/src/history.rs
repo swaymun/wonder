@@ -19,6 +19,20 @@ impl Store {
             .fetch_optional(&self.pool).await
     }
 
+    /// The newest saved agent replies and tool events of a conversation that
+    /// contain every needle, newest first, for finding links such as pull
+    /// requests without projecting the whole history.
+    pub async fn conversation_text_containing(
+        &self,
+        conversation: &str,
+        needles: [&str; 2],
+        limit: u32,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT body FROM (SELECT payload_json AS body, sort_ms, sequence FROM history_entries WHERE conversation_id = ?1 AND source = 'event' AND instr(payload_json, ?2) > 0 AND instr(payload_json, ?3) > 0 UNION ALL SELECT m.text AS body, h.sort_ms, h.sequence FROM assistant_messages m JOIN history_entries h ON h.source = 'assistant' AND h.source_id = m.id WHERE m.conversation_id = ?1 AND instr(m.text, ?2) > 0 AND instr(m.text, ?3) > 0) ORDER BY sort_ms DESC, sequence DESC LIMIT ?4")
+            .bind(conversation).bind(needles[0]).bind(needles[1]).bind(i64::from(limit))
+            .fetch_all(&self.pool).await
+    }
+
     pub async fn needs_file_change_repair(
         &self,
         conversation: &str,
@@ -790,5 +804,62 @@ mod tests {
             .update_history_refresh("chat", "new", "completed", 62001, None)
             .await
             .unwrap());
+    }
+}
+
+#[cfg(test)]
+mod text_search_tests {
+    use super::*;
+
+    // Pull request links are found in saved tool events and agent replies of
+    // this conversation only, newest first.
+    #[tokio::test]
+    async fn conversation_text_containing_reads_events_and_replies_newest_first() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        for (conversation, source, id, sort, body) in [
+            (
+                "chat",
+                "event",
+                "e1",
+                1,
+                r#"{"output":"https://github.com/o/r/pull/1"}"#,
+            ),
+            ("chat", "event", "e2", 3, r#"{"output":"no link here"}"#),
+            (
+                "other",
+                "event",
+                "e3",
+                4,
+                r#"{"output":"https://github.com/o/r/pull/9"}"#,
+            ),
+        ] {
+            sqlx::query("INSERT INTO history_entries(conversation_id,source,source_id,sort_ms,payload_json) VALUES (?,?,?,?,?)")
+                .bind(conversation).bind(source).bind(id).bind(sort).bind(body)
+                .execute(&store.pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO assistant_messages(id,conversation_id,codex_thread_id,codex_turn_id,item_id,text,state,created_at,updated_at) VALUES ('a1','chat','t','turn','i','Opened https://github.com/o/r/pull/2','completed','x','x')")
+            .execute(&store.pool).await.unwrap();
+        // Saving a reply indexes it in history; place it between the events.
+        sqlx::query("UPDATE history_entries SET sort_ms = 2 WHERE source = 'assistant' AND source_id = 'a1'")
+            .execute(&store.pool).await.unwrap();
+        let texts = store
+            .conversation_text_containing("chat", ["github.com/", "/pull/"], 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            texts,
+            [
+                "Opened https://github.com/o/r/pull/2",
+                r#"{"output":"https://github.com/o/r/pull/1"}"#
+            ]
+        );
+        assert_eq!(
+            store
+                .conversation_text_containing("chat", ["github.com/", "/pull/"], 1)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

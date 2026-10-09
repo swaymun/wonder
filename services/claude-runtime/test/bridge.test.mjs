@@ -167,6 +167,8 @@ test("duplicate delivery executes once and commits the terminal receipt before p
   const restarted = await new Sessions(join(f.root, "sessions")).initialize();
   assert.equal(restarted.get(f.thread.id).turns[0].status, "completed");
   assert.equal(f.capturedOptions[0].model, "claude-haiku-4-5-20251001");
+  // Bots have no per-task Stop, so an interrupt keeps its default (stop everything).
+  assert.ok(!("perTaskStopAffordance" in f.capturedOptions[0]));
 });
 
 // Contract: only actual agent tasks reach the existing agent roster/activity
