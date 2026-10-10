@@ -574,33 +574,6 @@ private struct RunningElsewhereRefresh: ViewModifier {
     }
 }
 
-/// The 5-hour and weekly percentages used; tapping shows usage details.
-private struct HeaderUsagePill: View {
-    let usage: HeaderUsage
-    let showDetails: () -> Void
-    var body: some View {
-        Button(action: showDetails) {
-            HStack(spacing: 5) {
-                if let used = usage.fiveHourUsed { part("5h", used) }
-                if let used = usage.weeklyUsed { part("wk", used) }
-            }
-            .font(.caption.weight(.medium)).monospacedDigit().lineLimit(1)
-            .fixedSize()
-            .padding(.horizontal, 2).frame(minHeight: 44).contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(usage.accessibilityLabel)
-        .accessibilityHint("Shows usage details")
-        .accessibilityIdentifier("header-usage")
-    }
-    private func part(_ name: String, _ used: Int) -> some View {
-        HStack(spacing: 2) {
-            Text(name).foregroundStyle(.secondary)
-            Text("\(used)%").foregroundStyle(used >= 90 ? Color.orange : Color.primary)
-        }
-    }
-}
-
 private struct ComposerUsageMonitor: ViewModifier {
     @ObservedObject var model: ConnectionModel
     let chat: ChatSummary
@@ -649,6 +622,7 @@ struct ConversationView: View {
     @State private var showingAttention = false
     @State private var editedFilesReview: EditedFilesReviewRequest?
     @State private var showingPullRequests = false
+    @State private var showingChanges = false
     @State private var showingApps = false
     @State private var showingDetails = false
     @State private var showingUsage = false
@@ -963,7 +937,13 @@ struct ConversationView: View {
         let answeredQuestions = answeredQuestionsOutsideTimeline(timeline)
         let disclosureRevision = disclosureEntries
         let implementablePlanID = planToImplement(in: timeline)
-        let latestEdits = prepared.conversationEdits ?? editedFilesReview?.summary
+        // Files skips the timeline projection, but the composer row keeps the
+        // Edited files pill: read it from the model's cached timeline.
+        let conversationEdits = workspaceRequest == nil ? prepared.conversationEdits
+            : model.timeline(for: chat, focusedRowID: model.searchFocus?.conversationID == chat.id ? model.searchFocus?.rowID : nil).conversationEdits
+        let latestEdits = conversationEdits ?? editedFilesReview?.summary
+        let latestResponseEdits = workspaceRequest == nil ? prepared.latestResponseEdits
+            : model.timeline(for: chat, focusedRowID: model.searchFocus?.conversationID == chat.id ? model.searchFocus?.rowID : nil).latestResponseEdits
         #if WONDER_DIAGNOSTICS
         if workspaceRequest == nil {
             let _ = DiagnosticJournal.shared.record(DiagnosticEvent(operation: "timeline.prepare", durationMs: (ProcessInfo.processInfo.systemUptime - timelineStart) * 1000, count: UInt64(timeline.count)))
@@ -1085,7 +1065,7 @@ struct ConversationView: View {
             .modifier(TimelineBottomFade(enabled: workspaceRequest == nil && editedFilesReview == nil && !showingAttention))
             if !readOnly {
                 // The composer and its pills sit on the chat's own background: no panel colour.
-                composer(latestEdits: latestEdits)
+                composer(latestEdits: latestEdits, latestResponseEdits: latestResponseEdits)
                     .modifier(ChatBottomUnit())
             }
         }
@@ -1094,6 +1074,11 @@ struct ConversationView: View {
         .navigationTitle(chat.title)
         .toolbarBackground(theme.chrome, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
+        // A finished turn may have edited, committed or switched branches.
+        .onChange(of: model.botWorking(chat.id)) { wasWorking, working in
+            guard wasWorking, !working, model.isProject(chat) else { return }
+            Task { await model.loadGitSummary(chat) }
+        }
         .onChange(of: disclosureRevision, initial: true) { _, _ in
             guard workspaceRequest == nil else { return }
             activityDisclosure = ActivityDisclosurePolicy.reconciled(
@@ -1129,11 +1114,6 @@ struct ConversationView: View {
             ToolbarItem(placement: .principal) {
                 if readOnly { conversationHeader }
                 else { conversationTitleMenu }
-            }
-            if !readOnly, chat.botId != nil || model.isProject(chat), let usage = model.headerUsage(chat) {
-                ToolbarItem(placement: .topBarTrailing) {
-                    HeaderUsagePill(usage: usage) { showingUsage = true }
-                }
             }
         }
         .overlay(alignment: .top) {
@@ -1385,6 +1365,20 @@ struct ConversationView: View {
             if chat.botId != nil || model.isProject(chat) {
                 Button("Connected apps", systemImage: "square.grid.2x2") { showingApps = true }
             }
+            // Usage lives here rather than beside New chat in the header.
+            if !readOnly, chat.botId != nil || model.isProject(chat), let usage = model.headerUsage(chat) {
+                Section("\(model.agentFamily(chat).title) usage") {
+                    ForEach(usage.windows) { window in
+                        Button(window.title, systemImage: window.used >= 90 ? "gauge.with.dots.needle.100percent" : "gauge.with.dots.needle.33percent") {
+                            showingUsage = true
+                        }
+                        // iOS 27 drops a label override inside a menu Section, so the
+                        // title itself reads well: "Weekly · 34% used".
+                        .accessibilityHint("Shows usage details")
+                        .accessibilityIdentifier("title-menu-usage:" + window.id)
+                    }
+                }
+            }
         } label: {
             HStack(spacing: 5) {
                 conversationHeader
@@ -1413,7 +1407,7 @@ struct ConversationView: View {
             Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold)).frame(width: 44, height: 44)
         }
     }
-    private func composer(latestEdits: ResponseEditedFiles?) -> some View {
+    private func composer(latestEdits: ResponseEditedFiles?, latestResponseEdits: ResponseEditedFiles?) -> some View {
             let attachments = composerAttachments
             return VStack(alignment: .leading, spacing: 8) {
                 DictationControls(controller: model.dictation, model: model, chat: chat)
@@ -1429,6 +1423,14 @@ struct ConversationView: View {
                     }
                     if !model.turnRunsElsewhere(chat.id), model.nativeOpenElsewhere.contains(chat.id) {
                         OpenOnMacNotice(waiting: model.snapshots[chat.id]?.hasUnassignedPreTurnWork == true)
+                    } else if !model.turnRunsElsewhere(chat.id), model.nativeTasksOnMac.contains(chat.id) {
+                        // Wonder can't join Claude's process on the Mac and two processes
+                        // would split the chat, so sending ends that process and its tasks.
+                        Label("Sending stops the tasks Claude is running on your Mac in this chat.",
+                              systemImage: "desktopcomputer")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("tasks-on-mac")
                     }
                     if model.turnRunsElsewhere(chat.id) {
                         Label("Working in \(model.agentFamily(chat).title) on your Mac. A message you send now waits until it finishes.",
@@ -1460,6 +1462,16 @@ struct ConversationView: View {
                                         editedFilesReview = EditedFilesReviewRequest(summary: latestEdits, selectedPath: nil, scope: model.assignmentScope)
                                     } else { editedFilesReview = nil }
                                 }
+                            }
+                            if model.isProject(chat), let branch = model.gitSummaries[chat.id], branch.showsChip {
+                                BranchDock(summary: branch, isPresented: showingChanges) { showingChanges = true }
+                                    .sheet(isPresented: $showingChanges) {
+                                        BranchChangesSheet(summary: model.gitSummaries[chat.id] ?? branch,
+                                            latestEdits: latestResponseEdits,
+                                            loadChanges: { [model, chat] scope in try await model.loadGitChanges(chat, scope: scope) },
+                                            loadDiff: { [model, chat] file, scope in try await model.loadGitChangeDiff(chat, file: file, scope: scope) },
+                                            refreshSummary: { [model, chat] in await model.loadGitSummary(chat) })
+                                    }
                             }
                             if model.isProject(chat), let pulls = model.pullRequests[chat.id], pulls.showsPill {
                                 PullRequestDock(pullRequests: pulls, error: model.pullRequestErrors[chat.id],
@@ -1598,11 +1610,11 @@ struct ConversationView: View {
                                 .disabled(model.stopping.contains(chat.id) || model.accessEnded || model.previewMode)
                         }
                         DictationSendControls(controller: model.dictation, conversationID: chat.id) {
-                        if chat.botId == nil || model.agentFamily(chat) == .claude {
+                        if !model.offersGuide(chat) {
                             Button { Task { await model.send(chat) } } label: { sendSymbol(preparing: preparingSend) }
                             .foregroundStyle(theme.page)
                             .background(model.canSend(chat) ? theme.text : Color.secondary.opacity(0.35), in: Circle())
-                            .accessibilityLabel(model.turnRunsElsewhere(chat.id) ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
+                            .accessibilityLabel(model.sendWaits(chat) ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
                             .accessibilityValue(preparingSend ? "Preparing" : "")
                             .keyboardShortcut(.return, modifiers: .command)
                             .disabled(!model.canSend(chat))
@@ -1621,7 +1633,7 @@ struct ConversationView: View {
                         .menuStyle(.borderlessButton)
                         .foregroundStyle(theme.page)
                         .background(model.canSend(chat) ? theme.text : Color.secondary.opacity(0.35), in: Circle())
-                        .accessibilityLabel(model.botWorking(chat.id) && chat.botId != nil ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
+                        .accessibilityLabel(model.sendWaits(chat) ? "Queue message" : "Send message").accessibilityIdentifier("send-message")
                         .accessibilityValue(preparingSend ? "Preparing" : "")
                         .accessibilityHint("Touch and hold for message actions.")
                         .keyboardShortcut(.return, modifiers: .command)
@@ -2511,6 +2523,8 @@ struct MessageRow: View {
                 else { BotMessageText(text: row.text) }
             }.font(typography.font(row.isCommentary ? .subheadline : .body))
                 .modifier(ChatBubbleSurface(isUser: row.isUser))
+                // Lift only the bubble; without this the preview is the row's wider frame.
+                .contentShape(.contextMenuPreview, ChatBubbleSurface.shape)
                 .contextMenu {
                     if !row.text.isEmpty {
                         // The row holds the whole message, so Copy never depends on
@@ -2565,6 +2579,7 @@ struct MessageTextSelectionSheet: View {
 }
 
 struct ChatBubbleSurface: ViewModifier {
+    static let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
     var isUser = false
     @Environment(\.wonderTheme) private var theme
     func body(content: Content) -> some View {
@@ -2572,7 +2587,7 @@ struct ChatBubbleSurface: ViewModifier {
         content.padding(.horizontal, 14).padding(.vertical, 10)
             .foregroundStyle(theme.isDefault ? Color.primary : theme.primaryText)
             .background(theme.isDefault ? Color(uiColor: isUser ? .systemGray4 : .secondarySystemBackground) : theme.bubble(isUser: isUser),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        in: Self.shape)
     }
 }
 
@@ -2599,7 +2614,7 @@ struct PlanCard: View {
                         Text("Implement plan")
                     }.frame(maxWidth: .infinity).frame(minHeight: 32)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.wonderProminent)
                 .disabled(isImplementing)
                 .accessibilityIdentifier("implement-plan")
             }
@@ -2937,7 +2952,7 @@ struct AttentionRow: View {
                 }
                 HStack {
                 Button("Reply") { Task { await model.resolve(request, decision: "respond", answers: answers) } }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.wonderProminent)
                     .disabled(model.previewMode || (request.params.questions ?? []).contains { $0.answers(from: answers[$0.id] ?? "").isEmpty })
                 if request.params.isBlocking == false {
                     Button("Skip") { Task { await model.resolve(request, decision: "skip", answers: [:]) } }.buttonStyle(.bordered).disabled(model.previewMode)
@@ -5048,7 +5063,7 @@ private struct WorkspaceImagePreview: View {
             .overlay(alignment: .bottom) {
                 VStack(spacing: 4) {
                     Button("Comment on an area", systemImage: "text.bubble") { showingRegion = true }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.wonderProminent)
                         .disabled(annotationUnavailableReason != nil)
                         .accessibilityHint(annotationUnavailableReason ?? "")
                         .accessibilityIdentifier("annotation-image-open")
@@ -5167,7 +5182,7 @@ private struct WorkspaceRegionEditor: View {
                             .accessibilityIdentifier("annotation-region-wait")
                     }
                     Button("Add to message") { addAnnotation() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.wonderProminent)
                         .disabled(annotationUnavailableReason != nil || loading || region == nil || note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || note.utf8.count > 4096)
                         .accessibilityIdentifier("annotation-region-add")
                 }
@@ -5911,7 +5926,7 @@ enum DiffColors {
 
 /// Every saved edit in the conversation. The composer's edits pill closes it;
 /// each file expands in place to its diff, unified or side by side.
-private struct ResponseEditedFilesReview: View {
+struct ResponseEditedFilesReview: View {
     let summary: ResponseEditedFiles
     @State private var expanded: Set<String>
     /// Keyed by path; a file's diff is prepared again when later edits add patches.
@@ -5966,7 +5981,7 @@ enum DiffLayout: String {
     }
 }
 
-private struct DiffLayoutPicker: View {
+struct DiffLayoutPicker: View {
     @Binding var layout: DiffLayout
     let split: Bool
     var body: some View {
@@ -6031,7 +6046,7 @@ struct PreparedDiff: Sendable {
 }
 
 /// Files with collapsible diffs in one lazy stack.
-private struct DiffDocument: View {
+struct DiffDocument: View {
     @Environment(\.wonderTheme) private var theme
     struct Section: Identifiable {
         let id: String
@@ -6848,6 +6863,7 @@ struct QueueDock: View {
     private func attachments(for item: QueuedMessage) -> [MessageAttachmentPresentation] {
         item.attachmentIds.map { MessageAttachmentPresentation(id: $0, file: attachmentMetadata[$0]) }
     }
+    private var unlisted: [(id: String, body: String, attachmentIds: [String])] { model.unlistedQueuedSends(chat.id) }
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
@@ -6867,12 +6883,26 @@ struct QueueDock: View {
                                 model.saveAnswerDraft([:], id: "queue-" + item.id)
                                 editing = nil; focused = false
                             }
-                        }.buttonStyle(.borderedProminent)
+                        }.buttonStyle(.wonderProminent)
                             .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || text.utf8.count > 65536 || model.previewMode || model.accessEnded)
                     }.frame(minHeight: 44)
                 }.disabled(busy != nil)
-            } else if !(model.queues[chat.id] ?? []).isEmpty {
+            } else if !(model.queues[chat.id] ?? []).isEmpty || !unlisted.isEmpty {
                 VStack(alignment: .trailing, spacing: 8) {
+                    ForEach(unlisted, id: \.id) { item in
+                        // Decided as queued when sent; its editable row follows from the Mac.
+                        VStack(alignment: .trailing, spacing: 4) {
+                            Text("Queued").font(.caption).foregroundStyle(.secondary)
+                            HStack(alignment: .bottom) {
+                                Spacer(minLength: 40)
+                                Text(item.body).lineLimit(4).padding(12)
+                                    .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                                    .accessibilityElement(children: .combine)
+                                    .accessibilityIdentifier("queued-message:\(item.id)")
+                                    .accessibilityLabel("Queued message: " + item.body)
+                            }
+                        }
+                    }
                     ForEach(model.queues[chat.id] ?? []) { item in
                         let itemAttachments = attachments(for: item)
                         VStack(alignment: .trailing, spacing: 4) {
@@ -6894,8 +6924,9 @@ struct QueueDock: View {
                                     Text(item.body).lineLimit(4)
                                 }.padding(12)
                                     .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                                    .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10))
                                     .contextMenu {
-                                        if model.agentFamily(chat) == .codex, let turn = model.activeTurn(chat.id) {
+                                        if model.agentFamily(chat) == .codex, !model.turnRunsElsewhere(chat.id), let turn = model.activeTurn(chat.id) {
                                             Button("Guide instead", systemImage: "arrow.turn.up.right") {
                                                 steering = item.id
                                                 perform(item) { try await model.changeQueue(chat, item: item, turn: turn) }
@@ -6977,7 +7008,7 @@ struct QueueView: View {
                             Button("Move up") { move(item) }.buttonStyle(.borderless).disabled(model.queues[chat.id]?.first?.id == item.id)
                             Button("Cancel", role: .destructive) { perform { try await model.changeQueue(chat, item: item, cancel: true) } }.buttonStyle(.borderless)
                         }.frame(minHeight: 44)
-                        if model.agentFamily(chat) == .codex, let turn = model.activeTurn(chat.id) { Button("Use as Guide") { perform { try await model.changeQueue(chat, item: item, turn: turn) } }.buttonStyle(.borderless).frame(minHeight: 44) }
+                        if model.agentFamily(chat) == .codex, !model.turnRunsElsewhere(chat.id), let turn = model.activeTurn(chat.id) { Button("Use as Guide") { perform { try await model.changeQueue(chat, item: item, turn: turn) } }.buttonStyle(.borderless).frame(minHeight: 44) }
                     }
                 }
                 if let failure { FailureDetails(message: failure); Button("Refresh queue") { refresh() } }
@@ -7102,7 +7133,7 @@ struct AsyncQuestionRow: View {
                     }
                     HStack {
                         Button("Reply") { Task { await model.replyAsync(question, chat: chat, answers: question.questions.indices.map { answers[String($0)] ?? "" }, skip: false) } }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.wonderProminent)
                             .disabled(model.previewMode || answerValidation != nil || model.savedAsyncReplies[question.id] != nil || model.retryableAsyncReplies.contains(question.id))
                         Button("Skip") { Task { await model.replyAsync(question, chat: chat, answers: [], skip: true) } }.buttonStyle(.bordered).disabled(model.previewMode || model.savedAsyncReplies[question.id] != nil || model.retryableAsyncReplies.contains(question.id))
                     }.controlSize(.regular).frame(minHeight: 44)
@@ -7461,7 +7492,10 @@ private struct SubagentActivityLabel: View {
                 Label(title, systemImage: symbol)
                     .font(.subheadline.weight(.medium)).lineLimit(1)
                 Spacer()
-                Text(statusLabel).font(.caption).foregroundStyle(.secondary)
+                // A Claude task's glyph already shows its status.
+                if symbol == "person.2" {
+                    Text(statusLabel).font(.caption).foregroundStyle(.secondary)
+                }
             }
             Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
         }

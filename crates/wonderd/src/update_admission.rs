@@ -208,8 +208,7 @@ fn admits_work(method: &Method, path: &str) -> bool {
     // checks this lease inside create_thread after exact receipt replay.
     (path.starts_with("/api/v1/conversations/")
         && (path.ends_with("/messages") || path.ends_with("/steer")))
-        || ((path.starts_with("/api/v1/channels/") || path.starts_with("/api/v1/group-chats/"))
-            && path.ends_with("/messages"))
+        || (path.starts_with("/api/v1/group-chats/") && path.ends_with("/messages"))
         || (path.starts_with("/api/v1/messages/") && path.ends_with("/retry"))
         || (path.starts_with("/api/v1/automations/") && path.ends_with("/run"))
         || (path.starts_with("/api/v1/groups/") && path.ends_with("/assignments"))
@@ -222,8 +221,6 @@ fn admits_work(method: &Method, path: &str) -> bool {
                 | "/api/v1/group-chats/propose"
         )
         || (path.starts_with("/api/v1/group-chats/") && path.ends_with("/retry"))
-        || (path.starts_with("/api/v1/bots/")
-            && (path.ends_with("/teaching/sessions") || path.ends_with("/fixture-tests")))
         || path == "/api/v1/computer/sessions"
         || (path.starts_with("/api/v1/computer/sessions/")
             && (path.ends_with("/admission")
@@ -258,7 +255,6 @@ mod tests {
     fn gate_covers_all_work_admissions() {
         for path in [
             "/api/v1/conversations/id/messages",
-            "/api/v1/channels/id/messages",
             "/api/v1/group-chats/id/messages",
             "/api/v1/messages/id/retry",
             "/api/v1/automations/id/run",
@@ -266,7 +262,6 @@ mod tests {
             "/api/v1/assignments/id/integrate",
             "/api/v1/bots/new",
             "/api/v1/group-chats/id/retry",
-            "/api/v1/bots/id/teaching/sessions",
             "/api/v1/computer/sessions",
             "/api/v1/computer/sessions/id/admission",
             "/api/v1/computer/sessions/id/control/acquire",

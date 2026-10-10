@@ -13,17 +13,26 @@ private let maxRequestBytes = 64 * 1024
 private let stdinReadSize = 4 * 1024
 private let controlLeaseLifetime: TimeInterval = 10
 
-// Local Stop is exposed in Wonder's existing menu bar menu. The helper owns
-// the active lease and held inputs; the notification can only revoke control.
+// Local Stop is exposed in Wonder's Settings (Access → Remote control). The
+// helper owns the active lease and held inputs; the notification can only
+// revoke control. Lease start/end is announced so Settings can enable Stop.
 private final class ControlSurfaceController: NSObject, @unchecked Sendable {
     private var stopHandler: (() -> Void)?
 
     override init() {
         super.init()
-        DistributedNotificationCenter.default().addObserver(
+        let center = DistributedNotificationCenter.default()
+        center.addObserver(
             self,
             selector: #selector(stopControl),
-            name: Notification.Name("com.wonder.stop-control"),
+            name: ControlSessionSignal.stop,
+            object: nil,
+            suspensionBehavior: .deliverImmediately
+        )
+        center.addObserver(
+            self,
+            selector: #selector(reportState),
+            name: ControlSessionSignal.stateRequest,
             object: nil,
             suspensionBehavior: .deliverImmediately
         )
@@ -34,15 +43,35 @@ private final class ControlSurfaceController: NSObject, @unchecked Sendable {
     @MainActor
     func show(stopHandler: @escaping () -> Void) {
         self.stopHandler = stopHandler
+        post(active: true)
     }
 
     @MainActor
     func hide() {
+        guard stopHandler != nil else { return }
         stopHandler = nil
+        post(active: false)
+    }
+
+    @MainActor
+    private func post(active: Bool) {
+        DistributedNotificationCenter.default().postNotificationName(
+            ControlSessionSignal.state,
+            object: active ? ControlSessionSignal.active : ControlSessionSignal.inactive,
+            userInfo: nil,
+            deliverImmediately: true
+        )
     }
 
     @objc private func stopControl() {
         Task { @MainActor [weak self] in self?.stopHandler?() }
+    }
+
+    @objc private func reportState() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.post(active: self.stopHandler != nil)
+        }
     }
 }
 
@@ -145,6 +174,8 @@ struct WonderComputerUse {
                 _ = captureSession.shutdown(reason: "stdin_closed")
                 releaseHeldInput()
                 _ = controlGate.releaseAll()
+                // Tell Settings the session ended so its Stop button disables.
+                MainActor.assumeIsolated { controlSurface.hide() }
                 exit(0)
             }
         }
@@ -498,6 +529,7 @@ struct WonderComputerUse {
                 _ = captureSession.shutdown()
                 releaseHeldInput()
                 _ = controlGate.releaseAll()
+                controlSurface.hide()
                 publisher.close(reason: "helper_stopped")
                 writeResponse(id: id, result: ["stopped": true])
                 exit(0)

@@ -363,6 +363,8 @@ enum DiagnosticSubagentFixture {
     }
     static var approvalDefaults: UserDefaults { UserDefaults(suiteName: "wonder.diagnostics.approval-settings")! }
     static var chatLayoutFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-chat-layout") }
+    /// Adds long-titled working and unread threads to the Project's sidebar list.
+    static var sidebarStatusFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-sidebar-status") }
     static var projectArchiveFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-archive") }
     static var projectSpeedFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-speed") }
     static var defaultModelsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-default-models") }
@@ -386,7 +388,20 @@ enum DiagnosticSubagentFixture {
     static var projectActionsFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-actions") }
     /// Adds a Claude Code `!` command and slash command to the project-actions thread.
     static var projectCommandBlocksFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-project-command-blocks") }
-    static var projectReadFixture: Bool { projectActionsFixture || projectArchiveFixture || projectSpeedFixture || defaultModelsFixture || projectSubagentFixture || projectFilesSendFixture || projectProviderSwitchFixture || projectPullRequestsFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
+    /// A started Codex Project thread whose Mac decides send or queue as wonderd
+    /// does: the receipt says `queued` and the queue lists only messages behind
+    /// a running turn. Holds the moments a flicker would show: 1.5 s before the
+    /// receipt, then 20 s before dispatch starts a direct send.
+    static var sendStatesFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-send-states") }
+    /// With send-states: a reply is running, so a new message waits behind it.
+    static var sendRunningFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-send-running") }
+    /// With send-states: the last reply was stopped.
+    static var sendStoppedFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-send-stopped") }
+    /// With send-states: a Mac from before the decision, whose queue also listed
+    /// a message dispatch had not yet started (the flicker's cause) and whose
+    /// receipt has no `queued`.
+    static var sendLegacyQueueFixture: Bool { ProcessInfo.processInfo.arguments.contains("-diagnostics-send-legacy-queue") }
+    static var projectReadFixture: Bool { projectActionsFixture || projectArchiveFixture || projectSpeedFixture || defaultModelsFixture || projectSubagentFixture || projectFilesSendFixture || projectProviderSwitchFixture || projectPullRequestsFixture || sendStatesFixture || ProcessInfo.processInfo.arguments.contains("-diagnostics-project-read") }
     static let hostID = "diagnostic-host"
     static let parentID = "fixture-parent-conversation"
     static let childID = "fixture-child-conversation"
@@ -507,6 +522,15 @@ enum DiagnosticSubagentFixture {
             turns.append(["id": "layout-turn-13", "status": "completed", "createdAt": "13000", "updatedAt": "13900", "items": [
                 ["id": "layout-reply-13", "type": "agentMessage", "state": "completed", "createdAt": "13900", "text": "Reply 13. Continuing the project at /p/app.\n\n```swift\nstruct Trip { let days: Int }\nlet trip = Trip(days: 2) // short\nprint(\"Days: \\(trip.days)\", 42, true)\n```"]]])
         }
+        if projectActionsFixture {
+            // A prompt written in Claude Code on the Mac with a screenshot: no Wonder
+            // message owns it, so the host lists the stored image on the item.
+            turns.append(["id": "layout-turn-desktop", "status": "completed", "createdAt": "12950", "updatedAt": "12980", "items": [
+                ["id": "layout-desktop-prompt", "type": "userMessage", "state": "completed", "createdAt": "12950",
+                 "text": "From the Mac: what changed in this screenshot?",
+                 "payload": ["attachmentIds": [desktopImageID]]],
+                ["id": "layout-reply-desktop", "type": "agentMessage", "state": "completed", "createdAt": "12980", "text": "The header is now blue."]]])
+        }
         if projectActionsFixture && projectCommandBlocksFixture {
             // A `!` command and a slash command run in Claude Code, as the host joins
             // each command to its output (claude-runtime nativeTurns).
@@ -538,10 +562,45 @@ enum DiagnosticSubagentFixture {
             }
             turns.append(["id": "layout-turn-14", "status": "completed", "createdAt": "14000", "updatedAt": "14950", "items": items])
         }
+        if sendStatesFixture {
+            if sendRunningFixture || sendStoppedFixture {
+                let id = sendRunningFixture ? "send-running-turn" : "send-stopped-turn"
+                messages.append(["messageId": "send-earlier", "body": "Draft the release notes.",
+                    "state": sendRunningFixture ? "streaming" : "interrupted", "codexTurnId": id, "codexThreadId": parentThreadID,
+                    "createdAt": "20000", "attachmentIds": [String]()])
+                turns.append(["id": id, "status": sendRunningFixture ? "inProgress" : "interrupted", "createdAt": "20000", "updatedAt": "20500", "items": [
+                    ["id": "send-earlier-reply", "type": "agentMessage", "state": sendRunningFixture ? "streaming" : "completed",
+                     "createdAt": "20500", "text": "Drafting the release notes."]]])
+            }
+            // A direct send waits 20 s for dispatch to start it (still accepted_by_wonder).
+            let sent = DiagnosticSubagentURLProtocol.state.lock.withLock { DiagnosticSubagentURLProtocol.state.sentMessages }
+            for (index, message) in sent.enumerated() {
+                let started = !message.queued && sendDispatched(message.acceptedAt)
+                var value: [String: Any] = ["messageId": "sent-\(message.client)", "clientMessageId": message.client, "body": message.body,
+                    "state": started ? "accepted_by_codex" : "accepted_by_wonder", "codexThreadId": parentThreadID,
+                    "createdAt": "\(30000 + index)", "attachmentIds": [String]()]
+                if started {
+                    value["codexTurnId"] = "sent-turn-\(index)"
+                    turns.append(["id": "sent-turn-\(index)", "status": "inProgress", "createdAt": "\(30000 + index)", "updatedAt": "\(30000 + index)", "items": [[String: Any]]()])
+                }
+                messages.append(value)
+            }
+        }
         let sequence = projectFilesRefreshFixture && DiagnosticSubagentURLProtocol.state.lock.withLock({ DiagnosticSubagentURLProtocol.state.workspaceChanged }) ? 2 : 1
         return ["conversationId": parentID, "hostEpoch": "fixture", "lastSequence": sequence,
                 "messages": messages, "assistantMessages": [],
                 "thread": ["threadId": parentThreadID, "hydrated": true, "turns": turns]]
+    }
+    static func sendDispatched(_ acceptedAt: Date) -> Bool { Date().timeIntervalSince(acceptedAt) >= 20 }
+    static let desktopImageID = "desktop-screenshot"
+    static let desktopImage: Data = UIGraphicsImageRenderer(size: CGSize(width: 320, height: 200)).pngData { context in
+        UIColor.systemBlue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 320, height: 200))
+        UIColor.white.setFill(); context.fill(CGRect(x: 24, y: 24, width: 272, height: 40))
+    }
+    static func desktopImageFile() -> [String: Any] {
+        ["id": desktopImageID, "kind": "attachment", "name": "Image.png", "mimeType": "image/png",
+         "byteSize": desktopImage.count, "sha256": ConversationFile.digest(desktopImage), "state": "available",
+         "createdAt": "2026-10-09T00:00:00Z", "updatedAt": "2026-10-09T00:00:00Z"]
     }
     static func resetTransport() {
         let state = DiagnosticSubagentURLProtocol.state
@@ -557,6 +616,7 @@ enum DiagnosticSubagentFixture {
             state.projectAccessMode = "read_only"
             state.projectSavedModel = nil
             state.projectSentModel = nil
+            state.sentMessages = []
             state.projectClaudeApproval = "ask"
             state.goalPresent = goalFixture
             state.goalObjective = "Prepare a reliable beta launch with the Scout helper."
@@ -609,13 +669,20 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         /// A same-provider model saved by PATCH, and the model a Project message carried as `projectModel`.
         var projectSavedModel: String?
         var projectSentModel: String?
+        /// Messages the send-states fixture accepted, and when its receipt went out.
+        var sentMessages: [(client: String, body: String, acceptedAt: Date, queued: Bool)] = []
         var projectClaudeApproval = "ask"
         var projectPlanMode = false
-        var archiveFailures = 1
+        /// The archive fixture's first archive fails, to show the failure.
+        var archiveFailures = DiagnosticSubagentFixture.projectArchiveFixture ? 1 : 0
         var questionResolved = false
         var connectedAppsUnavailable = false
         var workspaceChanged = false
         var workspaceRefreshFailures = 0
+        /// Projects added from Add project, newest first.
+        var createdProjects: [[String: Any]] = []
+        /// Codex's update was applied from the phone's Reconnect.
+        var codexReconnected = false
         var goalPresent = DiagnosticSubagentFixture.goalFixture
         var goalObjective = "Prepare a reliable beta launch with the Scout helper."
         var goalStatus = DiagnosticSubagentFixture.goalFixtureStatus
@@ -694,7 +761,7 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             let conversation = DiagnosticSubagentFixture.parentID
             let archiveFixture = DiagnosticSubagentFixture.projectArchiveFixture
             let speedFixture = DiagnosticSubagentFixture.projectSpeedFixture
-            let family = DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || speedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture ? "codex" : "claude"
+            let family = DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || speedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture || DiagnosticSubagentFixture.sendStatesFixture ? "codex" : "claude"
             let archived = Self.state.lock.withLock { Self.state.projectArchived }
             switch path {
             case "/api/v1/pairing/session/refresh-challenge":
@@ -704,22 +771,94 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     "offerId": "", "issuedAtMs": now, "expiresAtMs": now + 60_000])); return
             case "/api/v1/pairing/session":
                 finish(status: 200, body: try! JSONEncoder().encode(DiagnosticSubagentFixture.savedConnection().credential)); return
+            case "/api/v1/projects" where method == "POST":
+                // New folder: a name already taken in its location is refused as the Mac words it.
+                let request = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+                let name = request["name"] as? String ?? ""
+                let path: String
+                if let newFolder = request["newFolder"] as? [String: Any] {
+                    if name == "Taken" {
+                        finish(status: 409, body: Data("A folder with this name already exists there. Choose another name, or add it as an existing folder.".utf8)); return
+                    }
+                    path = (newFolder["parent"] as? String ?? "/Users/fixture") + "/" + name
+                } else {
+                    path = (request["folders"] as? [String])?.first ?? "/fixture/\(name)"
+                }
+                let project: [String: Any] = ["id": "created-\(name.lowercased().replacingOccurrences(of: " ", with: "-"))", "name": name,
+                    "isIncluded": true, "isPinned": false, "rootsRevision": 1, "createdAt": "fixture",
+                    "folders": [["id": "created-folder", "path": path, "name": URL(fileURLWithPath: path).lastPathComponent, "isPrimary": true, "isAvailable": true]]]
+                Self.state.lock.withLock { Self.state.createdProjects.insert(project, at: 0) }
+                finish(status: 201, body: json(project)); return
+            case "/api/v1/projects/candidates":
+                finish(status: 200, body: json(["candidates": [
+                    ["name": "Website", "folders": ["/Users/fixture/Code/Website"], "sources": ["claude"], "updatedAt": 2, "isIncluded": false],
+                    ["name": "Read status", "folders": ["/fixture"], "sources": ["codex"], "updatedAt": 1, "isIncluded": true]],
+                    "partial": []])); return
+            case "/api/v1/automations": finish(status: 200, body: Data("[]".utf8)); return
+            case "/api/v1/providers":
+                // Codex has an update waiting; -diagnostics-providers-working keeps an agent busy.
+                let working = ProcessInfo.processInfo.arguments.contains("-diagnostics-providers-working")
+                let reconnected = Self.state.lock.withLock { Self.state.codexReconnected }
+                finish(status: 200, body: json(["providers": [
+                    providerFixture("codex", updatePending: !reconnected, working: working),
+                    providerFixture("claude", updatePending: false, working: false)]])); return
+            case "/api/v1/providers/codex/reconnect" where method == "POST":
+                if ProcessInfo.processInfo.arguments.contains("-diagnostics-providers-working") {
+                    finish(status: 409, body: json(["detail": "An agent is still working. Reconnect after it finishes."])); return
+                }
+                Self.state.lock.withLock { Self.state.codexReconnected = true }
+                // Long enough to see "Reconnecting…".
+                DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(2)) { [self] in
+                    finish(status: 200, body: json(providerFixture("codex", updatePending: false, working: false)))
+                }
+                return
+            case let created where created.hasPrefix("/api/v1/projects/created-") && created.hasSuffix("/threads"):
+                finish(status: 200, body: json(["threads": [], "nextCursor": NSNull(), "partial": []])); return
             case "/api/v1/projects":
+                let created = Self.state.lock.withLock { Self.state.createdProjects }
                 finish(status: 200, body: json([
-                    "projects": [["id": "read-project", "name": "Read status", "isIncluded": true, "isPinned": false,
-                                  "rootsRevision": 1, "folders": speedFixture ? [["id":"fixture-folder","path":"/fixture","name":"fixture","isPrimary":true,"isAvailable":true]] : [], "createdAt": "fixture"]],
-                    "families": [["family": family, "available": true]], "modesVersion": 1, "archiveVersion": 1,
+                    "createVersion": 1,
+                    "projects": created + [["id": "read-project", "name": "Read status", "isIncluded": true, "isPinned": false,
+                                  "rootsRevision": 1, "folders": speedFixture || DiagnosticSubagentFixture.sidebarStatusFixture ? [["id":"fixture-folder","path":"/fixture","name":"fixture","isPrimary":true,"isAvailable":true]] : [], "createdAt": "fixture"]],
+                    "families": [["family": family, "available": true]], "modesVersion": 1, "archiveVersion": 2,
                     "pinned": archived ? [] : [["projectId": "read-project", "thread": projectReadThread()]]
                 ])); return
             case "/api/v1/projects/read-project/threads":
                 // Codex keeps not answering the Mac's thread list.
                 let partial = ProcessInfo.processInfo.arguments.contains("-diagnostics-project-threads-partial")
-                finish(status: 200, body: json(["threads": archived ? [] : [projectReadThread()], "nextCursor": NSNull(),
+                finish(status: 200, body: json(["threads": (archived ? [] : [projectReadThread()]) + sidebarStatusThreads(), "nextCursor": NSNull(),
                     "partial": partial ? [["family": "codex", "detail": "Codex threads could not be loaded."]] : []])); return
+            case "/api/v1/projects/read-project/threads/archived":
+                finish(status: 200, body: json(["threads": archived ? [projectReadThread()] : [], "partial": []])); return
             case "/api/v1/projects/read-project/threads/attach":
                 finish(status: 200, body: json(projectReadThread())); return
             case "/api/v1/conversations/\(conversation)/history/refresh":
                 finish(status: 200, body: json(["state": "completed"])); return
+            case "/api/v1/conversations/\(conversation)/messages" where DiagnosticSubagentFixture.sendStatesFixture && method == "POST":
+                guard let body, let request = try? JSONDecoder().decode(SendRequest.self, from: body) else {
+                    finish(status: 400, body: Data("{}".utf8)); return
+                }
+                // Holds the moment before the Mac's receipt arrives.
+                DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(1500)) { [self] in
+                    // Queued behind the running reply, or behind an earlier message's turn.
+                    let queued = Self.state.lock.withLock {
+                        let queued = DiagnosticSubagentFixture.sendRunningFixture || !Self.state.sentMessages.isEmpty
+                        Self.state.sentMessages.append((request.clientMessageId, request.body, Date(), queued))
+                        return queued
+                    }
+                    var receipt: [String: Any] = ["clientMessageId": request.clientMessageId,
+                        "wonderMessageId": "sent-\(request.clientMessageId)", "conversationId": conversation,
+                        "bodySha256": ConversationFile.digest(Data(request.body.utf8)), "deliveryState": "accepted_by_wonder"]
+                    if !DiagnosticSubagentFixture.sendLegacyQueueFixture { receipt["queued"] = queued }
+                    finish(status: 202, body: json(receipt))
+                }
+                return
+            case "/api/v1/conversations/\(conversation)/queue" where DiagnosticSubagentFixture.sendStatesFixture:
+                let sent = Self.state.lock.withLock { Self.state.sentMessages }
+                let listed = sent.filter { $0.queued
+                    || (DiagnosticSubagentFixture.sendLegacyQueueFixture && !DiagnosticSubagentFixture.sendDispatched($0.acceptedAt)) }
+                finish(status: 200, body: json(listed.map { ["id": "sent-\($0.client)", "clientMessageId": $0.client,
+                    "body": $0.body, "revision": 1, "attachmentIds": [String]()] as [String: Any] })); return
             case "/api/v1/project-conversations/\(conversation)/fork" where DiagnosticSubagentFixture.projectActionsFixture && method == "POST":
                 // Slow enough for the "Forking…" state to be observed: on a loaded CI runner the
                 // tap that starts the fork alone has taken 4.2s, longer than a 1.2s window.
@@ -763,12 +902,12 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                 }
                 finish(status: 200, body: json([
                     "conversationId": conversation, "projectId": "read-project", "projectName": "Read status",
-                    "title": "Read status fixture", "family": family, "model": DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || speedFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture ? (Self.state.lock.withLock { Self.state.projectSavedModel } ?? "gpt-fixture") : "claude:sonnet", "effort": "high",
+                    "title": "Read status fixture", "family": family, "model": DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || speedFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture || DiagnosticSubagentFixture.sendStatesFixture ? (Self.state.lock.withLock { Self.state.projectSavedModel } ?? "gpt-fixture") : "claude:sonnet", "effort": "high",
                     "serviceTier": speedFixture ? Self.state.lock.withLock { Self.state.projectServiceTier } as Any : NSNull(),
                     "accessMode": Self.state.lock.withLock { Self.state.projectAccessMode },
                     "workingFolder": "/fixture", "workingFolderName": "fixture",
                     "isPinned": true, "hasUnread": Self.state.lock.withLock { Self.state.projectUnread },
-                    "hasNativeSession": DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture, "folderInProject": true, "claudeApproval": Self.state.lock.withLock { Self.state.projectClaudeApproval }, "planMode": Self.state.lock.withLock { Self.state.projectPlanMode },
+                    "hasNativeSession": DiagnosticSubagentFixture.projectActionsFixture || archiveFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture || DiagnosticSubagentFixture.sendStatesFixture, "folderInProject": true, "claudeApproval": Self.state.lock.withLock { Self.state.projectClaudeApproval }, "planMode": Self.state.lock.withLock { Self.state.projectPlanMode },
                     "isArchived": Self.state.lock.withLock { Self.state.projectArchived }
                 ])); return
             case "/api/v1/project-conversations/\(conversation)/pull-requests" where DiagnosticSubagentFixture.projectPullRequestsFixture:
@@ -830,11 +969,11 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                     // nicknames, listed in an order that is not grouped, with a stoppable agent.
                     let stopped = Self.state.lock.withLock { Self.state.projectTasksStopped }
                     func task(_ id: String, _ title: String, _ kind: String, _ role: String, _ status: String,
-                              _ updatedAt: String, canStop: Bool = false) -> [String: Any] {
+                              _ updatedAt: String, canStop: Bool = false, elsewhere: Bool = false) -> [String: Any] {
                         ["parentConversationId": conversation, "threadId": id, "title": title,
                          "agentNickname": NSNull(), "agentRole": role, "status": status, "isArchived": false,
                          "canAcceptDirectInput": false, "namedSubagents": false, "kind": kind,
-                         "canStop": canStop && status == "running", "runningElsewhere": false, "updatedAt": updatedAt]
+                         "canStop": canStop && status == "running", "runningElsewhere": elsewhere, "updatedAt": updatedAt]
                     }
                     let thirdStopped = stopped.contains(DiagnosticSubagentFixture.thirdChildThreadID)
                     let tasks: [[String: Any]] = [
@@ -843,6 +982,9 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
                         task(DiagnosticSubagentFixture.thirdChildThreadID, "Audit the release checklist", "agent", "general-purpose",
                              thirdStopped ? "interrupted" : "running", thirdStopped ? "2026-10-08T10:30:00Z" : "2026-10-08T08:00:00Z", canStop: true),
                         task(DiagnosticSubagentFixture.childThreadID, "Run focused UI tests", "command", "Background command", "running", "2026-10-08T09:30:00Z", canStop: true),
+                        // Claude counts monitors and the linked sessions it started among running tasks.
+                        task("fixture-monitor-task", "Watch the build log", "monitor", "Monitor", "running", "2026-10-08T07:00:00Z", canStop: true),
+                        task("fixture-linked-session", "Review the release notes", "session", "Linked session", "running", "2026-10-08T06:00:00Z", elsewhere: true),
                     ]
                     finish(status: 200, body: json(["available": true, "detail": NSNull(), "subagents": tasks,
                         "nextCurrentCursor": NSNull(), "nextArchivedCursor": NSNull()])); return
@@ -1141,20 +1283,29 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
             "detail": NSNull(),
             "subagents": []
         ]))
+        case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/files" where DiagnosticSubagentFixture.projectActionsFixture && method == "GET":
+            finish(status: 200, body: json([DiagnosticSubagentFixture.desktopImageFile()]))
+        case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)/files/\(DiagnosticSubagentFixture.desktopImageID)" where DiagnosticSubagentFixture.projectActionsFixture:
+            finish(status: 200, body: DiagnosticSubagentFixture.desktopImage, contentType: "image/png")
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.parentID)": finish(status: 200, body: json(DiagnosticSubagentFixture.chatLayoutFixture ? DiagnosticSubagentFixture.chatLayoutSnapshot() : parentSnapshot()))
         case "/api/v1/conversations/\(DiagnosticSubagentFixture.childID)": finish(status: 200, body: json(childSnapshot()))
         default: finish(status: 404, body: Data("{}".utf8))
         }
     }
 
-    private func finish(status: Int, body: Data) {
+    private func finish(status: Int, body: Data, contentType: String = "application/json") {
         guard let url = request.url else { return }
-        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": contentType])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
 
+    private func providerFixture(_ id: String, updatePending: Bool, working: Bool) -> [String: Any] {
+        ["id": id, "running": true, "incompatible": false, "updatePending": updatePending, "detail": NSNull(),
+         "state": "signedIn", "version": id == "codex" ? "0.163.0" : "2.1.4",
+         "account": id == "codex" ? "ChatGPT account" : "Claude Max", "working": working]
+    }
     private func json(_ value: Any) -> Data {
         (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
     }
@@ -1179,10 +1330,23 @@ private final class DiagnosticSubagentURLProtocol: URLProtocol, @unchecked Senda
         return items
     }
     private func projectReadThread() -> [String: Any] {
-        let family = DiagnosticSubagentFixture.projectActionsFixture || DiagnosticSubagentFixture.projectArchiveFixture || DiagnosticSubagentFixture.projectSpeedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture ? "codex" : "claude"
+        let family = DiagnosticSubagentFixture.projectActionsFixture || DiagnosticSubagentFixture.projectArchiveFixture || DiagnosticSubagentFixture.projectSpeedFixture || DiagnosticSubagentFixture.projectSubagentFixture || DiagnosticSubagentFixture.projectFilesSendFixture || DiagnosticSubagentFixture.projectProviderSwitchFixture || DiagnosticSubagentFixture.sendStatesFixture ? "codex" : "claude"
         return ["reference": "\(family):read-fixture", "conversationId": DiagnosticSubagentFixture.parentID,
          "title": "Read status fixture", "family": family, "updatedAt": 1, "isPinned": true,
          "hasUnread": Self.state.lock.withLock { Self.state.projectUnread }, "isWorking": false]
+    }
+    /// Long titles beside a working spinner and an unread dot, for the sidebar's
+    /// truncation check on a narrow iPhone.
+    private func sidebarStatusThreads() -> [[String: Any]] {
+        guard DiagnosticSubagentFixture.sidebarStatusFixture else { return [] }
+        return [
+            ["reference": "codex:0b5e2a10-7c4d-4e1f-9a2b-3c4d5e6f7a80", "conversationId": NSNull(),
+             "title": "Investigate why the release build keeps timing out on the runner", "family": "codex",
+             "updatedAt": 3, "isPinned": false, "hasUnread": false, "isWorking": true],
+            ["reference": "claude:7d1c9e42-5b3a-4f60-8e21-0a9b8c7d6e54", "conversationId": NSNull(),
+             "title": "Rewrite the onboarding copy for the first launch explainer screen", "family": "claude",
+             "updatedAt": 2, "isPinned": false, "hasUnread": true, "isWorking": false],
+        ]
     }
     private func goalValue() -> Any {
         let state = Self.state
@@ -2010,6 +2174,54 @@ enum DiagnosticTheme {
         let arguments = ProcessInfo.processInfo.arguments
         guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else { return nil }
         return arguments[index + 1]
+    }
+}
+/// A Project thread's folder on a worktree branch, for the branch chip and
+/// Changes. `-project-git-preview` gives a branch with uncommitted and branch
+/// changes (a binary file, a rename, a deletion and a diff over the Mac's
+/// size limit); `-project-git-not-repository-preview` a folder outside Git.
+enum DiagnosticGitFixture {
+    private static var arguments: [String] { ProcessInfo.processInfo.arguments }
+    static var summary: WorkspaceGitSummary? {
+        if arguments.contains("-project-git-not-repository-preview") {
+            return WorkspaceGitSummary(repository: false, branch: nil)
+        }
+        guard arguments.contains("-project-git-preview") else { return nil }
+        return WorkspaceGitSummary(repository: true, branch: "agent/branch-chip",
+            head: "4f1c2d9a8b7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a", worktree: true, baseRef: "origin/main",
+            mergeBase: "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b", ahead: 3, behind: 1,
+            uncommitted: .init(files: 4, additions: 24, deletions: 6),
+            branchChanges: .init(files: 6, additions: 131, deletions: 18))
+    }
+    private static let uncommitted: [WorkspaceGitChanges.File] = [
+        .init(path: "Assets/logo.png", status: "modified", binary: true),
+        .init(path: "Docs/Huge.md", status: "modified", additions: 2, deletions: 2),
+        .init(path: "Sources/BranchChip.swift", status: "untracked", additions: 10, deletions: 0),
+        .init(path: "Sources/ChatView.swift", status: "modified", additions: 12, deletions: 4),
+    ]
+    static func changes(_ scope: WorkspaceChangeScope) -> WorkspaceGitChanges {
+        switch scope {
+        case .uncommitted:
+            return WorkspaceGitChanges(scope: "uncommitted", branch: "agent/branch-chip", files: uncommitted,
+                                       totals: .init(files: 4, additions: 24, deletions: 6))
+        case .branch:
+            let files = uncommitted + [
+                .init(path: "Sources/Changes.swift", originalPath: "Sources/Review.swift", status: "renamed", additions: 107, deletions: 9),
+                .init(path: "Sources/Legacy.swift", status: "deleted", additions: 0, deletions: 3),
+            ]
+            return WorkspaceGitChanges(scope: "branch", branch: "agent/branch-chip", baseRef: "origin/main",
+                                       files: files.sorted { $0.path < $1.path },
+                                       totals: .init(files: 6, additions: 131, deletions: 18))
+        }
+    }
+    static func diff(_ file: WorkspaceGitChanges.File, scope: WorkspaceChangeScope) throws -> String {
+        if file.path == "Docs/Huge.md" { throw PairingFailure.response(413) }
+        let path = file.path
+        if file.status == "untracked" {
+            return "diff --git a/\(path) b/\(path)\nnew file mode 100644\n--- /dev/null\n+++ b/\(path)\n@@ -0,0 +1,3 @@\n+struct BranchChip {\n+    let name: String\n+}\n"
+        }
+        let line = scope == .branch ? "+let scope = \"branch\"" : "+let scope = \"uncommitted\""
+        return "diff --git a/\(path) b/\(path)\n--- a/\(path)\n+++ b/\(path)\n@@ -12,3 +12,4 @@\n let title = \"Changes\"\n-let label = \"Files\"\n+let label = \"Branch changes\"\n\(line)\n }\n"
     }
 }
 #endif

@@ -5348,7 +5348,7 @@ import UIKit
         XCTAssertEqual(draft.value as? String, text)
         // Projects are the only destinations: the menu offers a new one and keeps this draft.
         app.buttons["destination-picker"].tap()
-        XCTAssertTrue(app.buttons["New project"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Add project"].waitForExistence(timeout: 5))
         app.buttons[name].firstMatch.tap()
         XCTAssertEqual(draft.value as? String, text)
         var threadIdentifier: String?
@@ -5802,7 +5802,7 @@ import UIKit
         app.buttons["connection-option:studio"].tap()
         XCTAssertEqual(draft.value as? String, "Editable word")
         app.buttons["destination-picker"].tap()
-        XCTAssertTrue(app.buttons["New project"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Add project"].waitForExistence(timeout: 5))
         app.navigationBars["New chat"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         retainMenuScreenshot(app, name: "Editable draft preserves saved pending message")
         app.terminate()

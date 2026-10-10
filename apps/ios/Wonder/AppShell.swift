@@ -24,6 +24,8 @@ enum WonderDeepLink: Equatable {
     case chat(host: String, id: String)
     case newProjectChat(host: String, project: String)
     case computer(host: String)
+    /// A Project's provider thread, attached on open: the widget's thread tiles.
+    case projectThread(host: String, project: String, family: AgentFamily, thread: String)
 
     static func parse(_ url: URL, scheme: String) -> Self? {
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -34,6 +36,10 @@ enum WonderDeepLink: Equatable {
         let path = parts.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         if path.count == 4, path[0].isEmpty, path[1] == "hosts", validID(path[2]), path[3] == "computer" {
             return .computer(host: path[2])
+        }
+        if path.count == 8, path[0].isEmpty, path[1] == "hosts", validID(path[2]), path[3] == "projects",
+           validID(path[4]), path[5] == "threads", let family = AgentFamily(rawValue: path[6]), validID(path[7]) {
+            return .projectThread(host: path[2], project: path[4], family: family, thread: path[7])
         }
         guard (path.count == 5 || path.count == 6), path[0].isEmpty,
               path[1] == "hosts", validID(path[2]), validID(path[4]) else { return nil }
@@ -46,7 +52,7 @@ enum WonderDeepLink: Equatable {
 
     var host: String {
         switch self {
-        case .chat(let host, _), .newProjectChat(let host, _), .computer(let host): host
+        case .chat(let host, _), .newProjectChat(let host, _), .computer(let host), .projectThread(let host, _, _, _): host
         }
     }
 
@@ -64,6 +70,9 @@ enum WonderDeepLink: Equatable {
             parts.path = "/hosts/\(host)/projects/\(project)/new"
         case .computer:
             parts.path = "/hosts/\(host)/computer"
+        case .projectThread(_, let project, let family, let thread):
+            guard Self.validID(project), Self.validID(thread) else { return nil }
+            parts.path = "/hosts/\(host)/projects/\(project)/threads/\(family.rawValue)/\(thread)"
         }
         return parts.url
     }
@@ -117,7 +126,8 @@ struct ChatShell: View {
     @Environment(\.scenePhase) private var phase
     @State private var showWideSidebar = true
     @State private var choosingProjectsHost: String?
-    /// First launch has no Mac to show, so pairing comes first as a sheet.
+    /// Diagnostics `-show-connections` opens Settings as a sheet. First launch
+    /// instead shows GetStartedView, which explains what pairing needs.
     @State private var pairing = false
     @State private var linkIssue: String?
 
@@ -129,11 +139,12 @@ struct ChatShell: View {
             if UIDevice.current.userInterfaceIdiom == .pad {
                 GeometryReader { window in
                     let compact = window.size.width < 760
+                    // Narrow enough to give the conversation most of the window.
                     let sidebarWidth = compact ? min(window.size.width * 0.85, 420)
-                        : min(380, max(280, window.size.width * 0.31))
+                        : min(320, max(260, window.size.width * 0.25))
                     let sidebarVisible = compact ? shell.sidebarOpen : showWideSidebar
                     HStack(spacing: 0) {
-                        Color.clear.frame(width: !compact && showWideSidebar ? sidebarWidth + 1 : 0)
+                        Color.clear.frame(width: !compact && showWideSidebar ? sidebarWidth : 0)
                             .accessibilityHidden(true)
                         VStack(spacing: 0) {
                             if compact {
@@ -170,10 +181,9 @@ struct ChatShell: View {
                             SidebarView(library: library, shell: shell)
                         }
                         .frame(width: sidebarWidth)
+                        // No divider: on light photo themes it drew a pale seam
+                        // between the sidebar and the chat.
                         .background(theme.sidebar)
-                        .overlay(alignment: .trailing) {
-                            if !compact && showWideSidebar { theme.separator.frame(width: 1) }
-                        }
                         .offset(x: sidebarVisible ? 0 : -sidebarWidth)
                         .allowsHitTesting(sidebarVisible)
                         .accessibilityHidden(!sidebarVisible)
@@ -191,7 +201,7 @@ struct ChatShell: View {
             Button("OK", role: .cancel) { linkIssue = nil }
         } message: { Text(linkIssue ?? "") }
         .sheet(item: Binding(get: { choosingProjectsHost.map(HostSheet.init) }, set: { choosingProjectsHost = $0?.id })) { sheet in
-            if let model = model(sheet.id) { ChooseProjectsView(model: model, library: model.projects) }
+            if let model = model(sheet.id) { AddProjectView(model: model, library: model.projects) }
         }
         .onChange(of: push.destination, initial: true) { _, value in
             guard let value else { return }
@@ -221,9 +231,6 @@ struct ChatShell: View {
             #if DEBUG || WONDER_DIAGNOSTICS
             if ProcessInfo.processInfo.arguments.contains("-show-connections") { pairing = true }
             #endif
-        }
-        .task(id: library.saved.connections.isEmpty) {
-            if library.loaded, library.saved.connections.isEmpty, !library.isPreview { pairing = true }
         }
         #if WONDER_DIAGNOSTICS
         .task {
@@ -275,6 +282,19 @@ struct ChatShell: View {
             shell.newChat(host: host, destination: .project(id: project), exactProject: true)
         case .computer(let host):
             shell.newChat(host: host, showComputer: true)
+        case .projectThread(let host, let project, let family, let thread):
+            let summary = ProjectThreadSummary(reference: family.rawValue + ":" + thread, conversationId: nil,
+                                               title: "", family: family, updatedAt: 0)
+            Task {
+                do {
+                    let conversation = try await linkedModel.projects.attach(project, thread: summary)
+                    linkedModel.projects.noteOpened(conversation)
+                    shell.open(host: host, conversation: conversation, fromLink: true)
+                } catch is CancellationError {
+                } catch {
+                    linkIssue = "That thread couldn’t be opened. Check \(linkedModel.macName) and try again."
+                }
+            }
         }
         linkIssue = nil
     }
@@ -308,14 +328,14 @@ private struct PhoneDrawerLayout: View {
     var body: some View {
         GeometryReader { geometry in
             let wide = horizontalSizeClass == .regular
-            let width = wide ? min(380, max(240, geometry.size.width * 0.31))
+            let width = wide ? min(320, max(240, geometry.size.width * 0.27))
                 : min(geometry.size.width * 0.85, 420)
             let drawerOpen = !wide && shell.sidebarOpen
             let offset = wide ? 0 : min(0, max(-width, (drawerOpen ? 0 : -width) + drag))
             let progress = !wide && width > 0 ? 1 + offset / width : 0
             ZStack(alignment: .leading) {
                 HStack(spacing: 0) {
-                    Color.clear.frame(width: wide ? width + 1 : 0)
+                    Color.clear.frame(width: wide ? width : 0)
                         .accessibilityHidden(true)
                     NavigationStack { // theme-exempt: a root stack; WonderThemeHost and its screens theme it
                         ShellMain(library: library, shell: shell, compactIPadWindow: false,
@@ -529,18 +549,21 @@ private struct ShellMain: View {
                         .accessibilityFocused($sidebarButtonFocused)
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { plus() } label: { Image(systemName: onNewChat ? "folder.badge.plus" : "plus") }
-                    .accessibilityLabel(onNewChat ? "New project" : "New chat")
-                    .accessibilityIdentifier(onNewChat ? "new-project" : "new-chat")
-                    .disabled(shell.sidebarOpen || (onNewChat && draftHostID == nil))
+            // Nothing to create until a computer is paired; GetStartedView offers that.
+            if !library.saved.connections.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { plus() } label: { Image(systemName: onNewChat ? "folder.badge.plus" : "plus") }
+                        .accessibilityLabel(onNewChat ? "Add project" : "New chat")
+                        .accessibilityIdentifier(onNewChat ? "new-project" : "new-chat")
+                        .disabled(shell.sidebarOpen || (onNewChat && draftHostID == nil))
+                }
             }
         }
         .navigationDestination(isPresented: $shell.settingsOpen) { ConnectionsView(library: library) }
         .sheet(item: Binding(get: { creatingProjectHost.map(HostSheet.init) }, set: { creatingProjectHost = $0?.id })) { sheet in
             if let saved = library.saved.connections.first(where: { $0.credential.hostInstallationId == sheet.id }) {
                 let model = library.model(for: saved)
-                ProjectEditorView(model: model, library: model.projects, project: nil) { created in
+                AddProjectView(model: model, library: model.projects) { created in
                     shell.newChat(host: sheet.id, destination: .project(id: created.id))
                 }
             }
@@ -780,6 +803,7 @@ struct SidebarView: View {
     @ObservedObject var library: ConnectionLibrary
     @ObservedObject var shell: ShellState
     @StateObject private var presenter = SidebarPresenter()
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AccessibilityFocusState private var headingFocused: Bool
     @SceneStorage("sidebar.search") private var search = ""
     @SceneStorage("sidebar.expanded") private var expandedStorage = ""
@@ -789,7 +813,16 @@ struct SidebarView: View {
     @State private var busyThread: String?
     @State private var failure: String?
     @State private var editing: ProjectEditTarget?
+    @State private var addingComputer = false
     @State private var renaming: ThreadTarget?
+    @State private var viewingArchive: ArchiveTarget?
+    @State private var viewingAutomations: HostSheet?
+
+    private struct ArchiveTarget: Identifiable {
+        let host: String
+        let project: ProjectSummary
+        var id: String { host + "/" + project.id }
+    }
     @State private var renameText = ""
 
     private struct ProjectEditTarget: Identifiable {
@@ -857,7 +890,13 @@ struct SidebarView: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
                 }
                 if library.saved.connections.isEmpty {
-                    Text("Add a computer in Settings").foregroundStyle(.secondary).listRowSeparator(.hidden)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("No computer yet. Pair one running the Wonder Mac app to see its chats here.")
+                            .foregroundStyle(.secondary)
+                        Button("Add computer", systemImage: "plus") { addingComputer = true }
+                            .accessibilityIdentifier("sidebar-add-computer")
+                    }
+                    .padding(.vertical, 6).listRowSeparator(.hidden).listRowBackground(Color.clear)
                 } else if !trimmedSearch.isEmpty && !presenter.hasResults {
                     Text("No matching chats").foregroundStyle(.secondary).listRowSeparator(.hidden)
                 }
@@ -887,10 +926,24 @@ struct SidebarView: View {
         .alert("Couldn’t complete that", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK") { failure = nil }
         } message: { Text(failure ?? "") }
+        .sheet(isPresented: $addingComputer) { PairComputerView(model: library.pairingModel()) }
+        .sheet(item: $viewingAutomations) { target in
+            if let model = model(target.id) { AutomationsSheet(model: model) }
+        }
+        .sheet(item: $viewingArchive) { target in
+            if let model = model(target.host) {
+                ArchivedThreadsView(model: model, library: model.projects, projectID: target.project.id,
+                                    projectName: target.project.name)
+            }
+        }
         .sheet(item: $editing) { target in
             if let model = model(target.host) {
-                ProjectEditorView(model: model, library: model.projects, project: target.project) { saved in
-                    if target.project == nil { setExpanded(SidebarProjection.expansionKey(host: target.host, project: saved.id), true) }
+                if let project = target.project {
+                    ProjectEditorView(model: model, library: model.projects, project: project)
+                } else {
+                    AddProjectView(model: model, library: model.projects) { saved in
+                        setExpanded(SidebarProjection.expansionKey(host: target.host, project: saved.id), true)
+                    }
                 }
             }
         }
@@ -908,7 +961,8 @@ struct SidebarView: View {
         #if WONDER_DIAGNOSTICS
         .onAppear {
             // The threads-notice scenario starts from its project expanded, whatever was remembered.
-            if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-threads-partial") {
+            if ProcessInfo.processInfo.arguments.contains("-diagnostics-project-threads-partial")
+                || DiagnosticSubagentFixture.sidebarStatusFixture {
                 expandedStorage = SidebarProjection.expansionKey(host: DiagnosticSubagentFixture.hostID, project: "read-project")
             }
         }
@@ -1009,11 +1063,19 @@ struct SidebarView: View {
             Text("Update Wonder on \(model(host)?.macName ?? "your computer") to use Projects.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
         case .newProject(let host):
             Button { editing = ProjectEditTarget(host: host, project: nil) } label: {
-                Label("New project", systemImage: "plus").font(.subheadline).foregroundStyle(.secondary)
+                Label("Add project", systemImage: "plus").font(.subheadline).foregroundStyle(.secondary)
                     .padding(.leading, 6).frame(maxWidth: .infinity, minHeight: 40, alignment: .leading).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("new-project:" + host)
+        case .automations(let host):
+            Button { viewingAutomations = HostSheet(id: host) } label: {
+                Label("Automations", systemImage: "clock.arrow.circlepath").font(.subheadline).foregroundStyle(.secondary)
+                    .padding(.leading, 6).frame(maxWidth: .infinity, minHeight: 40, alignment: .leading).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Scheduled tasks on this computer")
+            .accessibilityIdentifier("sidebar-automations:" + host)
         }
     }
 
@@ -1055,9 +1117,27 @@ struct SidebarView: View {
                 Task { await update(host, project, ["isPinned": !project.isPinned]) }
             }
             Button("Edit project", systemImage: "pencil") { editing = ProjectEditTarget(host: host, project: project) }
+            if let folder = project.primaryFolder {
+                Button("Copy folder path", systemImage: "folder") {
+                    UIPasteboard.general.string = folder.path
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                }
+                .accessibilityIdentifier("copy-project-folder")
+            }
+            if model(host)?.projects.supportsArchiveList == true {
+                Button("Archived threads", systemImage: "archivebox") {
+                    viewingArchive = ArchiveTarget(host: host, project: project)
+                }
+                .accessibilityIdentifier("project-archived-threads")
+            }
             Button("Hide from sidebar", systemImage: "eye.slash") { Task { await update(host, project, ["isIncluded": false]) } }
         }
     }
+
+    /// A narrow phone leaves a wider gap before a thread's status than a
+    /// regular-width sidebar does.
+    private var statusGap: CGFloat { horizontalSizeClass == .compact ? 14 : 10 }
+    @ScaledMetric(relativeTo: .body) private var statusSlot: CGFloat = 20
 
     private func threadRow(host: String, projectID: String, thread: ProjectThreadSummary, isSelected: Bool,
                            subtitle: String?, leading: CGFloat, prefix: String) -> some View {
@@ -1068,15 +1148,20 @@ struct SidebarView: View {
                     Text(thread.title).lineLimit(1).truncationMode(.tail)
                     if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                 }
-                Spacer(minLength: 4)
-                // The status keeps its slot; a long title truncates before it.
-                Group {
-                    if busyThread == thread.reference { ProgressView().controlSize(.small) }
-                    else if thread.isWorking { ProgressView().controlSize(.small).accessibilityLabel("Working") }
-                    else if thread.hasUnread { Circle().fill(Color.primary).frame(width: 7, height: 7).accessibilityLabel("Unread") }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // The status keeps a fixed slot after a clear gap, so a long
+                // title ends before it on the narrowest phone.
+                if busyThread == thread.reference || thread.isWorking || thread.hasUnread {
+                    Group {
+                        if busyThread == thread.reference { ProgressView().controlSize(.small) }
+                        else if thread.isWorking { ProgressView().controlSize(.small).accessibilityLabel("Working") }
+                        else { Circle().fill(Color.primary).frame(width: 7, height: 7).accessibilityLabel("Unread") }
+                    }
+                    .frame(width: statusSlot, alignment: .trailing)
+                    .padding(.leading, statusGap)
+                    .layoutPriority(1)
+                    .accessibilityIdentifier("sidebar-thread-status")
                 }
-                .fixedSize().layoutPriority(1)
-                .accessibilityIdentifier("sidebar-thread-status")
             }
             .padding(.leading, leading).contentShape(Rectangle()).frame(minHeight: subtitle == nil ? 40 : 46)
         }
@@ -1100,12 +1185,16 @@ struct SidebarView: View {
                 renaming = ThreadTarget(host: host, project: projectID, thread: thread)
             }
             Button("Copy resume command", systemImage: "terminal") { copyResumeCommand(host, projectID, thread) }
-            // Only a thread Wonder has opened has a stored folder.
-            if thread.conversationId != nil {
-                Button("Copy folder path", systemImage: "folder") { copyFolderPath(host, thread) }
-                    .accessibilityIdentifier("copy-thread-folder")
+            // The provider's own ID, as Codex and Claude Code show it; a draft
+            // with no first message has none yet.
+            if let native = thread.nativeID {
+                Button(thread.family == .claude ? "Copy session ID" : "Copy thread ID", systemImage: "number") {
+                    UIPasteboard.general.string = native
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                }
+                .accessibilityIdentifier("copy-thread-id")
             }
-            if thread.family == .codex, !thread.reference.hasPrefix("wonder:"), model(host)?.projects.supportsArchive == true {
+            if model(host)?.projects.canArchive(thread) == true {
                 Button("Archive", systemImage: "archivebox") { archive(host, projectID, thread) }
                     .disabled(busyThread != nil || thread.isWorking || model(host)?.macConnected != true)
                     .accessibilityIdentifier("archive-project-thread")
@@ -1213,22 +1302,6 @@ struct SidebarView: View {
             do { try await model.projects.rename(target.project, thread: target.thread, to: title) }
             catch is CancellationError {}
             catch { failure = "The new name couldn’t be saved. Try again." }
-        }
-    }
-
-    private func copyFolderPath(_ host: String, _ thread: ProjectThreadSummary) {
-        guard let conversation = thread.conversationId, let model = model(host) else { return }
-        Task {
-            do {
-                let folder: String
-                if let saved = model.projects.details[conversation] { folder = saved.workingFolder }
-                else { folder = try await model.projects.loadDetail(conversation).workingFolder }
-                UIPasteboard.general.string = folder
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
-            } catch is CancellationError {
-            } catch {
-                failure = "The folder path couldn’t be loaded. Check \(model.macName) and try again."
-            }
         }
     }
 

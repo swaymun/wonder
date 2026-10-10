@@ -1,20 +1,20 @@
 # Claude's access menu lists Auto, Ask, Accept edits, Plan and Full access in
 # that order with no divider. Plan is chosen there and shows only on the shield,
-# never as a composer chip. The header shows the 5-hour and weekly usage in
-# place of a usage menu entry, and no provider icon beside the name.
+# never as a composer chip. The title menu shows the 5-hour and weekly usage;
+# nothing sits beside New chat, and no provider icon beside the name.
 launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-read --fixture usage-fixture
 wait --id open-sidebar --timeout 20
 tap --id open-sidebar --type Button
 wait --id pinned-thread:claude:read-fixture --timeout 20
 tap --id pinned-thread:claude:read-fixture
 wait --id project-composer-access --timeout 15
-wait --id header-usage --timeout 15
-wait --label "5-hour limit 14% used, weekly 8% used"
+wait --id header-usage --gone
 wait --label "Read status fixture, Read status project, Claude, conversation options"
 shot claude-header-usage
 tap --id conversation-title-menu
 wait --id copy-conversation-markdown --timeout 5
-wait --contains "usage" --gone
+wait --label "5 hours · 14% used" --timeout 10
+wait --label "Weekly · 8% used"
 shot claude-header-menu
 tap --id copy-conversation-markdown
 wait --id copy-conversation-markdown --gone --timeout 5

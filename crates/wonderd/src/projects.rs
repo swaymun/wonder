@@ -83,7 +83,8 @@ enum ReceiptScanStep {
 /// The normal-home Codex client serves project threads and shared discovery.
 pub struct ProjectRuntime {
     codex: Arc<Mutex<AppServerClient>>,
-    config: LaunchConfig,
+    /// The Codex binary is re-located when ChatGPT moves or updates it.
+    config: std::sync::Mutex<LaunchConfig>,
     start: Mutex<()>,
     pub codex_store: String,
     pub claude_store: String,
@@ -111,13 +112,13 @@ impl ProjectRuntime {
                 wonder_version.clone(),
                 sink,
             ))),
-            config: LaunchConfig {
+            config: std::sync::Mutex::new(LaunchConfig {
                 project_scope: true,
                 codex_bin,
                 runtime_home: None,
                 wonder_version,
                 permission_overrides: Vec::new(),
-            },
+            }),
             start: Mutex::new(()),
             codex_store: store_key("codex", codex_home),
             claude_store: store_key("claude", claude_home),
@@ -129,6 +130,32 @@ impl ProjectRuntime {
     }
 
     pub async fn shutdown(&self) {
+        let _ = self.codex.lock().await.shutdown().await;
+    }
+
+    /// Start the next Codex runtime from `codex_bin`.
+    pub(crate) fn set_codex_bin(&self, codex_bin: PathBuf) {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .codex_bin = codex_bin;
+    }
+
+    fn launch_config(&self) -> LaunchConfig {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(crate) async fn codex_alive(&self) -> bool {
+        self.codex.lock().await.health().is_alive()
+    }
+
+    /// Stop the Projects Codex runtime so the next request starts the
+    /// installed one. Callers check that no Codex turn is running.
+    pub(crate) async fn stop_codex(&self) {
+        let _start = self.start.lock().await;
         let _ = self.codex.lock().await.shutdown().await;
     }
 }
@@ -145,7 +172,7 @@ pub async fn codex_rpc(state: &AppState) -> Result<RpcClient, String> {
     let _start = runtime.start.lock().await;
     let mut client = runtime.codex.lock().await;
     if !client.health().is_alive() {
-        if let Err(error) = client.restart(runtime.config.clone()).await {
+        if let Err(error) = client.restart(runtime.launch_config()).await {
             let incompatible = error.is_incompatible();
             state
                 .ingestion
@@ -387,7 +414,7 @@ pub(crate) async fn conversation_detail(
         is_pinned: conversation.is_pinned,
         has_unread: conversation.has_unread,
         has_native_session: conversation.native_session_id.is_some(),
-        is_archived: codex_is_archived(state, conversation).await?,
+        is_archived: is_archived(state, conversation).await?,
         folder_in_project: project.root_for(&conversation.cwd).is_some(),
         notice: state
             .projects
@@ -469,6 +496,71 @@ async fn codex_is_archived(
         .is_some_and(|id| archived.contains(id)))
 }
 
+/// Archived in Codex (provider-owned) or, for a Claude Code thread, in Wonder.
+pub(crate) async fn is_archived(
+    state: &AppState,
+    conversation: &StoredProjectConversation,
+) -> Result<bool, String> {
+    if conversation.wonder_archived {
+        return Ok(true);
+    }
+    codex_is_archived(state, conversation).await
+}
+
+/// Claude Code has no archive: Wonder hides the thread and leaves the session
+/// untouched, so it still opens in Claude Code on the Mac.
+async fn set_wonder_archived(
+    state: &AppState,
+    conversation: &StoredProjectConversation,
+    archived: bool,
+) -> Result<(), (StatusCode, String)> {
+    let conflict = |message: &str| (StatusCode::CONFLICT, message.to_owned());
+    let unavailable = |message: &str| (StatusCode::SERVICE_UNAVAILABLE, message.to_owned());
+    if conversation.wonder_archived == archived {
+        return Ok(());
+    }
+    let Some(_admission) = state.update_admission.claim_guard().await else {
+        return Err(conflict(
+            "Wonder is preparing to update. Try again shortly.",
+        ));
+    };
+    let _guard = state.dispatch_lock.lock().await;
+    if archived
+        && state
+            .store
+            .conversation_has_archive_blocking_work(&conversation.conversation_id)
+            .await
+            .map_err(|_| unavailable("The thread's work could not be checked. Try again."))?
+    {
+        return Err(conflict(
+            "Finish or stop this thread's work and resolve its pending sends before archiving it.",
+        ));
+    }
+    match state
+        .store
+        .set_project_conversation_wonder_archived(
+            &conversation.conversation_id,
+            archived,
+            &now_text(),
+        )
+        .await
+    {
+        Ok(true) => {}
+        _ => {
+            return Err(unavailable(
+                "The archive change could not be saved. Try again.",
+            ))
+        }
+    }
+    state
+        .projects
+        .cursors
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    Ok(())
+}
+
 async fn set_archived(
     state: &AppState,
     conversation: &StoredProjectConversation,
@@ -477,10 +569,7 @@ async fn set_archived(
     let conflict = |message: &str| (StatusCode::CONFLICT, message.to_owned());
     let unavailable = |message: String| (StatusCode::SERVICE_UNAVAILABLE, message);
     if conversation.family != AgentFamily::Codex {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "Archiving in Claude and Wonder together is not available yet.".into(),
-        ));
+        return set_wonder_archived(state, conversation, archived).await;
     }
     let Some(native) = conversation.native_session_id.as_deref() else {
         return Err(conflict(
@@ -687,6 +776,7 @@ struct ProjectsResponse {
     families: Vec<FamilyAvailability>,
     modes_version: u8,
     archive_version: u8,
+    create_version: u8,
     pinned: Vec<PinnedThread>,
 }
 
@@ -737,6 +827,9 @@ pub(crate) async fn list(
         Err(message) => return error(StatusCode::SERVICE_UNAVAILABLE, message),
     };
     for conversation in &pinned {
+        if conversation.wonder_archived {
+            continue;
+        }
         if conversation.family == AgentFamily::Codex
             && conversation
                 .native_session_id
@@ -772,7 +865,9 @@ pub(crate) async fn list(
         projects: projects.iter().map(project_summary).collect(),
         families,
         modes_version: MODES_VERSION,
-        archive_version: 1,
+        // 2: Claude Code threads archive in Wonder, and archived threads list.
+        archive_version: 2,
+        create_version: CREATE_VERSION,
         pinned: pinned_threads,
     })
     .into_response()
@@ -966,9 +1061,103 @@ pub(crate) async fn candidates(
 pub(crate) struct CreateProjectRequest {
     request_id: String,
     name: String,
+    #[serde(default)]
     folders: Vec<String>,
     #[serde(default)]
     primary_index: usize,
+    /// Creates an empty folder named after the project instead of using
+    /// existing `folders`.
+    new_folder: Option<NewFolderRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NewFolderRequest {
+    /// Where the folder is created; the Mac's home folder when absent.
+    parent: Option<String>,
+}
+
+/// Version of `POST /api/v1/projects`: 1 accepts `newFolder`.
+const CREATE_VERSION: u8 = 1;
+
+/// Creates `parent/name` for a new project. An empty folder already at that
+/// path is reused, so retrying a create whose response was lost succeeds;
+/// a folder with contents is refused rather than adopted silently.
+fn create_project_folder(
+    parent: Option<&str>,
+    name: &str,
+    denied: &[String],
+) -> Result<String, (StatusCode, &'static str)> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > 255
+        || name.starts_with('.')
+        || name.contains(['/', ':', '\0'])
+    {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Folder names can’t start with a period or contain / or :.",
+        ));
+    }
+    let parent = match parent {
+        Some(parent) => PathBuf::from(parent),
+        None => std::env::var_os("HOME").map(PathBuf::from).ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Your Mac’s home folder could not be found.",
+        ))?,
+    };
+    if !parent.is_absolute() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Choose a location on your Mac.",
+        ));
+    }
+    let parent = std::fs::canonicalize(&parent)
+        .ok()
+        .filter(|p| p.is_dir())
+        .ok_or((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "That location is no longer available on your Mac.",
+        ))?;
+    for root in denied {
+        let root = FsPath::new(root.strip_suffix("/**").unwrap_or(root));
+        let Ok(protected) = crate::filesystem::protected_root(root) else {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Protected Mac locations could not be checked.",
+            ));
+        };
+        if parent.starts_with(&protected) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "That location holds protected Mac settings. Choose another location.",
+            ));
+        }
+    }
+    let folder = parent.join(name);
+    match std::fs::create_dir(&folder) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let empty = std::fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir())
+                && std::fs::read_dir(&folder).is_ok_and(|mut entries| entries.next().is_none());
+            if !empty {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "A folder with this name already exists there. Choose another name, or add it as an existing folder.",
+                ));
+            }
+        }
+        Err(_) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "The folder couldn’t be created there. Choose another location.",
+            ))
+        }
+    }
+    folder.to_str().map(str::to_owned).ok_or((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "Folder names must be valid text.",
+    ))
 }
 
 pub(crate) async fn create(
@@ -978,6 +1167,34 @@ pub(crate) async fn create(
 ) -> Response {
     if uuid::Uuid::parse_str(&request.request_id).is_err() {
         return error(StatusCode::BAD_REQUEST, "requestId must be a UUID");
+    }
+    let mut request = request;
+    if let Some(new_folder) = request.new_folder.take() {
+        if !request.folders.is_empty() {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "Send either folders or newFolder, not both.",
+            );
+        }
+        let denied = state.denied_roots.clone();
+        let name = request.name.clone();
+        match tokio::task::spawn_blocking(move || {
+            create_project_folder(new_folder.parent.as_deref(), &name, &denied)
+        })
+        .await
+        {
+            Ok(Ok(path)) => {
+                request.folders = vec![path];
+                request.primary_index = 0;
+            }
+            Ok(Err((status, message))) => return error(status, message),
+            Err(_) => {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The folder could not be created. Try again.",
+                )
+            }
+        }
     }
     let denied = state.denied_roots.clone();
     let folders = request.folders.clone();
@@ -1445,7 +1662,7 @@ pub(crate) async fn threads(
         };
         for conversation in attached
             .iter()
-            .filter(|c| c.is_pinned || c.native_session_id.is_none())
+            .filter(|c| (c.is_pinned || c.native_session_id.is_none()) && !c.wonder_archived)
         {
             if conversation.family == AgentFamily::Codex
                 && conversation
@@ -1498,6 +1715,8 @@ pub(crate) async fn threads(
             .project_conversation_by_native(native.family, &store, &native.id)
             .await
         {
+            // Archived in Wonder: the provider still lists it, Wonder does not.
+            Ok(Some(conversation)) if conversation.wonder_archived => continue,
             Ok(Some(conversation)) => {
                 attached_summary(
                     &state,
@@ -1566,6 +1785,144 @@ pub(crate) async fn threads(
         partial,
     })
     .into_response()
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArchivedThreadsPage {
+    threads: Vec<ProjectThreadSummary>,
+    partial: Vec<PartialFailure>,
+}
+
+/// Most archived Codex threads Wonder reads for one project.
+const MAX_ARCHIVED_CODEX: usize = 200;
+
+/// A project's archived threads, newest first: Codex threads archived in Codex
+/// (from Wonder or the Codex app) and Claude Code threads archived in Wonder.
+/// Restoring one is the same conversation PATCH as archiving it.
+pub(crate) async fn archived_threads(
+    State(state): State<AppState>,
+    Extension(_authority): Extension<OwnerAuthority>,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(Some(project)) = state.store.project(&id).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(attached) = state.store.project_conversations(&project.id).await else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Archived threads are temporarily unavailable. Try again.",
+        );
+    };
+    let mut threads = Vec::new();
+    for conversation in attached.iter().filter(|c| c.wonder_archived) {
+        threads.push(
+            attached_summary(
+                &state,
+                conversation,
+                activity_seconds(&conversation.last_activity_at),
+                None,
+            )
+            .await,
+        );
+    }
+    let mut partial = Vec::new();
+    match archived_codex_rows(&state, &project).await {
+        Ok(rows) => {
+            let store = provider_store(&state, AgentFamily::Codex).to_owned();
+            for native in rows {
+                let summary = match state
+                    .store
+                    .project_conversation_by_native(AgentFamily::Codex, &store, &native.id)
+                    .await
+                {
+                    Ok(Some(conversation)) => {
+                        attached_summary(
+                            &state,
+                            &conversation,
+                            native.updated_at,
+                            Some(native.title),
+                        )
+                        .await
+                    }
+                    _ => ProjectThreadSummary {
+                        reference: reference(AgentFamily::Codex, &native.id),
+                        conversation_id: None,
+                        title: native.title,
+                        family: AgentFamily::Codex,
+                        updated_at: native.updated_at,
+                        is_pinned: false,
+                        has_unread: false,
+                        is_working: false,
+                    },
+                };
+                threads.push(summary);
+            }
+        }
+        Err(_) => partial.push(PartialFailure {
+            family: AgentFamily::Codex,
+            detail: "Archived Codex threads could not be loaded.".into(),
+        }),
+    }
+    threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Json(ArchivedThreadsPage { threads, partial }).into_response()
+}
+
+/// Codex's own archived threads in the project's folders, helpers excluded.
+async fn archived_codex_rows(
+    state: &AppState,
+    project: &StoredProject,
+) -> Result<Vec<NativeThread>, String> {
+    let rpc = codex_rpc(state).await?;
+    let mut rows = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen = HashSet::new();
+    loop {
+        let page = result(
+            &rpc,
+            "thread/list",
+            json!({
+                "cwd": root_paths(project), "sourceKinds": CODEX_SOURCE_KINDS, "archived": true,
+                "limit": 100, "sortKey": "updated_at", "sortDirection": "desc", "cursor": cursor,
+            }),
+        )
+        .await?;
+        for thread in page["data"]
+            .as_array()
+            .ok_or("Codex archive state is unavailable.")?
+        {
+            let Some(id) = thread.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if thread
+                .get("parentThreadId")
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                continue;
+            }
+            rows.push(NativeThread {
+                family: AgentFamily::Codex,
+                id: id.to_owned(),
+                title: thread_title(thread),
+                updated_at: thread
+                    .get("updatedAt")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default(),
+            });
+            if rows.len() >= MAX_ARCHIVED_CODEX {
+                return Ok(rows);
+            }
+        }
+        cursor = page
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match &cursor {
+            Some(next) if seen.insert(next.clone()) => {}
+            _ => return Ok(rows),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1978,12 +2335,12 @@ pub(crate) async fn fork(
             "This chat’s folder is no longer in the project. Add it back to fork.",
         );
     }
-    match codex_is_archived(&state, &source).await {
+    match is_archived(&state, &source).await {
         Ok(false) => {}
         Ok(true) => {
             return error(
                 StatusCode::CONFLICT,
-                "This chat is archived. Restore it on your Mac before forking.",
+                "This chat is archived. Restore it before forking.",
             )
         }
         Err(message) => return error(StatusCode::SERVICE_UNAVAILABLE, message),
@@ -2197,6 +2554,9 @@ pub(crate) async fn update_conversation(
         if let Err((status, message)) = set_archived(&state, &existing, archived).await {
             return error(status, message);
         }
+        let Ok(Some(existing)) = state.store.project_conversation(&id).await else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
         return match conversation_detail(&state, &existing).await {
             Ok(detail) if detail.is_archived == archived => Json(detail).into_response(),
             _ => error(
@@ -2552,7 +2912,7 @@ pub(crate) async fn create_thread(
                     "This message was already sent differently.",
                 );
             }
-            let Some(receipt) = crate::message_receipt(message) else {
+            let Some(receipt) = crate::queue::receipt(&state, message).await else {
                 return error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Stored message has an unknown delivery state.",
@@ -2774,12 +3134,13 @@ pub(crate) async fn create_thread(
         .store
         .touch_project(&project.id, request.family, &now)
         .await;
-    let Some(receipt) = crate::message_receipt(stored) else {
+    let Some(receipt) = crate::queue::receipt(&state, stored).await else {
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "stored message has an unknown delivery state",
         );
     };
+    state.dispatch_wake.notify_one();
     let conversation = attached_summary(&state, &conversation, activity_seconds(&now), None).await;
     (
         StatusCode::ACCEPTED,
@@ -3003,14 +3364,12 @@ pub(crate) async fn is_project(state: &AppState, conversation: &str) -> bool {
     )
 }
 
-/// Whether a Wonder message must wait for the Mac app. Claude Code keeps an
-/// open chat's conversation in memory: it neither sees a turn written by
-/// Wonder nor continues after it. A message from Wonder takes the chat over:
-/// the idle process the Claude desktop app keeps for it is closed, and the app
-/// continues from the transcript, including Wonder's turn, when the chat is
-/// next used there. Only a running turn, or a chat open in Claude Code in a
-/// terminal, holds the message. Codex holds it only while its desktop app is
-/// running a turn.
+/// Whether a Wonder message must wait for the Mac app: Claude on the Mac is
+/// writing a reply in the chat, or has it open in Claude Code in a terminal;
+/// Codex's desktop app is running a turn in it. Only reads. A Claude desktop
+/// chat that is idle, or still runs background work after its reply, does not
+/// hold the message: dispatch ends the app's process and continues the chat
+/// (see `take_over_from_desktop`).
 pub(crate) async fn held_on_mac(state: &AppState, conversation: &str) -> bool {
     let Ok(Some(stored)) = state.store.project_conversation(conversation).await else {
         return false;
@@ -3019,10 +3378,33 @@ pub(crate) async fn held_on_mac(state: &AppState, conversation: &str) -> bool {
         return false;
     };
     match stored.family {
-        AgentFamily::Claude => crate::desktop_activity::stop_idle_desktop_session(native)
+        AgentFamily::Claude => crate::desktop_activity::claude_holds_session(native)
             .await
-            .is_err(),
+            .is_some(),
         AgentFamily::Codex => crate::desktop_activity::codex_thread_busy(native).await,
+    }
+}
+
+/// A dispatch that found the chat held on the Mac after all (Claude there
+/// started writing a reply between the check and the claim). The message is
+/// not failed: its claim is released and it waits like any held message.
+const HELD_ON_MAC: &str = "\u{0}held-on-mac";
+
+/// Claude Code keeps an open chat's conversation in memory: it neither sees a
+/// turn written by Wonder nor continues after it, and two processes writing
+/// one session fork it. So Wonder ends the desktop app's process for the chat
+/// before sending (the app continues from the transcript, with Wonder's turn,
+/// when the chat is next used there). Background work still running in that
+/// process ends with it; the phone says so before the message is sent.
+async fn take_over_from_desktop(native: &str) -> Result<(), String> {
+    use crate::desktop_activity::StopRefusal;
+    match crate::desktop_activity::end_desktop_session(native).await {
+        Ok(()) => Ok(()),
+        Err(StopRefusal::Busy | StopRefusal::Terminal) => Err(HELD_ON_MAC.into()),
+        Err(StopRefusal::StillRunning) => Err(
+            "Claude on your Mac didn't close this chat, so its running tasks are still going. Stop them or close the chat in Claude on your Mac, then send again."
+                .into(),
+        ),
     }
 }
 
@@ -3040,7 +3422,7 @@ pub(crate) fn release_to_desktop(state: &AppState, conversation: &str) {
             return;
         }
         if let Some(native) = stored.native_session_id.as_deref() {
-            let _ = crate::desktop_activity::stop_idle_desktop_session(native).await;
+            crate::desktop_activity::close_idle_desktop_session(native).await;
         }
     });
 }
@@ -3108,6 +3490,9 @@ pub(crate) async fn dispatch(state: AppState, message: wonder_store::StoredMessa
                 .await;
             drop(guard);
         }
+        // The claim stays; the next dispatch pass releases it and the message
+        // waits, unchanged, until the Mac lets go of the chat.
+        Err(failure) if failure == HELD_ON_MAC => {}
         Err(failure) => {
             let (status, delivery) = if submitting {
                 ("uncertain", DeliveryState::Uncertain)
@@ -3149,6 +3534,12 @@ pub(crate) async fn dispatch_inner(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("This project conversation is unavailable.")?;
+    if conversation.wonder_archived {
+        return Err(
+            "This thread is archived in Wonder. Restore it from Archived threads before sending."
+                .into(),
+        );
+    }
     if codex_is_archived(state, &conversation).await? {
         return Err("This thread is archived. Restore it on your Mac before sending.".into());
     }
@@ -3309,7 +3700,12 @@ pub(crate) async fn dispatch_inner(
                 .map_err(|e| e.to_string())?;
             thread
         }
-        (AgentFamily::Claude, Some(binding)) => binding.thread_id,
+        (AgentFamily::Claude, Some(binding)) => {
+            if let Some(native) = conversation.native_session_id.as_deref() {
+                take_over_from_desktop(native).await?;
+            }
+            binding.thread_id
+        }
         (AgentFamily::Claude, None) => {
             let started = result(
                 &rpc,
@@ -3861,6 +4257,14 @@ async fn native_turn_status(
 /// Other project work, native children, goals, terminals and captured read/RPC
 /// handles retain the process; the private Bot runtime is never stopped here.
 async fn release_idle_codex_runtime(state: &AppState) {
+    release_codex_runtime_when_idle(state, false).await;
+}
+
+/// Shut the Projects Codex runtime down once nothing uses it. A `stale`
+/// runtime (ChatGPT installed a newer Codex) is released even when it holds
+/// only discovery state, so the next request starts the installed version.
+/// Returns whether it was shut down.
+pub(crate) async fn release_codex_runtime_when_idle(state: &AppState, stale: bool) -> bool {
     let runtime = &state.projects;
     let (rpc, generation) = {
         let _start = runtime.start.lock().await;
@@ -3869,31 +4273,32 @@ async fn release_idle_codex_runtime(state: &AppState) {
             || client.health().storage_blocked()
             || client.has_rpc_handles()
         {
-            return;
+            return false;
         }
         (client.rpc(), client.health().id().to_owned())
     };
     // Native idle checks may take several RPCs per loaded thread. An update
     // can proceed while they run; the final shutdown has its own admission.
     if state.update_admission.work_paused() {
-        return;
+        return false;
     }
     let Ok(loaded) = result(&rpc, "thread/loaded/list", json!({})).await else {
-        return;
+        return false;
     };
     if state.update_admission.work_paused() {
-        return;
+        return false;
     }
     let Some(threads) = loaded["data"].as_array() else {
-        return;
+        return false;
     };
-    // Discovery alone holds no writer and needs no restart. Incomplete or
-    // unsupported lifecycle responses must never authorize process shutdown.
-    if threads.is_empty() || !loaded["nextCursor"].is_null() {
-        return;
+    // Discovery alone holds no writer and needs no restart unless it runs a
+    // replaced binary. Incomplete or unsupported lifecycle responses must
+    // never authorize process shutdown.
+    if (threads.is_empty() && !stale) || !loaded["nextCursor"].is_null() {
+        return false;
     }
     let Ok(messages) = state.store.active_runtime_messages().await else {
-        return;
+        return false;
     };
     // Queued user intent remains in SQLite for the next dispatch tick. An
     // admitted turn with unconfirmed completion keeps its runtime alive.
@@ -3903,31 +4308,31 @@ async fn release_idle_codex_runtime(state: &AppState) {
                 .iter()
                 .any(|t| t.as_str() == m.codex_thread_id.as_deref())
     }) {
-        return;
+        return false;
     }
     for thread in threads {
         if state.update_admission.work_paused() {
-            return;
+            return false;
         }
         let Some(thread) = thread.as_str() else {
-            return;
+            return false;
         };
         let Ok(read) = result(&rpc, "thread/read", json!({"threadId": thread})).await else {
-            return;
+            return false;
         };
         if state.update_admission.work_paused() {
-            return;
+            return false;
         }
         if read["thread"]["id"].as_str() != Some(thread)
             || read["thread"]["status"]["type"].as_str() != Some("idle")
         {
-            return;
+            return false;
         }
         let Ok(goal) = result(&rpc, "thread/goal/get", json!({"threadId": thread})).await else {
-            return;
+            return false;
         };
         if state.update_admission.work_paused() {
-            return;
+            return false;
         }
         if !goal.get("goal").is_some_and(|g| {
             g.is_null()
@@ -3936,7 +4341,7 @@ async fn release_idle_codex_runtime(state: &AppState) {
                     Some("complete" | "blocked" | "paused" | "budgetLimited" | "usageLimited")
                 )
         }) {
-            return;
+            return false;
         }
         let Ok(background) = result(
             &rpc,
@@ -3945,17 +4350,17 @@ async fn release_idle_codex_runtime(state: &AppState) {
         )
         .await
         else {
-            return;
+            return false;
         };
         if !background["data"].as_array().is_some_and(Vec::is_empty)
             || !background["nextCursor"].is_null()
         {
-            return;
+            return false;
         }
     }
     drop(rpc);
     let Some(_admission) = state.update_admission.claim_guard().await else {
-        return;
+        return false;
     };
     let _dispatch = state.dispatch_lock.lock().await;
     let _start = runtime.start.lock().await;
@@ -3965,10 +4370,10 @@ async fn release_idle_codex_runtime(state: &AppState) {
         || client.health().id() != generation
         || client.has_rpc_handles()
     {
-        return;
+        return false;
     }
     let Ok(current) = state.store.active_runtime_messages().await else {
-        return;
+        return false;
     };
     for message in current
         .iter()
@@ -3978,7 +4383,7 @@ async fn release_idle_codex_runtime(state: &AppState) {
             .iter()
             .any(|thread| thread.as_str() == message.codex_thread_id.as_deref())
         {
-            return;
+            return false;
         }
         // A new Project turn may have started after the idle snapshot on a
         // thread that was not in that snapshot. Fail closed on store errors.
@@ -3987,8 +4392,8 @@ async fn release_idle_codex_runtime(state: &AppState) {
             .project_conversation(&message.conversation_id)
             .await
         {
-            Ok(Some(conversation)) if conversation.family == AgentFamily::Codex => return,
-            Err(_) => return,
+            Ok(Some(conversation)) if conversation.family == AgentFamily::Codex => return false,
+            Err(_) => return false,
             _ => {}
         }
     }
@@ -4002,10 +4407,10 @@ async fn release_idle_codex_runtime(state: &AppState) {
     .await;
     drop(final_rpc);
     let Ok(Ok(final_loaded)) = final_loaded else {
-        return;
+        return false;
     };
     let Some(final_threads) = final_loaded["data"].as_array() else {
-        return;
+        return false;
     };
     let probed = threads
         .iter()
@@ -4020,9 +4425,10 @@ async fn release_idle_codex_runtime(state: &AppState) {
         || current.len() != final_threads.len()
         || current != probed
     {
-        return;
+        return false;
     }
     let _ = client.shutdown().await;
+    true
 }
 
 /// Reuse a native Codex project with the same folders, otherwise create one
@@ -5360,6 +5766,173 @@ pub(crate) mod tests {
     // Contract: one provider-owned archive hides even pinned chats, failures
     // preserve visibility, restart/retry retain identity, and desktop changes
     // reconcile both ways without resuming archived work.
+    // Contract: a Claude Code thread archives in Wonder only. It leaves the
+    // pinned list and the thread list, appears under archived threads, refuses
+    // sends, survives a re-read from the store (relaunch), and restores with the
+    // same PATCH. Claude Code's own session is never touched.
+    #[tokio::test]
+    async fn claude_archive_is_wonder_local_listed_and_restorable() {
+        let (dir, state, _message) = handoff_fixture().await;
+        let cwd = dir.path().join("project-source");
+        state
+            .store
+            .create_project_conversation(ProjectConversationInsert {
+                conversation_id: "claude-chat",
+                project_id: "project",
+                family: AgentFamily::Claude,
+                provider_store: &state.projects.claude_store,
+                native_session_id: Some("5e55-10a1"),
+                cwd: cwd.to_str().unwrap(),
+                roots_revision: 1,
+                title: "Claude thread",
+                model: None,
+                effort: None,
+                service_tier: None,
+                access_mode: "read_only",
+                claude_approval: "ask",
+                plan_mode: false,
+                creation_request_id: None,
+                now: "now",
+            })
+            .await
+            .unwrap();
+        state
+            .store
+            .update_project_conversation(
+                "claude-chat",
+                ProjectConversationPatch {
+                    pinned: Some(true),
+                    ..Default::default()
+                },
+                "now",
+            )
+            .await
+            .unwrap();
+        let patch = |archived: bool| {
+            update_conversation(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path("claude-chat".into()),
+                Json(serde_json::from_value(json!({"isArchived": archived})).unwrap()),
+            )
+        };
+        let body = |response: Response| async move {
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        };
+        let pinned_ids = |library: Value| {
+            library["pinned"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    p["thread"]["conversationId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        let library = body(list(State(state.clone()), Extension(OwnerAuthority)).await).await;
+        assert_eq!(library["archiveVersion"], 2);
+        crate::tests::validate_http_contract("projectsResponse", &library);
+        assert!(pinned_ids(library).contains(&"claude-chat".to_owned()));
+
+        let archived = body(patch(true).await).await;
+        assert_eq!(archived["isArchived"], true);
+        crate::tests::validate_http_contract("projectConversationDetail", &archived);
+        // Relaunch: the flag comes back from the store, not from memory.
+        let stored = state
+            .store
+            .project_conversation("claude-chat")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.wonder_archived);
+        assert!(
+            conversation_detail(&state, &stored)
+                .await
+                .unwrap()
+                .is_archived
+        );
+        let library = body(list(State(state.clone()), Extension(OwnerAuthority)).await).await;
+        assert!(!pinned_ids(library).contains(&"claude-chat".to_owned()));
+        let page = body(
+            threads(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path("project".into()),
+                Query(ThreadsQuery {
+                    cursor: None,
+                    limit: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert!(!page["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["conversationId"] == "claude-chat"));
+        let listed = body(
+            archived_threads(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path("project".into()),
+            )
+            .await,
+        )
+        .await;
+        crate::tests::validate_http_contract("archivedProjectThreadsPage", &listed);
+        let row = listed["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["conversationId"] == "claude-chat")
+            .cloned()
+            .expect("archived Claude thread listed");
+        assert_eq!(row["reference"], "claude:5e55-10a1");
+        assert_eq!(row["family"], "claude");
+
+        let restored = body(patch(false).await).await;
+        assert_eq!(restored["isArchived"], false);
+        assert!(
+            !state
+                .store
+                .project_conversation("claude-chat")
+                .await
+                .unwrap()
+                .unwrap()
+                .wonder_archived
+        );
+        let library = body(list(State(state.clone()), Extension(OwnerAuthority)).await).await;
+        assert!(pinned_ids(library).contains(&"claude-chat".to_owned()));
+        let listed = body(
+            archived_threads(
+                State(state.clone()),
+                Extension(OwnerAuthority),
+                Path("project".into()),
+            )
+            .await,
+        )
+        .await;
+        assert!(!listed["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["conversationId"] == "claude-chat"));
+    }
+
     #[tokio::test]
     async fn codex_archive_reconciles_pins_retry_restart_and_desktop_restore() {
         let (dir, state, message) = handoff_fixture().await;
@@ -5571,12 +6144,7 @@ pub(crate) mod tests {
         );
         std::fs::remove_file(dir.path().join("archive-lost-response")).unwrap();
         set_archived(&state, &conversation, false).await.unwrap();
-        let mut claude = conversation.clone();
-        claude.family = AgentFamily::Claude;
-        assert_eq!(
-            set_archived(&state, &claude, true).await.unwrap_err().0,
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
+        // Claude archives in Wonder only: claude_archive_is_wonder_local_listed_and_restorable.
         state.projects.shutdown().await;
     }
 
@@ -6098,6 +6666,7 @@ pub(crate) mod tests {
             }],
             modes_version: MODES_VERSION,
             archive_version: 1,
+            create_version: CREATE_VERSION,
             pinned: vec![PinnedThread {
                 project_id: "p1".into(),
                 thread: pinned,
@@ -7610,6 +8179,81 @@ pub(crate) mod tests {
         let mut hidden_all = catalog.clone();
         hidden_all.models.clear();
         assert!(execution_settings(&hidden_all, AgentFamily::Codex, None, None, None).is_err());
+    }
+
+    // Contract: a new project's folder is created once inside the chosen
+    // location; a retry reuses the empty folder, an occupied name or a
+    // protected location is refused, and names cannot escape the location.
+    #[tokio::test]
+    async fn new_project_creates_its_folder_and_retries_idempotently() {
+        use crate::permission_modes::tests::{call, fixture};
+        let (dir, mut state) = fixture().await;
+        let parent = dir.path().join("Code");
+        std::fs::create_dir(&parent).unwrap();
+        let protected = dir.path().join("secrets");
+        std::fs::create_dir(&protected).unwrap();
+        state.denied_roots = vec![protected.to_string_lossy().into_owned()];
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let body = json!({
+            "requestId": request_id,
+            "name": "Launch site",
+            "newFolder": {"parent": parent.to_str().unwrap()},
+        });
+        crate::tests::validate_http_contract("createProjectRequest", &body);
+        let created = call(&state, "POST", "/api/v1/projects", body.clone()).await;
+        assert_eq!(created.0, StatusCode::CREATED, "{}", created.1);
+        let folder = std::fs::canonicalize(parent.join("Launch site")).unwrap();
+        assert!(folder.is_dir());
+        assert_eq!(created.1["folders"][0]["path"], folder.to_str().unwrap());
+        // A lost response is retried with the same request: same project, no error.
+        let retried = call(&state, "POST", "/api/v1/projects", body).await;
+        assert_eq!(retried.0, StatusCode::OK, "{}", retried.1);
+        assert_eq!(retried.1["id"], created.1["id"]);
+        // An occupied name is never adopted.
+        std::fs::write(folder.join("README.md"), "x").unwrap();
+        let occupied = call(
+            &state,
+            "POST",
+            "/api/v1/projects",
+            json!({"requestId": uuid::Uuid::new_v4().to_string(), "name": "Launch site",
+                   "newFolder": {"parent": parent.to_str().unwrap()}}),
+        )
+        .await;
+        assert_eq!(occupied.0, StatusCode::CONFLICT, "{}", occupied.1);
+        for (name, parent) in [
+            ("../escape", parent.to_str().unwrap()),
+            (".hidden", parent.to_str().unwrap()),
+            ("Inside", protected.to_str().unwrap()),
+            ("Relative", "Code"),
+        ] {
+            let refused = call(
+                &state,
+                "POST",
+                "/api/v1/projects",
+                json!({"requestId": uuid::Uuid::new_v4().to_string(), "name": name,
+                       "newFolder": {"parent": parent}}),
+            )
+            .await;
+            assert_eq!(
+                refused.0,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{name}: {}",
+                refused.1
+            );
+        }
+        assert!(!protected.join("Inside").exists());
+        assert!(!dir.path().join("escape").exists());
+        let both = call(
+            &state,
+            "POST",
+            "/api/v1/projects",
+            json!({"requestId": uuid::Uuid::new_v4().to_string(), "name": "Both",
+                   "folders": [parent.to_str().unwrap()], "newFolder": {}}),
+        )
+        .await;
+        assert_eq!(both.0, StatusCode::BAD_REQUEST, "{}", both.1);
+        let library = call(&state, "GET", "/api/v1/projects", Value::Null).await;
+        assert_eq!(library.1["createVersion"], 1);
     }
 
     // Contract: protected locations and whole-home folders cannot become

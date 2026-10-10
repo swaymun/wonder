@@ -32,6 +32,13 @@ import WonderPairing
     #endif
 
     init() {
+        #if WONDER_DIAGNOSTICS
+        // First launch without touching the Keychain: no saved computers, whatever an earlier run paired.
+        if ProcessInfo.processInfo.arguments.contains("-diagnostics-unpaired") {
+            loaded = true
+            return
+        }
+        #endif
         #if DEBUG || WONDER_DIAGNOSTICS
         if ProcessInfo.processInfo.arguments.contains("-read-preview") && !ProcessInfo.processInfo.arguments.contains("-connections-preview") {
             loaded = true

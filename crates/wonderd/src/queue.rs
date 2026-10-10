@@ -21,6 +21,38 @@ pub(super) struct Settings {
 pub(super) struct Reorder {
     items: Vec<(String, i64)>,
 }
+/// Whether an accepted message is queued rather than being sent now: it waits
+/// behind other work in its conversation, or the Mac holds the Project chat
+/// (Claude or Codex there is running a turn in it, or it is open in Claude
+/// Code in a terminal). The one owner of that decision for the send receipt
+/// and the queue list, so the phone's first placement of a message is final.
+pub(crate) async fn waits(state: &AppState, conversation: &str, behind_work: bool) -> bool {
+    behind_work
+        || (crate::projects::is_project(state, conversation).await
+            && crate::projects::held_on_mac(state, conversation).await)
+}
+
+/// The send receipt for an accepted message, saying whether it is queued.
+pub(crate) async fn receipt(
+    state: &AppState,
+    message: wonder_store::StoredMessage,
+) -> Option<ClientMessageReceipt> {
+    let queued = match message.state.as_str() {
+        "accepted_by_wonder" => {
+            let behind = state
+                .store
+                .message_behind_work(&message.id)
+                .await
+                .unwrap_or(false);
+            waits(state, &message.conversation_id, behind).await
+        }
+        _ => false,
+    };
+    let mut receipt = message_receipt(message)?;
+    receipt.queued = Some(queued);
+    Some(receipt)
+}
+
 pub(super) async fn list(
     State(state): State<AppState>,
     Path(conversation): Path<String>,
@@ -29,6 +61,16 @@ pub(super) async fn list(
         Ok(items) => items,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+    // The first pending message with nothing ahead is being sent (dispatch may
+    // simply not have claimed it yet) unless the Mac holds the chat.
+    let held = match items.iter().any(|item| !item.behind_work) {
+        true => waits(&state, &conversation, false).await,
+        false => false,
+    };
+    let items = items
+        .into_iter()
+        .filter(|item| item.behind_work || held)
+        .collect::<Vec<_>>();
     let bot = match bot_for_conversation(&state, &conversation).await {
         Ok(bot) => bot,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -389,6 +431,20 @@ mod tests {
         state
             .store
             .update_managed_bot(&bot, [true; 3])
+            .await
+            .unwrap();
+        // The message waits behind a running reply, so it is queued.
+        let MessageInsert::Inserted(active) = state
+            .store
+            .insert_message("owner", "active", "work", "hash", "bot", "now")
+            .await
+            .unwrap()
+        else {
+            panic!("active")
+        };
+        state
+            .store
+            .update_message_delivery(&active.id, "streaming", Some("thread"), Some("turn"))
             .await
             .unwrap();
         let MessageInsert::Inserted(message) = state

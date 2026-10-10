@@ -21,12 +21,18 @@ mod setup_window;
 
 actions!(
     wonder_settings,
-    [StatusSettings, DeviceSettings, AccessSettings,]
+    [
+        StatusSettings,
+        ProviderSettings,
+        DeviceSettings,
+        AccessSettings,
+    ]
 );
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     Status,
+    Providers,
     Devices,
     Access,
     About,
@@ -181,6 +187,139 @@ impl ReadinessSummary {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderTone {
+    Ready,
+    Attention,
+    Pending,
+}
+
+/// What Settings → Providers shows for one provider snapshot from the bridge.
+#[derive(Debug, PartialEq, Eq)]
+struct ProviderRow {
+    status: String,
+    detail: Option<String>,
+    tone: ProviderTone,
+    /// Bridge action and button label; `provider-sign-out` asks for confirmation first.
+    action: Option<(&'static str, &'static str)>,
+}
+
+impl ProviderRow {
+    fn from_snapshot(provider: &Value) -> Self {
+        let name = text(provider, "name");
+        let codex = text(provider, "id") == "codex";
+        let version = match text(provider, "version") {
+            "" => None,
+            version => Some(format!("Version {version}")),
+        };
+        let row = |status: &str, detail: Option<String>, tone, action| Self {
+            status: status.to_owned(),
+            detail,
+            tone,
+            action,
+        };
+        match text(provider, "operation") {
+            "signingIn" => {
+                return row(
+                    "Waiting for sign-in in your browser…",
+                    None,
+                    ProviderTone::Pending,
+                    Some(("provider-cancel", "Cancel")),
+                )
+            }
+            "signingOut" => return row("Signing out…", None, ProviderTone::Pending, None),
+            "reconnecting" => return row("Reconnecting…", None, ProviderTone::Pending, None),
+            _ => {}
+        }
+        // Signed in on this Mac, but wonderd runs something else: an earlier
+        // rejected version, a stopped runtime, or one an update replaces.
+        const RECONNECT: Option<(&str, &str)> = Some(("provider-reconnect", "Reconnect"));
+        match (text(provider, "state"), text(provider, "runtime")) {
+            ("signedIn", "incompatible") => row(
+                "Signed in, but not connected",
+                Some(format!(
+                    "Wonder is still using an earlier check of {name}. Reconnect to use the installed version."
+                )),
+                ProviderTone::Attention,
+                RECONNECT,
+            ),
+            ("signedIn", "stopped") => row(
+                "Signed in, but not running",
+                Some(format!("Wonder couldn’t keep {name} running. Reconnect to restart it.")),
+                ProviderTone::Attention,
+                RECONNECT,
+            ),
+            ("signedIn", "updatePending") => row(
+                "Update ready",
+                Some(format!(
+                    "{name} switches to the installed version when agents finish. Reconnect to switch now."
+                )),
+                ProviderTone::Pending,
+                RECONNECT,
+            ),
+            ("signedIn", _) => {
+                let account = text(provider, "account");
+                row(
+                    &if account.is_empty() {
+                        "Signed in".to_owned()
+                    } else {
+                        format!("Signed in with {account}")
+                    },
+                    version,
+                    ProviderTone::Ready,
+                    Some(("provider-sign-out", "Sign Out…")),
+                )
+            }
+            ("signedOut", _) => row(
+                "Not signed in",
+                Some(format!("Sign in so agents can use {name}.")),
+                ProviderTone::Attention,
+                Some(("provider-sign-in", "Sign In…")),
+            ),
+            ("needsSubscription", _) => row(
+                "Needs a Claude subscription",
+                Some("Wonder uses a Claude Pro, Max, Team or Enterprise plan. Sign in with that account.".into()),
+                ProviderTone::Attention,
+                Some(("provider-sign-in", "Sign In…")),
+            ),
+            ("unsupported", _) if codex => row(
+                "This ChatGPT version isn’t supported",
+                Some(version.map_or(
+                    "Update ChatGPT. Wonder starts the new version on its own.".into(),
+                    |version| format!("{version}. Update ChatGPT. Wonder starts the new version on its own."),
+                )),
+                ProviderTone::Attention,
+                Some(("provider-set-up", "Open ChatGPT")),
+            ),
+            ("unsupported", _) => row(
+                "Claude runtime needs an update",
+                Some("Install the latest Wonder to update it.".into()),
+                ProviderTone::Attention,
+                Some(("provider-set-up", "Download Wonder…")),
+            ),
+            ("notInstalled", _) if codex => row(
+                "Not installed",
+                Some("Codex comes with the ChatGPT app for Mac.".into()),
+                ProviderTone::Attention,
+                Some(("provider-set-up", "Set Up…")),
+            ),
+            ("notInstalled", _) => row(
+                "Not installed",
+                Some("Wonder’s Claude runtime is missing. Reinstall Wonder to restore it.".into()),
+                ProviderTone::Attention,
+                Some(("provider-set-up", "Set Up…")),
+            ),
+            ("unavailable", _) => row(
+                "Status unavailable",
+                Some(format!("Wonder couldn’t read {name}’s status.")),
+                ProviderTone::Attention,
+                Some(("provider-refresh", "Check Again")),
+            ),
+            _ => row("Checking…", None, ProviderTone::Pending, None),
+        }
+    }
+}
+
 struct Bridge {
     child: Child,
     sender: mpsc::Sender<Value>,
@@ -271,13 +410,15 @@ pub struct MacSettings {
     permission_drag_window: Option<WindowHandle<Root>>,
     last_clock: Instant,
     last_auto_pair: Option<Instant>,
+    confirm_sign_out: Option<String>,
 }
 impl MacSettings {
     pub fn new(cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
             KeyBinding::new("cmd-1", StatusSettings, Some("WonderSettings")),
-            KeyBinding::new("cmd-2", DeviceSettings, Some("WonderSettings")),
-            KeyBinding::new("cmd-3", AccessSettings, Some("WonderSettings")),
+            KeyBinding::new("cmd-2", ProviderSettings, Some("WonderSettings")),
+            KeyBinding::new("cmd-3", DeviceSettings, Some("WonderSettings")),
+            KeyBinding::new("cmd-4", AccessSettings, Some("WonderSettings")),
         ]);
         let (bridge, error) = match Bridge::start() {
             Ok(b) => (Some(b), None),
@@ -317,12 +458,17 @@ impl MacSettings {
             permission_drag_window: None,
             last_clock: Instant::now(),
             last_auto_pair: None,
+            confirm_sign_out: None,
         }
     }
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
         self.revoke = None;
-
+        self.confirm_sign_out = None;
+        if page == Page::Providers {
+            // The bridge skips providers checked within the last 30 seconds.
+            self.send(json!({"action":"provider-refresh"}), cx);
+        }
         cx.notify();
     }
     fn tick(&mut self, cx: &mut Context<Self>) {
@@ -694,27 +840,150 @@ impl MacSettings {
                 )
                 .children(action.map(|button| button.primary().small())),
         );
-        let mut view = stack().gap_5().child(status);
-        if self.flag("claudeAuthRequired") {
-            view = view.child(group(
-                cx,
-                vec![form_row(
-                    "Claude",
-                    Some("Sign in so agents can start work.".into()),
+        let view = stack().gap_5().child(status);
+        view.child(self.login_row("login", cx))
+    }
+    fn providers(&self, cx: &Context<Self>) -> Div {
+        let rows = array(&self.state, "providers")
+            .iter()
+            .map(|provider| self.provider_row(provider, cx).into_any_element())
+            .collect();
+        let checking = array(&self.state, "providers")
+            .iter()
+            .any(|provider| !text(provider, "operation").is_empty());
+        stack()
+            .gap_4()
+            .child(note(
+                "Wonder runs agents with these providers on this Mac. Sign in to each one you want to use.",
+            ))
+            .child(section(
+                "Agent providers",
+                Some(
                     self.action(
-                        "claude-sign-in",
-                        "Sign In…",
-                        json!({"action":"claude-sign-in"}),
-                        self.flag("serviceBusy"),
+                        "providers-check",
+                        "Check Again",
+                        json!({"action":"provider-refresh","enabled":true}),
+                        checking,
                         cx,
                     )
-                    .small(),
-                    cx,
+                    .ghost()
+                    .xsmall(),
+                ),
+                group(cx, rows),
+                cx,
+            ))
+    }
+    fn provider_row(&self, provider: &Value, cx: &Context<Self>) -> Stateful<Div> {
+        let id = text(provider, "id").to_owned();
+        let name = text(provider, "name").to_owned();
+        let row = ProviderRow::from_snapshot(provider);
+        let confirming = self.confirm_sign_out.as_deref() == Some(id.as_str())
+            && row
+                .action
+                .is_some_and(|(action, _)| action == "provider-sign-out");
+        let busy = !text(provider, "operation").is_empty();
+        let tone = match row.tone {
+            ProviderTone::Ready => cx.theme().success,
+            ProviderTone::Attention => cx.theme().warning,
+            ProviderTone::Pending => cx.theme().muted_foreground,
+        };
+        let trailing = if confirming {
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    Button::new(SharedString::from(format!("provider-{id}-keep")))
+                        .label("Cancel")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.confirm_sign_out = None;
+                            cx.notify();
+                        })),
                 )
-                .into_any_element()],
-            ));
-        }
-        view.child(self.login_row("login", cx))
+                .child({
+                    let id = id.clone();
+                    Button::new(SharedString::from(format!(
+                        "provider-{id}-confirm-sign-out"
+                    )))
+                    .label("Sign Out")
+                    .small()
+                    .danger()
+                    .accessibility_label(format!("Sign out of {name}"))
+                    .disabled(self.disabled())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.confirm_sign_out = None;
+                        this.send(json!({"action":"provider-sign-out","key":id}), cx);
+                    }))
+                })
+        } else {
+            div().children(row.action.map(|(action, label)| {
+                let button_id = SharedString::from(format!("provider-{id}-{action}"));
+                let accessibility = format!("{label} {name}").replace('…', "");
+                let button = if action == "provider-sign-out" {
+                    let id = id.clone();
+                    Button::new(button_id)
+                        .label(label)
+                        .disabled(self.disabled())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.confirm_sign_out = Some(id.clone());
+                            cx.notify();
+                        }))
+                } else {
+                    let command = if action == "provider-refresh" {
+                        json!({"action":action,"enabled":true})
+                    } else {
+                        json!({"action":action,"key":id})
+                    };
+                    // Cancel stays available while sign-in waits in the browser.
+                    self.action(
+                        button_id,
+                        label,
+                        command,
+                        busy && action != "provider-cancel",
+                        cx,
+                    )
+                };
+                button
+                    .small()
+                    .when(row.tone == ProviderTone::Attention, |button| {
+                        button.primary()
+                    })
+                    .accessibility_label(accessibility)
+            }))
+        };
+        let detail = if confirming {
+            Some(format!("Agents stop using {name} until you sign in again."))
+        } else {
+            row.detail.clone()
+        };
+        let message = text(provider, "message");
+        div()
+            .id(SharedString::from(format!("provider-{id}")))
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .min_h(px(52.))
+            .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(tone))
+            .child(
+                stack()
+                    .gap_0p5()
+                    .flex_1()
+                    .child(note(name.clone()).font_weight(FontWeight::MEDIUM))
+                    .child(note(row.status.clone()).text_xs())
+                    .children(detail.map(|detail| muted(detail, cx).text_xs()))
+                    .when(!message.is_empty(), |view| {
+                        view.child(note(message.to_owned()).text_xs().text_color(
+                            if provider["failure"] == true {
+                                cx.theme().danger
+                            } else {
+                                cx.theme().muted_foreground
+                            },
+                        ))
+                    }),
+            )
+            .child(div().flex_shrink_0().child(trailing))
     }
     fn about(&self, cx: &Context<Self>) -> Div {
         let mut rows = vec![
@@ -1188,6 +1457,30 @@ impl MacSettings {
         .into_any_element()];
         if !setup {
             control.push(self.shared_display_row(cx).into_any_element());
+            let active = self.flag("controlActive");
+            control.push(
+                form_row(
+                    "Stop control",
+                    Some(if active {
+                        "A paired device is controlling this Mac. Stop ends this session without changing the setting above."
+                    } else {
+                        "No paired device is controlling this Mac."
+                    }
+                    .into()),
+                    self.action(
+                        "stop-control",
+                        "Stop",
+                        json!({"action":"stop-control"}),
+                        !active,
+                        cx,
+                    )
+                    .small()
+                    .when(active, |button| button.danger())
+                    .accessibility_label("Stop control from paired device"),
+                    cx,
+                )
+                .into_any_element(),
+            );
         }
         stack().gap_5().child(permissions).child(section(
             "Remote control",
@@ -1371,6 +1664,7 @@ impl Render for MacSettings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pages = [
             (Page::Status, "General", IconName::Settings),
+            (Page::Providers, "Providers", IconName::Bot),
             (Page::Devices, "Devices", IconName::Network),
             (Page::Access, "Access", IconName::Eye),
             (Page::About, "About", IconName::Info),
@@ -1440,6 +1734,7 @@ impl Render for MacSettings {
         } else {
             match self.page {
                 Page::Status => self.general(cx),
+                Page::Providers => self.providers(cx),
                 Page::Devices => self.devices(cx),
                 Page::Access => self.permissions(cx),
                 Page::About => self.about(cx),
@@ -1452,6 +1747,9 @@ impl Render for MacSettings {
             .on_action(
                 cx.listener(|this, _: &StatusSettings, _, cx| this.select_page(Page::Status, cx)),
             )
+            .on_action(cx.listener(|this, _: &ProviderSettings, _, cx| {
+                this.select_page(Page::Providers, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &DeviceSettings, _, cx| this.select_page(Page::Devices, cx)),
             )
@@ -1770,8 +2068,64 @@ fn last_seen(phone: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expired, last_seen, now_ms, ReadinessAction, ReadinessSummary};
+    use super::{
+        expired, last_seen, now_ms, ProviderRow, ProviderTone, ReadinessAction, ReadinessSummary,
+    };
     use serde_json::json;
+    #[test]
+    fn provider_rows_offer_one_deliberate_action_per_state() {
+        let row = |id: &str, state: &str, operation: &str| {
+            ProviderRow::from_snapshot(&json!({
+                "id": id, "name": if id == "codex" { "Codex" } else { "Claude" },
+                "state": state, "operation": operation,
+                "version": "1.2.3", "account": "ChatGPT account",
+            }))
+        };
+        let action = |row: ProviderRow| row.action.map(|(action, _)| action);
+        let signed_in = row("codex", "signedIn", "");
+        assert_eq!(signed_in.status, "Signed in with ChatGPT account");
+        assert_eq!(signed_in.detail.as_deref(), Some("Version 1.2.3"));
+        assert_eq!(signed_in.tone, ProviderTone::Ready);
+        assert_eq!(action(signed_in), Some("provider-sign-out"));
+        for (id, state, expected) in [
+            ("claude", "signedOut", "provider-sign-in"),
+            ("claude", "needsSubscription", "provider-sign-in"),
+            ("codex", "unsupported", "provider-set-up"),
+            ("codex", "notInstalled", "provider-set-up"),
+            ("claude", "notInstalled", "provider-set-up"),
+            ("codex", "unavailable", "provider-refresh"),
+        ] {
+            let row = row(id, state, "");
+            assert_eq!(row.tone, ProviderTone::Attention, "{id} {state}");
+            assert_eq!(action(row), Some(expected), "{id} {state}");
+        }
+        // An operation in flight replaces the state's action; only sign-in can be cancelled.
+        assert_eq!(
+            action(row("codex", "signedOut", "signingIn")),
+            Some("provider-cancel")
+        );
+        assert_eq!(action(row("codex", "signedIn", "signingOut")), None);
+        assert_eq!(action(row("codex", "checking", "checking")), None);
+        assert_eq!(row("codex", "", "").status, "Checking…");
+        assert_eq!(action(row("claude", "signedIn", "reconnecting")), None);
+        // Signed in, but the runtime Wonder runs is out of step with it.
+        let runtime = |id: &str, runtime: &str| {
+            ProviderRow::from_snapshot(&json!({
+                "id": id, "name": "Codex", "state": "signedIn", "operation": "",
+                "runtime": runtime, "version": "1.2.3",
+            }))
+        };
+        for state in ["incompatible", "stopped", "updatePending"] {
+            assert_eq!(
+                action(runtime("codex", state)),
+                Some("provider-reconnect"),
+                "{state}"
+            );
+        }
+        assert_eq!(runtime("claude", "stopped").tone, ProviderTone::Attention);
+        assert_eq!(action(runtime("codex", "ok")), Some("provider-sign-out"));
+        assert_eq!(action(runtime("codex", "")), Some("provider-sign-out"));
+    }
     #[test]
     fn missing_or_elapsed_pairing_deadlines_fail_closed() {
         assert!(expired(&json!({})));

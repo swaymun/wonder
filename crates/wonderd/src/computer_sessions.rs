@@ -594,87 +594,6 @@ fn validate_input_batch(request: &InputBatchRequest) -> Result<(), &'static str>
     Ok(())
 }
 
-fn sanitized_teaching_events(
-    actions: &[InputAction],
-    sequence: u64,
-    now: &str,
-) -> Vec<TeachingEventCreate> {
-    actions
-        .iter()
-        .enumerate()
-        .filter_map(|(action_index, action)| {
-            let payload = match action {
-                InputAction::Pointer {
-                    x,
-                    y,
-                    phase,
-                    button,
-                } => serde_json::json!({
-                    "kind": "pointer",
-                    "x": (x * 10_000.0).round() / 10_000.0,
-                    "y": (y * 10_000.0).round() / 10_000.0,
-                    "phase": phase,
-                    "button": button,
-                }),
-                InputAction::Scroll { delta_x, delta_y } => serde_json::json!({
-                    "kind": "scroll",
-                    "deltaX": delta_x,
-                    "deltaY": delta_y,
-                }),
-                InputAction::Key {
-                    key,
-                    phase,
-                    modifiers,
-                } => {
-                    let named = matches!(
-                        key.as_str(),
-                        "return"
-                            | "tab"
-                            | "escape"
-                            | "backspace"
-                            | "delete"
-                            | "left"
-                            | "right"
-                            | "up"
-                            | "down"
-                            | "home"
-                            | "end"
-                            | "pageup"
-                            | "pagedown"
-                    );
-                    serde_json::json!({
-                        "kind": "key",
-                        "key": if named { serde_json::json!(key) } else { serde_json::json!("redacted") },
-                        "phase": phase,
-                        "modifiers": modifiers,
-                        "redacted": !named,
-                    })
-                }
-                InputAction::Text { text } => serde_json::json!({
-                    "kind": "text",
-                    "characterCount": text.chars().count(),
-                    "redacted": true,
-                }),
-                InputAction::Clipboard { operation, text } => serde_json::json!({
-                    "kind": "clipboard",
-                    "operation": operation,
-                    "characterCount": text.as_deref().map(|value| value.chars().count()).unwrap_or(0),
-                    "redacted": true,
-                }),
-                InputAction::ReleaseAll => return None,
-            };
-            let event_json = serde_json::to_string(&payload).ok()?;
-            Some(TeachingEventCreate {
-                control_sequence: sequence,
-                action_index: action_index as u64,
-                payload_bytes: event_json.len() as u64,
-                event_json,
-                created_at: now.to_owned(),
-            })
-        })
-        .collect()
-}
-
 fn validate_binding_request(request: &LeaseBindingRequest) -> bool {
     validate_text(&request.lease_id, 128)
         && request.generation > 0
@@ -2286,80 +2205,14 @@ pub(crate) async fn input_control(
                 .into_response();
         }
     };
-    let teaching =
-        crate::teaching::capture_session(&state, &device.device_id, &session.id, &request.lease_id)
-            .await;
-    let teaching_outcome = match teaching {
-        Ok(Some(teaching_session)) => {
-            let events =
-                sanitized_teaching_events(&request.actions, request.sequence, &completed_at);
-            match state
-                .store
-                .append_teaching_events(
-                    &teaching_session.id,
-                    &device.device_id,
-                    &state.host_installation_id,
-                    &session.id,
-                    &request.lease_id,
-                    &events,
-                    &completed_at,
-                )
-                .await
-            {
-                Ok(
-                    TeachingCaptureAppendResult::Interrupted | TeachingCaptureAppendResult::Expired,
-                ) => true,
-                Ok(
-                    TeachingCaptureAppendResult::Appended(_)
-                    | TeachingCaptureAppendResult::Duplicate
-                    | TeachingCaptureAppendResult::NotRecording,
-                ) => false,
-                Err(_) => {
-                    let _ = state
-                        .store
-                        .interrupt_teaching_for_lease(
-                            &request.lease_id,
-                            "Teaching capture was interrupted because its accepted action could not be saved.",
-                            &completed_at,
-                        )
-                        .await;
-                    true
-                }
-            }
-        }
-        Ok(None) => {
-            let _ = state
-                .store
-                .interrupt_teaching_for_lease(
-                    &request.lease_id,
-                    "Teaching stopped because the control lease ended before capture could be saved.",
-                    &completed_at,
-                )
-                .await;
-            false
-        }
-        Err(_) => {
-            let _ = state
-                .store
-                .interrupt_teaching_for_lease(
-                    &request.lease_id,
-                    "Teaching capture was interrupted because its accepted action could not be recorded.",
-                    &completed_at,
-                )
-                .await;
-            true
-        }
-    };
+    // Teaching capture is retired; end a legacy recording bound to this lease.
+    let _ = crate::teaching::interrupt_capture(&state, &request.lease_id).await;
     Json(control_response(
         &state,
         false,
         true,
         "active",
-        if teaching_outcome {
-            "Input accepted. Teaching capture was interrupted; no retry is needed."
-        } else {
-            "Input accepted."
-        },
+        "Input accepted.",
         Some(refreshed_lease),
         helper_result
             .get("clipboardText")
@@ -2791,52 +2644,6 @@ mod tests {
                 text: Some(text),
             }));
         }
-    }
-
-    #[test]
-    fn teaching_capture_redacts_text_clipboard_and_printable_keys() {
-        let events = sanitized_teaching_events(
-            &[
-                InputAction::Pointer {
-                    x: 0.123456,
-                    y: 0.987654,
-                    phase: "down".into(),
-                    button: Some("left".into()),
-                },
-                InputAction::Text {
-                    text: "secret text".into(),
-                },
-                InputAction::Clipboard {
-                    operation: "pasteFromPhone".into(),
-                    text: Some("private clipboard".into()),
-                },
-                InputAction::Key {
-                    key: "a".into(),
-                    phase: "press".into(),
-                    modifiers: 0,
-                },
-                InputAction::Key {
-                    key: "return".into(),
-                    phase: "press".into(),
-                    modifiers: 1,
-                },
-                InputAction::ReleaseAll,
-            ],
-            4,
-            "now",
-        );
-        assert_eq!(events.len(), 5);
-        let encoded = events
-            .iter()
-            .map(|event| event.event_json.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!encoded.contains("secret text"));
-        assert!(!encoded.contains("private clipboard"));
-        assert!(encoded.contains(r#""characterCount":11"#));
-        assert!(encoded.contains(r#""key":"redacted""#));
-        assert!(encoded.contains(r#""key":"return""#));
-        assert!(encoded.contains(r#""x":0.1235"#));
     }
 
     #[test]

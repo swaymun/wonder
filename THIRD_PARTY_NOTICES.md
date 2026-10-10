@@ -23,6 +23,14 @@ licenses; Wonder's MIT license does not replace them.
 - `licenses/Sparkle-LICENSE.txt` covers the bundled Sparkle framework. Automatic
   updates are unavailable in this beta.
 - `WebRTC-LICENSE.md` in the app Resources covers the bundled WebRTC framework.
+- The iOS app bundles Inter, Atkinson Hyperlegible, JetBrains Mono and IBM Plex
+  Mono, unmodified, under the SIL Open Font License 1.1 (IBM Plex has the Reserved
+  Font Name "Plex"). Their license texts ship in `Fonts/` and show in Settings ->
+  Acknowledgements. `EPUB-LICENSES.md` in the iOS app covers Readium.
+- The iOS Apothecary and Herbalist themes adapt colours from the Apothecary
+  Diary VS Code theme (https://github.com/montemurro19/apothecary-diary-theme,
+  MIT, Copyright (c) 2025 Matheus Montemurro); its notice ships in the app
+  (`ThemeCredits`) and shows in Settings -> Acknowledgements.
 - `node/LICENSE` in app Resources contains Node.js and its bundled third-party
   notices. The bundled npm distribution retains its license files.
 - `claude-runtime/node_modules` retains the license files of the locked production

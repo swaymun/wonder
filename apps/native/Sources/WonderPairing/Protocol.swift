@@ -155,11 +155,7 @@ public final class PairingAPI: Sendable {
         request.setValue("__Host-wonder_session=\(connection.credential.sessionToken)", forHTTPHeaderField: "Cookie")
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw PairingFailure.response((response as? HTTPURLResponse)?.statusCode ?? 0) }
-        var data = Data()
-        for try await byte in bytes {
-            guard data.count < 8 * 1024 * 1024 else { throw FileFailure.tooLarge }
-            data.append(byte)
-        }
+        let data = try await Self.collect(bytes, limit: 8 * 1024 * 1024, expected: file.byteSize, exceeded: FileFailure.tooLarge)
         try file.verify(data, mime: http.mimeType)
         return data
     }
@@ -250,15 +246,32 @@ public final class PairingAPI: Sendable {
               let responseRevision = http.value(forHTTPHeaderField: "X-Wonder-Revision"),
               responseRevision.count == 64, responseRevision.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "0123456789abcdef").contains($0) }) else { throw FileFailure.integrity }
         if let revision, revision != responseRevision { throw FileFailure.stale }
-        var data = Data()
-        data.reserveCapacity(Int(contentLength))
-        for try await byte in bytes {
-            guard data.count < Int(contentLength) else { throw FileFailure.integrity }
-            data.append(byte)
-        }
+        let data = try await Self.collect(bytes, limit: Int(contentLength), expected: Int(contentLength), exceeded: FileFailure.integrity)
         guard UInt64(data.count) == contentLength else { throw FileFailure.integrity }
         return WorkspaceMediaChunk(bytes: data, start: range.start, end: range.end,
                                    total: range.total, mimeType: mime, revision: responseRevision)
+    }
+
+    /// Reads a response body in 64 KB chunks, failing with `exceeded` as soon as
+    /// it passes `limit`. Appending to `Data` one byte at a time cost about six
+    /// times as long for an 8 MB file.
+    static func collect<Bytes: AsyncSequence>(_ bytes: Bytes, limit: Int, expected: Int?, exceeded: Error) async throws -> Data where Bytes.Element == UInt8 {
+        let chunkSize = 64 * 1024
+        var data = Data()
+        if let expected, expected > 0 { data.reserveCapacity(min(expected, limit)) }
+        var chunk = [UInt8]()
+        chunk.reserveCapacity(chunkSize)
+        func flush() throws {
+            guard data.count + chunk.count <= limit else { throw exceeded }
+            data.append(contentsOf: chunk)
+            chunk.removeAll(keepingCapacity: true)
+        }
+        for try await byte in bytes {
+            chunk.append(byte)
+            if chunk.count == chunkSize { try flush() }
+        }
+        try flush()
+        return data
     }
 
     private static func parseMediaContentRange(_ value: String) -> (start: UInt64, end: UInt64, total: UInt64)? {
@@ -275,9 +288,13 @@ public final class PairingAPI: Sendable {
     static let compactViewHeader = "X-Wonder-History-View"
     static let compactView = "compact"
 
-    public static func timeoutInterval(for path: String) -> TimeInterval {
+    /// Seconds a request may stay idle. An attachment upload sends up to about
+    /// 11 MB of base64 and the Mac stores and hashes it before answering, so it
+    /// gets longer than ordinary API calls.
+    public static func timeoutInterval(for path: String, method: String = "GET") -> TimeInterval {
         if path == "/api/v1/group-chats/propose" { return 330 }
         if path.hasSuffix("/control/acquire") { return 135 }
+        if method == "POST", path.hasPrefix("/api/v1/conversations/"), path.hasSuffix("/files") { return 120 }
         return 15
     }
 
@@ -285,12 +302,13 @@ public final class PairingAPI: Sendable {
                                                   credential: Credential? = nil, method: String? = nil,
                                                   decodingStatuses: Set<Int> = [], bearerToken: String? = nil) async throws -> T {
         guard let url = URL(string: try PairingLink.origin(origin) + path) else { throw PairingFailure.invalidLink }
+        let httpMethod = method ?? (body == nil ? "GET" : "POST")
         var request = URLRequest(
             url: url,
             cachePolicy: .reloadIgnoringLocalCacheData,
-            timeoutInterval: Self.timeoutInterval(for: path)
+            timeoutInterval: Self.timeoutInterval(for: path, method: httpMethod)
         )
-        request.httpMethod = method ?? (body == nil ? "GET" : "POST")
+        request.httpMethod = httpMethod
         request.httpBody = body
         request.setValue(origin, forHTTPHeaderField: "Origin")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -326,6 +344,18 @@ public final class PairingAPI: Sendable {
                [409, 422, 503].contains(status),
                let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                !message.isEmpty, message.utf8.count <= 512 {
+                throw PairingFailure.hostMessage(status, message)
+            }
+            // A refused Reconnect says why (an agent is working, Claude didn't restart).
+            if path.hasPrefix("/api/v1/providers/"), path.hasSuffix("/reconnect"), [409, 503].contains(status),
+               let reply = try? JSONDecoder().decode([String: String].self, from: data),
+               let message = reply["detail"], !message.isEmpty, message.utf8.count <= 512 {
+                throw PairingFailure.hostMessage(status, message)
+            }
+            // Project creation explains a refused folder or name in plain language.
+            if path == "/api/v1/projects", httpMethod == "POST", [409, 422].contains(status),
+               let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !message.isEmpty, message.utf8.count <= 512, !message.hasPrefix("Failed to") {
                 throw PairingFailure.hostMessage(status, message)
             }
             throw PairingFailure.response(status)

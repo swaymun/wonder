@@ -115,10 +115,10 @@ forward rules for an older feature or workflow.
   physical device and state limitations. If a capture is impossible, say so in
   the PR rather than claiming verification. CI adds the scenario results for both
   simulators, and the release workflow adds TestFlight builds, as PR comments.
-- Prove iOS behavior with `scripts/wonderctl` scenarios on `iphone` and `duo`
+- Prove iOS behavior with `scripts/wonderctl` scenarios on `iphone`, `iphone-27` and `duo`
   rather than screenshot-driven computer use; run them on this Mac's simulators
-  (no `--host`) while developing. CI runs the feature map on the Mac mini for
-  every pull request. See [apps/ios/CONTROL.md](apps/ios/CONTROL.md). Extend the
+  (no `--host`). CI runs the feature map on self-hosted runners on this MacBook
+  for every pull request. See [apps/ios/CONTROL.md](apps/ios/CONTROL.md). Extend the
   feature map when you add user-visible behavior. Run the scenarios a change
   affects locally before opening its PR.
 - A scenario must not depend on state an earlier run left (saved settings, a
@@ -145,7 +145,7 @@ forward rules for an older feature or workflow.
 - UI tests use unique accessibility IDs, fully visible controls and assertions of
   the resulting state. Use complete `-only-testing:Target/Class/testMethod` filters
   and confirm nonzero executed tests. A skip or successful tap alone is not a pass.
-- CI skips `RelayKeychainTests` (`apps/native-relay`) because the Mac mini runners
+- CI skips `RelayKeychainTests` (`apps/native-relay`) because the CI runners
   cannot use the login Keychain. When a change touches `RelayKeychain` or how the
   relay identity is stored, run them on a developer Mac with
   `WONDER_LOCAL_BUILD=1 WONDER_RELAY_LIB_DIR="$PWD/$(apps/native-relay/scripts/build-relay-ffi.sh macos)" swift test --package-path apps/native-relay --filter RelayKeychainTests`
@@ -169,21 +169,21 @@ forward rules for an older feature or workflow.
   uploads. Documentation/source-sync/tooling-only changes that do not alter the
   shipped app need no new binary.
 - Uploads are automatic: when an iOS change merges to `main`, the Wonder Release
-  workflow uploads both channels from the Mac mini and comments the build numbers
-  on the PR. Check that comment. To upload by hand (a failed or deferred release),
-  run these sequentially from the repository root on a pushed commit (see
+  workflow uploads both channels and comments the build numbers on the PR. Check
+  that comment. To upload by hand (a failed or deferred release), run these
+  sequentially from the repository root on a clean, pushed commit (see
   [fastlane/USAGE.md](fastlane/USAGE.md)):
 
   ```sh
-  scripts/wonder-remote --ref HEAD --signing --lock testflight -- bundle exec fastlane ios beta channel:testing profile:release
-  scripts/wonder-remote --ref HEAD --signing --lock testflight -- bundle exec fastlane ios beta channel:production profile:release
+  bundle exec fastlane ios beta channel:testing profile:release
+  bundle exec fastlane ios beta channel:production profile:release
   ```
 
-- Develop on the MacBook: run agent sessions, Rust/Swift/Xcode builds and test
-  suites locally. The Mac mini (marked by `~/.config/wonder/is-build-host`) is
-  reserved for the two self-hosted CI runners and their simulators, TestFlight
-  uploads and Mac signing/notarization; use `scripts/wonder-remote` only for
-  signing, notarization and release. Do not run agent sessions on the mini.
+- Do all work on this MacBook: agent sessions, builds, test suites, CI runners,
+  TestFlight uploads and Mac signing/notarization. The Mac mini is retired; do not
+  use `scripts/wonder-remote` or `--host`. Until the CI runners are registered
+  here, pull requests cannot pass CI: run the affected checks locally and push the
+  branch instead of waiting on CI.
 - Keep at most 2–3 concurrent agent sessions, each in its own worktree. Keep at
   most two app PRs waiting on CI; land a stack one PR at a time. One session at a
   time changes CI, workflows or `wonderctl`; others report problems to it.
@@ -195,8 +195,8 @@ forward rules for an older feature or workflow.
   `apps/menubar`, the daemon or bundled helpers), a Developer ID signed, notarized
   and stapled Mac release installed to `/Applications/Wonder.app` is likewise
   standing-authorized when needed.** Follow [RELEASING.md](RELEASING.md#mac-artifact)
-  with the next monotonic build version: build, sign and notarize on the Mac mini
-  with `scripts/release-mac.sh` through `scripts/wonder-remote --ref HEAD`, install
+  with the next monotonic build version: build, sign and notarize here with
+  `scripts/release-mac.sh` from a clean checkout of a pushed commit, install
   here with `scripts/install-mac-dmg.sh` and record the version in `BETA_STATUS.md`. Once the installed app passes its health checks, delete the
   installer's rollback bundles (`~/.wonder/Backups/signed-update-*`); do not keep
   old app backups. Publishing a GitHub release or appcast still needs approval.

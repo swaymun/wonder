@@ -118,7 +118,12 @@ pub async fn spawn(state: AppState) -> Result<tokio::task::JoinHandle<()>, sqlx:
                     .spawn(async move { crate::projects::recover(&recovery_state).await });
                 next_project_recovery = tokio::time::Instant::now() + Duration::from_secs(5);
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // An accepted send wakes the loop at once (a wake that arrives
+            // during a tick is kept, so it is never lost); otherwise poll.
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                _ = state.dispatch_wake.notified() => {}
+            }
         }
     }))
 }

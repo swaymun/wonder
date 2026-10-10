@@ -1,8 +1,9 @@
 import SwiftUI
 import WidgetKit
 
-/// Recent Projects on the Mac last used for a new chat. Tapping a Project
-/// starts a new chat there; Live View opens that Mac's screen.
+/// The most recently active threads on the Mac last used for a new chat.
+/// Tapping one opens that thread; Live View opens that Mac's screen. Before any
+/// thread is known, recent Projects start a new chat instead.
 struct WonderProjectWidgetEntry: TimelineEntry {
     let date: Date
     let snapshot: ProjectWidgetSnapshot?
@@ -13,9 +14,10 @@ struct WonderProjectWidgetEntry: TimelineEntry {
 
 struct WonderProjectWidgetProvider: TimelineProvider {
     func placeholder(in context: Context) -> WonderProjectWidgetEntry {
-        WonderProjectWidgetEntry(date: Date(), snapshot: ProjectWidgetSnapshot(hostID: "mac", hostName: "Mac", projects: [
-            .init(id: "one", name: "Project 1"), .init(id: "two", name: "Project 2"),
-            .init(id: "three", name: "Project 3"), .init(id: "four", name: "Project 4"),
+        WonderProjectWidgetEntry(date: Date(), snapshot: ProjectWidgetSnapshot(hostID: "mac", hostName: "Mac", projects: [], threads: [
+            .init(projectID: "one", family: "codex", nativeID: "one", conversationID: nil, title: "Thread 1", projectName: "Project"),
+            .init(projectID: "one", family: "codex", nativeID: "two", conversationID: nil, title: "Thread 2", projectName: "Project"),
+            .init(projectID: "one", family: "claude", nativeID: "three", conversationID: nil, title: "Thread 3", projectName: "Project"),
         ]), identity: nil)
     }
 
@@ -45,8 +47,35 @@ struct WonderProjectWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: WonderProjectWidgetEntry
 
-    /// Larger widgets show three recent Projects and Live View as equal tiles.
+    /// Larger widgets show three recent threads (or Projects) and Live View as equal tiles.
     static let projectLimit = 3
+
+    /// One tile: a thread to open, or a Project to start a chat in.
+    private struct Destination: Identifiable {
+        let id: String
+        let title: String
+        let detail: String
+        let icon: String
+        let url: URL?
+        let accessibility: String
+    }
+
+    private func destinations(_ snapshot: ProjectWidgetSnapshot, hostID: String,
+                              identity: ProjectWidgetIdentity) -> [Destination] {
+        if !snapshot.threads.isEmpty {
+            return snapshot.threads.prefix(Self.projectLimit).map { thread in
+                Destination(id: "thread-" + thread.id, title: thread.title, detail: thread.projectName,
+                            icon: "bubble.left.and.text.bubble.right",
+                            url: ProjectWidgetLink.thread(hostID: hostID, thread: thread, identity: identity),
+                            accessibility: "\(thread.title), \(thread.projectName)")
+            }
+        }
+        return snapshot.projects.prefix(Self.projectLimit).map { project in
+            Destination(id: "project-" + project.id, title: project.name, detail: "New chat", icon: "plus.bubble",
+                        url: ProjectWidgetLink.newChat(hostID: hostID, projectID: project.id, identity: identity),
+                        accessibility: "\(project.name), new chat")
+        }
+    }
     private var columns: Int { family == .systemExtraLarge ? 4 : 2 }
     /// Large and extra-large tiles fill their space with a stacked layout.
     private var tall: Bool { family == .systemLarge || family == .systemExtraLarge }
@@ -61,7 +90,7 @@ struct WonderProjectWidgetView: View {
                     Image(systemName: "laptopcomputer").foregroundStyle(.tint)
                     Spacer(minLength: 0)
                     Text("Open Wonder").font(.headline)
-                    Text(entry.snapshot == nil ? "Your recent Projects appear here." : "Pair a Mac to see its Projects.")
+                    Text(entry.snapshot == nil ? "Your recent threads appear here." : "Pair a Mac to see its threads.")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(3)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -71,18 +100,17 @@ struct WonderProjectWidgetView: View {
         .containerBackground(.fill.tertiary, for: .widget)
     }
 
-    /// One tap target: the most recent Project's new chat, or the computer.
+    /// One tap target: the most recent thread (or Project), or the computer.
     private func small(_ snapshot: ProjectWidgetSnapshot, hostID: String, identity: ProjectWidgetIdentity) -> some View {
-        let project = snapshot.projects.first
-        let url = project.flatMap { ProjectWidgetLink.newChat(hostID: hostID, projectID: $0.id, identity: identity) }
-            ?? ProjectWidgetLink.computer(hostID: hostID, identity: identity)
+        let first = destinations(snapshot, hostID: hostID, identity: identity).first
+        let url = first?.url ?? ProjectWidgetLink.computer(hostID: hostID, identity: identity)
         return VStack(alignment: .leading, spacing: 6) {
             hostLabel(snapshot)
             Spacer(minLength: 0)
-            if let project {
-                Image(systemName: "plus.bubble").font(.title3).foregroundStyle(.tint)
-                Text(project.name).font(.headline).lineLimit(2).privacySensitive()
-                Text("New chat").font(.caption).foregroundStyle(.secondary)
+            if let first {
+                Image(systemName: first.icon).font(.title3).foregroundStyle(.tint)
+                Text(first.title).font(.headline).lineLimit(2).privacySensitive()
+                Text(first.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1).privacySensitive()
             } else {
                 Image(systemName: "desktopcomputer").font(.title3).foregroundStyle(.tint)
                 Text("Live View").font(.headline)
@@ -92,11 +120,11 @@ struct WonderProjectWidgetView: View {
         .padding()
         .widgetURL(url)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(project.map { "\($0.name), new chat on \(snapshot.hostName)" } ?? "Live View of \(snapshot.hostName)")
+        .accessibilityLabel(first.map { "\($0.accessibility) on \(snapshot.hostName)" } ?? "Live View of \(snapshot.hostName)")
     }
 
     private func grid(_ snapshot: ProjectWidgetSnapshot, hostID: String, identity: ProjectWidgetIdentity) -> some View {
-        let projects = Array(snapshot.projects.prefix(Self.projectLimit))
+        let projects = destinations(snapshot, hostID: hostID, identity: identity)
         let rows = (projects.count + 1 + columns - 1) / columns
         return VStack(alignment: .leading, spacing: 8) {
             hostLabel(snapshot)
@@ -110,7 +138,7 @@ struct WonderProjectWidgetView: View {
                         ForEach(0..<columns, id: \.self) { column in
                             let index = row * columns + column
                             if index < projects.count {
-                                projectLink(projects[index], hostID: hostID, identity: identity)
+                                destinationLink(projects[index])
                             } else if index == projects.count {
                                 liveViewLink(snapshot, hostID: hostID, identity: identity)
                             } else {
@@ -129,13 +157,12 @@ struct WonderProjectWidgetView: View {
         .padding()
     }
 
-    @ViewBuilder private func projectLink(_ project: ProjectWidgetSnapshot.Project, hostID: String,
-                                          identity: ProjectWidgetIdentity) -> some View {
-        if let url = ProjectWidgetLink.newChat(hostID: hostID, projectID: project.id, identity: identity) {
+    @ViewBuilder private func destinationLink(_ destination: Destination) -> some View {
+        if let url = destination.url {
             Link(destination: url) {
-                tile(icon: "plus.bubble", title: project.name, private: true, detail: "New chat")
+                tile(icon: destination.icon, title: destination.title, private: true, detail: destination.detail)
             }
-            .accessibilityLabel("\(project.name), new chat")
+            .accessibilityLabel(destination.accessibility)
         }
     }
 
@@ -188,8 +215,8 @@ struct WonderProjectWidget: Widget {
         StaticConfiguration(kind: ProjectWidgetSnapshot.widgetKind, provider: WonderProjectWidgetProvider()) { entry in
             WonderProjectWidgetView(entry: entry)
         }
-        .configurationDisplayName("Recent Projects")
-        .description("Start a chat in a recent Project on your Mac, or open Live View of its screen.")
+        .configurationDisplayName("Recent Threads")
+        .description("Open the threads you worked on most recently on your Mac, or Live View of its screen.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge])
     }
 }

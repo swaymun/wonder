@@ -384,6 +384,7 @@ mod tests {
             claude_approval: "auto".into(),
             plan_mode: false,
             native_settings_turn: None,
+            wonder_archived: false,
             is_pinned: false,
             has_unread: false,
             creation_request_id: None,

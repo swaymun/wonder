@@ -22,6 +22,9 @@ use std::{
 };
 use wonder_store::{StoredConversationFile, StoredProject};
 
+mod workspace_git;
+pub(super) use workspace_git::{workspace_git_changes, workspace_git_summary};
+
 const PAGE_SIZE: usize = 200;
 const MAX_ENTRIES: usize = 20_000;
 const MAX_WORKSPACE_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -387,6 +390,11 @@ pub(super) struct WorkspaceDiffQuery {
     path: Option<String>,
     #[serde(default)]
     staged: bool,
+    /// `uncommitted` (against HEAD) or `branch` (against the merge base),
+    /// working tree included. Without it, `staged` picks one side as before.
+    scope: Option<String>,
+    /// A renamed file's previous path, from the change list.
+    original_path: Option<String>,
 }
 
 fn workspace_error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -1465,56 +1473,80 @@ fn validated_git_path(
     resolve_workspace_path(root, relative, denied, own_workspace, true)
 }
 
+/// The verified Git scope of a workspace root: the repository that contains
+/// it and the literal pathspec limiting Git to that root. Status, change lists
+/// and diffs all start here so they share one containment and deny boundary.
+enum GitScope {
+    NotRepository,
+    Unavailable(&'static str),
+    Ready {
+        directory: PathBuf,
+        repository: PathBuf,
+        pathspec: String,
+    },
+}
+
+async fn verified_git_scope(
+    root: &WorkspaceRoot,
+    denied: &[PathBuf],
+    own_workspace: Option<&Path>,
+) -> GitScope {
+    if !root.is_directory {
+        return GitScope::Unavailable("Git status is available for folders only.");
+    }
+    let Ok(directory) = resolve_workspace_path(root, Path::new(""), denied, own_workspace, false)
+    else {
+        return GitScope::Unavailable("This workspace location is unavailable.");
+    };
+    let Some(repository) = git_repository(&directory).await else {
+        return GitScope::NotRepository;
+    };
+    if protected_by_denies(&repository, denied, own_workspace)
+        || !repository.starts_with(&directory) && !directory.starts_with(&repository)
+    {
+        return GitScope::Unavailable(
+            "This repository is outside the conversation's verified workspace.",
+        );
+    }
+    let Some(pathspec) = git_pathspec(&repository, &directory) else {
+        return GitScope::Unavailable("Git scope could not be verified.");
+    };
+    GitScope::Ready {
+        directory,
+        repository,
+        pathspec,
+    }
+}
+
 async fn read_workspace_git_status(
     root: &WorkspaceRoot,
     denied: &[PathBuf],
     own_workspace: Option<&Path>,
 ) -> WorkspaceGitStatusResponse {
-    if !root.is_directory {
-        return WorkspaceGitStatusResponse {
-            available: false,
-            detail: Some("Git status is available for folders only.".into()),
-            repository_path: None,
-            changes: Vec::new(),
+    let (directory, repository, pathspec) =
+        match verified_git_scope(root, denied, own_workspace).await {
+            GitScope::Ready {
+                directory,
+                repository,
+                pathspec,
+            } => (directory, repository, pathspec),
+            GitScope::NotRepository => {
+                return WorkspaceGitStatusResponse {
+                    available: true,
+                    detail: None,
+                    repository_path: None,
+                    changes: Vec::new(),
+                }
+            }
+            GitScope::Unavailable(detail) => {
+                return WorkspaceGitStatusResponse {
+                    available: false,
+                    detail: Some(detail.into()),
+                    repository_path: None,
+                    changes: Vec::new(),
+                }
+            }
         };
-    }
-    let Ok(directory) = resolve_workspace_path(root, Path::new(""), denied, own_workspace, false)
-    else {
-        return WorkspaceGitStatusResponse {
-            available: false,
-            detail: Some("This workspace location is unavailable.".into()),
-            repository_path: None,
-            changes: Vec::new(),
-        };
-    };
-    let Some(repository) = git_repository(&directory).await else {
-        return WorkspaceGitStatusResponse {
-            available: true,
-            detail: None,
-            repository_path: None,
-            changes: Vec::new(),
-        };
-    };
-    if protected_by_denies(&repository, denied, own_workspace)
-        || !repository.starts_with(&directory) && !directory.starts_with(&repository)
-    {
-        return WorkspaceGitStatusResponse {
-            available: false,
-            detail: Some(
-                "This repository is outside the conversation's verified workspace.".into(),
-            ),
-            repository_path: None,
-            changes: Vec::new(),
-        };
-    }
-    let Some(pathspec) = git_pathspec(&repository, &directory) else {
-        return WorkspaceGitStatusResponse {
-            available: false,
-            detail: Some("Git scope could not be verified.".into()),
-            repository_path: None,
-            changes: Vec::new(),
-        };
-    };
     let args = [
         "status",
         "--porcelain=v1",
@@ -2068,6 +2100,9 @@ pub(super) async fn workspace_git_diff(
     AxumPath(conversation_id): AxumPath<String>,
     Query(query): Query<WorkspaceDiffQuery>,
 ) -> Response {
+    if query.scope.is_some() {
+        return workspace_git::scoped_diff(&state, &conversation_id, query).await;
+    }
     let (roots, _) = match conversation_workspace_roots(&state, &conversation_id, false).await {
         Ok(value) => value,
         Err((status, detail)) => return workspace_error(status, detail),

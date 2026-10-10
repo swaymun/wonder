@@ -623,6 +623,9 @@ fn claude_task_summary(
             .filter(|role| !role.trim().is_empty())
             .unwrap_or("Agent"),
         "command" => "Background command",
+        "monitor" => "Monitor",
+        "session" => "Linked session",
+        "task" => "Background task",
         _ => return None,
     };
     let status = match task.get("status").and_then(Value::as_str)? {
@@ -828,6 +831,18 @@ mod tests {
             row(json!({"id":"toolu_4","kind":"shell","title":"x","status":"running"})).is_none()
         );
         assert!(row(json!({"id":"","kind":"command","title":"x","status":"running"})).is_none());
+        // Monitors, linked sessions and other background tasks Claude counts.
+        for (kind, role) in [
+            ("monitor", "Monitor"),
+            ("session", "Linked session"),
+            ("task", "Background task"),
+        ] {
+            let task = row(json!({"id":"t","kind":kind,"title":"x","status":"running"})).unwrap();
+            assert_eq!(
+                (task.kind.as_deref(), task.agent_role.as_deref()),
+                (Some(kind), Some(role))
+            );
+        }
     }
 
     // An agent task's transcript keeps the commands and edits the agent ran

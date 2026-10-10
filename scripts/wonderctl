@@ -21,11 +21,15 @@ ROOT = Path(__file__).resolve().parent.parent
 PROJECT = ROOT / "apps/ios/Wonder.xcodeproj"
 SOURCES = ROOT / "apps/ios/Wonder"
 BUNDLE = "com.swaymun.wonder.testing"
+IPHONES = ("iPhone 17 Pro", "iPhone 17", "iPhone 16 Pro", "iPhone 16")
+# Profile: simulator name, device types to try, and the iOS major version it is pinned to
+# (None: the newest runtime that supports the device). CI runs every profile.
 PROFILES = {
-    "iphone": ("Wonder Control iPhone", ("iPhone 17 Pro", "iPhone 17", "iPhone 16 Pro", "iPhone 16")),
-    "duo": ("Wonder Control iPhone Duo", ("iPhone Duo",)),
+    "iphone": ("Wonder Control iPhone", IPHONES, "26"),
+    "iphone-27": ("Wonder Control iPhone 27", IPHONES, "27"),
+    "duo": ("Wonder Control iPhone Duo", ("iPhone Duo",), None),
 }
-DEVICE_NAME, DEVICE_TYPES = PROFILES[os.environ.get("WONDER_CONTROL_PROFILE", "iphone")]
+DEVICE_NAME, DEVICE_TYPES, DEVICE_MAJOR = PROFILES[os.environ.get("WONDER_CONTROL_PROFILE", "iphone")]
 CONTROL = ROOT / ".local/control"
 EVIDENCE = CONTROL / "evidence"
 DERIVED = Path(os.path.expanduser(os.environ.get("WONDER_CONTROL_DERIVED", ""))) if os.environ.get("WONDER_CONTROL_DERIVED") else ROOT / ".local/build/control-sim"
@@ -79,26 +83,46 @@ def devices():
                 yield runtime, entry
 
 
-def find_device():
-    matches = [(runtime, d) for runtime, d in devices() if d["name"] == DEVICE_NAME]
-    return max(matches, key=lambda item: item[0])[1] if matches else None
+_target = None
 
 
-def create_device():
+def target_runtime():
+    """The runtime identifier and device type this profile's simulator should use: the
+    newest installed runtime of its pinned major version that supports one of its types.
+    A runtime can support only some devices (iOS 27.1 ships for the Duo alone)."""
+    global _target
+    if _target:
+        return _target
     runtimes = json.loads(simctl("list", "runtimes", "available", "-j").stdout)["runtimes"]
-    ios = sorted((r for r in runtimes if r["platform"] == "iOS"), key=lambda r: r["version"])
-    if not ios:
-        raise ControlError("no available iOS simulator runtime")
-    # A runtime can support only some devices (iOS 27.1 ships for the Duo alone), so
-    # take the newest runtime that supports one of this profile's device types.
+    ios = sorted((r for r in runtimes if r["platform"] == "iOS"
+                  and (not DEVICE_MAJOR or r["version"].split(".")[0] == DEVICE_MAJOR)),
+                 key=lambda r: [int(part) for part in r["version"].split(".")])
     for runtime in reversed(ios):
         supported = {t["name"]: t["identifier"] for t in runtime.get("supportedDeviceTypes", [])}
         kind = next((supported[name] for name in DEVICE_TYPES if name in supported), None)
         if kind:
-            break
-    else:
-        raise ControlError(f"no installed iOS runtime supports any of {DEVICE_TYPES}")
-    simctl("create", DEVICE_NAME, kind, runtime["identifier"])
+            _target = (runtime["identifier"], kind)
+            return _target
+    version = f"iOS {DEVICE_MAJOR}" if DEVICE_MAJOR else "iOS"
+    raise ControlError(f"no installed {version} simulator runtime supports any of {DEVICE_TYPES}; "
+                       f"install one with: xcodebuild -downloadPlatform iOS -buildVersion VERSION")
+
+
+def find_device():
+    runtime, _ = target_runtime()
+    return next((d for r, d in devices() if d["name"] == DEVICE_NAME and r == runtime), None)
+
+
+def create_device():
+    runtime, kind = target_runtime()
+    # A same-named simulator on another runtime is this profile's old one; remove it so
+    # the name stays unambiguous in Simulator and simctl.
+    for r, d in list(devices()):
+        if d["name"] == DEVICE_NAME and r != runtime:
+            if d["state"] == "Booted":
+                simctl("shutdown", d["udid"], check=False)
+            simctl("delete", d["udid"])
+    simctl("create", DEVICE_NAME, kind, runtime)
     return find_device()
 
 
@@ -437,6 +461,19 @@ def cmd_tree(args):
 
 def cmd_wait(args):
     selector(args)
+    if args.never is not None:
+        # A state that must not show even briefly (a transient flicker): poll
+        # the whole window and fail on the first sighting.
+        end = time.time() + args.never
+        polls = 0
+        while time.time() < end:
+            found = visible_matches(args)
+            polls += 1
+            if found:
+                raise ControlError(f"appeared during the {args.never}s window: {vars(args)}")
+            time.sleep(0.1)
+        print(f"never appeared ({polls} checks)")
+        return
     deadline = time.time() + args.timeout
     while True:
         found = visible_matches(args)
@@ -590,6 +627,8 @@ def parser():
         else:
             c.add_argument("--contains", help="substring of label or value")
             c.add_argument("--gone", action="store_true")
+            c.add_argument("--never", type=float, metavar="SECONDS",
+                           help="assert the element does not appear at any point for this long")
     c = add("hold", cmd_hold, "long-press an element found by id/label/contains")
     c.add_argument("--id")
     c.add_argument("--label")
@@ -665,8 +704,8 @@ def main(argv):
     if "DEVELOPER_DIR" not in os.environ and user_xcode.exists():
         os.environ["DEVELOPER_DIR"] = str(user_xcode)
     args = parser().parse_args(argv)
-    global DEVICE_NAME, DEVICE_TYPES
-    DEVICE_NAME, DEVICE_TYPES = PROFILES[args.device]
+    global DEVICE_NAME, DEVICE_TYPES, DEVICE_MAJOR
+    DEVICE_NAME, DEVICE_TYPES, DEVICE_MAJOR = PROFILES[args.device]
     os.environ["WONDER_CONTROL_PROFILE"] = args.device
     # On the build Mac itself (marked by this file) --host means "here".
     if args.host and not (Path.home() / ".config/wonder/is-build-host").exists():

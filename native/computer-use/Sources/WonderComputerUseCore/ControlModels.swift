@@ -372,3 +372,15 @@ public enum ControlInputAction: Codable, Equatable, Sendable {
         }
     }
 }
+
+/// Distributed notifications between the control helper and Wonder's Settings.
+/// Stop can only revoke the current lease; the state names carry no lease data.
+public enum ControlSessionSignal {
+    public static let stop = Notification.Name("com.wonder.stop-control")
+    /// Posted by the helper with object `active` or `inactive` when a lease starts or ends.
+    public static let state = Notification.Name("com.wonder.control-state")
+    /// Asks a running helper to repost its current state.
+    public static let stateRequest = Notification.Name("com.wonder.control-state-request")
+    public static let active = "active"
+    public static let inactive = "inactive"
+}

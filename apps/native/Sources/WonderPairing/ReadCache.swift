@@ -144,6 +144,14 @@ public struct ConversationSnapshot: Codable, Sendable {
     private var newestRuntimeTurn: ReadTurn? {
         thread.turns?.last(where: { !$0.id.hasPrefix("local:") })
     }
+    /// Whether this projection already ends with the newest native turn the
+    /// Mac reports, settled, so a send needs no full history re-read. Any
+    /// doubt (a different, missing or running turn) means re-read first.
+    public func showsLatestNativeTurn(id: String?, status: String, runningElsewhere: Bool) -> Bool {
+        guard let id, let shown = newestRuntimeTurn, shown.id == id, !runningElsewhere,
+              ["completed", "failed", "interrupted"].contains(status) else { return false }
+        return shown.status == status
+    }
     public var activeTurnIDs: Set<String> {
         activeTurnID.map { [$0] } ?? []
     }
@@ -212,9 +220,13 @@ public struct ConversationSnapshot: Codable, Sendable {
                     let clientId = durable?.clientMessageId ?? item.payload?["clientId"]?.string
                     let identity = user ? "user-" + (clientId ?? durable?.messageId ?? item.id) : turn.id + "/" + item.id
                     let speaker: String = user ? "You" : (message ? author : "Activity")
+                    // A prompt written on the Mac has no Wonder message; the
+                    // host lists the images it attached on the item itself.
+                    let attachments = durable?.attachmentIds
+                        ?? (user ? item.payload?["attachmentIds"]?.array?.compactMap(\.string) : nil) ?? []
                     return ReadRow(id: identity, author: speaker,
                                    text: durable?.body ?? text, isUser: user, timestamp: durable?.createdAt ?? item.createdAt,
-                                   turnId: turn.id, item: item, attachmentIds: durable?.attachmentIds ?? [], source: durable?.source)
+                                   turnId: turn.id, item: item, attachmentIds: attachments, source: durable?.source)
                 }
             }
             // Live projections can precede thread hydration. Merge by identity so

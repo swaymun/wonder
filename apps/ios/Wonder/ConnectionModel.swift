@@ -43,27 +43,50 @@ struct CodexUsageCacheEntry: Sendable {
     }
 }
 
-/// The 5-hour and weekly percentages used, as the thread header shows them.
-/// Claude names its windows; Codex reports primary (5 hours) and secondary
-/// (weekly). Nil when neither window is known.
+/// The usage windows the conversation title menu shows, shortest first. Claude
+/// reports named 5-hour and weekly windows. Codex reports only the windows the
+/// account's plan has (a Pro plan can have a weekly primary window and no
+/// secondary), so each is labeled by its reported duration, never by slot.
+/// Nil when no window is known.
 struct HeaderUsage: Equatable, Sendable {
-    let fiveHourUsed: Int?
-    let weeklyUsed: Int?
+    struct Window: Equatable, Sendable, Identifiable {
+        let id: String
+        /// "5 hours", "Weekly", ...
+        let name: String
+        let used: Int
+        var title: String { "\(name) \u{00B7} \(used)% used" }
+    }
+    let windows: [Window]
 
     init?(_ response: CodexUsageResponse) {
-        func used(_ ids: Set<String>, minutes: UInt64) -> Int? {
-            let window = response.windows.first { ids.contains($0.id) }
-                ?? response.windows.first { $0.windowDurationMins == minutes }
-            return window.map { Int(min(max($0.usedPercent, 0), 100).rounded()) }
+        func used(_ window: CodexUsageWindow) -> Int { Int(min(max(window.usedPercent, 0), 100).rounded()) }
+        let claude = response.windows.contains { ["five_hour", "seven_day"].contains($0.id) }
+        let chosen: [CodexUsageWindow]
+        if claude {
+            chosen = ["five_hour", "seven_day"].compactMap { id in response.windows.first { $0.id == id } }
+        } else {
+            chosen = response.windows.filter { !$0.id.hasPrefix("seven_day_") }
+                .sorted { ($0.windowDurationMins ?? .max) < ($1.windowDurationMins ?? .max) }
         }
-        fiveHourUsed = used(["five_hour", "primary"], minutes: 300)
-        weeklyUsed = used(["seven_day", "secondary"], minutes: 10_080)
-        if fiveHourUsed == nil && weeklyUsed == nil { return nil }
+        var seen = Set<String>()
+        windows = chosen.filter { seen.insert($0.id).inserted }.map { window in
+            let minutes = window.windowDurationMins ?? (window.id == "five_hour" ? 300 : window.id == "seven_day" ? 10_080 : nil)
+            return Window(id: window.id, name: Self.name(minutes: minutes, fallback: window.label), used: used(window))
+        }
+        if windows.isEmpty { return nil }
     }
 
-    var accessibilityLabel: String {
-        let weekly = weeklyUsed.map { (fiveHourUsed == nil ? "Weekly limit " : "weekly ") + "\($0)% used" }
-        return [fiveHourUsed.map { "5-hour limit \($0)% used" }, weekly].compactMap { $0 }.joined(separator: ", ")
+    /// A window's name from its length: "5 hours", "Daily", "Weekly", "30 days".
+    static func name(minutes: UInt64?, fallback: String) -> String {
+        guard let minutes, minutes > 0 else { return fallback.isEmpty ? "Usage" : fallback }
+        switch minutes {
+        case 60: return "Hourly"
+        case 1_440: return "Daily"
+        case 10_080: return "Weekly"
+        case let m where m % 1_440 == 0: return "\(m / 1_440) days"
+        case let m where m % 60 == 0: return "\(m / 60) hours"
+        default: return "\(minutes) minutes"
+        }
     }
 }
 
@@ -235,9 +258,24 @@ struct ManagedBotListMutationState {
             nativeHistoryFailures.insert(chat.id)
         }
     }
+    /// Whether the shown history already ends with the newest native turn,
+    /// settled. False whenever that cannot be confirmed.
+    private func nativeHistoryCurrent(_ chat: ChatSummary) async -> Bool {
+        guard isProject(chat), !previewMode, let saved = connection, !accessEnded,
+              !nativeActivityUnsupported.contains(assignmentScope), let snapshot = snapshots[chat.id] else { return false }
+        struct Activity: Decodable, Sendable { let latestTurnId: String?; let latestTurnStatus: String; let runningElsewhere: Bool }
+        let scope = assignmentScope
+        guard let activity: Activity = try? await api.request("/api/v1/conversations/\(Self.escape(chat.id))/history/activity",
+            origin: saved.origin, credential: saved.credential), scope == assignmentScope else { return false }
+        return snapshot.showsLatestNativeTurn(id: activity.latestTurnId, status: activity.latestTurnStatus,
+                                              runningElsewhere: activity.runningElsewhere)
+    }
     /// Claude conversations open in Claude Code in a terminal on the Mac, which
     /// keeps Wonder's messages waiting until it is exited there.
     @Published private(set) var nativeOpenElsewhere: Set<String> = []
+    /// Claude on the Mac finished its reply but still runs agent tasks, commands
+    /// or monitors in its own process for this chat; sending ends them.
+    @Published private(set) var nativeTasksOnMac: Set<String> = []
     /// The newest native turn seen per conversation, from the cheap activity check.
     private var nativeActivity: [String: String] = [:]
     private var nativeActivityUnsupported: Set<String> = []
@@ -247,7 +285,9 @@ struct ManagedBotListMutationState {
         guard isProject(chat), !previewMode, let saved = connection, !accessEnded,
               !nativeActivityUnsupported.contains(assignmentScope) else { return false }
         struct Activity: Decodable, Sendable {
-            let latestTurnId: String?; let latestTurnStatus: String; let runningElsewhere: Bool; let openElsewhere: Bool?
+            let latestTurnId: String?; let latestTurnStatus: String; let runningElsewhere: Bool; let openElsewhere: Bool?; let tasksOnMac: Bool?
+            /// Claude can add to a finished turn: its own reply when a background task ends.
+            let latestTurnItems: Int?
         }
         let scope = assignmentScope
         do {
@@ -255,7 +295,9 @@ struct ManagedBotListMutationState {
                 origin: saved.origin, credential: saved.credential)
             guard scope == assignmentScope else { return false }
             if activity.openElsewhere == true { nativeOpenElsewhere.insert(chat.id) } else { nativeOpenElsewhere.remove(chat.id) }
-            let signature = [activity.latestTurnId ?? "", activity.latestTurnStatus, String(activity.runningElsewhere)].joined(separator: "\u{1F}")
+            if activity.tasksOnMac == true { nativeTasksOnMac.insert(chat.id) } else { nativeTasksOnMac.remove(chat.id) }
+            let signature = [activity.latestTurnId ?? "", activity.latestTurnStatus, String(activity.runningElsewhere),
+                             activity.latestTurnItems.map(String.init) ?? ""].joined(separator: "\u{1F}")
             let previous = nativeActivity.updateValue(signature, forKey: chat.id)
             return previous != nil && previous != signature
                 || (previous == nil && activity.runningElsewhere != turnRunsElsewhere(chat.id))
@@ -269,7 +311,7 @@ struct ManagedBotListMutationState {
     @Published var busy = false
     @Published var verification: String?
     @Published var error: String?
-    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; projectSubagents = [:]; pullRequests = [:]; pullRequestErrors = [:]; pullRequestLoadTokens = [:]; projectSubagentLookup = [:]; projectSubagentFreshIDs = [:]; projectSubagentAvailability = [:]; projectSubagentErrors = [:]; projectSubagentNextCurrentCursor = [:]; projectSubagentNextArchivedCursor = [:]; projectSubagentInitialCurrentCursor = [:]; projectSubagentInitialArchivedCursor = [:]; projectSubagentSeenCurrentCursors = [:]; projectSubagentSeenArchivedCursors = [:]; projectSubagentExpandedParents = []; projectSubagentPagingLimited = []; projectSubagentRefreshPending = []; projectSubagentPageRevision = [:]; loadingOlderProjectSubagents = []; projectSubagentLoadTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
+    @Published var accessEnded = false { didSet { noteListChange(); if accessEnded { cancelApprovalSettings(); connectedAppsCache = [:]; codexUsageCache = [:]; claudeUsageCache = [:]; goals = [:]; goalErrors = [:]; goalMutationTokens = [:]; projectSubagents = [:]; pullRequests = [:]; pullRequestErrors = [:]; pullRequestLoadTokens = [:]; gitSummaries = [:]; gitSummaryLoadTokens = [:]; projectSubagentLookup = [:]; projectSubagentFreshIDs = [:]; projectSubagentAvailability = [:]; projectSubagentErrors = [:]; projectSubagentNextCurrentCursor = [:]; projectSubagentNextArchivedCursor = [:]; projectSubagentInitialCurrentCursor = [:]; projectSubagentInitialArchivedCursor = [:]; projectSubagentSeenCurrentCursors = [:]; projectSubagentSeenArchivedCursors = [:]; projectSubagentExpandedParents = []; projectSubagentPagingLimited = []; projectSubagentRefreshPending = []; projectSubagentPageRevision = [:]; loadingOlderProjectSubagents = []; projectSubagentLoadTokens = [:]; resetImagePreviews(); dictation.forget(); cameraContextID = UUID() } } }
     @Published var chats: [ChatSummary] = [] { didSet { noteListChange() } }
     @Published var subagents: [String: [SubagentSummary]] = [:] { didSet { noteListChange() } }
     @Published var subagentAvailability: [String: Bool] = [:]
@@ -284,6 +326,9 @@ struct ManagedBotListMutationState {
     @Published var pullRequestErrors: [String: String] = [:]
     @Published var refreshingPullRequests: Set<String> = []
     private var pullRequestLoadTokens: [String: UUID] = [:]
+    /// The branch each Project thread's folder is on, read with Git on the Mac.
+    @Published var gitSummaries: [String: WorkspaceGitSummary] = [:]
+    private var gitSummaryLoadTokens: [String: UUID] = [:]
     /// Task IDs (tool-use IDs) with a Stop request in flight, per parent conversation.
     @Published var stoppingProjectSubagents: [String: Set<String>] = [:]
     @Published var projectSubagentStopErrors: [String: String] = [:]
@@ -388,6 +433,11 @@ struct ManagedBotListMutationState {
     @Published var sending: Set<String> = []
     @Published private(set) var preparingSends: Set<String> = []
     @Published var queues: [String: [QueuedMessage]] = [:]
+    /// Sends decided as queued when they were made (a turn was running,
+    /// earlier messages waited, or the Mac held the chat), by client message
+    /// ID, until they start. The Mac's receipt confirms or corrects the
+    /// decision; see `queuedClientIDs`.
+    @Published private(set) var queuedSends: [String: Set<String>] = [:]
     @Published var uploading: Set<String> = []
     @Published var loadingPhotos: Set<String> = []
     @Published var files: [String: [ConversationFile]] = [:]
@@ -463,6 +513,9 @@ struct ManagedBotListMutationState {
             // A Claude chat open, idle, in Claude on the Mac, with a message waiting for it.
             let projectOpenOnMacPreview = arguments.contains("-project-open-on-mac-preview")
             if projectOpenOnMacPreview { nativeOpenElsewhere.insert("preview") }
+            // The same, while Claude on the Mac still runs agent tasks after its reply.
+            let projectTasksOnMacPreview = arguments.contains("-project-tasks-on-mac-preview")
+            if projectTasksOnMacPreview { nativeTasksOnMac.insert("preview") }
             let projectTerminalTurnPreview = arguments.contains("-project-terminal-turn-preview") || projectRunningElsewherePreview
             var group: [String: Any] = [
                 "id": "preview-group", "conversationId": "preview", "name": saved?.hostName == "Laptop" ? "Travel plans" : saved?.hostName == "Home" ? "Reading list" : "Weekend plans", "isArchived": false,
@@ -570,6 +623,9 @@ struct ManagedBotListMutationState {
                                 projects.installPreviewFilesConversation(detail)
                                 #endif
                             }
+                            #if WONDER_DIAGNOSTICS
+                            if let summary = DiagnosticGitFixture.summary { gitSummaries["preview"] = summary }
+                            #endif
                             if arguments.contains("-project-goal-preview"),
                                let goal = try? JSONDecoder().decode(ConversationGoal.self, from: Data(#"{"objective":"Review the Project plan","status":"active","timeBudgetSeconds":600,"timeUsedSeconds":60}"#.utf8)) {
                                 goals["preview"] = goal
@@ -915,10 +971,14 @@ struct ManagedBotListMutationState {
         if ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-fixture") {
             let exhausted = ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-exhausted")
             let empty = family == .codex && ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-empty")
+            // A Codex Pro plan: one weekly primary window and no secondary.
+            let weeklyOnly = family == .codex && ProcessInfo.processInfo.arguments.contains("-diagnostics-usage-weekly-only")
             let fixture = CodexUsageResponse(
                 agentFamily: family.rawValue,
                 checkedAtMs: 1_700_000_000_000,
-                windows: empty ? [] : [
+                windows: empty ? [] : weeklyOnly ? [
+                    CodexUsageWindow(id: "primary", label: "Weekly", usedPercent: 34, remainingPercent: 66, windowDurationMins: 10_080, resetsAt: 1_700_604_800_000)
+                ] : [
                     CodexUsageWindow(id: family == .claude ? "five_hour" : "five-hours", label: "5 hours", usedPercent: exhausted ? 100 : (family == .claude ? 14 : 27), remainingPercent: exhausted ? 0 : (family == .claude ? 86 : 73), windowDurationMins: 300, resetsAt: 1_700_018_000_000),
                     CodexUsageWindow(id: family == .claude ? "seven_day" : "weekly", label: "Weekly", usedPercent: family == .claude ? 8 : 41, remainingPercent: family == .claude ? 92 : 59, windowDurationMins: 10_080, resetsAt: 1_700_604_800_000)
                 ]
@@ -1098,6 +1158,7 @@ struct ManagedBotListMutationState {
         projectSubagentLoadTokens = [:]
         projectSubagentAvailability = [:]
         pullRequests = [:]; pullRequestErrors = [:]; pullRequestLoadTokens = [:]; refreshingPullRequests = []
+        gitSummaries = [:]; gitSummaryLoadTokens = [:]
         projectSubagentLookup = [:]
         projectSubagentFreshIDs = [:]
         projectSubagentNextCurrentCursor = [:]
@@ -1111,7 +1172,7 @@ struct ManagedBotListMutationState {
         projectSubagentRefreshPending = []
         projectSubagentPageRevision = [:]
         loadingOlderProjectSubagents = []
-        subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]; loadingConversationIDs = []; loadingTokens = [:]; conversationLoadFailures = [:]
+        subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; queuedSends = [:]; uploading = []; stopping = []; controlErrors = [:]; loadingConversationIDs = []; loadingTokens = [:]; conversationLoadFailures = [:]
         let store = Self.readStore(for: saved)
         self.store = store
         writer?.retire(); writer = nil
@@ -1210,7 +1271,7 @@ struct ManagedBotListMutationState {
                     else if isProject(parent) { await loadProjectSubagents(parent) }
                 }
                 await refreshConversation(chat)
-                if isProject(chat) { Task { [weak self] in await self?.loadPullRequests(chat) } }
+                if isProject(chat) { Task { [weak self] in await self?.loadPullRequests(chat) }; Task { [weak self] in await self?.loadGitSummary(chat) } }
                 await loadAsyncQuestions(chat)
                 // Project sends use the same queue even though they have no Bot ID.
                 if chat.botId != nil || isProject(chat) { try? await loadQueue(chat) }
@@ -1507,6 +1568,70 @@ struct ManagedBotListMutationState {
         }
     }
 
+    /// Reads the branch the thread's folder is on. A Mac without this method,
+    /// or a folder outside Git, hides the branch chip; a failed read keeps the
+    /// last summary rather than flickering the chip away.
+    func loadGitSummary(_ chat: ChatSummary) async {
+        guard isProject(chat) else { return }
+        if previewMode {
+            #if WONDER_DIAGNOSTICS
+            if let summary = DiagnosticGitFixture.summary { gitSummaries[chat.id] = summary }
+            #endif
+            return
+        }
+        guard let saved = connection, !accessEnded else { return }
+        let key = partition
+        let token = UUID()
+        gitSummaryLoadTokens[chat.id] = token
+        do {
+            let path = try Self.gitEndpoint(chat, operation: "summary", query: [])
+            let response: WorkspaceGitSummary = try await api.request(path, origin: saved.origin, credential: saved.credential)
+            guard key == partition, gitSummaryLoadTokens[chat.id] == token, !Task.isCancelled else { return }
+            gitSummaries[chat.id] = response
+        } catch PairingFailure.response(let status) where [403, 404, 409, 501].contains(status) {
+            guard key == partition, gitSummaryLoadTokens[chat.id] == token else { return }
+            gitSummaries[chat.id] = nil
+        } catch {}
+    }
+
+    func loadGitChanges(_ chat: ChatSummary, scope: WorkspaceChangeScope) async throws -> WorkspaceGitChanges {
+        if previewMode {
+            #if WONDER_DIAGNOSTICS
+            try await Task.sleep(for: .milliseconds(150))
+            return DiagnosticGitFixture.changes(scope)
+            #else
+            throw PairingFailure.missingIdentity
+            #endif
+        }
+        guard let saved = connection, !accessEnded else { throw PairingFailure.missingIdentity }
+        let path = try Self.gitEndpoint(chat, operation: "changes", query: [URLQueryItem(name: "scope", value: scope.rawValue)])
+        return try await api.request(path, origin: saved.origin, credential: saved.credential)
+    }
+
+    func loadGitChangeDiff(_ chat: ChatSummary, file: WorkspaceGitChanges.File, scope: WorkspaceChangeScope) async throws -> String {
+        if previewMode {
+            #if WONDER_DIAGNOSTICS
+            return try DiagnosticGitFixture.diff(file, scope: scope)
+            #else
+            throw PairingFailure.missingIdentity
+            #endif
+        }
+        guard let saved = connection, !accessEnded else { throw PairingFailure.missingIdentity }
+        var query = [URLQueryItem(name: "path", value: file.path), URLQueryItem(name: "scope", value: scope.rawValue)]
+        if let original = file.originalPath { query.append(URLQueryItem(name: "originalPath", value: original)) }
+        let path = try Self.gitEndpoint(chat, operation: "diff", query: query)
+        let response: WorkspaceDiffResponse = try await api.request(path, origin: saved.origin, credential: saved.credential)
+        return response.diff
+    }
+
+    /// The thread's own working folder is always the "workspace" root.
+    private static func gitEndpoint(_ chat: ChatSummary, operation: String, query: [URLQueryItem]) throws -> String {
+        var components = workspaceComponents(conversationID: chat.id, operation: "git/" + operation)
+        components.queryItems = [URLQueryItem(name: "root", value: "workspace")] + query
+        guard let endpoint = components.string else { throw PairingFailure.invalidLink }
+        return endpoint
+    }
+
     func hasOlderProjectSubagents(_ conversationID: String) -> Bool {
         projectSubagentNextCurrentCursor[conversationID] != nil
             || projectSubagentNextArchivedCursor[conversationID] != nil
@@ -1691,7 +1816,7 @@ struct ManagedBotListMutationState {
         if chat.botId != nil { await loadSubagents(chat) }
         else if isProject(chat) { await loadProjectSubagents(chat) }
         await refreshConversation(chat)
-        if isProject(chat) { Task { [weak self] in await self?.loadPullRequests(chat) } }
+        if isProject(chat) { Task { [weak self] in await self?.loadPullRequests(chat) }; Task { [weak self] in await self?.loadGitSummary(chat) } }
         await loadAttention()
         try? await loadQueue(chat)
         if !readOnly, !isSubagent(chat), !chat.isArchived, composers[chat.id]?.pending?.receipt == nil, composers[chat.id]?.pending != nil {
@@ -1819,8 +1944,13 @@ struct ManagedBotListMutationState {
         guard let turnID else { return nil }
         return snapshots[chat]?.thread.turns?.first(where: { $0.id == turnID })
     }
+    /// Codex can take extra direction while it works, in a direct chat or a
+    /// Project thread. Claude and Group Chats only queue.
+    func offersGuide(_ chat: ChatSummary) -> Bool {
+        agentFamily(chat) == .codex && (chat.botId != nil || isProject(chat))
+    }
     func canGuide(_ chat: ChatSummary) -> Bool {
-        !dictation.blocksSending(conversationID: chat.id) && agentFamily(chat) == .codex && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id) && chat.botId != nil && activeTurn(chat.id) != nil && !turnRunsElsewhere(chat.id) && connection != nil && !accessEnded
+        !dictation.blocksSending(conversationID: chat.id) && offersGuide(chat) && !preparingSends.contains(chat.id) && !savingComposerSettings.contains(chat.id) && !approvalSettingsBlockSending(chat.id) && !chat.isArchived && !uploading.contains(chat.id) && !loadingPhotos.contains(chat.id) && activeTurn(chat.id) != nil && !turnRunsElsewhere(chat.id) && connection != nil && !accessEnded
             && !isSubagent(chat) && usageLimitMessage(chat) == nil
             && !sending.contains(chat.id)
             && composers[chat.id]?.pending == nil && composerErrors[chat.id] == nil
@@ -1932,13 +2062,16 @@ struct ManagedBotListMutationState {
         controlErrors[chat.id] = nil
         defer { if scope == assignmentScope { preparingSends.remove(chat.id) } }
         if isProject(chat) {
-            await reloadNativeHistory(chat)
+            // A full re-read lists every item of the thread; skip it when the
+            // cheap activity check shows the screen already ends with the
+            // Mac's newest finished turn.
+            if await !nativeHistoryCurrent(chat) { await reloadNativeHistory(chat) }
             guard scope == assignmentScope, !nativeHistoryFailures.contains(chat.id), !Task.isCancelled else { return }
         }
         do { try await uploadStaged(chat) }
         catch {
             guard assignmentScope == scope else { return }
-            controlErrors[chat.id] = "Attachment upload was not confirmed. Your files are saved; send again to retry."
+            controlErrors[chat.id] = AttachmentUploadFailure.message(for: error)
             return
         }
         guard assignmentScope == scope, !accessEnded else { return }
@@ -1965,6 +2098,8 @@ struct ManagedBotListMutationState {
         do {
             var next = composers[chat.id] ?? ComposerIntent()
             try next.begin(device: saved.credential.deviceId, groupRouting: routing, modelSelectionRevision: groups[chat.id] == nil ? managedBots.first(where: { $0.id == chat.botId })?.modelSelectionRevision : nil, projectModel: isProject(chat) ? projectNextModels[chat.id] : nil)
+            // Decide where the message shows before it first appears.
+            if let id = next.pending?.request.clientMessageId, sendWaits(chat) { queuedSends[chat.id, default: []].insert(id) }
             try saveComposer(next, chat: chat.id)
         } catch {
             guard assignmentScope == scope else { return }
@@ -1997,8 +2132,14 @@ struct ManagedBotListMutationState {
             guard partition == key, let intentStore, var next = composers[chat.id],
                   next.pending?.request.clientMessageId == pending.request.clientMessageId else { return }
             try next.accept(receipt, conversation: chat.id)
+            if let queued = receipt.queued, pending.request.expectedTurnId == nil {
+                let id = pending.request.clientMessageId
+                if queued { queuedSends[chat.id, default: []].insert(id) } else { queuedSends[chat.id]?.remove(id) }
+            }
             try intentStore.saveComposer(next, conversation: chat.id)
             composers[chat.id] = next
+            // A queued message gets its editable row before the conversation reloads.
+            if receipt.queued == true, chat.botId != nil || isProject(chat) { try? await loadQueue(chat) }
             if pending.request.modelSelectionRevision != nil, let index = managedBots.firstIndex(where: { $0.id == chat.botId }) {
                 var started = managedBots[index]
                 started.modelSelectionRevision = nil
@@ -2008,6 +2149,8 @@ struct ManagedBotListMutationState {
             if foreground { await refreshConversation(chat) }
         } catch {
             guard partition == key else { return }
+            if case PairingFailure.annotationRejected = error { queuedSends[chat.id]?.remove(pending.request.clientMessageId) }
+            if case PairingFailure.response(412) = error { queuedSends[chat.id]?.remove(pending.request.clientMessageId) }
             if case PairingFailure.annotationRejected(_, let detail) = error, var intent = composers[chat.id],
                intent.pending?.request.clientMessageId == pending.request.clientMessageId {
                 intent.markRejected()
@@ -2081,6 +2224,10 @@ struct ManagedBotListMutationState {
             guard next.hostEpoch.isEmpty || next.hostEpoch == page.hostEpoch else { throw ReadFailure.resync }
             next.install(page)
             try commit(next, publishing: .snapshots)
+            if var waiting = queuedSends[chat.id] {
+                waiting.subtract(page.messages.filter { $0.state != "accepted_by_wonder" }.compactMap(\.clientMessageId))
+                queuedSends[chat.id] = waiting.isEmpty ? nil : waiting
+            }
             conversationLoadFailures[chat.id] = nil
             conversationLoadRetries[chat.id] = nil
             if var intent = composers[chat.id], intent.pending != nil || !(intent.recoveredPending ?? []).isEmpty {
@@ -2132,7 +2279,7 @@ struct ManagedBotListMutationState {
         try store?.removeComposer(conversation: id)
         try store?.removeIntent(conversation: "async-list-" + id)
         composers.removeValue(forKey: id); composerErrors.removeValue(forKey: id)
-        files.removeValue(forKey: id); queues.removeValue(forKey: id); asyncQuestions.removeValue(forKey: id)
+        files.removeValue(forKey: id); queues.removeValue(forKey: id); queuedSends.removeValue(forKey: id); asyncQuestions.removeValue(forKey: id)
         controlErrors.removeValue(forKey: id); sending.remove(id); uploading.remove(id)
         if selectedChat?.id == id { selectedChat = nil }
         if visibleChat?.id == id { visibleChat = nil }
@@ -3088,7 +3235,36 @@ struct ManagedBotListMutationState {
         (try? store?.loadPosition(conversation: chat)) ?? projection.positions[chat]
     }
     func feedRows(for chat: ChatSummary) -> [ReadRow] {
-        ChatFeedEntry.visibleRows(rows(for: chat), queuedClientIDs: Set((queues[chat.id] ?? []).map(\.clientMessageId)))
+        ChatFeedEntry.visibleRows(rows(for: chat), queuedClientIDs: queuedClientIDs(chat.id))
+    }
+    /// The one owner of where a sent message shows: in the conversation, or
+    /// as Queued below it. The Mac's queue, plus sends decided as queued that
+    /// have not started. A send is placed once, from the turn state when it is
+    /// made, and moves only when that state really changes.
+    func queuedClientIDs(_ chat: String) -> Set<String> {
+        var ids = Set((queues[chat] ?? []).map(\.clientMessageId))
+        guard let waiting = queuedSends[chat], !waiting.isEmpty else { return ids }
+        let started = Set((snapshots[chat]?.messages ?? []).filter { $0.state != "accepted_by_wonder" }.compactMap(\.clientMessageId))
+        ids.formUnion(waiting.subtracting(started))
+        return ids
+    }
+    /// Queued sends the Mac's queue does not list yet (its reply is on the way).
+    func unlistedQueuedSends(_ chat: String) -> [(id: String, body: String, attachmentIds: [String])] {
+        let listed = Set((queues[chat] ?? []).map(\.clientMessageId))
+        let ids = queuedClientIDs(chat).subtracting(listed)
+        guard !ids.isEmpty else { return [] }
+        let sends = pendingSends(chat).map { ($0.request.clientMessageId, $0.request.body, $0.request.attachmentIds) }
+        let messages = (snapshots[chat]?.messages ?? []).compactMap { m in m.clientMessageId.map { ($0, m.body, m.attachmentIds) } }
+        var seen = Set<String>()
+        return (sends + messages).filter { ids.contains($0.0) && seen.insert($0.0).inserted }
+            .map { (id: $0.0, body: $0.1, attachmentIds: $0.2) }
+    }
+    /// Whether a message sent now waits, from the turn state on screen: a
+    /// running turn (here or on the Mac), messages already waiting, or a chat
+    /// held on the Mac. Guide and Group sends never queue here.
+    func sendWaits(_ chat: ChatSummary) -> Bool {
+        groups[chat.id] == nil && (botWorking(chat.id) || turnRunsElsewhere(chat.id)
+            || nativeOpenElsewhere.contains(chat.id) || !(queues[chat.id] ?? []).isEmpty)
     }
     private func projectedRows(for chat: ChatSummary) -> [ReadRow] {
         if rowCache?.id != chat.id || rowCache?.title != chat.title {
@@ -3119,7 +3295,7 @@ struct ManagedBotListMutationState {
     /// and unrelated model updates reuse it instead of regrouping all history.
     func timeline(for chat: ChatSummary, focusedRowID: String?) -> ConversationTimeline {
         _ = projectedRows(for: chat)
-        let queued = Set((queues[chat.id] ?? []).map(\.clientMessageId))
+        let queued = queuedClientIDs(chat.id)
         let key = ConversationTimeline.Key(chatID: chat.id, title: chat.title, rows: rowRevision, queued: queued,
             pending: pendingSends(chat.id).map(\.request.clientMessageId),
             activeTurns: activeTurnIDs(chat.id), activeTurn: activeTurn(chat.id), focusedRowID: focusedRowID)
@@ -3490,7 +3666,7 @@ struct ManagedBotListMutationState {
             projectSubagentRefreshPending = []
             projectSubagentPageRevision = [:]
             loadingOlderProjectSubagents = []
-            subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; uploading = []; stopping = []; controlErrors = [:]
+            subagents = [:]; subagentAvailability = [:]; subagentErrors = [:]; projectSubagents = [:]; projectSubagentErrors = [:]; composers = [:]; composerErrors = [:]; sending = []; preparingSends = []; intentLoadFailures = []; attention = []; asyncQuestions = [:]; retryableAsyncReplies = []; savedAsyncReplies = [:]; attentionErrors = [:]; resolving = []; savedDecisions = [:]; files = [:]; queues = [:]; queuedSends = [:]; uploading = []; stopping = []; controlErrors = [:]
             selectedChat = nil; managedBots = []; managedBotMutations = ManagedBotListMutationState(); macConnected = nil; hasConnectedThisLaunch = false; connection = nil; error = nil; accessEnded = false
             status = "Connect to your computer to get started."
         }
@@ -3521,6 +3697,8 @@ struct ConversationTimeline {
     let attachmentIDs: [String]
     let turns: [String: ReadTurn]
     let conversationEdits: ResponseEditedFiles?
+    /// The latest finished response's edits, for Changes' Last response.
+    let latestResponseEdits: ResponseEditedFiles?
 
     init(chatID: String, rows: [ReadRow], activeTurnIDs: Set<String>, activeTurnID: String?, focusedRowID: String?, turns: [ReadTurn]?) {
         self.rows = rows
@@ -3531,7 +3709,7 @@ struct ConversationTimeline {
         var byID: [String: ReadTurn] = [:]
         for turn in turns ?? [] where byID[turn.id] == nil { byID[turn.id] = turn }
         self.turns = byID
-        conversationEdits = ResponseEditedFiles.conversation(entries: entries, activeTurnIDs: activeTurnIDs, turns: byID)
+        (conversationEdits, latestResponseEdits) = ResponseEditedFiles.conversationAndLatest(entries: entries, activeTurnIDs: activeTurnIDs, turns: byID)
         disclosureEntries = entries.compactMap { entry in
             guard entry.isActivity, let turnID = entry.rows.first?.turnId else { return nil }
             return ActivityDisclosurePolicy.Entry(conversationID: chatID, turnID: turnID, entryID: entry.id,

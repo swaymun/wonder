@@ -1,6 +1,7 @@
 # A Claude agent task's transcript shows the commands, edits and tool calls it
 # ran, not only messages; a tool the running agent has not heard back on shows as
-# running. The fixture stands in for the Mac.
+# running. Each tool call starts collapsed and opens and closes on tap, and the
+# group header hides the calls again. The fixture stands in for the Mac.
 launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-subagents --fixture project-claude-tasks
 wait --id open-sidebar --timeout 30
 tap --id open-sidebar --type Button
@@ -13,9 +14,21 @@ tap --id project-subagent-roster:fixture-child-thread
 wait --contains "Checking the parser." --timeout 15
 shot claude-agent-transcript-collapsed
 tap --id activity-group:project-child-turn/task-command
-wait --contains "swift test --filter ParserTests" --timeout 5
+wait --label "Ran, swift test --filter ParserTests" --timeout 5
 wait --contains "Edited Parser.swift" --timeout 5
+# Collapsed by default: the command's output is not shown.
+wait --contains "Executed 12 tests" --gone --timeout 3
 shot claude-agent-transcript-work
+tap --label "Ran, swift test --filter ParserTests"
+wait --contains "Executed 12 tests" --timeout 5
+shot claude-agent-transcript-row-open
+tap --label "Ran, swift test --filter ParserTests"
+wait --contains "Executed 12 tests" --gone --timeout 5
+# The group header hides its tool calls and shows them again.
+tap --id activity-group:project-child-turn/task-command
+wait --label "Ran, swift test --filter ParserTests" --gone --timeout 5
+tap --id activity-group:project-child-turn/task-command
+wait --label "Ran, swift test --filter ParserTests" --timeout 5
 # Scroll the sheet, not the screen centre: on the Duo the half sheet sits below it.
 swipe up --in project-subagent-transcript
 swipe up --in project-subagent-transcript

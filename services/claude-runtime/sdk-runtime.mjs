@@ -35,6 +35,18 @@ export function isSubscription(account) {
     && (account.tokenSource == null || account.tokenSource === "claude.ai");
 }
 
+// `claude auth status` reads the stored login without starting a model or a session.
+// Map it onto the subscription rule the SDK runtime enforces.
+export function classifyAuthStatus(status) {
+  if (!status || typeof status !== "object" || typeof status.loggedIn !== "boolean") return { exitCode: 1, account: "" };
+  if (!status.loggedIn) return { exitCode: 42, account: "" };
+  const plan = typeof status.subscriptionType === "string" ? status.subscriptionType : "";
+  const account = plan ? `Claude ${plan.charAt(0).toUpperCase()}${plan.slice(1)}` : "";
+  const subscription = isSubscription({ apiProvider: status.apiProvider, subscriptionType: plan,
+    tokenSource: status.authMethod === "claude.ai" ? "claude.ai" : status.authMethod ?? "none" });
+  return subscription ? { exitCode: 0, account } : { exitCode: 45, account };
+}
+
 export function baseOptions(runtime, { connectors = false } = {}) {
   return { pathToClaudeCodeExecutable: runtime.executable, env: subscriptionEnvironment(),
     extraArgs: { "no-chrome": null },

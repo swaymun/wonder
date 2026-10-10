@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, readFile, mkdir, readdir, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compatibleVersion, RuntimeUpdates } from "../runtime-updates.mjs";
-import { isSubscription, subscriptionEnvironment, projectUsage, additionalUsageAvailable, baseOptions, loadSdk, inspectSdk } from "../sdk-runtime.mjs";
+import { compatibleVersion, RuntimeUpdates, activeRuntime } from "../runtime-updates.mjs";
+import { isSubscription, classifyAuthStatus, subscriptionEnvironment, projectUsage, additionalUsageAvailable, baseOptions, loadSdk, inspectSdk } from "../sdk-runtime.mjs";
 
 // Contract: new SDK bytes never replace a running turn; a bad candidate and a
 // restart must preserve a usable runtime. Exercise the manager's persisted state.
@@ -28,6 +28,16 @@ test("activates a checked update only after all active turns finish", async t =>
   assert.equal(first.runtime.version, "0.3.283");
   const restarted = await new RuntimeUpdates(options).initialize();
   assert.equal(restarted.current.version, "0.3.284");
+});
+test("status reads the activated SDK without changing manager state", async t => {
+  const { manager, options } = await fixture(t);
+  assert.equal((await activeRuntime(options)).version, "0.3.283");
+  await manager.refresh();
+  const saved = await readFile(join(options.root, "state.json"), "utf8");
+  assert.equal((await activeRuntime(options)).version, "0.3.284");
+  assert.equal(await readFile(join(options.root, "state.json"), "utf8"), saved);
+  assert.equal((await activeRuntime({ ...options, load: async () => { throw new Error("gone"); } })).version, "0.3.283");
+  assert.equal((await activeRuntime({ ...options, root: join(options.root, "missing") })).version, "0.3.283");
 });
 test("a broken candidate cannot displace the bundled version", async t => {
   const { manager } = await fixture(t, { check: async () => { throw new Error("control protocol changed"); } });
@@ -59,6 +69,13 @@ test("subscription guard cannot silently select API billing", () => {
   assert.equal(isSubscription({ ...pro, apiProvider: "bedrock" }), false);
   assert.deepEqual(subscriptionEnvironment({ HOME: "/home/test", ANTHROPIC_API_KEY: "secret", NODE_OPTIONS: "--require evil", CODEX_HOME: "private" }),
     { HOME: "/home/test", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "false", CLAUDE_AGENT_SDK_CLIENT_APP: "wonder/1.0" });
+  // Settings status applies the same rule to `claude auth status --json`.
+  const signedIn = { loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", subscriptionType: "max", email: "private@example.com" };
+  assert.deepEqual(classifyAuthStatus(signedIn), { exitCode: 0, account: "Claude Max" });
+  assert.deepEqual(classifyAuthStatus({ ...signedIn, authMethod: "api_key" }), { exitCode: 45, account: "Claude Max" });
+  assert.deepEqual(classifyAuthStatus({ ...signedIn, apiProvider: "bedrock" }).exitCode, 45);
+  assert.deepEqual(classifyAuthStatus({ loggedIn: false, authMethod: "none" }), { exitCode: 42, account: "" });
+  assert.deepEqual(classifyAuthStatus({}), { exitCode: 1, account: "" });
 });
 test("experimental usage is optional and percentages are never fractions", () => {
   assert.equal(projectUsage({ rate_limits_available: false }), null);

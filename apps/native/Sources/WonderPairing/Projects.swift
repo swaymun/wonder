@@ -192,9 +192,11 @@ public struct ProjectsResponse: Codable, Sendable {
     public let archiveVersion: Int?
     /// Pinned threads across included projects, most recent first; nil on older hosts.
     public let pinned: [PinnedProjectThread]?
-    public init(projects: [ProjectSummary], families: [ProjectFamilyAvailability], modesVersion: Int? = nil, pinned: [PinnedProjectThread]? = nil, archiveVersion: Int? = nil) {
+    /// 1 when creating a project can also create its folder (`newFolder`).
+    public let createVersion: Int?
+    public init(projects: [ProjectSummary], families: [ProjectFamilyAvailability], modesVersion: Int? = nil, pinned: [PinnedProjectThread]? = nil, archiveVersion: Int? = nil, createVersion: Int? = nil) {
         self.projects = projects; self.families = families; self.modesVersion = modesVersion; self.pinned = pinned
-        self.archiveVersion = archiveVersion
+        self.archiveVersion = archiveVersion; self.createVersion = createVersion
     }
 }
 
@@ -253,10 +255,26 @@ public struct ProjectThreadSummary: Codable, Hashable, Identifiable, Sendable {
     public let hasUnread: Bool
     public let isWorking: Bool
     public var id: String { reference }
+    /// The provider's thread (Codex) or session (Claude Code) ID; nil for a
+    /// Wonder draft that has no provider thread yet.
+    public var nativeID: String? {
+        let prefix = family.rawValue + ":"
+        guard reference.hasPrefix(prefix), reference.count > prefix.count else { return nil }
+        return String(reference.dropFirst(prefix.count))
+    }
     public init(reference: String, conversationId: String?, title: String, family: AgentFamily, updatedAt: Int,
                 isPinned: Bool = false, hasUnread: Bool = false, isWorking: Bool = false) {
         self.reference = reference; self.conversationId = conversationId; self.title = title; self.family = family
         self.updatedAt = updatedAt; self.isPinned = isPinned; self.hasUnread = hasUnread; self.isWorking = isWorking
+    }
+}
+
+/// Codex-archived and Wonder-archived (Claude Code) threads of one Project.
+public struct ArchivedProjectThreadsPage: Codable, Sendable {
+    public let threads: [ProjectThreadSummary]
+    public let partial: [ProjectPartialFailure]
+    public init(threads: [ProjectThreadSummary], partial: [ProjectPartialFailure]) {
+        self.threads = threads; self.partial = partial
     }
 }
 
@@ -751,6 +769,8 @@ public enum SidebarRow: Hashable, Identifiable, Sendable {
     case moreThreads(hostID: String, projectID: String, isLoading: Bool)
     case updateRequired(hostID: String)
     case newProject(hostID: String)
+    /// The Mac's scheduled tasks; each Mac's list ends with it.
+    case automations(hostID: String)
 
     /// Stable across paging, expansion and streaming updates.
     public var id: String {
@@ -766,6 +786,7 @@ public enum SidebarRow: Hashable, Identifiable, Sendable {
         case .moreThreads(let host, let project, _): return "more:\(host):\(project)"
         case .updateRequired(let host): return "update:\(host)"
         case .newProject(let host): return "new-project:\(host)"
+        case .automations(let host): return "automations:\(host)"
         }
     }
 
@@ -973,6 +994,7 @@ public enum SidebarProjection {
             }
             if query.isEmpty, host.supportsProjects == true || !host.projects.isEmpty {
                 rows.append(.newProject(hostID: host.hostID))
+                rows.append(.automations(hostID: host.hostID))
             }
         }
         return rows

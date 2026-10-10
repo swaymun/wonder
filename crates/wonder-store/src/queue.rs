@@ -8,11 +8,37 @@ pub struct QueueItem {
     pub body: String,
     pub revision: i64,
     pub attachment_ids: Vec<String>,
+    /// Waits behind other work in its conversation: a message being sent or
+    /// answered, or an earlier waiting message. The first pending message with
+    /// nothing ahead is being sent, not queued, even before dispatch claims it.
+    pub behind_work: bool,
 }
+
+/// `messages m` waits behind other work in its conversation. The exact
+/// complement of what dispatch may claim next (`pending_dispatch_messages`).
+/// A macro so queries stay static strings.
+macro_rules! behind_work {
+    () => {
+        "(EXISTS(SELECT 1 FROM messages active WHERE active.conversation_id=m.conversation_id AND active.id<>m.id AND active.state IN ('dispatching_to_codex','accepted_by_codex','streaming')) OR EXISTS(SELECT 1 FROM messages ahead JOIN dispatch_work aw ON aw.message_id=ahead.id WHERE ahead.conversation_id=m.conversation_id AND ahead.id<>m.id AND ahead.state='accepted_by_wonder' AND (ahead.queue_position,ahead.created_at,ahead.id)<(m.queue_position,m.created_at,m.id)))"
+    };
+}
+
 impl Store {
+    /// Whether an accepted message waits behind other work (see `QueueItem::behind_work`).
+    pub async fn message_behind_work(&self, message_id: &str) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(concat!(
+            "SELECT ",
+            behind_work!(),
+            " FROM messages m WHERE m.id=? AND m.state='accepted_by_wonder'"
+        ))
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|value: Option<bool>| value.unwrap_or(false))
+    }
     pub async fn pending_queue(&self, conversation: &str) -> Result<Vec<QueueItem>, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let rows = sqlx::query("SELECT m.* FROM messages m JOIN dispatch_work w ON w.message_id=m.id WHERE m.conversation_id=? AND m.state='accepted_by_wonder' AND NOT EXISTS(SELECT 1 FROM bot_initializations i WHERE i.message_id=m.id) AND NOT EXISTS(SELECT 1 FROM bot_workspace_followups f WHERE f.message_id=m.id) AND NOT EXISTS(SELECT 1 FROM message_sources s WHERE s.message_id=m.id AND s.kind='wake') ORDER BY m.queue_position,m.created_at,m.id")
+        let rows = sqlx::query(concat!("SELECT m.*, ", behind_work!(), " AS behind_work FROM messages m JOIN dispatch_work w ON w.message_id=m.id WHERE m.conversation_id=? AND m.state='accepted_by_wonder' AND NOT EXISTS(SELECT 1 FROM bot_initializations i WHERE i.message_id=m.id) AND NOT EXISTS(SELECT 1 FROM bot_workspace_followups f WHERE f.message_id=m.id) AND NOT EXISTS(SELECT 1 FROM message_sources s WHERE s.message_id=m.id AND s.kind='wake') ORDER BY m.queue_position,m.created_at,m.id"))
             .bind(conversation).fetch_all(&mut *tx).await?;
         let mut items = Vec::new();
         for row in rows {
@@ -29,6 +55,7 @@ impl Store {
                 body: row.get("body"),
                 revision: row.get("queue_revision"),
                 attachment_ids,
+                behind_work: row.get("behind_work"),
             });
         }
         tx.commit().await?;
@@ -425,5 +452,64 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+    // A message is listed as queued only while it waits behind other work;
+    // the one dispatch may claim next is being sent. The two predicates are
+    // exact complements, so a direct send never shows as queued first.
+    #[tokio::test]
+    async fn only_messages_behind_other_work_are_queued() {
+        let store = setup().await;
+        let waiting = |store: &Store| {
+            let store = store.clone();
+            async move {
+                let items = store.pending_queue("chat").await.unwrap();
+                let next: Vec<String> = store
+                    .pending_dispatch_messages()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|m| m.id)
+                    .collect();
+                for item in &items {
+                    assert_eq!(item.behind_work, !next.contains(&item.id), "{}", item.body);
+                    assert_eq!(
+                        store.message_behind_work(&item.id).await.unwrap(),
+                        item.behind_work
+                    );
+                }
+                items
+                    .into_iter()
+                    .filter(|item| item.behind_work)
+                    .map(|item| item.body)
+                    .collect::<Vec<_>>()
+            }
+        };
+        let first = message_at(&store, "first", "1").await;
+        assert!(
+            waiting(&store).await.is_empty(),
+            "nothing ahead: being sent"
+        );
+        message_at(&store, "second", "2").await;
+        assert_eq!(waiting(&store).await, ["second"]);
+        assert!(store.claim_message_for_dispatch(&first.id).await.unwrap());
+        assert_eq!(
+            waiting(&store).await,
+            ["second"],
+            "behind the turn being sent"
+        );
+        store
+            .update_message_delivery(&first.id, "streaming", Some("t"), Some("turn"))
+            .await
+            .unwrap();
+        assert_eq!(waiting(&store).await, ["second"], "behind the running turn");
+        store
+            .update_message_delivery(&first.id, "interrupted", Some("t"), Some("turn"))
+            .await
+            .unwrap();
+        assert!(
+            waiting(&store).await.is_empty(),
+            "after Stop it is sent at once"
+        );
+        assert!(!store.message_behind_work(&first.id).await.unwrap());
     }
 }

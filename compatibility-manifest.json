@@ -11,7 +11,8 @@
       "codex-cli 0.155.0-alpha.9.2",
       "codex-cli 0.155.0-alpha.16.3",
       "codex-cli 0.155.0-alpha.16.4",
-      "codex-cli 0.162.0-alpha.2"
+      "codex-cli 0.162.0-alpha.2",
+      "codex-cli 0.162.0-alpha.17.2"
     ],
     "alpha16SchemaSha256": {
       "stable": "6ca35a4c82645df5cba7b2bba1845d3167c12294317daf1923da1a2e8fa04738",
@@ -20,6 +21,10 @@
     "v162SchemaSha256": {
       "stable": "0c34fd753d5e4498c32db50dbb20e9c142f81cb3f4b186c581d756d6b7e10bac",
       "experimental": "9be20dabc0516c68cbe7ad4480affd2953c43ad0e7770a3949663967c00f5ca5"
+    },
+    "v162_17SchemaSha256": {
+      "stable": "6f622f94329e648ffcee48be34b78a35da19e55598fd71241dbb08508195c46d",
+      "experimental": "bff504aada804072a51f42c94478375c46273cf30195069ec4514f56a913663c"
     }
   },
   "requiredCapabilities": [
@@ -44,6 +49,6 @@
     "experimentalApi": true,
     "allowLegacySandboxComposition": false,
     "allowUnknownVersions": true,
-    "unknownVersionPolicy": "local-additive-schema-check-against-0.155.0-alpha.16.3"
+    "unknownVersionPolicy": "local-used-contract-check-against-0.155.0-alpha.16.3"
   }
 }

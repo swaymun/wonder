@@ -1,10 +1,11 @@
-# When usage cannot be read, the header shows no usage pill at all.
+# When usage cannot be read, the title menu shows no usage section at all.
 launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-actions --fixture usage-unavailable
 wait --id open-sidebar --timeout 30
 tap --id open-sidebar --type Button
 wait --id pinned-thread:codex:read-fixture --timeout 20
 tap --id pinned-thread:codex:read-fixture
 wait --id project-composer-model --timeout 15
-wait --id conversation-title-menu
-wait --id header-usage --gone
+tap --id conversation-title-menu
+wait --id copy-conversation-markdown --timeout 5
+wait --contains "% used" --gone
 shot codex-header-usage-unavailable

@@ -52,7 +52,7 @@ struct MacLocationBrowser: View {
             .safeAreaInset(edge: .bottom) {
                 if let page {
                     Button("Choose this folder") { choose(page.path, true); dismiss() }
-                        .buttonStyle(.borderedProminent).controlSize(.large).frame(maxWidth: .infinity).padding()
+                        .buttonStyle(.wonderProminent).controlSize(.large).frame(maxWidth: .infinity).padding()
                         .background(.bar).disabled(busy || failure != nil)
                 }
             }
@@ -209,7 +209,7 @@ struct FolderRequestCard: View {
 
     @ViewBuilder private var actionButtons: some View {
         Button(request.access == "write" ? "Allow read and write" : "Allow read-only") { resolve(true) }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.wonderProminent)
             .accessibilityIdentifier("folder-request-approve-" + request.id)
         Button("Decline") { resolve(false) }
             .buttonStyle(.bordered)

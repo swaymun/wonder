@@ -70,7 +70,7 @@ private struct PreviewConversationRoot: View {
 #endif
 
 /// Settings. It is pushed onto the main navigation stack with a Back button;
-/// only first-launch pairing presents it as a sheet, which needs its own Done.
+/// the Diagnostics `-show-connections` flag presents it as a sheet, which needs its own Done.
 struct ConnectionsView: View {
     @ObservedObject var library: ConnectionLibrary
     var isSheet = false
@@ -128,6 +128,10 @@ struct ConnectionsView: View {
                         .accessibilityIdentifier("settings-default-models")
                 }
             }
+            Section {
+                NavigationLink("Acknowledgements") { AcknowledgementsView() }
+                    .accessibilityIdentifier("settings-acknowledgements")
+            }
             #if WONDER_DIAGNOSTICS
             Section { NavigationLink("Diagnostics") { DiagnosticsView(library: library) }.accessibilityIdentifier("diagnostics-settings") }
             #endif
@@ -135,6 +139,56 @@ struct ConnectionsView: View {
         .wonderGroupedStyle()
         .navigationTitle("Settings")
         .sheet(isPresented: $adding) { PairComputerView(model: library.pairingModel()) }
+    }
+}
+
+/// Licenses of what ships inside Wonder: the bundled fonts (the SIL Open Font
+/// License asks that its text travel with the fonts), open-source components and
+/// the theme palettes derived from others' work.
+struct AcknowledgementsView: View {
+    private struct Entry: Identifiable {
+        let title: String
+        let detail: String
+        let text: () -> String?
+        var id: String { title }
+    }
+    private static func resource(_ name: String, _ ext: String) -> String? {
+        Bundle.main.url(forResource: name, withExtension: ext).flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+    }
+    private var sections: [(String, [Entry])] {
+        [
+            ("Fonts", BundledFonts.licenses.map { license in
+                Entry(title: license.family, detail: "SIL Open Font License 1.1") { BundledFonts.licenseText(license.file) }
+            }),
+            ("Software", [
+                Entry(title: "Readium Swift Toolkit", detail: "EPUB previews · BSD 3-Clause") { Self.resource("EPUB-LICENSES", "md") },
+                Entry(title: "WebRTC", detail: "Computer view · BSD 3-Clause") { Self.resource("WebRTC-LICENSE", "md") },
+            ]),
+            ("Themes", ThemeCredits.all.map { credit in
+                Entry(title: credit.title, detail: credit.detail) { credit.license }
+            }),
+        ]
+    }
+    var body: some View {
+        List {
+            ForEach(sections, id: \.0) { section in
+                Section(section.0) {
+                    ForEach(section.1) { entry in
+                        NavigationLink { LicenseTextView(title: entry.title, text: entry.text()) } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.title)
+                                Text(entry.detail).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityIdentifier("acknowledgement:" + entry.title)
+                    }
+                }
+            }
+        }
+        .wonderGroupedStyle()
+        .navigationTitle("Acknowledgements")
+        .navigationBarTitleDisplayMode(.inline)
+        .accessibilityIdentifier("acknowledgements")
     }
 }
 
@@ -193,10 +247,9 @@ struct ConnectionDetail: View {
             Section {
                 NavigationLink("Projects") { ManageProjectsView(model: model, library: model.projects, embedded: true) }
                     .accessibilityIdentifier("connection-projects")
-                NavigationLink("Automations") { AutomationsView(model: model) }
-                    .accessibilityIdentifier("connection-automations")
                 NavigationLink("Connected apps") { ConnectedAppsView(model: model) }
             }
+            MacProvidersSection(model: model)
             CodexUsageSection(model: model)
             ClaudeUsageSection(model: model)
             Section {
@@ -257,6 +310,115 @@ enum UsageAutoRefresh {
         while !Task.isCancelled {
             await load(false)
             try? await Task.sleep(for: .seconds(maxAge))
+        }
+    }
+}
+
+/// Codex and Claude on this Mac, as its Settings → Providers shows them, with
+/// the Mac's Reconnect when what Wonder runs is out of step with what is
+/// installed. Signing in and out stay on the Mac.
+private struct MacProvidersSection: View {
+    @ObservedObject var model: ConnectionModel
+    @State private var providers: [MacProviderStatus] = []
+    @State private var loading = false
+    @State private var unsupported = false
+    @State private var failure: String?
+    @State private var reconnecting: String?
+    @State private var messages: [String: (text: String, failed: Bool)] = [:]
+
+    var body: some View {
+        Section {
+            if unsupported {
+                Text("Update Wonder on \(model.macName) to see its providers here.").foregroundStyle(.secondary)
+            } else if providers.isEmpty {
+                if let failure {
+                    Text(failure).foregroundStyle(.secondary).accessibilityIdentifier("providers-failure")
+                    Button("Try again") { Task { await load(refresh: true) } }.disabled(loading)
+                } else {
+                    ProgressView("Checking providers…").accessibilityIdentifier("providers-loading")
+                }
+            }
+            ForEach(providers) { provider in row(provider) }
+        } header: {
+            HStack {
+                Text("Providers")
+                Spacer()
+                if loading && !providers.isEmpty { ProgressView().controlSize(.small).accessibilityLabel("Checking providers") }
+            }
+        }
+        .task(id: model.assignmentScope) { await load(refresh: false) }
+    }
+
+    @ViewBuilder private func row(_ provider: MacProviderStatus) -> some View {
+        let presented = MacProviderRow(provider, macName: model.macName)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                if let family = provider.family { ProviderIcon(family: family).accessibilityHidden(true) }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(provider.name).font(.body.weight(.semibold))
+                    Text(reconnecting == provider.id ? "Reconnecting…" : presented.status)
+                        .foregroundStyle(presented.needsAttention ? Color.orange : Color.secondary)
+                    if let detail = presented.detail, reconnecting != provider.id {
+                        Text(detail).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                if reconnecting == provider.id {
+                    ProgressView()
+                } else if let action = presented.action {
+                    Button(action == .update ? "Update now" : action == .reconnect ? "Reconnect" : "Check again") {
+                        if action == .checkAgain { Task { await load(refresh: true) } }
+                        else { Task { await reconnect(provider) } }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(presented.blocked != nil || reconnecting != nil || loading || model.accessEnded || model.macConnected != true)
+                    .accessibilityIdentifier("provider-action:" + provider.id)
+                }
+            }
+            if let blocked = presented.blocked, reconnecting == nil {
+                Text(blocked).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("provider-blocked:" + provider.id)
+            }
+            if let message = messages[provider.id] {
+                Text(message.text).font(.caption).foregroundStyle(message.failed ? Color.red : Color.secondary)
+                    .accessibilityIdentifier("provider-message:" + provider.id)
+            }
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("provider:" + provider.id)
+    }
+
+    private func load(refresh: Bool) async {
+        guard !model.previewMode, !loading else { return }
+        loading = true; defer { loading = false }
+        do {
+            let response: MacProvidersResponse = try await model.manage("/api/v1/providers" + (refresh ? "?refresh=true" : ""))
+            providers = response.providers; failure = nil; unsupported = false
+        } catch PairingFailure.response(404) {
+            unsupported = true
+        } catch is CancellationError {
+            return
+        } catch {
+            failure = model.macConnected == true ? "Wonder couldn’t read providers on \(model.macName)." : "Connect to \(model.macName) to see its providers."
+        }
+    }
+
+    private func reconnect(_ provider: MacProviderStatus) async {
+        reconnecting = provider.id; messages[provider.id] = nil
+        defer { reconnecting = nil }
+        do {
+            let updated: MacProviderStatus = try await model.manage(
+                "/api/v1/providers/\(ConnectionModel.escape(provider.id))/reconnect", method: "POST", body: Data("{}".utf8))
+            if let index = providers.firstIndex(where: { $0.id == updated.id }) { providers[index] = updated }
+            messages[provider.id] = ("\(provider.name) reconnected.", false)
+        } catch PairingFailure.hostMessage(_, let detail) {
+            messages[provider.id] = (detail, true)
+            await load(refresh: true)
+        } catch is CancellationError {
+            return
+        } catch {
+            messages[provider.id] = ("\(provider.name) could not reconnect. \(managementError(error))", true)
         }
     }
 }
@@ -442,7 +604,7 @@ struct PairComputerView: View {
                           code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         : link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .accessibilityIdentifier(enteringCode ? "pairing-connect-code" : "pairing-connect-link")
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.wonderProminent)
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal)
                     .padding(.vertical, 8)

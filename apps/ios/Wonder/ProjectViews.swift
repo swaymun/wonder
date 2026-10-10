@@ -128,14 +128,29 @@ struct ProjectAccessMenu: View {
 struct ProjectConversationHeader: View {
     let detail: ProjectConversationDetail
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     var body: some View {
-        VStack(spacing: 1) {
-            Text(detail.title).font(.headline).lineLimit(1)
-            if !dynamicTypeSize.isAccessibilitySize {
-                Text(detail.projectName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        Group {
+            if horizontalSizeClass == .regular {
+                // A wide window has room for one thin line: title, then project.
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(detail.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        Text(detail.projectName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            .layoutPriority(-1)
+                    }
+                }
+                .frame(maxWidth: 420)
+            } else {
+                VStack(spacing: 1) {
+                    Text(detail.title).font(.headline).lineLimit(1)
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        Text(detail.projectName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: 240)
             }
         }
-        .frame(maxWidth: 240)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(detail.title), \(detail.projectName) project, \(detail.family.title)")
         .accessibilityIdentifier("project-conversation-header")
@@ -422,6 +437,109 @@ struct ProjectConversationDetailsView: View {
     }
 }
 
+// MARK: - Archived threads
+
+/// A Project's archived threads with Restore. Codex threads are archived in
+/// Codex itself (from Wonder or the Codex app); Claude Code threads are hidden
+/// in Wonder only, and their sessions stay in Claude Code on the Mac.
+struct ArchivedThreadsView: View {
+    @ObservedObject var model: ConnectionModel
+    @ObservedObject var library: ProjectLibrary
+    let projectID: String
+    let projectName: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var page: ArchivedProjectThreadsPage?
+    @State private var loadFailure: String?
+    @State private var restoring: String?
+    @State private var failure: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let page {
+                    if page.threads.isEmpty {
+                        Text("No archived threads in \(projectName).").foregroundStyle(.secondary)
+                            .accessibilityIdentifier("archived-threads-empty")
+                    }
+                    ForEach(page.threads) { thread in row(thread) }
+                    if !page.partial.isEmpty {
+                        Text(page.partial.map(\.detail).joined(separator: " "))
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Section {
+                    } footer: {
+                        Text("Restoring a Codex thread restores it in Codex too. Claude Code threads are archived in Wonder only; Claude Code on your Mac still shows them.")
+                    }
+                } else if let loadFailure {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(loadFailure).foregroundStyle(.secondary)
+                        Button("Try again") { Task { await load() } }
+                            .accessibilityIdentifier("archived-threads-retry")
+                    }
+                } else {
+                    ProgressView("Loading archived threads…").frame(maxWidth: .infinity)
+                }
+                if let failure { FailureDetails(message: failure) }
+            }
+            .wonderGroupedStyle()
+            .navigationTitle("Archived threads").navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("Done") { dismiss() }.accessibilityIdentifier("archived-threads-done") }
+            .task { await load() }
+            .refreshable { await load() }
+        }
+    }
+
+    private func row(_ thread: ProjectThreadSummary) -> some View {
+        HStack(spacing: 10) {
+            Image(thread.family == .claude ? "ProviderClaude" : "ProviderCodex").resizable().scaledToFit()
+                .frame(width: 18, height: 18).clipShape(RoundedRectangle(cornerRadius: 4))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(thread.title).lineLimit(2)
+                Text(thread.family == .claude ? "Archived in Wonder" : "Archived in Codex")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if restoring == thread.reference {
+                ProgressView().accessibilityLabel("Restoring")
+            } else {
+                Button("Restore") { restore(thread) }
+                    .buttonStyle(.bordered)
+                    .disabled(restoring != nil || model.macConnected != true)
+                    .accessibilityLabel("Restore \(thread.title)")
+                    .accessibilityIdentifier("restore-thread:" + thread.reference)
+            }
+        }
+        .frame(minHeight: 44)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("archived-thread:" + thread.reference)
+    }
+
+    private func load() async {
+        loadFailure = nil
+        do { page = try await library.archivedThreads(projectID) }
+        catch is CancellationError {}
+        catch { if page == nil { loadFailure = "Archived threads couldn’t be loaded. Check \(model.macName) and try again." } }
+    }
+
+    private func restore(_ thread: ProjectThreadSummary) {
+        restoring = thread.reference; failure = nil
+        Task {
+            defer { restoring = nil }
+            do {
+                try await library.unarchive(projectID, thread: thread)
+                if let current = page {
+                    page = ArchivedProjectThreadsPage(threads: current.threads.filter { $0.reference != thread.reference },
+                                                      partial: current.partial)
+                }
+            } catch is CancellationError {
+            } catch {
+                failure = "The thread couldn’t be restored. " + managementError(error)
+            }
+        }
+    }
+}
+
 // MARK: - Project library
 
 /// Create or edit a named group of folders on one Mac. Saving is metadata only.
@@ -429,6 +547,8 @@ struct ProjectEditorView: View {
     @ObservedObject var model: ConnectionModel
     @ObservedObject var library: ProjectLibrary
     let project: ProjectSummary?
+    /// Pushed inside Add project, which owns the navigation stack and dismissal.
+    var embedded = false
     var onSaved: (ProjectSummary) -> Void = { _ in }
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
@@ -450,7 +570,9 @@ struct ProjectEditorView: View {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && name.count <= 120 && !folders.isEmpty && folders.count <= 16 && changed && !saving && !model.accessEnded
     }
     var body: some View {
-        NavigationStack {
+        if embedded { form } else { NavigationStack { form } }
+    }
+    private var form: some View {
             Form {
                 Section {
                     LabeledContent("Computer") {
@@ -490,9 +612,9 @@ struct ProjectEditorView: View {
             }
             .wonderGroupedStyle()
             .disabled(saving || frozen)
-            .navigationTitle(project == nil ? "New project" : "Edit project").navigationBarTitleDisplayMode(.inline)
+            .navigationTitle(project == nil ? "Existing folder" : "Edit project").navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                if !embedded { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
                 ToolbarItem(placement: .confirmationAction) {
                     if saving { ProgressView() }
                     else { Button(frozen ? "Retry create" : project == nil ? "Create" : "Save") { Task { await save() } }.disabled(!canSave).accessibilityIdentifier("project-save") }
@@ -526,7 +648,10 @@ struct ProjectEditorView: View {
                 primary = project.folders.firstIndex(where: \.isPrimary) ?? 0
                 nameEdited = true
             }
-        }
+            .task {
+                // Adding an existing folder starts by choosing it.
+                if embedded, project == nil, folders.isEmpty { browsing = true }
+            }
     }
     private func remove(at index: Int) {
         folders.remove(at: index)
@@ -554,7 +679,7 @@ struct ProjectEditorView: View {
                 drafts.remove(creationKey)
             }
             onSaved(saved)
-            dismiss()
+            if !embedded { dismiss() }
         } catch PairingFailure.response(409) {
             failure = "These folders changed on another device. Close and reopen the project to see the latest folders."
         } catch PairingFailure.response(422) {
@@ -573,8 +698,6 @@ struct ManageProjectsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
     @State private var editing: ProjectSummary?
-    @State private var creating = false
-    @State private var choosing = false
     @State private var busy: Set<String> = []
     @State private var failure: String?
     private var filtered: [ProjectSummary] {
@@ -622,11 +745,7 @@ struct ManageProjectsView: View {
                         }
                         if filtered.isEmpty && library.loadingProjects { ProgressView() }
                     } footer: {
-                        Text("Hidden projects keep their threads on your Mac.")
-                    }
-                    Section {
-                        Button("Add project", systemImage: "folder.badge.plus") { creating = true }
-                        Button("Choose from your Mac", systemImage: "sparkles.rectangle.stack") { choosing = true }
+                        Text("Hidden projects keep their threads on your Mac. Add projects from the sidebar.")
                     }
                 }
                 if let failure { FailureDetails(message: failure) }
@@ -637,8 +756,6 @@ struct ManageProjectsView: View {
             .refreshable { await library.refresh() }
             .task { await library.refresh() }
             .sheet(item: $editing) { project in ProjectEditorView(model: model, library: library, project: project) }
-            .sheet(isPresented: $creating) { ProjectEditorView(model: model, library: library, project: nil) }
-            .sheet(isPresented: $choosing) { ChooseProjectsView(model: model, library: library) }
     }
     private func set(_ project: ProjectSummary, _ fields: [String: Any]) async {
         busy.insert(project.id); failure = nil
@@ -648,95 +765,240 @@ struct ManageProjectsView: View {
     }
 }
 
-/// Suggestions from native Codex projects and Claude Code folders. Nothing is
-/// selected by default and nothing is included until the owner confirms.
-struct ChooseProjectsView: View {
+/// The one way to add a project on a Mac: create a new folder, choose an
+/// existing one, or add a folder Codex or Claude Code already works in.
+/// Suggestions are never added until the owner taps Add.
+struct AddProjectView: View {
     @Environment(\.wonderTheme) private var theme
     @ObservedObject var model: ConnectionModel
     @ObservedObject var library: ProjectLibrary
-    var onFinish: () -> Void = {}
+    var onAdded: (ProjectSummary) -> Void = { _ in }
     @Environment(\.dismiss) private var dismiss
+    private enum Step: Hashable { case newFolder, existingFolder }
+    @State private var path: [Step] = []
     @State private var candidates: [ProjectCandidate] = []
     @State private var partial: [ProjectPartialFailure] = []
-    @State private var selected: Set<String> = []
     @State private var loading = true
-    @State private var saving = false
-    @State private var failure: String?
-    @State private var creating = false
+    @State private var loadFailure: String?
+    @State private var adding: String?
+    @State private var added: Set<String> = []
+    @State private var addFailure: String?
     @State private var requestIDs: [String: String] = [:]
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 Section {
-                    ForEach(candidates.filter { !$0.isIncluded }) { candidate in
-                        Button {
-                            if !selected.insert(candidate.id).inserted { selected.remove(candidate.id) }
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: selected.contains(candidate.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(selected.contains(candidate.id) ? theme.accent : Color.secondary)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(candidate.name).foregroundStyle(.primary)
-                                    Text(candidate.folders.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                                }
-                                Spacer()
-                                Text(candidate.sources.map(\.title).joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        .accessibilityAddTraits(selected.contains(candidate.id) ? .isSelected : [])
+                    NavigationLink(value: Step.newFolder) {
+                        choice("New folder", detail: library.supportsNewFolder
+                               ? "Create an empty folder on \(model.macName) for a new project."
+                               : "Update Wonder on \(model.macName) to create folders from here.",
+                               icon: "folder.badge.plus")
+                    }
+                    .disabled(!library.supportsNewFolder)
+                    .accessibilityIdentifier("add-project-new-folder")
+                    NavigationLink(value: Step.existingFolder) {
+                        choice("Existing folder", detail: "Choose a folder that’s already on \(model.macName).", icon: "folder")
+                    }
+                    .accessibilityIdentifier("add-project-existing-folder")
+                }
+                Section {
+                    ForEach(candidates.filter { !$0.isIncluded || added.contains($0.id) }) { candidate in
+                        suggestion(candidate)
                     }
                     if loading { ProgressView("Looking for projects…") }
-                    else if candidates.allSatisfy(\.isIncluded) {
-                        Text("No new suggestions. Add a project by choosing its folders.").foregroundStyle(.secondary)
+                    else if let loadFailure {
+                        Text(loadFailure).foregroundStyle(.secondary)
+                        Button("Try again") { Task { await load() } }
+                    } else if candidates.allSatisfy(\.isIncluded) && added.isEmpty {
+                        Text("No other folders found.").foregroundStyle(.secondary)
+                            .accessibilityIdentifier("add-project-no-suggestions")
                     }
                     ForEach(partial, id: \.self) { item in Text(item.detail).font(.footnote).foregroundStyle(.secondary) }
-                } footer: {
-                    Text("Only the projects you choose appear in Wonder.")
-                }
-                Section { Button("Choose folders instead", systemImage: "folder.badge.plus") { creating = true } }
-                if let failure {
-                    FailureDetails(message: failure)
-                    Button("Try again") { Task { await load() } }
+                    if let addFailure {
+                        Text(addFailure).font(.footnote).foregroundStyle(.secondary).accessibilityIdentifier("add-project-failure")
+                    }
+                } header: {
+                    Text("Used by Codex or Claude Code")
                 }
             }
             .wonderGroupedStyle()
-            .navigationTitle("Choose projects").navigationBarTitleDisplayMode(.inline)
+            .navigationTitle("Add project").navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Skip") { onFinish(); dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    if saving { ProgressView() }
-                    else { Button("Include \(selected.count)") { Task { await include() } }.disabled(selected.isEmpty) }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(added.isEmpty ? "Cancel" : "Done") { dismiss() }.accessibilityIdentifier("add-project-close")
+                }
+            }
+            .navigationDestination(for: Step.self) { step in
+                switch step {
+                case .newFolder:
+                    NewFolderProjectForm(model: model, library: library) { finish($0) }
+                case .existingFolder:
+                    ProjectEditorView(model: model, library: library, project: nil, embedded: true) { finish($0) }
                 }
             }
             .task { await load() }
-            .sheet(isPresented: $creating) { ProjectEditorView(model: model, library: library, project: nil) }
         }
     }
+    private func choice(_ title: String, detail: String, icon: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).foregroundStyle(theme.accent).frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).foregroundStyle(.primary)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+    private func suggestion(_ candidate: ProjectCandidate) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(candidate.name).foregroundStyle(.primary)
+                Text(candidate.folders.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Text(candidate.sources.map(\.title).joined(separator: ", ")).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if added.contains(candidate.id) {
+                Label("Added", systemImage: "checkmark").labelStyle(.iconOnly).foregroundStyle(theme.accent)
+                    .accessibilityLabel("Added")
+            } else if adding == candidate.id {
+                ProgressView().accessibilityLabel("Adding")
+            } else {
+                Button("Add") { Task { await add(candidate) } }
+                    .buttonStyle(.bordered).disabled(adding != nil)
+                    .accessibilityLabel("Add \(candidate.name)")
+                    .accessibilityIdentifier("add-project-suggestion:" + candidate.name)
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+    private func finish(_ project: ProjectSummary) {
+        onAdded(project)
+        dismiss()
+    }
     private func load() async {
-        loading = true; failure = nil
+        loading = true; loadFailure = nil
         defer { loading = false }
         do {
             let response = try await library.candidates()
             candidates = response.candidates; partial = response.partial
         } catch PairingFailure.response(404) {
-            failure = "Update Wonder on \(model.macName) to use Projects."
-        } catch { failure = "Suggestions couldn’t be loaded. You can still choose folders." }
+            loadFailure = "Update Wonder on \(model.macName) to see suggestions."
+        } catch is CancellationError {
+            return
+        } catch { loadFailure = "Suggestions couldn’t be loaded. You can still choose a folder." }
     }
-    private func include() async {
-        saving = true; failure = nil
-        defer { saving = false }
-        for candidate in candidates where selected.contains(candidate.id) {
-            let request = requestIDs[candidate.id] ?? UUID().uuidString.lowercased()
-            requestIDs[candidate.id] = request
-            do {
-                _ = try await library.createProject(requestID: request, name: candidate.name, folders: candidate.folders, primaryIndex: 0)
-                selected.remove(candidate.id)
-            } catch {
-                failure = "\(candidate.name) couldn’t be included. Try again."
-                return
+    private func add(_ candidate: ProjectCandidate) async {
+        adding = candidate.id; addFailure = nil
+        defer { adding = nil }
+        let request = requestIDs[candidate.id] ?? UUID().uuidString.lowercased()
+        requestIDs[candidate.id] = request
+        do {
+            let project = try await library.createProject(requestID: request, name: candidate.name, folders: candidate.folders, primaryIndex: 0)
+            added.insert(candidate.id)
+            onAdded(project)
+        } catch PairingFailure.hostMessage(_, let message) {
+            addFailure = message
+        } catch {
+            addFailure = "\(candidate.name) couldn’t be added. \(managementError(error))"
+        }
+    }
+}
+
+/// A project in a folder created for it. The folder takes the project's name.
+struct NewFolderProjectForm: View {
+    @ObservedObject var model: ConnectionModel
+    @ObservedObject var library: ProjectLibrary
+    var onCreated: (ProjectSummary) -> Void
+    @State private var name = ""
+    /// nil is the Mac's home folder.
+    @State private var parent: String?
+    @State private var parentChosen = false
+    @State private var browsing = false
+    @State private var saving = false
+    @State private var failure: String?
+    @State private var requestID = UUID().uuidString.lowercased()
+    @FocusState private var nameFocused: Bool
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var nameProblem: String? {
+        if trimmed.hasPrefix(".") { return "Folder names can’t start with a period." }
+        if trimmed.contains("/") || trimmed.contains(":") { return "Folder names can’t contain / or :." }
+        if trimmed.count > 120 { return "Use a shorter name." }
+        return nil
+    }
+    private var canCreate: Bool { !trimmed.isEmpty && nameProblem == nil && !saving && !model.accessEnded }
+    private var locationName: String { parent.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Home folder" }
+    var body: some View {
+        Form {
+            Section {
+                TextField("Project name", text: $name)
+                    .focused($nameFocused)
+                    .submitLabel(.done)
+                    .onSubmit { if canCreate { Task { await create() } } }
+                    .accessibilityIdentifier("new-folder-name")
+            } footer: {
+                if let nameProblem { Text(nameProblem).foregroundStyle(.red) }
+                else { Text("The folder gets the same name.") }
+            }
+            Section {
+                Button { browsing = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "folder").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(locationName).foregroundStyle(.primary)
+                            if let parent {
+                                Text(parent).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            }
+                        }
+                        Spacer()
+                        Text("Change").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityLabel("Location, \(locationName)")
+                .accessibilityHint("Chooses where the folder is created")
+                .accessibilityIdentifier("new-folder-location")
+            } header: { Text("Location on \(model.macName)") }
+            if let failure {
+                Section { Text(failure).foregroundStyle(.secondary).accessibilityIdentifier("new-folder-failure") }
             }
         }
-        onFinish()
-        dismiss()
+        .wonderGroupedStyle()
+        .disabled(saving)
+        .navigationTitle("New folder").navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                if saving { ProgressView() }
+                else { Button("Create") { Task { await create() } }.disabled(!canCreate).accessibilityIdentifier("new-folder-create") }
+            }
+        }
+        .sheet(isPresented: $browsing) {
+            MacLocationBrowser(model: model, title: "Location", foldersOnly: true) { path, isDirectory in
+                guard isDirectory else { return }
+                parent = path; parentChosen = true
+            }
+        }
+        // A changed name or location is a different request.
+        .onChange(of: trimmed) { _, _ in requestID = UUID().uuidString.lowercased() }
+        .onChange(of: parent) { _, _ in requestID = UUID().uuidString.lowercased() }
+        .onAppear {
+            // New projects usually sit beside the most recent one.
+            if !parentChosen, let recent = SidebarProjection.sorted(library.projects).first,
+               let primary = recent.folders.first(where: \.isPrimary) ?? recent.folders.first {
+                parent = URL(fileURLWithPath: primary.path).deletingLastPathComponent().path
+            }
+            nameFocused = true
+        }
+    }
+    private func create() async {
+        saving = true; failure = nil
+        defer { saving = false }
+        do {
+            onCreated(try await library.createProject(requestID: requestID, name: trimmed, newFolderParent: parent))
+        } catch PairingFailure.hostMessage(_, let message) {
+            failure = message
+        } catch is CancellationError {
+            return
+        } catch { failure = managementError(error) }
     }
 }

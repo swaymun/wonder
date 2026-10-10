@@ -13,8 +13,8 @@ final class WonderThemeTests: XCTestCase {
         XCTAssertEqual(themes.first?.scheme, .system)
         XCTAssertEqual(Set(themes.map(\.id)).count, themes.count)
         XCTAssertEqual(Set(themes.map(\.name)).count, themes.count)
-        XCTAssertTrue((16...21).contains(themes.count), "\(themes.count) themes")
-        XCTAssertEqual(themes.filter { $0.background != nil }.count, 4)
+        XCTAssertTrue((16...26).contains(themes.count), "\(themes.count) themes")
+        XCTAssertEqual(themes.filter { $0.background != nil }.count, 5)
     }
 
     func testUnknownStoredThemeFallsBackToWonder() {
@@ -62,7 +62,7 @@ final class WonderThemeTests: XCTestCase {
     func testPhotoThemesKeepTextReadableOverTheirBrightestAndDarkestPixels() {
         for spec in WonderThemeCatalog.themes {
             guard let photo = spec.background else { continue }
-            let p = spec.palette(systemIsDark: false)
+            let p = spec.palette(systemIsDark: spec.forcedDark == true)
             XCTAssertTrue(photo.asset.hasPrefix("ThemeBackground"), spec.id)
             XCTAssertTrue((0.5...0.9).contains(photo.scrim), "\(spec.id) scrim")
             for pixel in [photo.pixelRange.lowerBound, photo.pixelRange.upperBound] {
@@ -73,6 +73,17 @@ final class WonderThemeTests: XCTestCase {
                     ThemeContrast.worstCaseRatio(foreground: p.secondaryText, scrimColor: p.background, scrim: photo.scrim, pixelValue: pixel),
                     4.5, "\(spec.id) secondary over pixel \(pixel)")
             }
+        }
+    }
+
+    // Contract: a palette derived from another project names the themes it
+    // covers, and those themes exist, so the notice in Acknowledgements stays true.
+    func testDerivedPalettesCarryTheirNotice() {
+        let ids = Set(WonderThemeCatalog.themes.map(\.id))
+        for credit in ThemeCredits.all {
+            XCTAssertFalse(credit.themeIDs.isEmpty, credit.title)
+            XCTAssertTrue(Set(credit.themeIDs).isSubset(of: ids), credit.title)
+            XCTAssertTrue(credit.license.contains("Permission is hereby granted"), credit.title)
         }
     }
 

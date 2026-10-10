@@ -166,6 +166,45 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(PairingAPI.timeoutInterval(for: "/api/v1/computer/sessions/session/control/input"), 15)
     }
 
+    func testAttachmentUploadsGetALongerTimeoutThanListingFiles() {
+        XCTAssertEqual(PairingAPI.timeoutInterval(for: "/api/v1/conversations/chat/files", method: "POST"), 120)
+        XCTAssertEqual(PairingAPI.timeoutInterval(for: "/api/v1/conversations/chat/files"), 15)
+        XCTAssertEqual(PairingAPI.timeoutInterval(for: "/api/v1/conversations/chat/messages", method: "POST"), 15)
+    }
+
+    func testAttachmentUploadFailuresSayWhatHappened() {
+        let cases: [(Error, String)] = [
+            (URLError(.timedOut), "took too long"),
+            (URLError(.networkConnectionLost), "connection to your Mac dropped"),
+            (PairingFailure.response(413), "8 MB or smaller"),
+            (FileFailure.integrity, "different copy"),
+            (PairingFailure.response(500), "was not confirmed"),
+        ]
+        for (error, phrase) in cases {
+            XCTAssertTrue(AttachmentUploadFailure.message(for: error).contains(phrase), "\(error)")
+        }
+    }
+
+    func testResponseBodiesAreCollectedUpToTheirLimit() async throws {
+        func body(_ count: Int) -> AsyncStream<UInt8> {
+            AsyncStream { continuation in
+                for index in 0..<count { continuation.yield(UInt8(truncatingIfNeeded: index)) }
+                continuation.finish()
+            }
+        }
+        // Around the 64 KB chunk boundary and exactly at the limit.
+        for count in [0, 1, 65_535, 65_536, 65_537, 140_000] {
+            let data = try await PairingAPI.collect(body(count), limit: 140_000, expected: count, exceeded: FileFailure.tooLarge)
+            XCTAssertEqual(data, Data((0..<count).map { UInt8(truncatingIfNeeded: $0) }))
+        }
+        for count in [140_001, 200_000] {
+            do {
+                _ = try await PairingAPI.collect(body(count), limit: 140_000, expected: nil, exceeded: FileFailure.tooLarge)
+                XCTFail("\(count) bytes must exceed the limit")
+            } catch FileFailure.tooLarge {}
+        }
+    }
+
     func testControlRequestCanDecodeAnExplicitStructuredConflict() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ComputerControlResponseProtocol.self]

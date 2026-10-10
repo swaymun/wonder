@@ -26,6 +26,20 @@ export async function writeJson(path, value) {
   try { await directory.sync(); } finally { await directory.close(); }
 }
 
+// The SDK the sidecar runs, for read-only callers such as Settings → Providers:
+// the activated update when it still loads, otherwise the bundled one. Never
+// writes state; the sidecar remains the only owner of activation and pruning.
+export async function activeRuntime({ root, bundled, load = loadSdk }) {
+  let state = {};
+  try { state = JSON.parse(await readFile(join(root, "state.json"), "utf8")); } catch { return bundled; }
+  const version = state.active;
+  if (version === bundled.version || !compatibleVersion(version, bundled.version)) return bundled;
+  try {
+    const runtime = await load(join(root, "versions", version));
+    return runtime.version === version ? runtime : bundled;
+  } catch { return bundled; }
+}
+
 // One owner in the daemon sidecar. Staging never changes an in-flight Query or
 // its executable. The bundled SDK remains the recovery path on every launch.
 export class RuntimeUpdates {

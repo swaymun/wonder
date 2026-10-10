@@ -21,7 +21,7 @@ use wonderd::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("--locate-runtime") {
-        println!("{}", resolve_codex().await?.display());
+        println!("{}", wonderd::provider_runtime::locate_codex().display());
         return Ok(());
     }
     if std::env::args().nth(1).as_deref() == Some("--verify-runtime") {
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     store.start_event_epoch(&host_epoch).await?;
 
-    let codex_bin = resolve_codex().await?;
+    let codex_bin = wonderd::provider_runtime::locate_codex();
     let codex_state = effective_codex_home()?;
     let private_runtime = data_dir.join("runtime");
     let sensitive_root_paths = sensitive_roots(&codex_state)?;
@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let launch_config = LaunchConfig {
         project_scope: false,
         runtime_home: Some(private_runtime),
-        codex_bin,
+        codex_bin: codex_bin.clone(),
         wonder_version: env!("CARGO_PKG_VERSION").into(),
         permission_overrides,
     };
@@ -177,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
     let claude = wonderd::claude::Runtime::configured(&data_dir, &store);
     let projects = wonderd::projects::ProjectRuntime::configured(
-        resolve_codex().await?,
+        codex_bin.clone(),
         env!("CARGO_PKG_VERSION").into(),
         &codex_state,
         &claude_config_home()?,
@@ -200,12 +200,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_installation_id,
         app_server: Arc::clone(&app_server),
         launch_config: Arc::new(tokio::sync::Mutex::new(launch_config)),
+        provider_reconnect: Default::default(),
         denied_roots: denied_root_refs
             .iter()
             .map(|path| (*path).to_owned())
             .collect(),
         linked_file_roots,
         dispatch_lock: Arc::new(tokio::sync::Mutex::new(())),
+        dispatch_wake: Arc::default(),
         update_admission: Arc::new(Default::default()),
         channel_worker_slots: Arc::new(tokio::sync::Semaphore::new(CHANNEL_WORKER_CONCURRENCY)),
         approval_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -228,6 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     wonderd::bot_management::recover_deletions(&state).await;
     let notification_service = wonderd::ingestion::spawn(state.clone()).await;
     let scheduler_task = wonderd::spawn_automation_scheduler(state.clone());
+    let runtime_update_task = wonderd::provider_runtime::spawn_update_watcher(state.clone());
     let listen_addr =
         std::env::var("WONDER_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:3777".into());
     let listen_addr: SocketAddr = listen_addr.parse()?;
@@ -352,6 +355,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     drop(notification_service);
     scheduler_task.abort();
+    runtime_update_task.abort();
     dispatcher_task.abort();
     push_task.abort();
     let _ = scheduler_task.await;
@@ -366,21 +370,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.projects.shutdown().await;
     logger.record("info", "daemon_stopped", serde_json::json!({}))?;
     Ok(())
-}
-
-async fn resolve_codex() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Ok(path) = std::env::var("WONDER_CODEX_BIN") {
-        return Ok(PathBuf::from(path));
-    }
-    let resources = Path::new("/Applications/ChatGPT.app/Contents/Resources");
-    // The supported launcher preserves adjacency with codex-code-mode-host.
-    // Do not select the nested Mach-O directly; its helper lives elsewhere.
-    let current = resources.join("codex-cli/bin/codex");
-    Ok(if current.is_file() {
-        current
-    } else {
-        resources.join("codex")
-    })
 }
 
 fn data_directory() -> Result<PathBuf, Box<dyn std::error::Error>> {

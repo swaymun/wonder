@@ -27,6 +27,37 @@ final class MessageProjectionTests: XCTestCase {
         let cached = try JSONDecoder().decode(ConversationSnapshot.self, from: JSONEncoder().encode(snapshot))
         XCTAssertEqual(cached.rows(author: "Ada").map { $0.source?.kind }, ["thread", "wake", nil])
     }
+    // A prompt written in Claude Code on the Mac has no Wonder message; its
+    // images reach the bubble through the item's attachment list.
+    func testImagesAttachedOnTheMacAppearOnTheUserBubble() throws {
+        let desktop = ReadItem(id: "prompt", type: "userMessage", state: "completed", text: "What changed?", createdAt: "1000",
+            payload: ["attachmentIds": .array([.string("image-1"), .string("image-2")])])
+        let reply = ReadItem(id: "answer", type: "agentMessage", state: "completed", text: "A new header.", createdAt: "2000",
+            payload: ["attachmentIds": .array([.string("not-a-user-attachment")])])
+        let rows = try JSONDecoder().decode(ConversationSnapshot.self,
+            from: JSONEncoder().encode(snapshot([desktop, reply], clients: []))).rows(author: "Ada")
+        XCTAssertEqual(rows.map(\.attachmentIds), [["image-1", "image-2"], []])
+        // Wonder's own messages keep their durable attachments.
+        let sent = snapshot([echo("echo", client: "client")]).rows(author: "Ada")
+        XCTAssertEqual(sent.first?.attachmentIds, [])
+    }
+    // A Project send re-reads native history only when the screen may be
+    // behind the Mac: another newest turn, one still running, or a status change.
+    func testASendSkipsTheFullReadOnlyWhenTheNewestNativeTurnIsShownSettled() {
+        let shown = ConversationSnapshot(conversationId: "chat", hostEpoch: "epoch", lastSequence: 1, messages: [],
+            assistantMessages: [], thread: ThreadProjection(nextCursor: nil, hydrated: true, turns: [
+                ReadTurn(id: "older", items: [], status: "completed"),
+                ReadTurn(id: "newest", items: [], status: "completed"),
+                ReadTurn(id: "local:pending", items: [], status: "inProgress")]))
+        XCTAssertTrue(shown.showsLatestNativeTurn(id: "newest", status: "completed", runningElsewhere: false))
+        XCTAssertFalse(shown.showsLatestNativeTurn(id: "desktop-turn", status: "completed", runningElsewhere: false))
+        XCTAssertFalse(shown.showsLatestNativeTurn(id: "newest", status: "inProgress", runningElsewhere: true))
+        XCTAssertFalse(shown.showsLatestNativeTurn(id: "newest", status: "failed", runningElsewhere: false))
+        XCTAssertFalse(shown.showsLatestNativeTurn(id: nil, status: "none", runningElsewhere: false))
+        let empty = ConversationSnapshot(conversationId: "chat", hostEpoch: "epoch", lastSequence: 1, messages: [],
+            assistantMessages: [], thread: ThreadProjection(nextCursor: nil, hydrated: true))
+        XCTAssertFalse(empty.showsLatestNativeTurn(id: "newest", status: "completed", runningElsewhere: false))
+    }
     func testQuestionOnlyEmptyReplyDoesNotRenderBubble() {
         let rows = snapshot([ReadItem(id: "question", type: "agentMessage", state: "completed", text: "  ", createdAt: "1")], clients: []).rows(author: "Ada")
         XCTAssertTrue(rows.isEmpty)

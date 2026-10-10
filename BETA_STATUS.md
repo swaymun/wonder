@@ -1,14 +1,16 @@
 # Wonder beta status
 
-On October 9, Wonder Testing Release 1.0 (51) and production Release 1.0 (107)
-uploaded and processed from `fbe1cf5d` (the October stack, #85), archived on the
-Mac mini with Xcode 27.1. Testing 51 is available in internal Owner Beta;
-production 107's tester availability was not checked. TestFlight installation
-remains unverified. Mac 1.0.130 was built on the Mac mini from the same commit,
-Developer ID signed, notarized and stapled; its DMG passed Gatekeeper and artifact
-checks, and it is installed here over 1.0.129 with `/healthz` and `/readyz` matching
-the previous host. No external beta review, public enrollment or new public Mac
-binary release was requested.
+On October 10, Wonder Testing Release 1.0 (52) and production Release 1.0 (108)
+uploaded and processed from `88c716a5` (branch `agent/app-review-prep`, the App
+Review preparation), archived on this MacBook with Xcode 27.0; the Mac mini is retired.
+Testing 52 is available in internal Owner Beta; production 108's tester
+availability was not checked. TestFlight installation remains unverified. Mac
+1.0.132 was built here from the same commit, Developer ID signed, notarized and
+stapled; its DMG passed Gatekeeper and artifact checks, and it is installed with
+`/readyz` ready and ChatGPT's Codex 0.162.0-alpha.17.2 verified. Interim Mac
+1.0.131 (`6ca85ce4`) fixed a stalled notification queue the night before. No
+external beta review, public enrollment or new public Mac binary release was
+requested.
 
 Wonder connects native iPhone and iPad conversations to agents on your own Mac.
 The Mac companion requires Apple Silicon. Follow [installation](INSTALL.md) for
@@ -19,9 +21,9 @@ Keep the Mac awake and online while using it remotely.
 
 | Component | Status |
 | --- | --- |
-| iPhone and iPad | Production Release 1.0 (107) uploaded and processed; tester availability not checked. Built on the Mac mini from clean, pushed source (`fbe1cf5d`) with Xcode 27.1. TestFlight installation remains unverified. |
-| Wonder Testing | Blue Release 1.0 (51) uploaded, processed and available in automatic Owner Beta, from the same source as production 107. Earlier builds are superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
-| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.130 (from `fbe1cf5d`, built on the Mac mini) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `6073a409cf2495c94ae1d7136d8a2d2c47f02e6a37011b7ad95ed6cf7dac6dd2`. |
+| iPhone and iPad | Production Release 1.0 (108) uploaded and processed; tester availability not checked. Built on this MacBook from clean, pushed source (`88c716a5`) with Xcode 27.0. TestFlight installation remains unverified. |
+| Wonder Testing | Blue Release 1.0 (52) uploaded, processed and available in automatic Owner Beta, from the same source as production 108. Earlier builds are superseded. TestFlight installation remains unverified; pairing, drafts and Keychain access stay separate from production. |
+| Mac companion | [Version 1.0.101](https://github.com/swaymun/wonder/releases/tag/mac-v1.0.101-beta.1) remains the public download. Local release 1.0.132 (from `88c716a5`, built on this MacBook) is Developer ID signed, notarized, stapled, Gatekeeper accepted and installed; DMG SHA-256 `a2770be04d03c764f32f88f2b12174899004624854e415160cb1088bb6aea6ed`. |
 | Source | Reviewed MIT source is at [swaymun/wonder](https://github.com/swaymun/wonder). The iOS archives and the Mac app came from clean, pushed internal source. Third-party components retain their own licenses. |
 
 Mac 1.0.129 matches Claude Desktop when a Claude Project reply is stopped: the

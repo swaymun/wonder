@@ -5,16 +5,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { Sessions } from "../sessions.mjs";
-import { ClaudeBridge } from "../bridge.mjs";
+import { ClaudeBridge, withLiveRoster } from "../bridge.mjs";
 import { ToolPolicy } from "../permissions.mjs";
-import { backgroundTasks, claudeSessionBusy, nativeTurns, turnEndMessageId } from "../project-history.mjs";
+import { backgroundTasks, claudeSessionBusy, claudeSessionState, mainTurnRunning, nativeTurns, sessionSummary, turnEndMessageId } from "../project-history.mjs";
 import { ClaudeSessionFiles, projectFolderName } from "../session-file.mjs";
 import { TurnProjection } from "../projection.mjs";
 
 // Contract owner: project conversations continue the owner's native Claude Code
 // session by exact UUID, read history from that transcript, and never receive
 // Bot instructions or tools.
-async function fixture(t, { transcripts = {} } = {}) {
+async function fixture(t, { transcripts = {}, claudeSessionsDir = undefined } = {}) {
   const gate = { current: null };
   const root = await mkdtemp(join(tmpdir(), "wonder-project-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -76,7 +76,7 @@ async function fixture(t, { transcripts = {} } = {}) {
     },
   };
   const updates = { acquire: async () => ({ runtime: { sdk }, release: async () => {} }) };
-  const bridge = new ClaudeBridge({ updates, sessions, send: async frame => { frames.push(frame); } });
+  const bridge = new ClaudeBridge({ updates, sessions, send: async frame => { frames.push(frame); }, claudeSessionsDir, yieldCheckMs: 20 });
   const policy = { mode: "workspace", approvalMode: "ask", readRoots: ["/"], writeRoots: [primary, secondary], deniedRoots: [] };
   const project = { cwd: primary, additionalDirectories: [secondary] };
   return { root, primary, secondary, sessions, bridge, frames, inputs, capturedOptions, interrupts, closes, lingers, emits, policy, project, gate };
@@ -293,6 +293,33 @@ test("native history includes Claude Code turns and reuses Wonder receipts by id
   assert.deepEqual(turns[1].items[1], { type: "commandExecution", id: "tool-1", command: "ls", status: "completed", success: true, aggregatedOutput: "ok" });
 });
 
+test("images the owner attaches in Claude Code reach the prompt, bounded", () => {
+  // Shapes recorded by Claude Code and the Claude desktop app: base64 image
+  // blocks beside or instead of the typed words (paste ids shortened).
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const image = (media_type, data = png) => ({ type: "image", source: { type: "base64", media_type, data } });
+  const turns = nativeTurns([
+    { type: "user", uuid: "u1", imagePasteIds: [1], origin: { kind: "human" },
+      message: { role: "user", content: [image("image/webp"), { type: "text", text: "What is in [Image #1]?" }] } },
+    { type: "assistant", uuid: "a1", message: { id: "m1", content: [{ type: "text", text: "A cat." }] } },
+    // An image alone is still a prompt; the reply belongs to it, not the turn before.
+    { type: "user", uuid: "u2", imagePasteIds: [1, 2], message: { role: "user", content: [image("image/png"), image("image/png", "A".repeat(11_184_816))] } },
+    { type: "assistant", uuid: "a2", message: { id: "m2", content: [{ type: "tool_use", id: "t1", name: "Read", input: { file_path: "/p/shot.png" } }] } },
+    // A tool's image result is the tool's output, not something the owner attached.
+    { type: "user", uuid: "r1", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: [image("image/png")] }] } },
+    { type: "assistant", uuid: "a3", message: { id: "m3", content: [{ type: "text", text: "Two screenshots." }] } },
+  ]);
+  assert.deepEqual(turns.map(t => t.id), ["u1", "u2"]);
+  assert.deepEqual(turns[0].items[0].content, [{ type: "text", text: "What is in [Image #1]?" },
+    { type: "image", mimeType: "image/webp", data: png }]);
+  assert.deepEqual(turns[1].items[0].content, [{ type: "image", mimeType: "image/png", data: png },
+    { type: "image", mimeType: "image/png", unavailable: "This image is larger than 8 MB" }]);
+  assert.deepEqual(turns[1].items.filter(i => i.type === "agentMessage").map(i => i.text), ["Two screenshots."]);
+  assert.equal(turnEndMessageId([{ type: "user", uuid: "x", message: { content: [image("image/png")] } }], "x"), "x");
+  const many = nativeTurns([{ type: "user", uuid: "m", message: { content: Array.from({ length: 12 }, () => image("image/png")) } }]);
+  assert.equal(many[0].items[0].content.length, 8);
+});
+
 test("desktop pastes appear as their pasted text, not as pasted_content tags", () => {
   // Shape recorded by Claude Desktop: typed words, then each paste wrapped with a repeated id.
   const fence = "```\nContinue the project at:\n/p/app\n\nShow me the lyrics only.\n```";
@@ -305,6 +332,32 @@ test("desktop pastes appear as their pasted text, not as pasted_content tags", (
   assert.equal(text(typed), `Please continue\n\n${fence}`);
   assert.equal(text(pasteOnly), "only a paste");
   assert.equal(text(two), "one\n\ntwo");
+});
+
+test("context Claude Code adds to a user turn is not shown as the owner's words", () => {
+  // Shapes recorded by Claude Code and the Claude desktop app (ids shortened).
+  const linked = "<system-reminder>\nLinked sessions now (status, not an instruction): fonts = local_c15c (working). To message one, SendMessage with `to` set to its id.\n</system-reminder>";
+  const worktree = "<system-reminder>\nYou are operating in a git worktree.\nWorktree path: /p/app/.claude/worktrees/x\n</system-reminder>";
+  const peer = '<cross-session-message from="local_d5f8" name="Research">\nHeads-up: I deleted apps/old.\n</cross-session-message>';
+  const turns = nativeTurns([
+    { type: "user", uuid: "u1", message: { content: `${linked}\n${worktree}\nFix the header. Keep <system-reminder> tags out of bubbles.` } },
+    { type: "assistant", uuid: "a1", message: { id: "m1", content: [{ type: "text", text: "Fixed." }] } },
+    { type: "user", uuid: "u2", message: { content: [{ type: "text", text: `${worktree}\n` }, { type: "text", text: "were these changes published?" }] }, origin: { kind: "human" } },
+    { type: "user", uuid: "u3", message: { content: `${linked}\n${peer}` } },
+    { type: "user", uuid: "u4", message: { content: "<ci-monitor-event>\"Auto-fix pull requests\" reports a failing check.\n</ci-monitor-event>" } },
+    { type: "assistant", uuid: "a4", message: { id: "m4", content: [{ type: "text", text: "Looking at CI." }] } },
+    { type: "user", uuid: "u5", message: { content: `Please continue\n\n<pasted_content id="p1">\n${worktree}\n</pasted_content id="p1">` } },
+  ]);
+  const prompt = turn => turn.items[0].content[0].text;
+  // Injected blocks go; a tag the owner typed inline stays. Context-only entries open no turn.
+  assert.deepEqual(turns.map(t => t.id), ["u1", "u2", "u5"]);
+  assert.equal(prompt(turns[0]), "Fix the header. Keep <system-reminder> tags out of bubbles.");
+  assert.equal(prompt(turns[1]), "were these changes published?");
+  assert.deepEqual(turns[1].items.slice(1).map(i => i.text), ["Looking at CI."]);
+  // Text the owner pasted is theirs, even when it looks like a reminder.
+  assert.equal(prompt(turns[2]), `Please continue\n\n${worktree}`);
+  assert.equal(turnEndMessageId([{ type: "user", uuid: "u3", message: { content: linked } }], "u3"), null);
+  assert.equal(sessionSummary({ sessionId: "s", firstPrompt: `${worktree}\nRename the app`, lastModified: 1000 }).title, "Rename the app");
 });
 
 test("a shell or slash command and its output form one turn whose prompt keeps the command markup", () => {
@@ -518,6 +571,13 @@ test("a desktop-busy Claude session shows its turn running elsewhere and refuses
   const idle = await bridge.request("thread/turns/list", { threadId: thread.id, itemsView: "notLoaded" });
   assert.equal(idle.data[0].status, "completed");
   assert.equal(idle.data[0].runningElsewhere, undefined);
+  // A finished turn that grows (Claude's reply when a background task ends) changes its count.
+  assert.deepEqual([idle.data[0].items, idle.data[0].itemCount], [[], 2]);
+  messages.push({ type: "user", origin: { kind: "task-notification" }, message: { content: "<task-notification></task-notification>" } },
+    { type: "assistant", uuid: "a2", message: { id: "m2", content: [{ type: "text", text: "The task finished" }] } });
+  bridge.transcripts.clear();
+  const grown = await bridge.request("thread/turns/list", { threadId: thread.id, itemsView: "notLoaded" });
+  assert.deepEqual([grown.data[0].id, grown.data[0].itemCount], ["turn-1", 3]);
 });
 
 test("turns and agent tasks from before a compaction stay visible", async t => {
@@ -839,4 +899,204 @@ test("changing the model after an interrupt starts a new process", async t => {
   assert.ok(f.closes.length >= 1, "the old process ended");
   assert.equal(f.capturedOptions.length, 2);
   assert.equal(f.capturedOptions[1].model, "sonnet");
+});
+
+// Owner: the agent-task list counts what Claude on the Mac counts as running:
+// agents, background commands, monitors and linked sessions it started.
+test("monitors and started linked sessions are tasks; proposals are not", () => {
+  const messages = [
+    { type: "user", uuid: "turn-1", origin: { kind: "human" }, message: { content: "Watch the build" } },
+    { type: "assistant", uuid: "a1", timestamp: "2026-10-09T00:00:01Z", message: { content: [
+      { type: "tool_use", id: "mon", name: "Monitor", input: { description: "Build errors", command: "tail -f build.log" } },
+      { type: "tool_use", id: "linked", name: "mcp__ccd_session__start_session", input: { title: "Review", prompt: "Review it" } },
+      { type: "tool_use", id: "offer", name: "mcp__ccd_session__start_session", input: { title: "Maybe", prompt: "Later" } }] } },
+    { type: "user", uuid: "r1", message: { content: [
+      { type: "tool_result", tool_use_id: "mon", content: "Monitor started (task b1a2c3d4e, expires in 30m unless the source ends first)" },
+      { type: "tool_result", tool_use_id: "linked", content: [{ type: "text", text: "Started session \"Review\" (session_id: local_1626a88b-15e9, name: review). It runs on its own." }] },
+      { type: "tool_result", tool_use_id: "offer", content: [{ type: "text", text: "Proposed \"Maybe\" (task_id: task_ab07e02f)." }] }] } },
+  ];
+  const tasks = Object.fromEntries(backgroundTasks(messages, true).map(t => [t.id, t]));
+  assert.deepEqual(Object.keys(tasks).sort(), ["linked", "mon"]);
+  assert.deepEqual([tasks.mon.kind, tasks.mon.status, tasks.mon.taskId, tasks.mon.title], ["monitor", "running", "b1a2c3d4e", "Build errors"]);
+  assert.deepEqual([tasks.linked.kind, tasks.linked.hostSessionId, tasks.linked.title], ["session", "local_1626a88b-15e9", "Review"]);
+  // Without a live process a monitor's state is unknown; a linked session has its own process.
+  const idle = Object.fromEntries(backgroundTasks(messages, false).map(t => [t.id, t.status]));
+  assert.deepEqual(idle, { mon: "unknown", linked: "running" });
+  const done = [...messages, { type: "user", uuid: "n1", origin: { kind: "task-notification" }, message: { content:
+    "<task-notification>\n<task-id>b1a2c3d4e</task-id>\n<tool-use-id>mon</tool-use-id>\n<status>completed</status>\n<summary>Monitor \"Build errors\" ended</summary>\n</task-notification>" } }];
+  assert.equal(backgroundTasks(done, true).find(t => t.id === "mon").status, "completed");
+});
+
+test("a main turn ends at its final reply even while background work runs", () => {
+  const prompt = { type: "user", uuid: "u", message: { content: "Go" } };
+  const tool = { type: "assistant", uuid: "a", message: { stop_reason: "tool_use", content: [{ type: "tool_use", id: "t", name: "Bash", input: {} }] } };
+  const result = { type: "user", uuid: "r", message: { content: [{ type: "tool_result", tool_use_id: "t", content: "ok" }] } };
+  const reply = { type: "assistant", uuid: "b", message: { stop_reason: "end_turn", content: [{ type: "text", text: "Started" }] } };
+  const child = { type: "assistant", uuid: "c", parent_tool_use_id: "t", message: { stop_reason: null, content: [] } };
+  assert.equal(mainTurnRunning([prompt]), true);
+  assert.equal(mainTurnRunning([prompt, tool]), true);
+  assert.equal(mainTurnRunning([prompt, tool, result]), true);
+  assert.equal(mainTurnRunning([prompt, tool, result, reply]), false);
+  assert.equal(mainTurnRunning([prompt, tool, result, reply, child]), false, "an agent's own messages are not the main turn");
+  assert.equal(mainTurnRunning([prompt, { type: "user", uuid: "i", message: { content: [{ type: "text", text: "[Request interrupted by user]" }] } }]), false);
+  assert.equal(mainTurnRunning([]), false);
+});
+
+test("a desktop session's status separates its reply from background work", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "wonder-claude-sessions-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const record = status => writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: "s", status }));
+  const state = async status => { await record(status); return claudeSessionState("s", dir); };
+  assert.deepEqual(await state("busy"), { open: true, busy: true, background: true });
+  assert.deepEqual(await state("shell"), { open: true, busy: false, background: true }, "only background commands or monitors");
+  assert.deepEqual(await state("waiting"), { open: true, busy: true, background: true });
+  assert.deepEqual(await state("idle"), { open: true, busy: false, background: false });
+  await writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: "s", status: "busy", entrypoint: "sdk-ts" }));
+  assert.deepEqual(await claudeSessionState("s", dir), { open: false, busy: false, background: false }, "Wonder's own SDK runs are not Claude on the Mac");
+});
+
+test("a desktop session whose reply finished is idle while its tasks run, and refuses a second writer", async t => {
+  const f = await fixture(t, { transcripts: {} });
+  const dir = await mkdtemp(join(tmpdir(), "wonder-claude-sessions-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sdkSessionId = "11111111-2222-3333-4444-555555555556";
+  const messages = [{ type: "user", uuid: "turn-1", origin: { kind: "human" }, message: { content: "Audit it" } },
+    { type: "assistant", uuid: "a1", message: { id: "m1", stop_reason: "tool_use", content: [{ type: "tool_use", id: "tu-a", name: "Agent", input: { description: "Audit", prompt: "Look" } }] } },
+    { type: "user", uuid: "r1", message: { content: [{ type: "tool_result", tool_use_id: "tu-a", content: "Async agent launched successfully. agentId: x9" }] } },
+    { type: "assistant", uuid: "a2", message: { id: "m2", stop_reason: "end_turn", content: [{ type: "text", text: "It is running." }] } }];
+  const sdk = { getSessionMessages: async () => messages, getSessionInfo: async (id, { dir: cwd }) => ({ sessionId: id, cwd, lastModified: 1 }) };
+  const bridge = new ClaudeBridge({ updates: { acquire: async () => ({ runtime: { sdk }, release: async () => {} }) },
+    sessions: f.sessions, send: async () => {}, claudeSessionsDir: dir });
+  const { thread } = await bridge.request("project/session/attach", { sessionId: sdkSessionId, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+  await writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sdkSessionId, status: "busy" }));
+  const { data } = await bridge.request("thread/turns/list", { threadId: thread.id, itemsView: "notLoaded" });
+  assert.equal(data[0].status, "completed");
+  assert.equal(data[0].runningElsewhere, undefined);
+  const tasks = (await bridge.request("thread/backgroundTasks/list", { threadId: thread.id })).data;
+  assert.deepEqual(tasks.map(t => [t.id, t.status, t.runningElsewhere]), [["tu-a", "running", true]]);
+  // Claude Code 2.1.295 reports "idle" while a background command runs: an
+  // open process still runs what its transcript launched and never reported.
+  await writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sdkSessionId, status: "idle" }));
+  bridge.transcripts.clear();
+  const idle = (await bridge.request("thread/backgroundTasks/list", { threadId: thread.id })).data;
+  assert.deepEqual(idle.map(t => [t.id, t.status, t.runningElsewhere]), [["tu-a", "running", true]]);
+  // Wonder's host ends the app's process before sending; a process still (or
+  // again) open here would write its own copy, so the bridge refuses a second writer.
+  await assert.rejects(bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Another" }] }), /open in Claude on your Mac/);
+});
+
+test("the live roster names running tasks the transcript has not recorded", () => {
+  const roster = { tasks: new Map([["b1", { task_id: "b1", task_type: "local_bash", description: "Sleep" }],
+    ["m1", { task_id: "m1", task_type: "monitor_mcp", description: "Watch" }]]), toolUses: new Map([["b1", "tu-b"]]) };
+  const transcript = [{ id: "tu-b", kind: "command", status: "unknown", taskId: null, title: "Sleep" },
+    { id: "tu-old", kind: "command", status: "completed", taskId: "b0", title: "Old" }];
+  const merged = withLiveRoster(transcript, roster);
+  assert.deepEqual(merged.map(t => [t.id, t.kind, t.status, t.taskId]),
+    [["task:m1", "monitor", "running", "m1"], ["tu-b", "command", "running", "b1"], ["tu-old", "command", "completed", "b0"]]);
+  assert.equal(withLiveRoster(transcript, { tasks: null, toolUses: new Map() }), transcript, "no roster yet: the transcript decides");
+});
+
+test("a reply ends at its result while a background command runs; the next message joins the process", async t => {
+  const f = await fixture(t);
+  f.lingers.current = true;
+  const { thread } = await f.bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+  f.gate.current = Promise.withResolvers();
+  await f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Start a build" }] });
+  await settle(() => f.bridge.active.get(thread.id)?.query);
+  const run = f.bridge.active.get(thread.id);
+  f.emits.push({ type: "system", subtype: "task_started", task_type: "local_bash", task_id: "bq77", tool_use_id: "tu-bg", description: "Build" });
+  f.emits.push({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "bq77", task_type: "local_bash", description: "Build" }] });
+  await settle(() => run.roster.tasks?.size);
+  f.bridge.projectMessages = async () => ({ messages: [], desktop: false });
+  f.gate.current.resolve();
+  await run.finished;
+  assert.equal(f.sessions.get(thread.id).turns.at(-1).status, "completed", "the reply is done");
+  assert.ok(!f.bridge.active.has(thread.id), "the conversation is idle");
+  assert.equal(f.closes.length, 0, "the process stays up for the command");
+  assert.ok(f.bridge.lingering.has(thread.id));
+  const listed = (await f.bridge.request("thread/backgroundTasks/list", { threadId: thread.id })).data;
+  assert.deepEqual(listed.map(t => [t.id, t.kind, t.status]), [["tu-bg", "command", "running"]]);
+
+  f.gate.current = null;
+  await f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Next" }] });
+  await f.bridge.active.get(thread.id)?.finished;
+  assert.equal(f.capturedOptions.length, 1, "no second process");
+  assert.equal(f.inputs.at(-1).message.content[0].text, "Next");
+  assert.equal(f.sessions.get(thread.id).turns.at(-1).status, "completed");
+  assert.ok(f.bridge.lingering.has(thread.id), "still up while the command runs");
+
+  // The command finishes; Claude reports it in its own turn, which ends the process.
+  // That reply joins the last turn live, under the IDs history gives it, and
+  // the turn is not reported as ending again.
+  const last = f.sessions.get(thread.id).turns.at(-1).id;
+  const before = f.frames.length;
+  f.emits.push({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+  f.emits.push({ type: "user", origin: { kind: "task-notification" }, message: { role: "user", content: "<task-notification><task-id>bq77</task-id><status>completed</status></task-notification>" } });
+  f.emits.push({ type: "stream_event", event: { type: "message_start", message: { id: "auto" } } });
+  f.emits.push({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
+  f.emits.push({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "The build " } } });
+  f.emits.push({ type: "assistant", message: { id: "auto", content: [{ type: "text", text: "The build finished." }] } });
+  f.emits.push({ type: "result", subtype: "success" });
+  await settle(() => f.closes.length);
+  assert.ok(!f.bridge.lingering.has(thread.id));
+  const after = f.frames.slice(before);
+  assert.ok(!after.some(frame => ["turn/started", "turn/completed"].includes(frame.method)), "the turn stays ended");
+  const done = after.filter(frame => frame.method === "item/completed").map(frame => frame.params);
+  assert.deepEqual(done.map(p => [p.turnId, p.item.id, p.item.text]), [[last, `${last}:auto:0`, "The build finished."]]);
+  const history = nativeTurns([{ type: "user", uuid: last, message: { content: "Next" } },
+    { type: "user", origin: { kind: "task-notification" }, message: { content: "<task-notification></task-notification>" } },
+    { type: "assistant", message: { id: "auto", content: [{ type: "text", text: "The build finished." }] } }]);
+  assert.equal(history.at(-1).items.at(-1).id, done[0].item.id, "history shows the same item");
+});
+
+test("a lingering process yields when Claude on the Mac opens the chat, so one process writes it", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "wonder-claude-sessions-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const f = await fixture(t, { claudeSessionsDir: dir });
+  f.lingers.current = true;
+  const { thread } = await f.bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+  f.gate.current = Promise.withResolvers();
+  await f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Start a build" }] });
+  await settle(() => f.bridge.active.get(thread.id)?.query);
+  const run = f.bridge.active.get(thread.id);
+  f.emits.push({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "bq77", task_type: "local_bash", description: "Build" }] });
+  await settle(() => run.roster.tasks?.size);
+  f.bridge.projectMessages = async () => ({ messages: [], desktop: false });
+  f.gate.current.resolve();
+  await run.finished;
+  assert.ok(f.bridge.lingering.has(thread.id), "the process stays up for the command");
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.ok(f.bridge.lingering.has(thread.id), "Wonder's own Agent SDK record is not Claude on the Mac");
+  await writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: f.sessions.get(thread.id).sdkSessionId, status: "idle", entrypoint: "claude-desktop" }));
+  await settle(() => f.closes.length);
+  assert.ok(!f.bridge.lingering.has(thread.id), "Wonder released its process");
+});
+
+test("a reply does not keep its process for background work when Claude on the Mac has the chat open", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "wonder-claude-sessions-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const f = await fixture(t, { claudeSessionsDir: dir });
+  f.lingers.current = true;
+  const { thread } = await f.bridge.request("thread/start", { cwd: f.primary, model: "claude:haiku", wonderPolicy: f.policy, wonderProject: f.project });
+  f.gate.current = Promise.withResolvers();
+  await f.bridge.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "Start a build" }] });
+  await settle(() => f.bridge.active.get(thread.id)?.query);
+  const run = f.bridge.active.get(thread.id);
+  f.emits.push({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "bq77", task_type: "local_bash", description: "Build" }] });
+  await settle(() => run.roster.tasks?.size);
+  await writeFile(join(dir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: f.sessions.get(thread.id).sdkSessionId, status: "idle", entrypoint: "claude-desktop" }));
+  f.bridge.projectMessages = async () => ({ messages: [], desktop: false });
+  f.gate.current.resolve();
+  await run.finished;
+  assert.ok(!f.bridge.lingering.has(thread.id));
+  assert.equal(f.closes.length, 1);
+});
+
+test("a Project's agents may run in the background; a Bot's stay in the turn", async () => {
+  const cwd = "/tmp";
+  const policy = project => new ToolPolicy({ cwd, mode: "workspace", approvalMode: "auto", readRoots: ["/"], writeRoots: [cwd], deniedRoots: [], project, tools: [] });
+  const hook = async p => (await p.beforeTool({ tool_name: "Agent", tool_input: { prompt: "x", run_in_background: true, model: "opus" } })).hookSpecificOutput;
+  const project = await hook(policy(true)), bot = await hook(policy(false));
+  assert.deepEqual(project.updatedInput, { prompt: "x", run_in_background: true }, "the parent's model, the agent's own choice of background");
+  assert.deepEqual(bot.updatedInput, { prompt: "x", run_in_background: false });
 });

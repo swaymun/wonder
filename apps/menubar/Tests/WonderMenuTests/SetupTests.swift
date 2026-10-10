@@ -138,35 +138,107 @@ final class SetupTests: XCTestCase {
     }
 
     @MainActor
-    func testClaudeCheckOffersSignInOnlyForAccountFailure() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("WonderClaudeCheck-\(UUID().uuidString)")
+    func testProviderStatusSignInAndSignOutFollowManageRuntimeResults() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("WonderProviders-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
+        // The fake records each action and replies with the exit code saved for it.
         let script = directory.appendingPathComponent("manage-runtime.sh")
-        try "#!/bin/sh\nexit $(cat \"$WONDER_SERVICE_DIR/check-exit\")\n".write(to: script, atomically: true, encoding: .utf8)
-        let service = ServiceControls(
-            defaults: isolatedDefaults(), login: TestLogin(), serviceDirectory: directory,
-            environment: ["WONDER_RESOURCES": directory.path, "WONDER_SERVICE_DIR": directory.path]
-        )
-        func check(_ exitCode: Int32) async throws {
-            try "\(exitCode)".write(to: directory.appendingPathComponent("check-exit"), atomically: true, encoding: .utf8)
-            let finished = expectation(description: "Claude check exit \(exitCode)")
-            service.repair(claude: true)
-            var observation: AnyCancellable? = service.$busy.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
-            await fulfillment(of: [finished], timeout: 5)
-            observation?.cancel()
-            observation = nil
+        try """
+        #!/bin/sh
+        echo "$1" >> "$WONDER_SERVICE_DIR/actions"
+        printf '1.2.3\\tTest plan\\n'
+        exit $(cat "$WONDER_SERVICE_DIR/$1" 2>/dev/null || echo 1)
+        """.write(to: script, atomically: true, encoding: .utf8)
+        func reply(_ action: String, _ code: Int32) throws {
+            try "\(code)".write(to: directory.appendingPathComponent(action), atomically: true, encoding: .utf8)
+        }
+        let providers = ProviderControls(environment: ["WONDER_RESOURCES": directory.path, "WONDER_SERVICE_DIR": directory.path])
+        var restarts = 0
+        providers.restartServices = { restarts += 1 }
+        func settle() async {
+            for _ in 0..<200 where providers.busy { try? await Task.sleep(for: .milliseconds(25)) }
+            XCTAssertFalse(providers.busy)
+        }
+        func state(_ provider: ProviderKind) -> String? {
+            providers.snapshot.first { $0["id"] as? String == provider.rawValue }?["state"] as? String
         }
 
-        try await check(42)
-        XCTAssertTrue(service.claudeAuthRequired)
-        XCTAssertTrue(service.message?.contains("needs sign-in") == true)
-        try await check(1)
-        XCTAssertFalse(service.claudeAuthRequired)
-        XCTAssertTrue(service.message?.contains("did not finish") == true)
-        try await check(0)
-        XCTAssertFalse(service.claudeAuthRequired)
-        XCTAssertTrue(service.message?.contains("Claude is connected") == true)
+        try reply("status", 0); try reply("claude-status", 42)
+        providers.refresh()
+        await settle()
+        XCTAssertEqual(state(.codex), "signedIn")
+        XCTAssertEqual(providers.statuses[.codex], ProviderStatus(state: .signedIn, version: "1.2.3", account: "Test plan"))
+        XCTAssertEqual(state(.claude), "signedOut")
+        providers.refresh()
+        XCTAssertFalse(providers.busy, "A fresh status is not checked again")
+
+        try reply("claude-login", 1)
+        providers.signIn(.claude)
+        await settle()
+        XCTAssertEqual(providers.messages[.claude]?.failure, true)
+        try reply("claude-login", 0); try reply("claude-status", 0)
+        providers.signIn(.claude)
+        await settle()
+        XCTAssertNil(providers.messages[.claude])
+        XCTAssertEqual(state(.claude), "signedIn")
+        XCTAssertEqual(restarts, 0, "Claude reads its login per request")
+
+        try reply("logout", 0); try reply("status", 42)
+        providers.signOut(.codex)
+        await settle()
+        XCTAssertEqual(state(.codex), "signedOut")
+        XCTAssertEqual(restarts, 1, "The daemon reconnects after the Codex login changes")
+
+        for (code, expected) in [(43, "unsupported"), (44, "notInstalled"), (7, "unavailable")] {
+            try reply("status", Int32(code))
+            providers.refresh(maximumAge: 0)
+            await settle()
+            XCTAssertEqual(state(.codex), expected)
+        }
+        let actions = try String(contentsOf: directory.appendingPathComponent("actions"), encoding: .utf8)
+        XCTAssertFalse(actions.contains("check"), "Status never runs the model-starting SDK check")
+    }
+
+    @MainActor
+    func testReconnectRestartsTheRuntimeWonderRunsAndReportsTheOutcome() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("WonderReconnect-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try "#!/bin/sh\nprintf '1.2.3\\tTest plan\\n'\nexit 0\n".write(
+            to: directory.appendingPathComponent("manage-runtime.sh"), atomically: true, encoding: .utf8)
+        let daemon = FakeProviderDaemon()
+        daemon.set([ProviderRuntime(id: "codex", incompatible: true, detail: "Codex was updated."),
+                    ProviderRuntime(id: "claude", running: false)])
+        let providers = ProviderControls(environment: ["WONDER_RESOURCES": directory.path, "WONDER_SERVICE_DIR": directory.path], daemon: daemon)
+        func settle() async {
+            for _ in 0..<200 where providers.busy { try? await Task.sleep(for: .milliseconds(25)) }
+            XCTAssertFalse(providers.busy)
+        }
+        func field(_ provider: ProviderKind, _ key: String) -> String? {
+            providers.snapshot.first { $0["id"] as? String == provider.rawValue }?[key] as? String
+        }
+        providers.refresh()
+        await settle()
+        XCTAssertEqual(field(.codex, "state"), "signedIn")
+        XCTAssertEqual(field(.codex, "runtime"), "incompatible", "Installed and running versions can disagree")
+        XCTAssertEqual(field(.codex, "runtimeDetail"), "Codex was updated.")
+        XCTAssertEqual(field(.claude, "runtime"), "stopped")
+
+        daemon.set([ProviderRuntime(id: "codex", running: true), ProviderRuntime(id: "claude", running: false)])
+        providers.reconnect(.codex)
+        XCTAssertEqual(field(.codex, "operation"), "reconnecting")
+        await settle()
+        XCTAssertEqual(daemon.reconnected, [.codex])
+        XCTAssertEqual(field(.codex, "runtime"), "ok")
+        XCTAssertEqual(providers.messages[.codex]?.failure, false)
+
+        daemon.failure = "Claude didn’t restart."
+        providers.reconnect(.claude)
+        await settle()
+        XCTAssertEqual(providers.messages[.claude]?.text, "Claude didn’t restart.")
+        XCTAssertEqual(providers.messages[.claude]?.failure, true)
+        XCTAssertEqual(field(.claude, "runtime"), "stopped")
     }
 
     func testHelperRelaunchUpdateAndInvalidOutput() throws {
@@ -203,5 +275,22 @@ final class SetupTests: XCTestCase {
             XCTAssertFalse(step.canEnter(executionReady: false))
             XCTAssertTrue(step.canEnter(executionReady: true))
         }
+    }
+}
+
+private final class FakeProviderDaemon: ProviderDaemon, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reports: [ProviderRuntime] = []
+    private var calls: [ProviderKind] = []
+    private var nextFailure: String?
+    var reconnected: [ProviderKind] { lock.withLock { calls } }
+    var failure: String? {
+        get { lock.withLock { nextFailure } }
+        set { lock.withLock { nextFailure = newValue } }
+    }
+    func set(_ runtimes: [ProviderRuntime]) { lock.withLock { reports = runtimes } }
+    func runtimes() async -> [ProviderRuntime]? { lock.withLock { reports } }
+    func reconnect(_ provider: ProviderKind) async -> String? {
+        lock.withLock { calls.append(provider); return nextFailure }
     }
 }

@@ -27,6 +27,33 @@ const syntheticUser = entry => Boolean(entry?.origin?.kind && entry.origin.kind 
 // the id). The tags are transport markup; the owner sees the pasted words.
 export const unwrapPastes = text => !text.includes("<pasted_content") ? text : text.replace(
   /<pasted_content id="([^"]*)">\n?([\s\S]*?)\n?<\/pasted_content id="\1">/g, (_, _id, body) => body).trim();
+// Claude Code and the Claude desktop app add their own context to a user turn as
+// whole tagged blocks on their own lines (worktree and linked-session reminders,
+// messages from other sessions, CI and side-session events). The owner did not
+// write them. Only whole blocks that start and end a line, outside a paste, are
+// removed, so a tag the owner mentions inline or pastes stays.
+const pasteBlock = /(<pasted_content id="([^"]*)">[\s\S]*?<\/pasted_content id="\2">)/;
+const harnessBlock = new RegExp(String.raw`(^|\n)[ \t]*<(system-reminder|cross-session-message|side-sessions-event|ci-monitor-event|session-mentions|local-command-caveat)(?:\s[^>\n]*)?>[\s\S]*?</\2>[ \t]*(?=\n|$)`, "g");
+export const stripHarness = text => {
+  if (!text.includes("<")) return text;
+  // split returns text, paste, paste id, text, ...; only the text between pastes is stripped.
+  const parts = text.split(pasteBlock);
+  const stripped = parts.map((part, i) => i % 3 === 0 ? part.replace(harnessBlock, "$1") : i % 3 === 1 ? part : "").join("");
+  return stripped === text ? text : stripped.trim();
+};
+// What the owner wrote in a user entry: harness blocks removed, pastes unwrapped.
+export const ownerText = content => unwrapPastes(stripHarness(textOf(content)));
+// Images the owner attached in Claude Code or the Claude desktop app. They
+// travel as the transcript's own base64 bytes; wonderd verifies and stores
+// them as the bubble's attachments. Bounded per turn and per image (8 MB).
+const MAX_PROMPT_IMAGES = 8, MAX_IMAGE_BASE64 = Math.ceil(8 * 1024 * 1024 / 3) * 4;
+export const ownerImages = content => !Array.isArray(content) ? [] : content
+  .filter(b => b?.type === "image" && b.source?.type === "base64" && typeof b.source.data === "string"
+    && typeof b.source.media_type === "string")
+  .slice(0, MAX_PROMPT_IMAGES)
+  .map(b => b.source.data.length <= MAX_IMAGE_BASE64
+    ? { type: "image", mimeType: b.source.media_type, data: b.source.data }
+    : { type: "image", mimeType: b.source.media_type, unavailable: "This image is larger than 8 MB" });
 const interruptMarker = text => /^\[Request interrupted by user/.test(text.trim());
 // A `!` shell command or slash command run in Claude Code is one user entry
 // (`<bash-input>` or `<command-name>`) and its output a second one
@@ -40,8 +67,9 @@ const opensTurn = entry => {
   if (entry?.type !== "user" || entry.parent_tool_use_id) return false;
   const content = entry.message?.content;
   if (Array.isArray(content) && content.some(b => b?.type === "tool_result")) return false;
-  const text = unwrapPastes(textOf(content));
-  return Boolean(text.trim()) && !syntheticUser(entry) && !interruptMarker(text) && !commandOutput(text);
+  const text = ownerText(content);
+  if (!text.trim()) return ownerImages(content).length > 0 && !syntheticUser(entry);
+  return !syntheticUser(entry) && !interruptMarker(text) && !commandOutput(text);
 };
 
 // The last transcript entry that belongs to the turn `turnId` (the uuid of the
@@ -71,8 +99,9 @@ export function nativeTurns(messages, journal = [], active = false) {
         applyClaudeToolResult(item, block, entry.tool_use_result);
         if (item.type === "mcpToolCall") delete item.result;
       }
-      const text = unwrapPastes(textOf(content));
-      if (results.length || !text.trim() || syntheticUser(entry)) continue;
+      const text = ownerText(content);
+      const images = results.length ? [] : ownerImages(content);
+      if (results.length || (!text.trim() && !images.length) || syntheticUser(entry)) continue;
       if (interruptMarker(text)) { if (turn) turn.interrupted = true; continue; }
       const prompt = turn?.items[0];
       if (commandOutput(text) && prompt?.type === "userMessage" && prompt.content?.[0]?.type === "text") {
@@ -83,7 +112,7 @@ export function nativeTurns(messages, journal = [], active = false) {
       const user = receipt?.items?.find(i => i.type === "userMessage");
       turn = { id: entry.uuid, status: "completed", error: null, items: [user
         ? { ...user }
-        : { type: "userMessage", id: entry.uuid, content: [{ type: "text", text }] }] };
+        : { type: "userMessage", id: entry.uuid, content: [...(text.trim() ? [{ type: "text", text }] : []), ...images] }] };
       turns.push(turn);
       continue;
     }
@@ -123,7 +152,7 @@ export function nativeTurns(messages, journal = [], active = false) {
 }
 
 export function sessionSummary(info) {
-  const title = (info.customTitle || info.summary || info.firstPrompt || "Claude session").replace(/\s+/g, " ").trim().slice(0, 200);
+  const title = (info.customTitle || info.summary || stripHarness(info.firstPrompt ?? "") || "Claude session").replace(/\s+/g, " ").trim().slice(0, 200);
   return { sessionId: info.sessionId, title, cwd: info.cwd ?? null,
     createdAt: Math.floor((info.createdAt ?? info.lastModified) / 1000), updatedAt: Math.floor(info.lastModified / 1000) };
 }
@@ -151,6 +180,17 @@ export function backgroundTasks(messages, live = false, agentFiles = []) {
         if (block?.type !== "tool_use" || typeof block.id !== "string") continue;
         const agent = ["Agent", "Task"].includes(block.name);
         const known = tasks.get(block.id);
+        // A Monitor is always a background watch; a linked session runs as its
+        // own chat. Both count among the session's running tasks, as in Claude.
+        if (block.name === "Monitor" || block.name === LINKED_SESSION_TOOL) {
+          const monitor = block.name === "Monitor";
+          tasks.set(block.id, { id: block.id, kind: monitor ? "monitor" : "session", background: true,
+            title: bounded(monitor ? block.input?.description : block.input?.title, 200) ?? (monitor ? "Monitor" : "Linked session"),
+            role: null, status: "running", request: monitor ? bounded(block.input?.command, 8000) : bounded(block.input?.prompt, 8000),
+            summary: null, result: null, outputFile: null, taskId: null, hostSessionId: null, launched: false,
+            startedAt: entry.timestamp ?? null });
+          continue;
+        }
         const background = block.input?.run_in_background === true || known?.background === true;
         if (!agent && !background) continue;
         tasks.set(block.id, { ...known, id: block.id, kind: agent ? "agent" : "command", background,
@@ -171,6 +211,14 @@ export function backgroundTasks(messages, live = false, agentFiles = []) {
       if (task.kind === "agent" && /^Async agent launched/i.test(text ?? "")) {
         task.background = true;
         task.taskId ??= text.match(/\bagentId: ([A-Za-z0-9_-]{1,64})/)?.[1] ?? null;
+        continue;
+      }
+      if (task.kind === "monitor" || task.kind === "session") {
+        // Only a started watch or session runs; a proposal or a refusal does not.
+        const started = block.is_error !== true && (task.kind === "monitor"
+          ? text?.match(/^Monitor started \(task ([A-Za-z0-9_-]{1,64})/) : text?.match(/^Started session .*\(session_id: (local_[A-Za-z0-9_-]{1,80})/));
+        if (started) Object.assign(task, task.kind === "monitor" ? { taskId: started[1] } : { hostSessionId: started[1] }, { launched: true });
+        else if (task.status === "running") { task.status = block.is_error === true ? "failed" : "dropped"; task.result = text; }
         continue;
       }
       // A background command's launch names the task ID that stop_task needs.
@@ -198,27 +246,66 @@ export function backgroundTasks(messages, live = false, agentFiles = []) {
       outputFile: notice.outputFile, taskId: notice.taskId ?? task.taskId, updatedAt: entry.timestamp ?? task.updatedAt ?? null });
   }
   const list = [...tasks.values()]
-    .map(task => ({ ...task, updatedAt: task.updatedAt ?? task.startedAt ?? null }))
+    .filter(task => task.status !== "dropped")
+    .map(({ launched, ...task }) => ({ ...task, updatedAt: task.updatedAt ?? task.startedAt ?? null }))
     .map((task, order) => ({ task, order }))
     .sort((a, b) => String(b.task.startedAt ?? "").localeCompare(String(a.task.startedAt ?? "")) || b.order - a.order)
     .map(({ task }) => task).slice(0, 100);
-  if (!live) for (const task of list) if (task.status === "running") task.status = "unknown";
+  // A linked session's state is its own process's, not this one's.
+  if (!live) for (const task of list) if (task.status === "running" && task.kind !== "session") task.status = "unknown";
   return list;
 }
 
+const LINKED_SESSION_TOOL = "mcp__ccd_session__start_session";
+
+// Whether the session's own reply (its main turn) is still being written, as
+// opposed to background work it left running. A turn ends with an assistant
+// message that stopped for a reason other than calling a tool, or with an
+// interruption; a later prompt, tool result or task notice starts work again.
+export function mainTurnRunning(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const entry = messages[i];
+    if (entry?.parent_tool_use_id || entry?.isSidechain || entry?.isMeta) continue;
+    if (entry?.type === "assistant") {
+      const reason = entry.message?.stop_reason;
+      return !reason || reason === "tool_use" || reason === "pause_turn";
+    }
+    if (entry?.type === "user") return !/^\[Request interrupted by user/.test(textOf(entry.message?.content).trimStart());
+  }
+  return false;
+}
+
 // Claude Code records each running interactive session (desktop or terminal)
-// in ~/.claude/sessions/<pid>.json with a busy/idle status. Only these JSON
-// records are read; key files beside them are never opened.
-export async function claudeSessionBusy(sessionId, dir = join(homedir(), ".claude", "sessions")) {
+// in ~/.claude/sessions/<pid>.json. Its status is "busy" while a reply runs or
+// background agents work, "shell" while only background commands or monitors
+// run, "waiting" on a dialog, and "idle" otherwise. Only these JSON records are
+// read; key files beside them are never opened. Agent SDK runs (Wonder's own)
+// are not interactive sessions and are skipped.
+export async function claudeSessionRecords(dir = join(homedir(), ".claude", "sessions")) {
   let names;
-  try { names = await readdir(dir); } catch { return false; }
+  try { names = await readdir(dir); } catch { return []; }
+  const records = [];
   for (const name of names.filter(n => /^[0-9]{1,10}\.json$/.test(n)).slice(0, 256)) {
     let record;
     try { record = JSON.parse(await readFile(join(dir, name), "utf8")); } catch { continue; }
-    if (record?.sessionId !== sessionId || `${record.pid}.json` !== name || !Number.isSafeInteger(record.pid)) continue;
-    if (record.entrypoint === "sdk-ts") continue; // An Agent SDK run, such as Wonder's own.
+    if (!record || `${record.pid}.json` !== name || !Number.isSafeInteger(record.pid) || record.entrypoint === "sdk-ts") continue;
     try { process.kill(record.pid, 0); } catch (error) { if (error.code !== "EPERM") continue; }
-    if (record.status === "busy") return true;
+    records.push({ sessionId: typeof record.sessionId === "string" ? record.sessionId : null,
+      hostSessionId: typeof record.hostSessionId === "string" ? record.hostSessionId : null,
+      status: typeof record.status === "string" ? record.status : "idle" });
   }
-  return false;
+  return records;
+}
+
+// What Claude on the Mac is doing with this session: `busy` while its process
+// may be writing a reply (a reply or a dialog), `background` while it keeps
+// background work running. Neither when no interactive process has it open.
+export async function claudeSessionState(sessionId, dir) {
+  const records = (await claudeSessionRecords(dir)).filter(r => r.sessionId === sessionId);
+  return { open: records.length > 0, busy: records.some(r => ["busy", "waiting"].includes(r.status)),
+    background: records.some(r => ["busy", "shell", "waiting"].includes(r.status)) };
+}
+
+export async function claudeSessionBusy(sessionId, dir) {
+  return (await claudeSessionState(sessionId, dir)).busy;
 }

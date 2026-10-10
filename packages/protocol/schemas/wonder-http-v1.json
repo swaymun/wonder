@@ -27,18 +27,14 @@
     "workspaceDirectory": { "$ref": "#/$defs/workspaceDirectory" },
     "workspaceGitStatus": { "$ref": "#/$defs/workspaceGitStatus" },
     "workspaceDiff": { "$ref": "#/$defs/workspaceDiff" },
+    "workspaceGitSummary": { "$ref": "#/$defs/workspaceGitSummary" },
+    "workspaceGitChanges": { "$ref": "#/$defs/workspaceGitChanges" },
     "computerSession": { "$ref": "#/$defs/computerSession" },
     "computerControlLease": { "$ref": "#/$defs/computerControlLease" },
     "computerControlActionResponse": { "$ref": "#/$defs/computerControlActionResponse" },
     "computerAdmissionResponse": { "$ref": "#/$defs/computerAdmissionResponse" },
     "computerSignalingResponse": { "$ref": "#/$defs/computerSignalingResponse" },
     "computerSignalingMutationResponse": { "$ref": "#/$defs/computerSignalingMutationResponse" },
-    "teachingCapability": { "$ref": "#/$defs/teachingCapability" },
-    "teachingSession": { "$ref": "#/$defs/teachingSession" },
-    "botSkill": { "$ref": "#/$defs/botSkill" },
-    "botSkillList": { "$ref": "#/$defs/botSkillList" },
-    "saveBotSkillVersionResponse": { "$ref": "#/$defs/saveBotSkillVersionResponse" },
-    "botSkillFixtureTestReceipt": { "$ref": "#/$defs/botSkillFixtureTestReceipt" },
     "conversationFile": { "$ref": "#/$defs/conversationFile" },
     "artifactAnnotation": { "$ref": "#/$defs/artifactAnnotation" },
     "automationSummary": { "$ref": "#/$defs/automationSummary" },
@@ -149,43 +145,6 @@
     "/api/v1/computer/sessions/{id}/control/resume": {
       "post": { "request": { "$ref": "#/$defs/computerControlBindingRequest" }, "response": { "$ref": "#/$defs/computerControlActionResponse" }, "failureStatus": 409 }
     },
-    "/api/v1/teaching/capability": {
-      "get": { "response": { "$ref": "#/$defs/teachingCapability" } }
-    },
-    "/api/v1/bots/{botId}/teaching/sessions": {
-      "post": { "request": { "$ref": "#/$defs/startTeachingSessionRequest" }, "response": { "$ref": "#/$defs/teachingSession" }, "successStatus": 201 }
-    },
-    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}": {
-      "get": { "response": { "$ref": "#/$defs/teachingSession" } }
-    },
-    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}/stop": {
-      "post": { "request": { "$ref": "#/$defs/teachingRevisionRequest" }, "response": { "$ref": "#/$defs/teachingSession" } }
-    },
-    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}/cancel": {
-      "post": { "request": { "$ref": "#/$defs/optionalTeachingRevisionRequest" }, "response": { "$ref": "#/$defs/teachingSession" } }
-    },
-    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}/review": {
-      "post": { "request": { "$ref": "#/$defs/reviewTeachingSessionRequest" }, "response": { "$ref": "#/$defs/teachingSession" } }
-    },
-    "/api/v1/bots/{botId}/teaching/sessions/{sessionId}/save-version": {
-      "post": { "request": { "$ref": "#/$defs/saveBotSkillVersionRequest" }, "response": { "$ref": "#/$defs/saveBotSkillVersionResponse" } }
-    },
-    "/api/v1/bots/{botId}/skills": {
-      "get": { "response": { "$ref": "#/$defs/botSkillList" } }
-    },
-    "/api/v1/bots/{botId}/skills/{skillId}/versions/{version}/fixture-tests": {
-      "post": { "request": { "$ref": "#/$defs/runBotSkillFixtureTestRequest" }, "response": { "$ref": "#/$defs/botSkillFixtureTestReceipt" }, "successStatus": 201 }
-    },
-    "/api/v1/bots/{botId}/skills/{skillId}/fixture-tests/{requestId}": {
-      "get": { "response": { "$ref": "#/$defs/botSkillFixtureTestReceipt" } }
-    },
-    "/api/v1/bots/{botId}/skills/{skillId}": {
-      "get": { "response": { "$ref": "#/$defs/botSkill" } },
-      "delete": { "successStatus": 204 }
-    },
-    "/api/v1/bots/{botId}/skills/{skillId}/activate": {
-      "post": { "request": { "$ref": "#/$defs/activateBotSkillVersionRequest" }, "response": { "$ref": "#/$defs/botSkill" } }
-    },
     "/api/v1/sync/checkpoint": {
       "get": { "response": { "$ref": "#/$defs/readCheckpoint" } }
     },
@@ -214,6 +173,12 @@
     },
     "/api/v1/conversations/{conversationId}/workspace/git/status": {
       "get": { "query": { "$ref": "#/$defs/workspaceQuery" }, "response": { "$ref": "#/$defs/workspaceGitStatus" } }
+    },
+    "/api/v1/conversations/{conversationId}/workspace/git/summary": {
+      "get": { "query": { "$ref": "#/$defs/workspaceGitRootQuery" }, "response": { "$ref": "#/$defs/workspaceGitSummary" } }
+    },
+    "/api/v1/conversations/{conversationId}/workspace/git/changes": {
+      "get": { "query": { "$ref": "#/$defs/workspaceGitChangesQuery" }, "response": { "$ref": "#/$defs/workspaceGitChanges" } }
     },
     "/api/v1/conversations/{conversationId}/workspace/git/diff": {
       "get": { "query": { "$ref": "#/$defs/workspaceDiffQuery" }, "response": { "$ref": "#/$defs/workspaceDiff" } }
@@ -267,6 +232,8 @@
         "successStatus": 201
       }
     },
+    "/api/v1/providers": { "get": { "response": { "$ref": "#/$defs/providersResponse" } } },
+    "/api/v1/providers/{id}/reconnect": { "post": { "response": { "$ref": "#/$defs/providerStatus" } } },
     "/api/v1/projects/candidates": { "get": { "response": { "$ref": "#/$defs/projectCandidatesResponse" } } },
     "/api/v1/projects/{projectId}": {
       "patch": {
@@ -281,6 +248,9 @@
         "response": { "$ref": "#/$defs/createProjectThreadResponse" },
         "successStatus": 202
       }
+    },
+    "/api/v1/projects/{projectId}/threads/archived": {
+      "get": { "response": { "$ref": "#/$defs/archivedProjectThreadsPage" } }
     },
     "/api/v1/projects/{projectId}/threads/attach": {
       "post": {
@@ -1137,218 +1107,6 @@
       },
       "additionalProperties": false
     },
-    "teachingCapability": {
-      "type": "object",
-      "required": ["available", "action", "reason", "provider", "maxDurationSeconds", "maxEvents", "maxEvidenceBytes"],
-      "properties": {
-        "available": { "type": "boolean" },
-        "action": { "enum": ["update-host", "retry", "none"] },
-        "reason": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "provider": { "type": "string", "minLength": 1, "maxLength": 80 },
-        "maxDurationSeconds": { "type": "integer", "minimum": 1, "maximum": 600 },
-        "maxEvents": { "type": "integer", "minimum": 1, "maximum": 20000 },
-        "maxEvidenceBytes": { "type": "integer", "minimum": 1, "maximum": 52428800 }
-      },
-      "additionalProperties": false
-    },
-    "teachingSessionState": {
-      "enum": ["draft", "awaitingCaptureConsent", "starting", "recording", "reviewing", "skillDraft", "approvedVersion", "testing", "replayVerified", "testFailed", "cancelled", "interrupted", "expired", "unavailable"]
-    },
-    "startTeachingSessionRequest": {
-      "type": "object",
-      "required": ["clientRequestId", "conversationId", "computerSessionId", "controlLeaseId", "captureScope", "outcome"],
-      "properties": {
-        "clientRequestId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "computerSessionId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "controlLeaseId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "captureScope": { "const": "authenticated-remote-control" },
-        "outcome": { "type": "string", "minLength": 1, "maxLength": 2000 }
-      },
-      "additionalProperties": false
-    },
-    "teachingRevisionRequest": {
-      "type": "object",
-      "required": ["expectedRevision"],
-      "properties": { "expectedRevision": { "type": "integer", "minimum": 1 } },
-      "additionalProperties": false
-    },
-    "optionalTeachingRevisionRequest": {
-      "type": "object",
-      "properties": { "expectedRevision": { "type": ["integer", "null"], "minimum": 1 } },
-      "additionalProperties": false
-    },
-    "reviewTeachingSessionRequest": {
-      "type": "object",
-      "required": ["expectedRevision", "name", "description", "goal", "inputSchema", "prerequisites", "steps", "resultChecks"],
-      "properties": {
-        "expectedRevision": { "type": "integer", "minimum": 1 },
-        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
-        "goal": { "type": "string", "minLength": 1, "maxLength": 2000 },
-        "inputSchema": { "type": "object" },
-        "prerequisites": { "type": "string", "minLength": 1, "maxLength": 24576 },
-        "steps": { "type": "string", "minLength": 1, "maxLength": 24576 },
-        "resultChecks": { "type": "string", "minLength": 1, "maxLength": 24576 }
-      },
-      "additionalProperties": false
-    },
-    "saveBotSkillVersionRequest": {
-      "type": "object",
-      "required": ["clientRequestId", "expectedRevision"],
-      "properties": {
-        "clientRequestId": { "type": "string", "format": "uuid" },
-        "expectedRevision": { "type": "integer", "minimum": 1 },
-        "slug": { "type": ["string", "null"], "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 64 }
-      },
-      "additionalProperties": false
-    },
-    "activateBotSkillVersionRequest": {
-      "type": "object",
-      "required": ["version"],
-      "properties": { "version": { "type": "integer", "minimum": 1 } },
-      "additionalProperties": false
-    },
-    "teachingEvent": {
-      "type": "object",
-      "required": ["sequence", "actionIndex", "kind", "payload", "createdAt"],
-      "properties": {
-        "sequence": { "type": "integer", "minimum": 1 },
-        "actionIndex": { "type": "integer", "minimum": 0, "maximum": 31 },
-        "kind": { "enum": ["pointer", "scroll", "key", "text", "clipboard"] },
-        "payload": { "type": "object", "maxProperties": 12 },
-        "createdAt": { "type": "string", "minLength": 1 }
-      },
-      "additionalProperties": false
-    },
-    "teachingSession": {
-      "type": "object",
-      "required": ["id", "clientRequestId", "ownerDeviceId", "hostInstallationId", "botId", "conversationId", "computerSessionId", "controlLeaseId", "state", "captureScope", "captureProvider", "outcome", "name", "description", "goal", "inputSchema", "prerequisites", "steps", "resultChecks", "failureReason", "revision", "eventCount", "evidenceBytes", "contentHash", "createdAt", "updatedAt", "startedAt", "endedAt", "expiresAt", "events", "capability"],
-      "properties": {
-        "id": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "clientRequestId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "ownerDeviceId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "hostInstallationId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "botId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "computerSessionId": { "type": ["string", "null"], "maxLength": 160 },
-        "controlLeaseId": { "type": ["string", "null"], "maxLength": 160 },
-        "state": { "$ref": "#/$defs/teachingSessionState" },
-        "captureScope": { "type": "string", "minLength": 1, "maxLength": 80 },
-        "captureProvider": { "type": "string", "minLength": 1, "maxLength": 80 },
-        "outcome": { "type": "string", "minLength": 1, "maxLength": 2000 },
-        "name": { "type": ["string", "null"], "maxLength": 120 },
-        "description": { "type": ["string", "null"], "maxLength": 2000 },
-        "goal": { "type": ["string", "null"], "maxLength": 2000 },
-        "inputSchema": { "type": ["object", "null"] },
-        "prerequisites": { "type": ["string", "null"], "maxLength": 24576 },
-        "steps": { "type": ["string", "null"], "maxLength": 24576 },
-        "resultChecks": { "type": ["string", "null"], "maxLength": 24576 },
-        "failureReason": { "type": ["string", "null"], "maxLength": 512 },
-        "revision": { "type": "integer", "minimum": 1 },
-        "eventCount": { "type": "integer", "minimum": 0, "maximum": 20000 },
-        "evidenceBytes": { "type": "integer", "minimum": 0, "maximum": 52428800 },
-        "contentHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
-        "createdAt": { "type": "string", "minLength": 1 },
-        "updatedAt": { "type": "string", "minLength": 1 },
-        "startedAt": { "type": ["string", "null"] },
-        "endedAt": { "type": ["string", "null"] },
-        "expiresAt": { "type": ["string", "null"] },
-        "events": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/teachingEvent" } },
-        "capability": { "$ref": "#/$defs/teachingCapability" }
-      },
-      "additionalProperties": false
-    },
-    "botSkillVersion": {
-      "type": "object",
-      "required": ["id", "version", "sourceSessionId", "contentHash", "inputSchema", "verificationState", "createdAt"],
-      "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "version": { "type": "integer", "minimum": 1 },
-        "sourceSessionId": { "type": "string", "minLength": 1 },
-        "contentHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "inputSchema": { "type": "object" },
-        "verificationState": { "enum": ["unverified", "structurallyVerified", "fixtureVerified", "replayVerified", "testFailed"] },
-        "createdAt": { "type": "string", "minLength": 1 }
-      },
-      "additionalProperties": false
-    },
-    "botSkill": {
-      "type": "object",
-      "required": ["id", "botId", "slug", "name", "description", "state", "activeVersion", "discoverability", "versions"],
-      "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "botId": { "type": "string", "minLength": 1 },
-        "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 64 },
-        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
-        "state": { "enum": ["draft", "active", "archived"] },
-        "activeVersion": { "type": ["integer", "null"], "minimum": 1 },
-        "discoverability": { "const": "bot-private" },
-        "versions": { "type": ["array", "null"], "items": { "$ref": "#/$defs/botSkillVersion" } }
-      },
-      "additionalProperties": false
-    },
-    "botSkillList": {
-      "type": "object",
-      "required": ["capability", "skills"],
-      "properties": {
-        "capability": { "$ref": "#/$defs/teachingCapability" },
-        "skills": { "type": "array", "items": { "$ref": "#/$defs/botSkill" } }
-      },
-      "additionalProperties": false
-    },
-    "saveBotSkillVersionResponse": {
-      "type": "object",
-      "required": ["skill", "version", "teachingSession"],
-      "properties": {
-        "skill": { "$ref": "#/$defs/botSkill" },
-        "version": { "$ref": "#/$defs/botSkillVersion" },
-        "teachingSession": { "$ref": "#/$defs/teachingSession" }
-      },
-      "additionalProperties": false
-    },
-    "runBotSkillFixtureTestRequest": {
-      "type": "object",
-      "required": ["clientRequestId", "contentHash", "inputSchema", "inputs"],
-      "properties": {
-        "clientRequestId": { "type": "string", "format": "uuid" },
-        "contentHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "inputSchema": { "type": "object", "maxProperties": 16 },
-        "inputs": { "type": "object", "maxProperties": 16, "maxLength": 8192 },
-        "workingDirectory": { "type": ["string", "null"], "maxLength": 512 }
-      },
-      "additionalProperties": false
-    },
-    "botSkillFixtureTestReceipt": {
-      "type": "object",
-      "required": ["id", "clientRequestId", "ownerDeviceId", "botId", "skillId", "version", "contentHash", "inputSchemaHash", "inputSchema", "inputs", "workingDirectory", "provider", "executionKind", "status", "verificationState", "artifactPath", "artifactHash", "artifactBytes", "evidence", "failureReason", "createdAt", "completedAt"],
-      "properties": {
-        "id": { "type": "string", "format": "uuid" },
-        "clientRequestId": { "type": "string", "format": "uuid" },
-        "ownerDeviceId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "botId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "skillId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "version": { "type": "integer", "minimum": 1 },
-        "contentHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "inputSchemaHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "inputSchema": { "type": "object", "maxProperties": 16 },
-        "inputs": { "type": "object", "maxProperties": 16 },
-        "workingDirectory": { "type": "string", "maxLength": 512 },
-        "provider": { "const": "deterministic-local" },
-        "executionKind": { "const": "deterministicFixture" },
-        "status": { "enum": ["succeeded", "failed"] },
-        "verificationState": { "enum": ["fixtureVerified", "testFailed"] },
-        "artifactPath": { "type": ["string", "null"], "maxLength": 1024 },
-        "artifactHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
-        "artifactBytes": { "type": "integer", "minimum": 0, "maximum": 65536 },
-        "evidence": { "type": "object", "maxProperties": 16 },
-        "failureReason": { "type": ["string", "null"], "maxLength": 512 },
-        "createdAt": { "type": "string", "minLength": 1 },
-        "completedAt": { "type": "string", "minLength": 1 }
-      },
-      "additionalProperties": false
-    },
     "transcriptionState": {
       "type": "string",
       "enum": ["queued", "processing", "completed", "failed", "cancelled"]
@@ -1644,8 +1402,76 @@
       "properties": {
         "root": { "type": "string", "minLength": 1 },
         "path": { "type": "string" },
-        "staged": { "type": "boolean" }
+        "staged": { "type": "boolean" },
+        "scope": { "enum": ["uncommitted", "branch"], "description": "Diff the working tree against HEAD (uncommitted) or the branch's merge base with its base ref (branch). Without it, staged picks the index or worktree side of an uncommitted change." },
+        "originalPath": { "type": "string", "description": "A renamed file's previous path, from workspaceGitChanges." }
       }
+    },
+    "workspaceGitRootQuery": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "root": { "type": "string", "minLength": 1 } }
+    },
+    "workspaceGitChangesQuery": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "root": { "type": "string", "minLength": 1 }, "scope": { "enum": ["uncommitted", "branch"] } }
+    },
+    "workspaceGitTotals": {
+      "type": "object", "required": ["files", "additions", "deletions"],
+      "properties": {
+        "files": { "type": "integer", "minimum": 0 },
+        "additions": { "type": "integer", "minimum": 0 },
+        "deletions": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "workspaceGitSummary": {
+      "type": "object",
+      "description": "Read-only branch state of a conversation's workspace. repository false: not a Git folder. baseRef is origin/HEAD's target, then main, master, origin/main, origin/master, or a Project assignment's recorded base. branchChanges compares the merge base with the working tree, untracked files included.",
+      "required": ["available", "detail", "repository", "branch", "detached", "head", "worktree", "baseRef", "mergeBase", "ahead", "behind", "uncommitted", "branchChanges"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "detail": { "type": ["string", "null"] },
+        "repository": { "type": "boolean" },
+        "branch": { "type": ["string", "null"] },
+        "detached": { "type": "boolean" },
+        "head": { "type": ["string", "null"] },
+        "worktree": { "type": "boolean" },
+        "baseRef": { "type": ["string", "null"] },
+        "mergeBase": { "type": ["string", "null"] },
+        "ahead": { "type": ["integer", "null"], "minimum": 0 },
+        "behind": { "type": ["integer", "null"], "minimum": 0 },
+        "uncommitted": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/workspaceGitTotals" }] },
+        "branchChanges": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/workspaceGitTotals" }] }
+      },
+      "additionalProperties": false
+    },
+    "workspaceGitChangedFile": {
+      "type": "object",
+      "required": ["path", "originalPath", "status", "binary", "additions", "deletions"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "originalPath": { "type": ["string", "null"] },
+        "status": { "enum": ["added", "modified", "deleted", "renamed", "untracked"] },
+        "binary": { "type": "boolean" },
+        "additions": { "type": ["integer", "null"], "minimum": 0 },
+        "deletions": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "workspaceGitChanges": {
+      "type": "object",
+      "required": ["scope", "available", "detail", "branch", "baseRef", "files", "totals", "truncated"],
+      "properties": {
+        "scope": { "enum": ["uncommitted", "branch"] },
+        "available": { "type": "boolean" },
+        "detail": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "baseRef": { "type": ["string", "null"] },
+        "files": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/workspaceGitChangedFile" } },
+        "totals": { "$ref": "#/$defs/workspaceGitTotals" },
+        "truncated": { "type": "boolean" }
+      },
+      "additionalProperties": false
     },
     "agentFamily": { "type": "string", "enum": ["codex", "claude"] },
     "providerPermissions": {
@@ -2403,7 +2229,8 @@
           }
         },
         "modesVersion": { "const": 1 },
-        "archiveVersion": { "const": 1 },
+        "archiveVersion": { "enum": [1, 2] },
+        "createVersion": { "const": 1 },
         "pinned": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/pinnedProjectThread" } }
       },
       "additionalProperties": false
@@ -2450,14 +2277,42 @@
       },
       "additionalProperties": false
     },
+    "providerStatus": {
+      "type": "object",
+      "required": ["id", "running", "incompatible", "updatePending", "detail", "state", "version", "account", "working"],
+      "properties": {
+        "id": { "enum": ["codex", "claude"] },
+        "running": { "type": "boolean" },
+        "incompatible": { "type": "boolean" },
+        "updatePending": { "type": "boolean" },
+        "detail": { "type": ["string", "null"] },
+        "state": { "enum": ["signedIn", "signedOut", "needsSubscription", "unsupported", "notInstalled", "unavailable"] },
+        "version": { "type": "string", "maxLength": 40 },
+        "account": { "type": "string", "maxLength": 60 },
+        "working": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "providersResponse": {
+      "type": "object",
+      "required": ["providers"],
+      "properties": { "providers": { "type": "array", "items": { "$ref": "#/$defs/providerStatus" } } },
+      "additionalProperties": false
+    },
     "createProjectRequest": {
       "type": "object",
-      "required": ["requestId", "name", "folders"],
+      "required": ["requestId", "name"],
+      "oneOf": [{ "required": ["folders"] }, { "required": ["newFolder"] }],
       "properties": {
         "requestId": { "type": "string", "format": "uuid" },
         "name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "folders": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "minLength": 1 } },
-        "primaryIndex": { "type": "integer", "minimum": 0 }
+        "primaryIndex": { "type": "integer", "minimum": 0 },
+        "newFolder": {
+          "type": "object",
+          "properties": { "parent": { "type": "string", "minLength": 1 } },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },
@@ -2495,6 +2350,15 @@
       "properties": {
         "threads": { "type": "array", "items": { "$ref": "#/$defs/projectThreadSummary" } },
         "nextCursor": { "type": ["string", "null"] },
+        "partial": { "$ref": "#/$defs/projectPartialFailures" }
+      },
+      "additionalProperties": false
+    },
+    "archivedProjectThreadsPage": {
+      "type": "object",
+      "required": ["threads", "partial"],
+      "properties": {
+        "threads": { "type": "array", "items": { "$ref": "#/$defs/projectThreadSummary" } },
         "partial": { "$ref": "#/$defs/projectPartialFailures" }
       },
       "additionalProperties": false

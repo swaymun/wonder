@@ -5,7 +5,7 @@ import { BRIDGE_PROTOCOL, HAIKU_MODEL, TurnProjection, questionRequest, question
 import { baseOptions, inspectSdk, isSubscription } from "./sdk-runtime.mjs";
 import { SANDBOX_GUIDANCE, ToolPolicy, toolCallKey } from "./permissions.mjs";
 import { createNativeCua } from "./native-cua.mjs";
-import { backgroundTasks, claudeSessionBusy, nativeTurns, sessionSummary, turnEndMessageId } from "./project-history.mjs";
+import { backgroundTasks, claudeSessionBusy, claudeSessionRecords, claudeSessionState, mainTurnRunning, nativeTurns, sessionSummary, turnEndMessageId } from "./project-history.mjs";
 import { ClaudeSessionFiles } from "./session-file.mjs";
 import { lstat, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
@@ -61,21 +61,49 @@ function processShape(options, policy) {
 }
 
 export function selectedModel(value) {
-  if (value === "claude:haiku" || value === HAIKU_MODEL) return HAIKU_MODEL;
+  // A saved Haiku 4.5 choice keeps running Haiku 4.5; the "haiku" alias follows
+  // Claude Code to its current Haiku.
+  if (value === HAIKU_MODEL) return HAIKU_MODEL;
   if (typeof value !== "string" || !/^claude:[a-zA-Z0-9._\[\]-]{1,100}$/.test(value)) throw new Error("Choose a Claude model for this Bot.");
   const model = value.slice("claude:".length);
   if (model === "default") throw new Error("Choose an explicit Claude model.");
   return model;
 }
 
+function modelVersion(model) {
+  const resolved = model.resolvedModel ?? model.id;
+  const match = /^claude-([a-z]+)-(\d{1,2})(?:-(\d{1,2}))?(?:-\d{8})?(?:\[1m\])?$/.exec(resolved);
+  if (!match) return null;
+  const [, family, major, minor] = match;
+  return { family, major: Number(major), minor: Number(minor ?? 0), minorText: minor };
+}
+
 function modelDisplayName(model) {
   // Keep selection aliases stable, but label the model they resolve to today.
-  // Haiku is intentionally pinned by selectedModel, regardless of its alias.
-  const resolved = model.id === "haiku" ? HAIKU_MODEL : model.resolvedModel ?? model.id;
-  const match = /^claude-([a-z]+)-(\d{1,2})(?:-(\d{1,2}))?(?:-\d{8})?(?:\[1m\])?$/.exec(resolved);
-  if (!match) return model.name;
-  const [, family, major, minor] = match;
-  return `${family[0].toUpperCase()}${family.slice(1)} ${major}${minor ? `.${minor}` : ""}`;
+  const version = modelVersion(model);
+  if (!version) return model.name;
+  const { family, major, minorText } = version;
+  return `${family[0].toUpperCase()}${family.slice(1)} ${major}${minorText ? `.${minorText}` : ""}`;
+}
+
+// Claude Code's catalog in its own order (Opus, Fable, Sonnet, Haiku), keeping
+// only the newest version of each family: an older pinned entry such as
+// Haiku 4.5 beside the current Haiku is not offered.
+export function offeredModels(models) {
+  const listed = models.filter(m => m.id !== "default");
+  const newest = new Map();
+  for (const model of listed) {
+    const version = modelVersion(model);
+    if (!version) continue;
+    const best = newest.get(version.family);
+    if (!best || version.major > best.major || (version.major === best.major && version.minor > best.minor)) newest.set(version.family, version);
+  }
+  return listed.filter(model => {
+    const version = modelVersion(model);
+    if (!version) return true;
+    const best = newest.get(version.family);
+    return version.major === best.major && version.minor === best.minor;
+  });
 }
 
 // A Project turn offers the agent only Wonder's thread tools: the daemon sends
@@ -134,9 +162,43 @@ async function sdkInput(input, policy) {
   return content;
 }
 
+// Claude Code reports the session's live background tasks (agents, commands,
+// monitors and others) as one list whenever it changes. It is the same roster
+// Claude on the Mac counts, so a Wonder-driven session uses it directly.
+function observeTasks(roster, message) {
+  if (!roster || message?.type !== "system") return;
+  if (message.subtype === "task_started" && message.task_id && message.tool_use_id) roster.toolUses.set(message.task_id, message.tool_use_id);
+  if (message.subtype === "background_tasks_changed" && Array.isArray(message.tasks))
+    roster.tasks = new Map(message.tasks.filter(t => typeof t?.task_id === "string").slice(0, 100).map(t => [t.task_id, t]));
+}
+
+const rosterKind = type => ["local_agent", "remote_agent", "in_process_teammate"].includes(type) ? "agent"
+  : type === "local_bash" ? "command" : String(type ?? "").startsWith("monitor") ? "monitor" : "task";
+
+// Running tasks the transcript cannot name yet (or never records, such as an
+// MCP task) come from the live roster; a listed task is running.
+export function withLiveRoster(tasks, roster) {
+  if (!roster?.tasks) return tasks;
+  const result = tasks.map(task => {
+    const taskId = task.taskId ?? [...roster.toolUses].find(([, toolUse]) => toolUse === task.id)?.[0] ?? null;
+    return taskId && roster.tasks.has(taskId) ? { ...task, taskId, status: "running" } : taskId ? { ...task, taskId } : task;
+  });
+  for (const [taskId, live] of roster.tasks) {
+    if (result.some(task => task.taskId === taskId)) continue;
+    const id = roster.toolUses.get(taskId) ?? `task:${taskId}`;
+    const index = result.findIndex(task => task.id === id);
+    if (index >= 0) { result[index] = { ...result[index], taskId, status: "running" }; continue; }
+    const kind = rosterKind(live.task_type);
+    result.unshift({ id, kind, background: true, title: typeof live.description === "string" && live.description.trim()
+        ? live.description.trim().slice(0, 200) : kind === "agent" ? "Agent task" : "Background task",
+      role: null, status: "running", request: null, summary: null, result: null, outputFile: null, taskId, startedAt: null, updatedAt: null });
+  }
+  return result;
+}
+
 export class ClaudeBridge {
-  constructor({ updates, sessions, send, inspect = inspectSdk, onFatal = () => {}, claudeSessionsDir = undefined, claudeProjectsDir = undefined }) {
-    Object.assign(this, { updates, sessions, send, inspect, onFatal, claudeSessionsDir });
+  constructor({ updates, sessions, send, inspect = inspectSdk, onFatal = () => {}, claudeSessionsDir = undefined, claudeProjectsDir = undefined, yieldCheckMs = 1000 }) {
+    Object.assign(this, { updates, sessions, send, inspect, onFatal, claudeSessionsDir, yieldCheckMs });
     this.sessionFiles = new ClaudeSessionFiles(claudeProjectsDir);
     this.transcripts = new Map();
     this.active = new Map(); this.lingering = new Map(); this.pending = new Map(); this.inspection = null; this.inspectionAt = 0;
@@ -176,7 +238,7 @@ export class ClaudeBridge {
     }
     if (method === "model/list") {
       const catalog = await this.catalog();
-      return { data: catalog.models.filter(m => m.id !== "default").sort((a, b) => Number(b.id === "haiku") - Number(a.id === "haiku")).map(m => ({ id: `claude:${m.id}`, model: `claude:${m.id}`,
+      return { data: offeredModels(catalog.models).map(m => ({ id: `claude:${m.id}`, model: `claude:${m.id}`,
         displayName: modelDisplayName(m), description: m.description, hidden: false,
         agentFamily: "claude", nativeModelIds: m.resolvedModel ? [m.resolvedModel] : [], isDefault: m.id === "haiku", supportedReasoningEfforts: (m.efforts ?? []).map(effort => ({ reasoningEffort: effort, description: `${effort[0].toUpperCase()}${effort.slice(1)}` })), defaultReasoningEffort: null })), nextCursor: null };
     }
@@ -217,13 +279,15 @@ export class ClaudeBridge {
     if (session.options.wonderProject && ["thread/turns/list", "thread/items/list"].includes(method)) {
       // The native transcript includes turns written by Claude Code on the Mac.
       const turns = await this.projectTurns(session);
-      if (method === "thread/turns/list") return page([...turns].reverse().map(t => params.itemsView === "notLoaded" ? { ...t, items: [] } : t), params);
+      // A turn can grow after it ends (Claude's own reply when a background task
+      // finishes), so an unloaded turn still says how many items it has.
+      if (method === "thread/turns/list") return page([...turns].reverse().map(t => params.itemsView === "notLoaded" ? { ...t, items: [], itemCount: t.items.length } : t), params);
       const selected = params.turnId ? turns.filter(t => t.id === params.turnId) : params.sortDirection === "asc" ? turns : [...turns].reverse();
       return page(selected.flatMap(t => t.items.map(item => ({ turnId: t.id, item }))), params);
     }
     if (session.options.wonderProject && method === "thread/backgroundTasks/list") {
       const tasks = await this.projectTasks(session);
-      return { data: tasks.map(({ request, result, outputFile, taskId, ...summary }) => summary) };
+      return { data: tasks.map(({ request, result, outputFile, taskId, hostSessionId, ...summary }) => summary) };
     }
     if (session.options.wonderProject && method === "thread/backgroundTask/read") return this.backgroundTask(session, params.taskId);
     if (session.options.wonderProject && method === "thread/backgroundTask/stop") return this.stopBackgroundTask(session, params.taskId);
@@ -245,10 +309,17 @@ export class ClaudeBridge {
       return { thread: this.sessions.describe(session, true), model: next.model };
     }
     if (method === "turn/start") {
-      // Two writers on one Claude Code session would interleave its transcript.
-      if (session.options.wonderProject && session.sdkStarted && !this.active.has(session.id)
-        && await claudeSessionBusy(session.sdkSessionId, this.claudeSessionsDir))
-        throw new Error("Claude is working on this conversation on your Mac. Send your message when it finishes.");
+      // Two writers on one Claude Code session would fork its transcript.
+      // Claude on the Mac keeps the conversation in its own process; Wonder's
+      // host ends the desktop app's process before sending, so one still open
+      // here started again since, or is a terminal Wonder cannot close.
+      if (session.options.wonderProject && session.sdkStarted && !this.active.has(session.id)) {
+        const mac = await claudeSessionState(session.sdkSessionId, this.claudeSessionsDir);
+        if (mac.busy && mainTurnRunning((await this.projectMessages(session)).messages))
+          throw new Error("Claude is working on this conversation on your Mac. Send your message when it finishes.");
+        if (mac.open)
+          throw new Error("This conversation is open in Claude on your Mac. Send your message again in a moment.");
+      }
       if (session.options.wonderProject && params.wonderProject) params.wonderProject = await projectContext(params.wonderProject);
       const options = { ...session.options, ...params };
       if (options.wonderProject && options.wonderProject.cwd !== session.options.wonderProject?.cwd)
@@ -266,10 +337,11 @@ export class ClaudeBridge {
         // shape (model, effort, folders, tools, sandbox) needs a new process.
         let reuse = this.lingering.get(session.id);
         if (reuse) {
-          if (reuse.shape === processShape(options, policy)) { this.lingering.delete(session.id); reuse.draining = false; }
+          if (reuse.shape === processShape(options, policy)) { this.lingering.delete(session.id); reuse.draining = false; clearInterval(reuse.watch); }
           else { await this.endLinger(session.id); reuse = null; }
         }
-        const run = { reuse, turn, abort: new AbortController(), query: null, children: new Map(), childTasks: new Map(), stopped: false, authorizedTools: new Map(), toolResults: new Map() };
+        const run = { reuse, turn, abort: new AbortController(), query: null, children: new Map(), childTasks: new Map(), stopped: false, authorizedTools: new Map(), toolResults: new Map(),
+          roster: reuse?.roster ?? { tasks: null, toolUses: new Map() } };
         this.active.set(session.id, run);
         // Return the durable receipt before the SDK can produce an event.
         run.finished = new Promise((resolve, reject) => setImmediate(() => {
@@ -392,22 +464,34 @@ export class ClaudeBridge {
       if (stamp) this.transcripts.set(session.sdkSessionId, { stamp, messages });
       while (this.transcripts.size > 4) this.transcripts.delete(this.transcripts.keys().next().value);
     }
-    // A turn started on the Mac (Claude desktop or terminal) is running there.
-    const desktop = !this.active.has(session.id) && await claudeSessionBusy(session.sdkSessionId, this.claudeSessionsDir);
-    return { messages, desktop };
+    // A reply started on the Mac (Claude desktop or terminal) is running there
+    // only while its main turn is unfinished; background agents, commands and
+    // monitors it left running do not make the conversation busy.
+    const mac = this.active.has(session.id) ? { busy: false, background: false }
+      : await claudeSessionState(session.sdkSessionId, this.claudeSessionsDir);
+    // Claude Code 2.1.295 reports "idle" while background commands run, so any
+    // open process runs the tasks its transcript launched and has not reported.
+    return { messages, desktop: mac.busy && mainTurnRunning(messages), desktopTasks: mac.background || Boolean(mac.open) };
   }
   async projectTasks(session) {
-    const { messages, desktop } = await this.projectMessages(session);
+    const { messages, desktopTasks } = await this.projectMessages(session);
     const files = session.sdkStarted ? await this.sessionFiles.agentTasks(session.sdkSessionId, session.options.wonderProject.cwd) : [];
     const run = this.active.get(session.id) ?? this.lingering.get(session.id);
-    const tasks = backgroundTasks(messages, desktop || Boolean(run), files);
+    let tasks = backgroundTasks(messages, desktopTasks || Boolean(run), files);
+    tasks = withLiveRoster(tasks, run?.roster);
+    if (tasks.some(task => task.kind === "session")) {
+      // A linked session runs while its own Claude process is working.
+      const records = await claudeSessionRecords(this.claudeSessionsDir);
+      tasks = tasks.map(task => task.kind !== "session" || !task.hostSessionId ? task : { ...task,
+        status: records.some(r => r.hostSessionId === task.hostSessionId && r.status !== "idle") ? "running" : "completed" });
+    }
     // Wonder can stop only tasks inside a session it is driving right now; a
     // session running in Claude on the Mac keeps its own stop controls.
     return tasks.map(task => {
       if (task.status === "running" && run?.stoppedTasks?.has(task.id)) task = { ...task, status: "interrupted" };
       const running = task.status === "running";
-      return { ...task, canStop: running && Boolean(run?.query) && Boolean(task.taskId),
-        runningElsewhere: running && desktop && !run };
+      return { ...task, canStop: running && task.kind !== "session" && Boolean(run?.query) && Boolean(task.taskId),
+        runningElsewhere: running && !run && (task.kind === "session" || desktopTasks) };
     });
   }
   // Ask Claude Code to stop one running agent task or background command. The
@@ -417,7 +501,7 @@ export class ClaudeBridge {
     if (typeof taskId !== "string" || !taskId || taskId.length > 256) throw new Error("Choose an agent task.");
     const task = (await this.projectTasks(session)).find(t => t.id === taskId);
     if (!task) return { outcome: "notFound" };
-    const { request, result, outputFile, taskId: sdkTaskId, ...summary } = task;
+    const { request, result, outputFile, taskId: sdkTaskId, hostSessionId, ...summary } = task;
     if (task.runningElsewhere) return { outcome: "runningElsewhere", task: summary };
     if (task.status !== "running") return { outcome: "notRunning", task: summary };
     const run = this.active.get(session.id) ?? this.lingering.get(session.id);
@@ -439,13 +523,13 @@ export class ClaudeBridge {
     const task = (await this.projectTasks(session)).find(t => t.id === taskId);
     if (!task) throw new Error("This agent task is no longer in the conversation.");
     const sections = [];
-    if (task.request) sections.push(task.kind === "agent" ? `Task\n\n${task.request}` : `Command\n\n\`\`\`\n${task.request}\n\`\`\``);
+    if (task.request) sections.push(["agent", "session"].includes(task.kind) ? `Task\n\n${task.request}` : `Command\n\n\`\`\`\n${task.request}\n\`\`\``);
     const work = task.kind === "agent" ? await this.agentWork(session, task) : [];
     if (task.summary && !work.length) sections.push(task.summary);
     if (task.result && !/^Async agent launched/i.test(task.result)) sections.push(task.result);
-    const output = task.kind === "command" ? await this.taskOutput(session, task) : null;
+    const output = ["command", "monitor"].includes(task.kind) ? await this.taskOutput(session, task) : null;
     if (output) sections.push(`Latest output\n\n\`\`\`\n${output}\n\`\`\``);
-    const { request, result, outputFile, ...summary } = task;
+    const { request, result, outputFile, hostSessionId, ...summary } = task;
     const items = sections.map((text, index) => ({ type: "agentMessage", id: `${task.id}:${index}`, text, status: "completed" }));
     return { task: summary, items: [...items.slice(0, 1), ...work, ...items.slice(1)] };
   }
@@ -680,6 +764,7 @@ export class ClaudeBridge {
         // An interrupted reply ends at the SDK's result for the interrupt, which
         // is not a failure; running agents are left to their own Stop.
         if (run.interrupting && message.type === "result") { projection.finish("interrupted"); await flush(); break; }
+        observeTasks(run.roster, message);
         projection.accept(message);
         if (message.type === "system" && message.subtype === "init") await this.sessions.save(session);
         while (run.childMessages.length) await this.child(session, run, run.childMessages.shift(), projection);
@@ -699,9 +784,14 @@ export class ClaudeBridge {
       // A soft interrupt leaves the process (and the agents it spared) running.
       // A reply that joined a surviving process keeps it while agents still run.
       let spared = Boolean(handle && handle.query === query && !run.abort.signal.aborted && !run.hardStop);
+      // A Project reply ends at its result even while background agents,
+      // commands or monitors keep running, as in Claude on the Mac; the
+      // process stays up for them and the next reply joins it.
       if (spared && !run.interrupting) {
-        spared = Boolean(reuse && projection.terminal && run.sparesTasks);
-        if (spared) { try { spared = (await this.projectTasks(session)).some(task => task.status === "running"); } catch { spared = false; } }
+        spared = Boolean(projection.terminal && run.sparesTasks);
+        if (spared) { try { spared = run.roster.tasks?.size > 0 || (await this.projectTasks(session)).some(task => task.status === "running" && task.kind !== "session"); } catch { spared = false; } }
+        // Claude on the Mac opened the chat meanwhile: it continues from here.
+        if (spared && await this.openOnMac(session)) spared = false;
       }
       if (spared) { this.linger(session, run, handle, lease, projection); lease = null; }
       else { done.resolve(); query?.close(); handle?.abort.abort(); run.abort.abort(); }
@@ -727,8 +817,19 @@ export class ClaudeBridge {
   // process (model, effort, folders, tools or sandbox change), on fork, or when
   // Wonder closes; each of those ends any agent still running in it.
   linger(session, run, handle, lease, projection) {
-    Object.assign(handle, { lease, topProjection: projection, childMessages: run.childMessages, stoppedTasks: run.stoppedTasks, children: run.children, childTasks: run.childTasks, draining: true });
+    Object.assign(handle, { lease, topProjection: projection, childMessages: run.childMessages, stoppedTasks: run.stoppedTasks, children: run.children, childTasks: run.childTasks, roster: run.roster, draining: true });
     this.lingering.set(session.id, handle);
+    // When Claude on the Mac (the desktop app or a terminal) opens this chat,
+    // it continues from the transcript in its own process. This one yields at
+    // once, ending the work it kept, so two processes never write one session:
+    // its next notice or reply would fork the chat.
+    handle.watch = setInterval(async () => {
+      if (handle.checking || this.lingering.get(session.id) !== handle) return;
+      handle.checking = true;
+      try { if (await this.openOnMac(session) && this.lingering.get(session.id) === handle) await this.endLinger(session.id); }
+      catch {} finally { handle.checking = false; }
+    }, this.yieldCheckMs);
+    handle.watch.unref?.();
     (async () => {
       try {
         while (handle.draining) {
@@ -738,12 +839,45 @@ export class ClaudeBridge {
           if (!handle.draining) return;
           handle.pending = null;
           if (next.done) break;
-          if (next.value.type !== "result") continue;
-          if (!(await this.projectTasks(session)).some(task => task.status === "running")) break;
+          const message = next.value;
+          observeTasks(handle.roster, message);
+          // Spared agents keep reporting: their own cards follow them.
+          if (message.parent_tool_use_id || (message.type === "system" && ["task_started", "task_progress", "task_notification"].includes(message.subtype))) {
+            try {
+              await this.child(session, handle, message, handle.topProjection);
+              while (handle.childMessages.length) await this.child(session, handle, handle.childMessages.shift(), handle.topProjection);
+            } catch {}
+          } else if (["stream_event", "assistant", "user", "result"].includes(message.type)) {
+            // When a background task finishes, Claude replies on its own in this
+            // process. History adds that reply to the last turn, so it streams
+            // into the same turn here; the turn stays ended.
+            try { await this.continueTurn(session, handle, message); } catch {}
+          }
+          if (message.type !== "result") continue;
+          if (handle.roster.tasks?.size) continue;
+          if (!(await this.projectTasks(session)).some(task => task.status === "running" && task.kind !== "session")) break;
         }
       } catch {}
       if (handle.draining && this.lingering.get(session.id) === handle) await this.endLinger(session.id);
     })();
+  }
+  // A live interactive Claude Code process (not an Agent SDK run like this
+  // one) has the session open.
+  async openOnMac(session) {
+    return (await claudeSessionState(session.sdkSessionId, this.claudeSessionsDir)).open;
+  }
+  async continueTurn(session, handle, message) {
+    if (!handle.followUp) {
+      if (message.type === "result") return;
+      const output = [];
+      handle.followUp = { output, projection: new TurnProjection({ threadId: session.id, turnId: handle.topProjection.turnId,
+        emit: event => output.push(event), onChild: child => handle.childMessages.push(child), continuation: true }) };
+    }
+    const { projection, output } = handle.followUp;
+    projection.accept(message);
+    if (message.type === "result") { projection.finish("completed"); handle.followUp = null; }
+    while (handle.childMessages.length) await this.child(session, handle, handle.childMessages.shift(), handle.topProjection);
+    while (output.length) await this.send(output.shift());
   }
   async endLinger(sessionId, lookup = true) {
     const handle = this.lingering.get(sessionId);
@@ -751,7 +885,7 @@ export class ClaudeBridge {
     let tasks = [];
     if (lookup) try { tasks = await this.projectTasks(handle.session); } catch {}
     if (this.lingering.get(sessionId) !== handle) return;
-    this.lingering.delete(sessionId); handle.draining = false;
+    this.lingering.delete(sessionId); handle.draining = false; clearInterval(handle.watch);
     // Agents shown as running end with the process; report what the transcript knows.
     for (const [toolId, child] of [...(handle.children ?? [])].reverse()) {
       if (!child.projection.terminal) {

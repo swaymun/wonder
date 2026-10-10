@@ -15,6 +15,10 @@ import WonderPairing
     /// The host accepts Claude approval modes and plan mode.
     @Published private(set) var supportsModes = false
     @Published private(set) var supportsArchive = false
+    /// The Mac archives Claude Code threads in Wonder and lists archived threads.
+    @Published private(set) var supportsArchiveList = false
+    /// The Mac can create a new project's folder.
+    @Published private(set) var supportsNewFolder = false
     /// Pinned threads across this Mac's included projects.
     @Published private(set) var pinned: [PinnedProjectThread] = []
     /// Conversations the Mac reported gone while a saved copy was still open.
@@ -102,7 +106,7 @@ import WonderPairing
             createdDuringThreadRead = [:]
             projects = []; families = []; loadingProjects = false; failure = nil
             threads = [:]; details = [:]; supportsProjects = nil; options = nil
-            supportsModes = false; supportsArchive = false; pinned = []; unavailable = []; manuallyUnread = []; recentlyOpened = RecentlyOpenedConversations()
+            supportsModes = false; supportsArchive = false; supportsArchiveList = false; supportsNewFolder = false; pinned = []; unavailable = []; manuallyUnread = []; recentlyOpened = RecentlyOpenedConversations()
             archivedReferences = []
             pendingPins = [:]; detailRevisions = [:]; updatingDetails = []; readRevisions = [:]
             restoreCache()
@@ -149,6 +153,8 @@ import WonderPairing
             families = response.families
             supportsModes = (response.modesVersion ?? 0) >= 1
             supportsArchive = (response.archiveVersion ?? 0) >= 1
+            supportsArchiveList = (response.archiveVersion ?? 0) >= 2
+            supportsNewFolder = (response.createVersion ?? 0) >= 1
             // A pin changed while this request was in flight; the next refresh reports it.
             if pinRevision == pinRevisionAtStart, pendingPins.isEmpty, updatingDetails.isEmpty {
                 archivedReferences.subtract((response.pinned ?? []).map(\.thread.reference))
@@ -267,6 +273,18 @@ import WonderPairing
     func createProject(requestID: String, name: String, folders: [String], primaryIndex: Int) async throws -> ProjectSummary {
         guard let model, let scope = fenced() else { throw PairingFailure.response(401) }
         let body = try JSONSerialization.data(withJSONObject: ["requestId": requestID, "name": name, "folders": folders, "primaryIndex": primaryIndex])
+        let created: ProjectSummary = try await model.manage("/api/v1/projects", method: "POST", body: body)
+        guard isCurrent(scope) else { throw CancellationError() }
+        upsert(created)
+        return created
+    }
+
+    /// Creates an empty folder named `name` in `parent` (the Mac's home folder
+    /// when nil) and a project for it. A retry with the same request reuses it.
+    func createProject(requestID: String, name: String, newFolderParent parent: String?) async throws -> ProjectSummary {
+        guard let model, let scope = fenced() else { throw PairingFailure.response(401) }
+        let body = try JSONSerialization.data(withJSONObject: ["requestId": requestID, "name": name,
+                                                               "newFolder": parent.map { ["parent": $0] } ?? [:]])
         let created: ProjectSummary = try await model.manage("/api/v1/projects", method: "POST", body: body)
         guard isCurrent(scope) else { throw CancellationError() }
         upsert(created)
@@ -480,11 +498,39 @@ import WonderPairing
         try await updateConversation(conversation, fields: ["title": title])
     }
 
+    /// Whether a thread can be archived: Codex threads in Codex (once they have
+    /// a provider thread), Claude Code threads in Wonder only.
+    func canArchive(_ thread: ProjectThreadSummary) -> Bool {
+        switch thread.family {
+        case .codex: supportsArchive && thread.nativeID != nil
+        case .claude: supportsArchiveList
+        }
+    }
+
     func archive(_ projectID: String, thread: ProjectThreadSummary) async throws {
-        guard supportsArchive, thread.family == .codex else { throw PairingFailure.response(422) }
+        guard canArchive(thread) else { throw PairingFailure.response(422) }
         let conversation = try await attach(projectID, thread: thread)
         try await updateConversation(conversation, fields: ["isArchived": true])
         await refresh()
+    }
+
+    /// A Project's archived threads, newest first.
+    func archivedThreads(_ projectID: String) async throws -> ArchivedProjectThreadsPage {
+        guard let model, let scope = fenced() else { throw PairingFailure.response(401) }
+        let page: ArchivedProjectThreadsPage = try await model.manage(
+            "/api/v1/projects/\(ConnectionModel.escape(projectID))/threads/archived")
+        guard isCurrent(scope) else { throw CancellationError() }
+        return page
+    }
+
+    /// Restores an archived thread: in Codex for a Codex thread, in Wonder for
+    /// Claude Code. It returns to the sidebar on the next read.
+    func unarchive(_ projectID: String, thread: ProjectThreadSummary) async throws {
+        let conversation = try await attach(projectID, thread: thread)
+        try await updateConversation(conversation, fields: ["isArchived": false])
+        archivedReferences.remove(thread.reference)
+        await refresh()
+        if threads[projectID] != nil { loadThreads(projectID) }
     }
 
     private func removeArchivedRows(_ conversationID: String) {

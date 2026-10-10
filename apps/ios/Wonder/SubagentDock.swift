@@ -2,15 +2,27 @@ import SwiftUI
 import WonderPairing
 
 /// One shared visual envelope keeps both controls aligned as text scales.
-private struct ComposerStatusPill: ViewModifier {
+/// `isActive` marks the pill whose view is open: a stronger muted fill and a
+/// hairline ring, from the theme's own primary colour so it reads on every theme.
+struct ComposerStatusPill: ViewModifier {
+    var isActive = false
     @ScaledMetric(relativeTo: .subheadline) private var height: CGFloat = 36
     @Environment(\.wonderTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func body(content: Content) -> some View {
         content
             .font(.subheadline.weight(.medium))
             .padding(.horizontal, 12)
             .frame(minWidth: 44, minHeight: height)
             .background(theme.surface, in: Capsule())
+            .overlay {
+                if isActive {
+                    Capsule().fill(Color.primary.opacity(0.12))
+                        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.28), lineWidth: 1))
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isActive)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
     }
@@ -40,7 +52,7 @@ struct SubagentDock: View {
                     familyIcon
                     Text(count.formatted()).monospacedDigit().fixedSize()
                 }
-                    .modifier(ComposerStatusPill())
+                    .modifier(ComposerStatusPill(isActive: isPresented))
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("subagent-status-pill")
@@ -123,7 +135,7 @@ struct ProjectSubagentDock: View {
                         Text(agents.count.formatted()).monospacedDigit()
                     }
                 }
-                .modifier(ComposerStatusPill())
+                .modifier(ComposerStatusPill(isActive: isPresented))
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("project-subagent-status-pill")
@@ -214,8 +226,11 @@ struct ProjectSubagentDock: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(agent.title).foregroundStyle(.primary).lineLimit(2)
                             .multilineTextAlignment(.leading)
-                        Text([agent.kindLabel, status].compactMap { $0 }.joined(separator: " \u{00B7} "))
-                            .font(.caption).foregroundStyle(.secondary)
+                        // The glyph shows the status; the words stay in the accessibility label.
+                        if let kind = [agent.kindLabel, agent.isRunningElsewhere ? status : nil]
+                            .compactMap({ $0 }).joined(separator: " \u{00B7} ").nilIfEmpty {
+                            Text(kind).font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     Spacer(minLength: 8)
                 }
@@ -274,9 +289,12 @@ struct ProjectSubagentTranscriptView: View {
     @State private var turns: [String: ReadTurn] = [:]
     @State private var lastActivityEntries: Set<String> = []
     @State private var expanded: Set<String> = []
+    /// Tool-call rows the reader opened. Rows start collapsed, as in the conversation.
+    @State private var expandedDetails: Set<String> = []
     @State private var error: String?
     @State private var loading = true
     @State private var loadingOlder = false
+    @State private var loadedOlder = false
     @State private var olderTask: Task<Void, Never>?
     @State private var loadToken = UUID()
 
@@ -296,8 +314,10 @@ struct ProjectSubagentTranscriptView: View {
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .accessibilityIdentifier("project-subagent-load-older")
                     }
-                    ForEach(entries) { entry in
-                        transcriptEntry(entry)
+                    // Each visible row is a peer in this one lazy stack (no nested
+                    // stacks); IDs come from the history so state survives reloads.
+                    ForEach(ChatFeedNode.visible(entries, expanded: expanded)) { node in
+                        transcriptNode(node)
                     }
                     if !loading, entries.isEmpty, error == nil {
                         ContentUnavailableView("No activity yet", systemImage: "text.bubble",
@@ -326,33 +346,54 @@ struct ProjectSubagentTranscriptView: View {
                 }
             }
         }
-        .task(id: child.threadId + ":" + model.assignmentScope) { await loadInitial() }
+        .task(id: child.threadId + ":" + model.assignmentScope) {
+            await loadInitial()
+            // A running task keeps working: re-read its newest page so new tool
+            // calls appear. Row and group disclosure is keyed by history IDs, so
+            // what the reader opened stays open across the refresh.
+            while child.isRunning, !Task.isCancelled, snapshot.map({ $0.activeTurnID != nil }) ?? true {
+                do { try await Task.sleep(for: .seconds(4)) } catch { return }
+                await refreshNewest()
+            }
+        }
         .onDisappear {
             loadToken = UUID()
             olderTask?.cancel()
         }
     }
 
-    @ViewBuilder private func transcriptEntry(_ entry: ChatFeedEntry) -> some View {
-        if entry.isActivity {
-            ActivityGroupView(rows: entry.rows,
-                turn: entry.rows.first?.turnId.flatMap { turns[$0] },
-                isLatestSegmentForTurn: lastActivityEntries.contains(entry.id),
-                isLatestActiveSegment: false,
-                isProjectConversation: true,
-                expanded: expanded.contains(entry.id)) {
-                    if expanded.contains(entry.id) { expanded.remove(entry.id) }
-                    else { expanded.insert(entry.id) }
-                }
-            if expanded.contains(entry.id) {
-                ForEach(entry.rows, id: \.id) { row in
-                    ActivityItemView(row: row, expanded: true) {}
-                        .padding(.leading, 12)
-                }
+    @ViewBuilder private func transcriptNode(_ node: ChatFeedNode) -> some View {
+        switch node.content {
+        case .entry(let entry):
+            if entry.isActivity {
+                ActivityGroupView(rows: entry.rows,
+                    turn: entry.rows.first?.turnId.flatMap { turns[$0] },
+                    isLatestSegmentForTurn: lastActivityEntries.contains(entry.id),
+                    isLatestActiveSegment: false,
+                    isProjectConversation: true,
+                    expanded: expanded.contains(entry.id)) {
+                        if !expanded.insert(entry.id).inserted { expanded.remove(entry.id) }
+                    }
+            } else if let row = entry.rows.first {
+                MessageRow(row: row)
+                    .accessibilityIdentifier("project-subagent-row:" + row.id)
             }
-        } else if let row = entry.rows.first {
-            MessageRow(row: row)
-                .accessibilityIdentifier("project-subagent-row:" + row.id)
+        case .activity(let row):
+            if row.isCommentary {
+                BotMessageText(text: row.text)
+                    .modifier(ChatBubbleSurface())
+                    .accessibilityLabel(row.author + ": " + ChatPlainText.of(row.text))
+                    .padding(.leading, 12)
+            } else {
+                ActivityItemView(row: row, expanded: expandedDetails.contains(row.id)) {
+                    if !expandedDetails.insert(row.id).inserted { expandedDetails.remove(row.id) }
+                }
+                .padding(.leading, 12)
+            }
+        case .compaction(let row):
+            ContextCompactionMarker(row: row, isProjectConversation: true)
+        case .file:
+            EmptyView()
         }
     }
 
@@ -376,6 +417,8 @@ struct ProjectSubagentTranscriptView: View {
         turns = [:]
         lastActivityEntries = []
         expanded = []
+        expandedDetails = []
+        loadedOlder = false
         loading = true
         loadingOlder = false
         error = nil
@@ -392,6 +435,18 @@ struct ProjectSubagentTranscriptView: View {
         loading = false
     }
 
+    private func refreshNewest() async {
+        // Older pages the reader loaded would be dropped by a newest-page read.
+        guard !loading, !loadingOlder, !loadedOlder, error == nil else { return }
+        let token = loadToken
+        let requestedChild = child
+        let scope = model.assignmentScope
+        guard let response = try? await model.projectSubagentTranscript(parent: parent, child: requestedChild),
+              !Task.isCancelled, loadToken == token, child.threadId == requestedChild.threadId,
+              model.assignmentScope == scope, !loadedOlder else { return }
+        display(response.snapshot)
+    }
+
     private func loadOlder(cursor: String) async {
         guard let snapshot else { return }
         let token = loadToken
@@ -404,6 +459,7 @@ struct ProjectSubagentTranscriptView: View {
             guard !Task.isCancelled, loadToken == token, child.threadId == requestedChild.threadId,
                   model.assignmentScope == scope else { return }
             display(try snapshot.mergingOlder(response.snapshot))
+            loadedOlder = true
         } catch {
             guard !Task.isCancelled, loadToken == token, child.threadId == requestedChild.threadId,
                   model.assignmentScope == scope else { return }
@@ -439,7 +495,7 @@ struct FilesDock: View {
         Button(action: open) {
             Label("Files", systemImage: "folder")
                 .labelStyle(.iconOnly)
-                .modifier(ComposerStatusPill())
+                .modifier(ComposerStatusPill(isActive: isPresented))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("conversation-files-pill")
@@ -464,7 +520,7 @@ struct AttentionDock: View {
             if pending.count > 0 {
                 Button(action: toggle) {
                     Label(pending.label, systemImage: pending.symbol)
-                        .modifier(ComposerStatusPill())
+                        .modifier(ComposerStatusPill(isActive: isPresented))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("question-dock-open")
@@ -510,7 +566,7 @@ struct EditedFilesDock: View {
             .monospacedDigit()
             .lineLimit(1)
             .fixedSize()
-            .modifier(ComposerStatusPill())
+            .modifier(ComposerStatusPill(isActive: isPresented))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("response-edits-pill")
@@ -568,7 +624,7 @@ struct GoalDock: View {
                     .frame(width: iconSize, height: iconSize)
             }
             .accessibilityHidden(true)
-            .modifier(ComposerStatusPill())
+            .modifier(ComposerStatusPill(isActive: isPresented))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("goal-status-pill")
@@ -876,7 +932,7 @@ struct PullRequestDock: View {
             .monospacedDigit()
             .lineLimit(1)
             .fixedSize()
-            .modifier(ComposerStatusPill())
+            .modifier(ComposerStatusPill(isActive: isPresented))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("pull-requests-pill")
@@ -996,4 +1052,8 @@ private struct PullRequestRow: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

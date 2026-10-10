@@ -3,6 +3,27 @@ import CryptoKit
 
 public enum FileFailure: Error { case tooLarge, integrity, stale, unsupported, notUploaded }
 
+/// What the composer says when staged attachments could not be uploaded. The
+/// files stay staged, so each message says whether sending again can help.
+public enum AttachmentUploadFailure {
+    public static func message(for error: Error) -> String {
+        switch error {
+        case FileFailure.tooLarge, PairingFailure.response(413):
+            return "Files must be 8 MB or smaller. Remove the large file, then send again."
+        case FileFailure.unsupported, PairingFailure.response(415):
+            return "Your Mac can't accept one of these file types. Remove it, then send again."
+        case FileFailure.integrity:
+            return "Your Mac received a different copy of a file. Your files are saved; send again to retry."
+        case let error as URLError where error.code == .timedOut:
+            return "The upload took too long. Your files are saved; send again on a stronger connection."
+        case is URLError:
+            return "The connection to your Mac dropped during the upload. Your files are saved; send again to retry."
+        default:
+            return "Attachment upload was not confirmed. Your files are saved; send again to retry."
+        }
+    }
+}
+
 /// A note about exact preview bytes. The host validates the Project, path,
 /// source hash and selected region again before accepting the attachment.
 public struct ArtifactAnnotation: Codable, Sendable, Hashable {

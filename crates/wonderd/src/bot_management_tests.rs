@@ -86,7 +86,7 @@ async fn bot_http_creation_is_idempotent_and_uuid_prefix_collision_cannot_delete
 #[tokio::test]
 async fn legacy_group_creation_retries_cannot_revive_deleted_chats() {
     let (_dir, state) = crate::ingestion::tests::fixture().await;
-    for path in ["/api/v1/channels", "/api/v1/group-chats"] {
+    for path in ["/api/v1/group-chats"] {
         let id = uuid::Uuid::new_v4().to_string();
         let body = json!({"clientRequestId":id,"name":"Release fixture","coordinatorBotId":"bot","memberBotIds":[]});
         let (status, first) = call(&state, "POST", path, body.clone()).await;

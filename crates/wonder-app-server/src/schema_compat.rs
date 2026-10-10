@@ -1,11 +1,29 @@
-//! Accept additive Codex schema changes without accepting a changed contract.
+//! Decide whether a Codex runtime Wonder has not seen can still serve Wonder.
 //!
-//! The pinned schema remains the contract Wonder was built and tested against.
-//! New definitions, distinct request/notification methods, and optional object
-//! fields are safe to ignore. Changed or newly required fields need a Wonder
-//! release, rather than a downloaded schema silently changing authorization.
+//! ChatGPT updates its bundled Codex without asking, so an unknown version is
+//! compared with the pinned schema Wonder was built and tested against. Only
+//! the contracts Wonder exercises are compared: the params and responses of
+//! the methods `RpcClient` may send (`crate::sent_methods`) and the params of
+//! the notifications wonderd reads (`crate::CONSUMED_NOTIFICATIONS`). Anything
+//! else Codex adds, changes or retires cannot reach Wonder and passes.
+//!
+//! The comparison is directional:
+//!
+//! - Data Wonder sends (request params) may only widen. New optional fields,
+//!   new variants and new enum labels are fine; a newly required field, a
+//!   narrowed type, a removed label, a new constraint, or a removed field that
+//!   was required, governs permissions or is now rejected, needs a Wonder
+//!   release.
+//! - Data Wonder receives (responses, notifications) may only grow. New
+//!   fields, variants and labels are fine because ingestion keeps unknown
+//!   items and labels as opaque values; removed optional fields are fine.
+//!   A removed or no-longer-required field, a widened or changed type, or a
+//!   removed label needs a release.
+//! - Approval, sandbox and permission definitions Wonder sends stay exact:
+//!   even an added label there needs review before Wonder relies on it.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::collections::HashSet;
 
 const STABLE: &[u8] = include_bytes!(
     "../../../research/codex-app-server/0.155.0-alpha.16.3/stable/codex_app_server_protocol.v2.schemas.json"
@@ -14,6 +32,49 @@ const EXPERIMENTAL: &[u8] = include_bytes!(
     "../../../research/codex-app-server/0.155.0-alpha.16.3/experimental/codex_app_server_protocol.v2.schemas.json"
 );
 
+/// Keywords that document a schema without constraining values.
+const ANNOTATIONS: &[&str] = &[
+    "description",
+    "title",
+    "$comment",
+    "examples",
+    "$schema",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+];
+
+/// Value constraints whose removal only accepts more values.
+const CONSTRAINTS: &[&str] = &[
+    "format",
+    "maxLength",
+    "minLength",
+    "maximum",
+    "minimum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "pattern",
+    "maxItems",
+    "minItems",
+    "uniqueItems",
+    "multipleOf",
+    "maxProperties",
+    "minProperties",
+    "additionalProperties",
+];
+
+/// Responses whose names do not follow `<Name>Params` -> `<Name>Response`.
+const RESPONSE_NAMES: &[(&str, &str)] =
+    &[("configRequirements/read", "ConfigRequirementsReadResponse")];
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Direction {
+    /// Wonder sends this value to Codex.
+    Input,
+    /// Codex sends this value to Wonder.
+    Output,
+}
+
 pub(super) fn verify(stable: &[u8], experimental: &[u8]) -> Result<(), String> {
     for (name, reference, candidate) in [
         ("stable", STABLE, stable),
@@ -21,202 +82,556 @@ pub(super) fn verify(stable: &[u8], experimental: &[u8]) -> Result<(), String> {
     ] {
         let reference: Value = serde_json::from_slice(reference)
             .map_err(|error| format!("invalid embedded {name} schema: {error}"))?;
-        let mut candidate: Value = serde_json::from_slice(candidate)
+        let candidate: Value = serde_json::from_slice(candidate)
             .map_err(|error| format!("invalid generated {name} schema: {error}"))?;
-        // 0.159 adds item-anchor cursors while retaining the same opaque string
-        // and null inputs Wonder sends. Accept only that verified widening.
-        let cursor = &candidate["definitions"]["ThreadItemsListParams"]["properties"]["cursor"];
-        let definition = &candidate["definitions"]["ThreadItemsListCursor"];
-        if [cursor, definition].iter().all(|value| {
-            value.as_object().is_some_and(|properties| {
-                properties.keys().all(|key| {
-                    matches!(
-                        key.as_str(),
-                        "anyOf" | "description" | "title" | "$comment" | "examples"
-                    )
-                })
-            })
-        }) && cursor.get("anyOf")
-            == Some(&serde_json::json!([
-                {"$ref":"#/definitions/ThreadItemsListCursor"}, {"type":"null"}
-            ]))
-            && definition["anyOf"]
-                .as_array()
-                .is_some_and(|variants| variants.contains(&serde_json::json!({"type":"string"})))
-        {
-            candidate["definitions"]["ThreadItemsListParams"]["properties"]["cursor"] =
-                reference["definitions"]["ThreadItemsListParams"]["properties"]["cursor"].clone();
-        }
-        accept_widened_error_info(&reference, &mut candidate);
-        preserve(&reference, &candidate, name)?;
+        verify_schema(&reference, &candidate).map_err(|reason| format!("{name}: {reason}"))?;
     }
     Ok(())
 }
 
-/// 0.162 regroups `CodexErrorInfo` from `oneOf` to `anyOf` and appends one
-/// catch-all variant (any string or object) so unknown error labels still
-/// deserialize. The type is reachable only from `TurnError`, which the runtime
-/// sends in `Turn`, `ErrorNotification` and timeline entries; Wonder never sends
-/// or reads it, so it cannot carry authority. Accept exactly that shape: every
-/// earlier variant is still compared by `preserve` (added labels are allowed
-/// there). Any other `anyOf` shape, or a changed catch-all, still fails.
-fn accept_widened_error_info(reference: &Value, candidate: &mut Value) {
-    let Some(old) = reference["definitions"]["CodexErrorInfo"]["oneOf"].as_array() else {
-        return;
+fn verify_schema(reference: &Value, candidate: &Value) -> Result<(), String> {
+    let empty = Map::new();
+    let old = reference["definitions"].as_object().unwrap_or(&empty);
+    let new = candidate["definitions"]
+        .as_object()
+        .ok_or("schema has no definitions")?;
+    let mut contract = Contract {
+        old,
+        new,
+        seen: HashSet::new(),
     };
-    let Some(info) = candidate["definitions"]["CodexErrorInfo"].as_object_mut() else {
-        return;
-    };
-    if info.contains_key("oneOf") {
-        return;
+    let old_requests = methods(old, "ClientRequest")?;
+    let new_requests = methods(new, "ClientRequest")?;
+    for (method, required) in crate::sent_methods() {
+        // A method the pinned schema lacks (Wonder's Claude bridge methods)
+        // has no Codex contract to protect.
+        let Some(before) = find(&old_requests, method) else {
+            continue;
+        };
+        let Some(after) = find(&new_requests, method) else {
+            if required {
+                return Err(format!("{method} removed"));
+            }
+            continue;
+        };
+        let path = format!("{method} params");
+        contract.compare_params(before, after, Direction::Input, &path)?;
+        if let Some(response) = response_name(method, before).filter(|name| old.contains_key(name))
+        {
+            let current = response_name(method, after)
+                .filter(|name| new.contains_key(name))
+                .ok_or_else(|| format!("{method} response missing"))?;
+            contract.compare_definition(&response, &current, Direction::Output, false)?;
+        }
     }
-    let Some(variants) = info.get("anyOf").and_then(Value::as_array) else {
-        return;
-    };
-    if variants.len() != old.len() + 1
-        || variants.last() != Some(&serde_json::json!({"type": ["string", "object"]}))
-    {
-        return;
+    let old_notifications = methods(old, "ServerNotification")?;
+    let new_notifications = methods(new, "ServerNotification")?;
+    for (method, required) in crate::CONSUMED_NOTIFICATIONS {
+        let Some(before) = find(&old_notifications, method) else {
+            continue;
+        };
+        let Some(after) = find(&new_notifications, method) else {
+            if required {
+                return Err(format!("{method} notification removed"));
+            }
+            continue;
+        };
+        let path = format!("{method} notification");
+        contract.compare_params(before, after, Direction::Output, &path)?;
     }
-    let kept = Value::Array(variants[..old.len()].to_vec());
-    info.remove("anyOf");
-    info.insert("oneOf".into(), kept);
+    Ok(())
 }
 
-fn preserve(reference: &Value, candidate: &Value, path: &str) -> Result<(), String> {
-    match (reference, candidate) {
-        (Value::Object(old), Value::Object(new)) => {
-            for (key, value) in old {
-                if matches!(
-                    key.as_str(),
-                    "description" | "title" | "$comment" | "examples"
-                ) {
-                    continue;
+fn methods<'a>(
+    definitions: &'a Map<String, Value>,
+    union: &str,
+) -> Result<Vec<(&'a str, &'a Value)>, String> {
+    let Some(variants) = definitions
+        .get(union)
+        .and_then(|value| value["oneOf"].as_array())
+    else {
+        return Err(format!("{union} missing"));
+    };
+    let mut methods = Vec::with_capacity(variants.len());
+    for variant in variants {
+        let method = variant["properties"]["method"]["enum"][0]
+            .as_str()
+            .ok_or_else(|| format!("{union} has a variant without a method"))?;
+        if methods.iter().any(|(existing, _)| *existing == method) {
+            return Err(format!("{union} has duplicate method {method}"));
+        }
+        methods.push((method, variant));
+    }
+    Ok(methods)
+}
+
+fn find<'a>(methods: &[(&str, &'a Value)], method: &str) -> Option<&'a Value> {
+    methods
+        .iter()
+        .find(|(name, _)| *name == method)
+        .map(|(_, variant)| *variant)
+}
+
+/// The response definition of a request: `ThreadStartParams` answers with
+/// `ThreadStartResponse`, `GetAccountRateLimitsParams` (inside a nullable
+/// `anyOf`) with `GetAccountRateLimitsResponse`.
+fn response_name(method: &str, variant: &Value) -> Option<String> {
+    if let Some((_, name)) = RESPONSE_NAMES.iter().find(|(known, _)| *known == method) {
+        return Some((*name).to_owned());
+    }
+    fn params_ref(value: &Value) -> Option<&str> {
+        if let Some(name) = value["$ref"].as_str() {
+            return name.strip_prefix("#/definitions/");
+        }
+        ["anyOf", "oneOf", "allOf"]
+            .iter()
+            .filter_map(|key| value[*key].as_array())
+            .flatten()
+            .find_map(params_ref)
+    }
+    params_ref(&variant["properties"]["params"])
+        .and_then(|name| name.strip_suffix("Params"))
+        .map(|name| format!("{name}Response"))
+}
+
+fn is_authority(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["approval", "sandbox", "permission"]
+        .iter()
+        .any(|word| name.contains(word))
+}
+
+fn is_annotation(key: &str) -> bool {
+    ANNOTATIONS.contains(&key)
+}
+
+/// `{"$ref": X}` or `{"allOf": [{"$ref": X}]}` with only annotations beside it.
+fn reference_name(value: &Value) -> Option<&str> {
+    let object = value.as_object()?;
+    if let Some(name) = object.get("$ref").and_then(Value::as_str) {
+        if object.keys().all(|key| key == "$ref" || is_annotation(key)) {
+            return name.strip_prefix("#/definitions/");
+        }
+        return None;
+    }
+    let all_of = object.get("allOf")?.as_array()?;
+    if all_of.len() == 1
+        && object
+            .keys()
+            .all(|key| key == "allOf" || is_annotation(key))
+    {
+        return reference_name(&all_of[0]);
+    }
+    None
+}
+
+fn union_of(object: &Map<String, Value>) -> Option<(&'static str, &Vec<Value>)> {
+    ["oneOf", "anyOf"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(Value::as_array).map(|v| (key, v)))
+}
+
+fn type_set(value: &Value) -> Vec<&str> {
+    match value {
+        Value::String(name) => vec![name.as_str()],
+        Value::Array(names) => names.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn string_set(value: Option<&Value>) -> Vec<&str> {
+    value
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+struct Contract<'a> {
+    old: &'a Map<String, Value>,
+    new: &'a Map<String, Value>,
+    /// Definition pairs compared (or being compared) in a direction. A cycle
+    /// back to a pair in progress is assumed compatible.
+    seen: HashSet<(String, String, Direction, bool)>,
+}
+
+impl<'a> Contract<'a> {
+    fn compare_params(
+        &mut self,
+        before: &Value,
+        after: &Value,
+        direction: Direction,
+        path: &str,
+    ) -> Result<(), String> {
+        match (
+            before["properties"].get("params"),
+            after["properties"].get("params"),
+        ) {
+            (None, _) => Ok(()),
+            (Some(_), None) => Err(format!("{path} missing")),
+            (Some(old), Some(new)) => self.compare(old, new, direction, false, path),
+        }
+    }
+
+    fn definition(definitions: &'a Map<String, Value>, name: &str) -> Result<&'a Value, String> {
+        definitions
+            .get(name)
+            .ok_or_else(|| format!("{name} missing"))
+    }
+
+    fn compare_definition(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+        direction: Direction,
+        exact: bool,
+    ) -> Result<(), String> {
+        let exact = exact || (direction == Direction::Input && is_authority(old_name));
+        if !self
+            .seen
+            .insert((old_name.to_owned(), new_name.to_owned(), direction, exact))
+        {
+            return Ok(());
+        }
+        let old = Self::definition(self.old, old_name)?;
+        let new = Self::definition(self.new, new_name)?;
+        self.compare(old, new, direction, exact, old_name)
+    }
+
+    /// Runs a comparison whose failure only means "not this one".
+    fn attempt(
+        &mut self,
+        old: &Value,
+        new: &Value,
+        direction: Direction,
+        exact: bool,
+        path: &str,
+    ) -> bool {
+        let saved = self.seen.clone();
+        let accepted = self.compare(old, new, direction, exact, path).is_ok();
+        if !accepted {
+            self.seen = saved;
+        }
+        accepted
+    }
+
+    fn compare(
+        &mut self,
+        old: &Value,
+        new: &Value,
+        direction: Direction,
+        exact: bool,
+        path: &str,
+    ) -> Result<(), String> {
+        match (reference_name(old), reference_name(new)) {
+            (Some(before), Some(after)) => {
+                return self.compare_definition(before, after, direction, exact)
+            }
+            (Some(before), None) => {
+                let exact = exact || (direction == Direction::Input && is_authority(before));
+                let old = Self::definition(self.old, before)?;
+                return self.compare(old, new, direction, exact, path);
+            }
+            (None, Some(after)) => {
+                let new = Self::definition(self.new, after)?;
+                return self.compare(old, new, direction, exact, path);
+            }
+            (None, None) => {}
+        }
+        match (old, new) {
+            (Value::Object(old), Value::Object(new)) => {
+                self.compare_object(old, new, direction, exact, path)
+            }
+            (Value::Array(old), Value::Array(new)) => {
+                if old.len() != new.len() {
+                    return Err(format!("{path} changed length"));
                 }
-                let next = format!("{path}.{key}");
-                // 0.158 retired this optional Windows-only response property.
-                // Wonder is a Mac host and never reads or sends it. All other
-                // removed fields, including permission contracts, still fail.
-                if key == "windowsSandboxPrivateDesktop"
-                    && path.ends_with(".definitions.ConfigRequirements.properties")
-                    && !new.contains_key(key)
-                {
-                    continue;
+                for (index, (before, after)) in old.iter().zip(new).enumerate() {
+                    self.compare(before, after, direction, exact, &format!("{path}[{index}]"))?;
                 }
-                let current = new.get(key).ok_or_else(|| format!("{next} missing"))?;
-                if key == "required" || key == "enum" {
-                    // These response labels are presented generically. Added
-                    // labels cannot grant authority; permission enums stay exact.
-                    let extensible = key == "enum"
-                        && (path.ends_with(".definitions.PlanType")
-                            || path.ends_with(".definitions.CodexErrorInfo.oneOf"));
-                    if extensible
-                        && value
-                            .as_array()
-                            .zip(current.as_array())
-                            .is_some_and(|(old, new)| old.iter().all(|v| new.contains(v)))
+                Ok(())
+            }
+            _ if old == new => Ok(()),
+            _ => Err(format!("{path} changed")),
+        }
+    }
+
+    fn compare_object(
+        &mut self,
+        old: &Map<String, Value>,
+        new: &Map<String, Value>,
+        direction: Direction,
+        exact: bool,
+        path: &str,
+    ) -> Result<(), String> {
+        let old_union = union_of(old);
+        let new_union = union_of(new);
+        match (old_union, new_union) {
+            (Some((_, before)), Some((_, after))) => {
+                self.compare_variants(before, after, direction, exact, path)?;
+            }
+            (None, Some((union, after))) => {
+                // A single shape became one of several (an opaque string
+                // cursor gaining an object form). Every value the old shape
+                // described must still fit one of the new variants.
+                for piece in pieces(old) {
+                    if !after
+                        .iter()
+                        .any(|variant| self.attempt(&piece, variant, direction, exact, path))
                     {
-                        continue;
+                        return Err(format!("{path} changed"));
                     }
-                    if !same_set(value, current) {
+                }
+                if direction == Direction::Input || exact {
+                    if let Some(key) = new
+                        .keys()
+                        .find(|key| *key != union && !is_annotation(key) && *key != "default")
+                    {
+                        return Err(format!("{path}.{key} added a constraint"));
+                    }
+                }
+                return Ok(());
+            }
+            (Some(_), None) => return Err(format!("{path} changed variants")),
+            (None, None) => {}
+        }
+        let union = old_union.map(|(key, _)| key);
+        for (key, before) in old {
+            if is_annotation(key) || Some(key.as_str()) == union || key == "required" {
+                continue;
+            }
+            let next = format!("{path}.{key}");
+            let after = new.get(key);
+            match key.as_str() {
+                "properties" => self.compare_properties(old, new, direction, exact, path)?,
+                "enum" => {
+                    let Some(after) = after else {
+                        if exact {
+                            return Err(format!("{next} removed"));
+                        }
+                        continue;
+                    };
+                    let (before, after) = (
+                        before.as_array().ok_or_else(|| format!("{next} invalid"))?,
+                        after.as_array().ok_or_else(|| format!("{next} invalid"))?,
+                    );
+                    if let Some(lost) = before.iter().find(|label| !after.contains(label)) {
+                        return Err(format!("{next} lost {lost}"));
+                    }
+                    if exact && after.len() != before.len() {
                         return Err(format!("{next} changed"));
                     }
-                } else if key == "oneOf" || key == "anyOf" || key == "allOf" {
-                    preserve_variants(value, current, &next)?;
-                } else {
-                    preserve(value, current, &next)?;
+                }
+                "type" => {
+                    let before = type_set(before);
+                    let Some(after) = after.map(type_set) else {
+                        if direction == Direction::Input && !exact {
+                            continue;
+                        }
+                        return Err(format!("{next} removed"));
+                    };
+                    let widened = before.iter().all(|kind| after.contains(kind));
+                    let narrowed = after.iter().all(|kind| before.contains(kind));
+                    let compatible = match direction {
+                        _ if exact => widened && narrowed,
+                        Direction::Input => widened,
+                        Direction::Output => narrowed,
+                    };
+                    if !compatible {
+                        return Err(format!("{next} changed"));
+                    }
+                }
+                // The runtime applies a default when Wonder omits a field;
+                // a changed default changes what Wonder's request means.
+                "default" => {
+                    if direction == Direction::Input && after != Some(before) {
+                        return Err(format!("{next} changed"));
+                    }
+                }
+                "additionalProperties"
+                    if direction == Direction::Input
+                        && before == &Value::Bool(false)
+                        && after.is_none_or(|after| after == &Value::Bool(true)) => {}
+                _ => match after {
+                    Some(after) => self.compare(before, after, direction, exact, &next)?,
+                    None if CONSTRAINTS.contains(&key.as_str()) && !exact => {}
+                    None => return Err(format!("{next} missing")),
+                },
+            }
+        }
+        let before = string_set(old.get("required"));
+        let after = string_set(new.get("required"));
+        match direction {
+            Direction::Input => {
+                if let Some(field) = after.iter().find(|field| !before.contains(field)) {
+                    return Err(format!("{path} now requires {field}"));
                 }
             }
+            Direction::Output => {
+                if let Some(field) = before.iter().find(|field| !after.contains(field)) {
+                    return Err(format!("{path}.{field} is no longer required"));
+                }
+            }
+        }
+        if direction == Direction::Input || exact {
             for key in new.keys() {
                 if old.contains_key(key)
-                    || matches!(
-                        key.as_str(),
-                        "description" | "title" | "$comment" | "examples"
-                    )
-                    || path.ends_with(".definitions")
-                    || path.ends_with(".properties")
+                    || is_annotation(key)
+                    || matches!(key.as_str(), "properties" | "required" | "default")
+                    || Some(key.as_str()) == new_union.map(|(key, _)| key)
                 {
                     continue;
                 }
                 return Err(format!("{path}.{key} added a constraint"));
             }
-            Ok(())
         }
-        (Value::Array(old), Value::Array(new)) => {
-            if old.len() != new.len() {
-                return Err(format!("{path} changed length"));
+        Ok(())
+    }
+
+    fn compare_properties(
+        &mut self,
+        old: &Map<String, Value>,
+        new: &Map<String, Value>,
+        direction: Direction,
+        exact: bool,
+        path: &str,
+    ) -> Result<(), String> {
+        let empty = Map::new();
+        let before = old["properties"].as_object().unwrap_or(&empty);
+        let after = new
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
+        let required = string_set(old.get("required"));
+        let closed = new.get("additionalProperties") == Some(&Value::Bool(false));
+        for (name, schema) in before {
+            let next = format!("{path}.{name}");
+            match after.get(name) {
+                Some(current) => self.compare(schema, current, direction, exact, &next)?,
+                // Codex ignores a field it no longer knows, so Wonder loses
+                // only that field's effect. That is acceptable unless the
+                // field was required, governs permissions, or is now refused.
+                None if direction == Direction::Input
+                    && !exact
+                    && !required.contains(&name.as_str())
+                    && !is_authority(name)
+                    && !closed => {}
+                // Wonder already copes with an optional field being absent.
+                None if direction == Direction::Output && !required.contains(&name.as_str()) => {}
+                None => return Err(format!("{next} removed")),
             }
-            for (index, (before, after)) in old.iter().zip(new).enumerate() {
-                preserve(before, after, &format!("{path}[{index}]"))?;
+        }
+        Ok(())
+    }
+
+    fn compare_variants(
+        &mut self,
+        old: &[Value],
+        new: &[Value],
+        direction: Direction,
+        exact: bool,
+        path: &str,
+    ) -> Result<(), String> {
+        if exact && new.len() != old.len() {
+            return Err(format!("{path} changed variants"));
+        }
+        let old_keys: Vec<_> = old.iter().map(variant_key).collect();
+        let new_keys: Vec<_> = new.iter().map(variant_key).collect();
+        let mut used = vec![false; new.len()];
+        for (index, before) in old.iter().enumerate() {
+            let next = format!("{path}[{index}]");
+            let key = old_keys[index].as_ref();
+            let unique = key.filter(|key| {
+                old_keys
+                    .iter()
+                    .filter(|other| other.as_ref() == Some(key))
+                    .count()
+                    == 1
+                    && new_keys
+                        .iter()
+                        .filter(|other| other.as_ref() == Some(key))
+                        .count()
+                        == 1
+            });
+            if let Some(key) = unique {
+                // A tagged variant keeps its identity: compare it with its
+                // successor and report exactly what changed.
+                let position = new_keys
+                    .iter()
+                    .position(|other| other.as_ref() == Some(key))
+                    .unwrap();
+                if !used[position] {
+                    self.compare(before, &new[position], direction, exact, &next)?;
+                    used[position] = true;
+                    continue;
+                }
             }
-            Ok(())
+            let Some(position) = (0..new.len()).find(|position| {
+                !used[*position] && self.attempt(before, &new[*position], direction, exact, &next)
+            }) else {
+                return Err(format!("{next} removed or changed"));
+            };
+            used[position] = true;
         }
-        _ if reference == candidate => Ok(()),
-        _ => Err(format!("{path} changed")),
+        Ok(())
     }
 }
 
-fn same_set(reference: &Value, candidate: &Value) -> bool {
-    match (reference.as_array(), candidate.as_array()) {
-        (Some(old), Some(new)) => {
-            old.len() == new.len() && old.iter().all(|value| new.contains(value))
-        }
-        _ => false,
+/// The separately matchable shapes of a non-union schema: a nullable string
+/// is a string or a null.
+fn pieces(object: &Map<String, Value>) -> Vec<Value> {
+    let structural: Map<String, Value> = object
+        .iter()
+        .filter(|(key, _)| !is_annotation(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    match structural.get("type") {
+        Some(Value::Array(kinds)) => kinds
+            .iter()
+            .map(|kind| {
+                if kind == "null" {
+                    serde_json::json!({"type": "null"})
+                } else {
+                    let mut piece = structural.clone();
+                    piece.insert("type".into(), kind.clone());
+                    Value::Object(piece)
+                }
+            })
+            .collect(),
+        _ => vec![Value::Object(structural)],
     }
 }
 
-fn preserve_variants(reference: &Value, candidate: &Value, path: &str) -> Result<(), String> {
-    let old = reference
-        .as_array()
-        .ok_or_else(|| format!("{path} is not an array"))?;
-    let new = candidate
-        .as_array()
-        .ok_or_else(|| format!("{path} is not an array"))?;
-    let additive_methods = path.ends_with(".definitions.ClientRequest.oneOf")
-        || path.ends_with(".definitions.ServerNotification.oneOf");
-    if !additive_methods && old.len() != new.len() {
-        return Err(format!("{path} changed variants"));
+/// The identity of a union variant across versions: its tag, method, first
+/// label, single externally tagged property, reference or JSON type.
+fn variant_key(variant: &Value) -> Option<String> {
+    if let Some(name) = reference_name(variant) {
+        return Some(format!("ref:{name}"));
     }
-    if additive_methods {
-        let old_methods = variant_methods(old, path)?;
-        let new_methods = variant_methods(new, path)?;
-        for (method, before) in old_methods {
-            let after = new_methods
-                .iter()
-                .find(|(name, _)| *name == method)
-                .map(|(_, value)| *value)
-                .ok_or_else(|| format!("{path}: {method} removed"))?;
-            preserve(before, after, &format!("{path}.{method}"))?;
+    for tag in ["type", "method"] {
+        if let Some(label) = variant["properties"][tag]["enum"]
+            .as_array()
+            .filter(|labels| labels.len() == 1)
+            .and_then(|labels| labels[0].as_str())
+        {
+            return Some(format!("{tag}:{label}"));
         }
-        return Ok(());
     }
-    let mut used = vec![false; new.len()];
-    for (index, before) in old.iter().enumerate() {
-        let Some(position) = new.iter().enumerate().find_map(|(position, after)| {
-            (!used[position] && preserve(before, after, path).is_ok()).then_some(position)
-        }) else {
-            return Err(format!("{path}[{index}] changed"));
-        };
-        used[position] = true;
+    if let Some(label) = variant["enum"].as_array().and_then(|labels| labels.first()) {
+        return Some(format!("enum:{label}"));
     }
-    Ok(())
-}
-
-fn variant_methods<'a>(
-    variants: &'a [Value],
-    path: &str,
-) -> Result<Vec<(&'a str, &'a Value)>, String> {
-    let mut methods = Vec::with_capacity(variants.len());
-    for variant in variants {
-        let method = variant["properties"]["method"]["enum"][0]
-            .as_str()
-            .ok_or_else(|| format!("{path} has a variant without a method"))?;
-        if methods.iter().any(|(existing, _)| *existing == method) {
-            return Err(format!("{path} has duplicate method {method}"));
-        }
-        methods.push((method, variant));
+    let required = string_set(variant.get("required"));
+    if variant["type"] == "object"
+        && required.len() == 1
+        && variant["properties"]
+            .as_object()
+            .is_some_and(|p| p.len() == 1)
+    {
+        return Some(format!("field:{}", required[0]));
     }
-    Ok(methods)
+    if !variant["type"].is_null() {
+        return Some(format!("json:{}", variant["type"]));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -238,6 +653,58 @@ mod tests {
         )
     }
 
+    type Mutation = Box<dyn Fn(&mut Value)>;
+
+    fn mutation(apply: impl Fn(&mut Value) + 'static) -> Mutation {
+        Box::new(apply)
+    }
+
+    fn variants<'v>(schema: &'v mut Value, definition: &str) -> &'v mut Vec<Value> {
+        let definition = &mut schema["definitions"][definition];
+        let key = if definition.get("oneOf").is_some() {
+            "oneOf"
+        } else {
+            "anyOf"
+        };
+        definition[key].as_array_mut().unwrap()
+    }
+
+    fn tagged<'v>(schema: &'v mut Value, definition: &str, tag: &str) -> &'v mut Value {
+        variants(schema, definition)
+            .iter_mut()
+            .find(|variant| variant["properties"]["type"]["enum"][0] == tag)
+            .unwrap()
+    }
+
+    fn methods_mut<'v>(schema: &'v mut Value, union: &str) -> &'v mut Vec<Value> {
+        schema["definitions"][union]["oneOf"]
+            .as_array_mut()
+            .unwrap()
+    }
+
+    fn assert_cases(
+        schemas: impl Fn() -> (Value, Value),
+        cases: Vec<(&str, Mutation)>,
+        accepted: bool,
+    ) {
+        for (case, mutate) in cases {
+            let (mut stable, mut experimental) = schemas();
+            mutate(&mut stable);
+            mutate(&mut experimental);
+            let result = check(&stable, &experimental);
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "{case}: {result:?} ({})",
+                if accepted {
+                    "Wonder does not depend on this, so it must not need a Wonder release"
+                } else {
+                    "this breaks Wonder, so it must need a Wonder release"
+                }
+            );
+        }
+    }
+
     #[test]
     fn current_contract_is_accepted() {
         let (stable, experimental) = baseline();
@@ -245,118 +712,361 @@ mod tests {
     }
 
     #[test]
-    fn optional_fields_and_new_methods_do_not_require_a_wonder_release() {
-        let (mut stable, mut experimental) = baseline();
-        stable["definitions"]["ThreadStartParams"]["properties"]["futureOption"] =
-            json!({"type":"string"});
-        experimental["definitions"]["FutureResponse"] = json!({"type":"object"});
-        let request = experimental["definitions"]["ClientRequest"]["oneOf"][0].clone();
-        let mut added = request;
-        added["properties"]["method"]["enum"] = json!(["future/read"]);
-        experimental["definitions"]["ClientRequest"]["oneOf"]
-            .as_array_mut()
-            .unwrap()
-            .push(added);
-        assert!(check(&stable, &experimental).is_ok());
+    fn every_sent_method_has_a_compared_response() {
+        // Guards response derivation: a request whose response cannot be
+        // named would silently escape the check.
+        let (_, experimental) = baseline();
+        let definitions = experimental["definitions"].as_object().unwrap();
+        let requests = methods(definitions, "ClientRequest").unwrap();
+        for (method, _) in crate::sent_methods() {
+            let Some(variant) = find(&requests, method) else {
+                continue;
+            };
+            if method == "initialize" {
+                continue;
+            }
+            let response = response_name(method, variant);
+            assert!(
+                response
+                    .as_ref()
+                    .is_some_and(|name| definitions.contains_key(name)),
+                "{method} has no response definition ({response:?}); add it to RESPONSE_NAMES"
+            );
+        }
     }
 
     #[test]
-    fn additive_error_plan_and_string_cursor_shapes_preserve_existing_inputs() {
-        let (mut stable, mut experimental) = baseline();
-        for schema in [&mut stable, &mut experimental] {
-            schema["definitions"]["CodexErrorInfo"]["oneOf"][0]["enum"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!("flexUnavailable"));
-            schema["definitions"]["PlanType"]["enum"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!("promax"));
+    fn changes_wonder_cannot_observe_pass_without_a_release() {
+        assert_cases(
+            baseline,
+            vec![
+                (
+                    "new optional request field",
+                    mutation(|s| {
+                        s["definitions"]["ThreadStartParams"]["properties"]["futureOption"] =
+                            json!({"type":"string"});
+                    }),
+                ),
+                (
+                    "new method and definition",
+                    mutation(|s| {
+                        s["definitions"]["FutureResponse"] = json!({"type":"object"});
+                        let mut added = methods_mut(s, "ClientRequest")[0].clone();
+                        added["properties"]["method"]["enum"] = json!(["future/read"]);
+                        methods_mut(s, "ClientRequest").push(added);
+                    }),
+                ),
+                (
+                    "new notification",
+                    mutation(|s| {
+                        let mut added = methods_mut(s, "ServerNotification")[0].clone();
+                        added["properties"]["method"]["enum"] = json!(["future/changed"]);
+                        methods_mut(s, "ServerNotification").push(added);
+                    }),
+                ),
+                (
+                    "changed params of a method Wonder never sends",
+                    mutation(|s| {
+                        s["definitions"]["FuzzyFileSearchParams"]["required"] =
+                            json!(["query", "roots", "futureRequired"]);
+                        s["definitions"]["FuzzyFileSearchParams"]["properties"]["query"] =
+                            json!({"type":"integer"});
+                    }),
+                ),
+                (
+                    "removed method Wonder never sends",
+                    mutation(|s| {
+                        methods_mut(s, "ClientRequest").retain(|variant| {
+                            variant["properties"]["method"]["enum"][0] != "fuzzyFileSearch"
+                        });
+                    }),
+                ),
+                (
+                    "removed notification Wonder never reads",
+                    mutation(|s| {
+                        methods_mut(s, "ServerNotification").retain(|variant| {
+                            variant["properties"]["method"]["enum"][0]
+                                != "thread/tokenUsage/updated"
+                        });
+                    }),
+                ),
+                (
+                    "new message phase label",
+                    mutation(|s| {
+                        variants(s, "MessagePhase")
+                            .push(json!({"enum":["future_phase"], "type":"string"}));
+                    }),
+                ),
+                (
+                    "new thread item type",
+                    mutation(|s| {
+                        let mut added = tagged(s, "ThreadItem", "plan").clone();
+                        added["properties"]["type"]["enum"] = json!(["futureItem"]);
+                        added["required"] = json!(["id", "type", "futureField"]);
+                        variants(s, "ThreadItem").push(added);
+                    }),
+                ),
+                (
+                    "new turn status and error labels",
+                    mutation(|s| {
+                        s["definitions"]["TurnStatus"]["enum"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("paused"));
+                        variants(s, "CodexErrorInfo")[0]["enum"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("flexUnavailable"));
+                        variants(s, "CodexErrorInfo").push(json!({"type":["string","object"]}));
+                        s["definitions"]["PlanType"]["enum"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("promax"));
+                    }),
+                ),
+                (
+                    "new required response field",
+                    mutation(|s| {
+                        let thread = &mut s["definitions"]["Thread"];
+                        thread["properties"]["futureField"] = json!({"type":"string"});
+                        thread["required"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("futureField"));
+                    }),
+                ),
+                (
+                    "removed optional response field",
+                    mutation(|s| {
+                        s["definitions"]["ConfigRequirements"]["properties"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("windowsSandboxPrivateDesktop");
+                    }),
+                ),
+                (
+                    "removed optional request field outside permissions",
+                    mutation(|s| {
+                        s["definitions"]["ThreadResumeParams"]["properties"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("history");
+                    }),
+                ),
+                (
+                    "new variant in history Wonder could send",
+                    mutation(|s| {
+                        variants(s, "ResponseItem").push(json!({
+                            "type":"object", "required":["type"],
+                            "properties":{"type":{"enum":["future_item"],"type":"string"}}
+                        }));
+                    }),
+                ),
+                (
+                    "widened request label outside permissions",
+                    mutation(|s| {
+                        s["definitions"]["ThreadSortKey"]["enum"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("future_key"));
+                    }),
+                ),
+                (
+                    "opaque string cursor gains an object form",
+                    mutation(|s| {
+                        s["definitions"]["ThreadItemsListParams"]["properties"]["cursor"] = json!(
+                            {"anyOf":[{"$ref":"#/definitions/ThreadItemsListCursor"},{"type":"null"}]}
+                        );
+                        s["definitions"]["ThreadItemsListCursor"] =
+                            json!({"anyOf":[{"type":"string"},{"type":"object"}]});
+                    }),
+                ),
+            ],
+            true,
+        );
+    }
+
+    #[test]
+    fn changes_that_break_wonder_still_need_a_release() {
+        assert_cases(
+            baseline,
+            vec![
+                (
+                    "newly required request field",
+                    mutation(|s| {
+                        s["definitions"]["TurnStartParams"]["required"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("futureOption"));
+                    }),
+                ),
+                (
+                    "changed request field type",
+                    mutation(|s| {
+                        s["definitions"]["TurnStartParams"]["properties"]["permissions"]["type"] =
+                            json!("object");
+                    }),
+                ),
+                (
+                    "removed permission field",
+                    mutation(|s| {
+                        s["definitions"]["TurnStartParams"]["properties"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("permissions");
+                    }),
+                ),
+                (
+                    "removed required request field",
+                    mutation(|s| {
+                        s["definitions"]["TurnStartParams"]["properties"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("input");
+                    }),
+                ),
+                (
+                    "request now refuses unknown fields",
+                    mutation(|s| {
+                        s["definitions"]["TurnStartParams"]["additionalProperties"] = json!(false);
+                    }),
+                ),
+                (
+                    "request input variant removed",
+                    mutation(|s| {
+                        variants(s, "UserInput")
+                            .retain(|variant| variant["properties"]["type"]["enum"][0] != "image");
+                    }),
+                ),
+                (
+                    "approval policy label added",
+                    mutation(|s| {
+                        variants(s, "AskForApproval")[0]["enum"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("future-auto-approve"));
+                    }),
+                ),
+                (
+                    "required method removed",
+                    mutation(|s| {
+                        methods_mut(s, "ClientRequest").retain(|variant| {
+                            variant["properties"]["method"]["enum"][0] != "turn/start"
+                        });
+                    }),
+                ),
+                (
+                    "required notification removed",
+                    mutation(|s| {
+                        methods_mut(s, "ServerNotification").retain(|variant| {
+                            variant["properties"]["method"]["enum"][0] != "turn/completed"
+                        });
+                    }),
+                ),
+                (
+                    "response field Wonder relies on removed",
+                    mutation(|s| {
+                        s["definitions"]["Thread"]["properties"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("id");
+                    }),
+                ),
+                (
+                    "response field became optional",
+                    mutation(|s| {
+                        s["definitions"]["Turn"]["required"]
+                            .as_array_mut()
+                            .unwrap()
+                            .retain(|field| field != "id");
+                    }),
+                ),
+                (
+                    "response field type changed",
+                    mutation(|s| {
+                        s["definitions"]["Thread"]["properties"]["id"] = json!({"type":"integer"});
+                    }),
+                ),
+                (
+                    "response label removed",
+                    mutation(|s| {
+                        s["definitions"]["PlanType"]["enum"]
+                            .as_array_mut()
+                            .unwrap()
+                            .remove(0);
+                    }),
+                ),
+                (
+                    "final answer phase replaced",
+                    mutation(|s| {
+                        variants(s, "MessagePhase")
+                            .retain(|variant| variant["enum"] != json!(["final_answer"]));
+                    }),
+                ),
+                (
+                    "consumed notification params changed",
+                    mutation(|s| {
+                        s["definitions"]["AgentMessageDeltaNotification"]["properties"]["delta"] =
+                            json!({"type":"integer"});
+                    }),
+                ),
+                (
+                    "thread item type removed",
+                    mutation(|s| {
+                        variants(s, "ThreadItem").retain(|variant| {
+                            variant["properties"]["type"]["enum"][0] != "agentMessage"
+                        });
+                    }),
+                ),
+                (
+                    "duplicate method",
+                    mutation(|s| {
+                        let request = methods_mut(s, "ClientRequest")[0].clone();
+                        methods_mut(s, "ClientRequest").push(request);
+                    }),
+                ),
+            ],
+            false,
+        );
+    }
+
+    #[test]
+    fn cursor_widening_keeps_opaque_strings_and_constraints_visible() {
+        let widen = |schema: &mut Value| {
             schema["definitions"]["ThreadItemsListParams"]["properties"]["cursor"] =
                 json!({"anyOf":[{"$ref":"#/definitions/ThreadItemsListCursor"},{"type":"null"}]});
             schema["definitions"]["ThreadItemsListCursor"] =
                 json!({"anyOf":[{"type":"string"},{"type":"object"}]});
-        }
-        assert!(check(&stable, &experimental).is_ok());
-        experimental["definitions"]["ThreadItemsListParams"]["properties"]["cursor"]["maxLength"] =
-            json!(1);
-        assert!(
-            check(&stable, &experimental).is_err(),
-            "New cursor constraints must not be hidden"
+        };
+        assert_cases(
+            baseline,
+            vec![
+                (
+                    "cursor constraint",
+                    mutation(move |s| {
+                        widen(s);
+                        s["definitions"]["ThreadItemsListParams"]["properties"]["cursor"]
+                            ["maxLength"] = json!(1);
+                    }),
+                ),
+                (
+                    "referenced cursor constraint",
+                    mutation(move |s| {
+                        widen(s);
+                        s["definitions"]["ThreadItemsListCursor"]["maxLength"] = json!(1);
+                    }),
+                ),
+                (
+                    "cursor no longer a string",
+                    mutation(move |s| {
+                        widen(s);
+                        s["definitions"]["ThreadItemsListCursor"]["anyOf"][0] =
+                            json!({"type":"integer"});
+                    }),
+                ),
+            ],
+            false,
         );
-        experimental["definitions"]["ThreadItemsListParams"]["properties"]["cursor"]
-            .as_object_mut()
-            .unwrap()
-            .remove("maxLength");
-        experimental["definitions"]["ThreadItemsListCursor"]["maxLength"] = json!(1);
-        assert!(
-            check(&stable, &experimental).is_err(),
-            "Referenced constraints must remain visible"
-        );
-        experimental["definitions"]["ThreadItemsListCursor"]
-            .as_object_mut()
-            .unwrap()
-            .remove("maxLength");
-        experimental["definitions"]["ThreadItemsListCursor"]["anyOf"][0] =
-            json!({"type":"integer"});
-        assert!(
-            check(&stable, &experimental).is_err(),
-            "Opaque strings must remain accepted"
-        );
-        let (mut stable, experimental) = baseline();
-        stable["definitions"]["PlanType"]["enum"]
-            .as_array_mut()
-            .unwrap()
-            .remove(0);
-        assert!(
-            check(&stable, &experimental).is_err(),
-            "Existing response labels must remain supported"
-        );
-    }
-
-    #[test]
-    fn changed_or_newly_required_fields_are_rejected() {
-        let (stable, mut experimental) = baseline();
-        experimental["definitions"]["TurnStartParams"]["properties"]["permissions"]["type"] =
-            json!("object");
-        assert!(check(&stable, &experimental).is_err());
-        let (stable, mut experimental) = baseline();
-        experimental["definitions"]["TurnStartParams"]["required"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!("futureOption"));
-        assert!(check(&stable, &experimental).is_err());
-    }
-
-    #[test]
-    fn retired_windows_response_field_does_not_disable_the_mac_runtime() {
-        let (mut stable, mut experimental) = baseline();
-        for schema in [&mut stable, &mut experimental] {
-            schema["definitions"]["ConfigRequirements"]["properties"]
-                .as_object_mut()
-                .unwrap()
-                .remove("windowsSandboxPrivateDesktop");
-        }
-        assert!(check(&stable, &experimental).is_ok());
-        experimental["definitions"]["TurnStartParams"]["properties"]
-            .as_object_mut()
-            .unwrap()
-            .remove("permissions");
-        assert!(check(&stable, &experimental).is_err());
-    }
-
-    #[test]
-    fn duplicate_methods_and_new_constraints_are_rejected() {
-        let (stable, mut experimental) = baseline();
-        let request = experimental["definitions"]["ClientRequest"]["oneOf"][0].clone();
-        experimental["definitions"]["ClientRequest"]["oneOf"]
-            .as_array_mut()
-            .unwrap()
-            .push(request);
-        assert!(check(&stable, &experimental).is_err());
-        let (stable, mut experimental) = baseline();
-        experimental["definitions"]["TurnStartParams"]["additionalProperties"] = json!(false);
-        assert!(check(&stable, &experimental).is_err());
     }
 
     const V162_STABLE: &[u8] = include_bytes!(
@@ -365,77 +1075,100 @@ mod tests {
     const V162_EXPERIMENTAL: &[u8] = include_bytes!(
         "../../../research/codex-app-server/0.162.0-alpha.2/experimental/codex_app_server_protocol.v2.schemas.json"
     );
+    const V162_17_STABLE: &[u8] = include_bytes!(
+        "../../../research/codex-app-server/0.162.0-alpha.17.2/stable/codex_app_server_protocol.v2.schemas.json"
+    );
+    const V162_17_EXPERIMENTAL: &[u8] = include_bytes!(
+        "../../../research/codex-app-server/0.162.0-alpha.17.2/experimental/codex_app_server_protocol.v2.schemas.json"
+    );
 
-    fn v162() -> (Value, Value) {
+    fn v162_17() -> (Value, Value) {
         (
-            serde_json::from_slice(V162_STABLE).unwrap(),
-            serde_json::from_slice(V162_EXPERIMENTAL).unwrap(),
+            serde_json::from_slice(V162_17_STABLE).unwrap(),
+            serde_json::from_slice(V162_17_EXPERIMENTAL).unwrap(),
         )
     }
 
     #[test]
-    fn generated_0_162_schemas_pass_the_additive_check_without_the_hash_shortcut() {
-        // Regression: 0.162 regrouped CodexErrorInfo as anyOf and every unknown
-        // version path then failed with "CodexErrorInfo.oneOf missing".
+    fn every_shipped_codex_passes_without_the_hash_shortcut() {
+        // Regressions: 0.162 regrouped CodexErrorInfo as anyOf ("oneOf
+        // missing"); 0.162.0-alpha.17 added MessagePhase "partial_answer"
+        // ("changed variants"). Each broke Codex for every user until a
+        // Wonder release.
         assert_eq!(verify(V162_STABLE, V162_EXPERIMENTAL), Ok(()));
+        assert_eq!(verify(V162_17_STABLE, V162_17_EXPERIMENTAL), Ok(()));
     }
 
     #[test]
-    fn permission_and_sandbox_contract_changes_still_fail_on_0_162() {
-        let (stable, experimental) = v162();
-        for (path, mutate) in [
-            (
-                "permissions type",
-                Box::new(|schema: &mut Value| {
-                    schema["definitions"]["TurnStartParams"]["properties"]["permissions"]["type"] =
-                        json!("object");
-                }) as Box<dyn Fn(&mut Value)>,
-            ),
-            (
-                "permissions removed",
-                Box::new(|schema: &mut Value| {
-                    schema["definitions"]["ThreadStartParams"]["properties"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("permissions");
-                }),
-            ),
-            (
-                "approval policy enum widened",
-                Box::new(|schema: &mut Value| {
-                    schema["definitions"]["AskForApproval"]["oneOf"][0]["enum"]
-                        .as_array_mut()
-                        .unwrap()
-                        .push(json!("future-auto-approve"));
-                }),
-            ),
-        ] {
-            let (mut changed_stable, mut changed_experimental) =
-                (stable.clone(), experimental.clone());
-            mutate(&mut changed_stable);
-            mutate(&mut changed_experimental);
-            assert!(
-                check(&changed_stable, &changed_experimental).is_err(),
-                "{path} must need a Wonder release"
-            );
-        }
-    }
-
-    #[test]
-    fn only_the_exact_error_info_widening_is_accepted() {
-        let (mut stable, experimental) = v162();
-        let variants = stable["definitions"]["CodexErrorInfo"]["anyOf"]
-            .as_array_mut()
-            .unwrap();
-        // A different catch-all is a different contract.
-        *variants.last_mut().unwrap() = json!({"type": "string"});
-        assert!(check(&stable, &experimental).is_err());
-        let (mut stable, experimental) = v162();
-        // An existing variant disappearing is not a widening.
-        let variants = stable["definitions"]["CodexErrorInfo"]["anyOf"]
-            .as_array_mut()
-            .unwrap();
-        variants.remove(1);
-        assert!(check(&stable, &experimental).is_err());
+    fn later_runtimes_are_judged_by_the_same_rules() {
+        assert_cases(
+            v162_17,
+            vec![
+                (
+                    "another new phase label",
+                    mutation(|s| {
+                        variants(s, "MessagePhase")
+                            .push(json!({"enum":["draft"], "type":"string"}));
+                    }),
+                ),
+                (
+                    "capability removed from a method Wonder never calls",
+                    mutation(|s| {
+                        let response =
+                            &mut s["definitions"]["ModelProviderCapabilitiesReadResponse"];
+                        response["properties"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("webSearch");
+                        response["required"] = json!(["imageGeneration"]);
+                    }),
+                ),
+            ],
+            true,
+        );
+        assert_cases(
+            v162_17,
+            vec![
+                (
+                    "final answer phase replaced",
+                    mutation(|s| {
+                        variants(s, "MessagePhase")
+                            .retain(|variant| variant["enum"] != json!(["final_answer"]));
+                    }),
+                ),
+                (
+                    "permissions retyped",
+                    mutation(|s| {
+                        s["definitions"]["ThreadStartParams"]["properties"]["permissions"]
+                            ["type"] = json!("object");
+                    }),
+                ),
+                (
+                    "permissions removed",
+                    mutation(|s| {
+                        s["definitions"]["ThreadStartParams"]["properties"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("permissions");
+                    }),
+                ),
+                (
+                    "approval policy label added",
+                    mutation(|s| {
+                        variants(s, "AskForApproval")[0]["enum"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("future-auto-approve"));
+                    }),
+                ),
+                (
+                    "existing error variant removed",
+                    mutation(|s| {
+                        variants(s, "CodexErrorInfo").remove(1);
+                    }),
+                ),
+            ],
+            false,
+        );
     }
 }

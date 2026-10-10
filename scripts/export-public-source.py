@@ -26,7 +26,7 @@ FORBIDDEN_SUFFIXES = {'.ipa', '.dmg', '.pkg', '.zip', '.p12', '.p8', '.pem',
                       '.key', '.mobileprovision', '.sqlite', '.sqlite3', '.db',
                       '.log', '.xcresult', '.trace', '.profraw', '.pyc'}
 SYNTHETIC_USERS = {'example', 'test', 'user', 'owner', 'private', 'demo',
-                   'alice', 'bob', 'Shared', 'USERNAME', 'YourName'}
+                   'alice', 'bob', 'fixture', 'Shared', 'USERNAME', 'YourName'}
 SECRET_PATTERNS = {
     'private-key-block': re.compile(
         r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----\s+'

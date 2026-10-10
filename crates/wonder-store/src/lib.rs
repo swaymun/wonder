@@ -121,11 +121,8 @@ pub use computer_sessions::{
 };
 mod teaching;
 pub use teaching::{
-    NewSkillFixtureRun, SkillFixtureRunReservation, SkillVersionReservation, StoredBotSkill,
-    StoredBotSkillVersion, StoredSkillFixtureRun, StoredTeachingEvent, StoredTeachingSession,
-    TeachingCaptureAppendResult, TeachingEventCreate, TeachingReview, TeachingSessionCreate,
-    TEACHING_EXPIRED_REASON, TEACHING_MAX_EVENTS, TEACHING_MAX_EVIDENCE_BYTES,
-    TEACHING_UNAVAILABLE,
+    SkillVersionReservation, StoredBotSkill, StoredBotSkillVersion, StoredTeachingSession,
+    TeachingReview, TeachingSessionCreate, TEACHING_EXPIRED_REASON,
 };
 mod file_access;
 pub use file_access::BotFileAccess;
@@ -565,6 +562,10 @@ impl Store {
         let store = Self { pool };
         backfill_avatar_identity(&store.pool).await?;
         store.prune_replay().await?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64);
+        store.prune_orphaned_pending_notifications(now_ms).await?;
         Ok(store)
     }
 

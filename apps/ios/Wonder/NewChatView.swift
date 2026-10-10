@@ -3,6 +3,46 @@ import WonderPairing
 import PhotosUI
 import UniformTypeIdentifiers
 
+/// Where people get the Mac companion. Every Mac release is a GitHub pre-release,
+/// so `releases/latest` would 404; the releases page always lists the newest.
+let wonderMacDownloadURL = URL(string: "https://github.com/swaymun/wonder/releases")!
+
+/// First launch, before any computer is paired: what Wonder needs and how to start.
+struct GetStartedView: View {
+    let addComputer: () -> Void
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                Image(systemName: "laptopcomputer.and.iphone")
+                    .font(.system(size: 44)).foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text("Chat with agents on your Mac")
+                    .font(.title3.weight(.semibold)).multilineTextAlignment(.center)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Wonder connects to Claude and Codex running on your own Mac through the Wonder Mac app. Commands and files stay on your Mac.")
+                    .multilineTextAlignment(.center).foregroundStyle(.secondary)
+                Button(action: addComputer) {
+                    Label("Add computer", systemImage: "plus").frame(maxWidth: 280)
+                }
+                .buttonStyle(.wonderProminent).controlSize(.large)
+                .accessibilityIdentifier("welcome-add-computer")
+                Link(destination: wonderMacDownloadURL) {
+                    Label("Get Wonder for Mac", systemImage: "arrow.down.circle")
+                }
+                .accessibilityIdentifier("welcome-mac-download")
+                Text("Your Mac and this device connect privately over Tailscale. Pairing needs both devices nearby.")
+                    .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    .padding(.top, 6)
+            }
+            .frame(maxWidth: 420)
+            .padding(.horizontal, 24).padding(.vertical, 32)
+            .frame(maxWidth: .infinity)
+        }
+        .defaultScrollAnchor(.center)
+        .accessibilityIdentifier("welcome")
+    }
+}
+
 /// Durable new-chat drafts: one per Mac, plus the last explicitly chosen Mac.
 enum NewChatDraftStore {
     private static func key(_ host: String) -> String { "wonder.newchat.draft." + Data(host.utf8).base64EncodedString() }
@@ -251,17 +291,18 @@ struct NewChatView: View {
     private struct PersistenceKey: Hashable { let host: String?; let draft: NewChatDraft }
 
     /// Only shown while no Mac is paired; otherwise a Mac is always selected.
-    private var noConnection: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Text(linkedProjectID == nil ? "Pair your Mac to get started" : "Linked computer is not paired")
-                .font(.title3.weight(.semibold))
-            if linkedProjectID != nil {
+    @ViewBuilder private var noConnection: some View {
+        if linkedProjectID == nil {
+            GetStartedView { pairing = true }
+        } else {
+            VStack(spacing: 16) {
+                Spacer()
+                Text("Linked computer is not paired").font(.title3.weight(.semibold))
                 Text("Pair the computer from this link to open its project.").foregroundStyle(.secondary)
-            }
-            Button("Add computer", systemImage: "plus") { pairing = true }.buttonStyle(.borderedProminent)
-            Spacer()
-        }.frame(maxWidth: .infinity).padding()
+                Button("Add computer", systemImage: "plus") { pairing = true }.buttonStyle(.wonderProminent)
+                Spacer()
+            }.frame(maxWidth: .infinity).padding()
+        }
     }
 
     private func linkedProjectRecovery(_ model: ConnectionModel) -> some View {
@@ -728,7 +769,7 @@ private struct NewChatContent: View {
             model.dictation.captureControlsHidden(conversationID: draftChat.id)
         }
         .sheet(isPresented: $addingProject) {
-            ProjectEditorView(model: model, library: projects, project: nil) { saved in
+            AddProjectView(model: model, library: projects) { saved in
                 choose(destination: .project(id: saved.id), project: saved)
             }
         }
@@ -984,7 +1025,7 @@ private struct NewChatContent: View {
                     }
                 }
                 Section {
-                    Button("New project", systemImage: "folder.badge.plus") { addingProject = true }
+                    Button("Add project", systemImage: "folder.badge.plus") { addingProject = true }
                 }
             }
         } label: {

@@ -757,18 +757,21 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(response.windows[0].windowDurationMins, 300)
     }
 
-    // Contract: the header reads Codex primary/secondary and Claude's named
-    // windows as 5-hour and weekly use, and shows nothing without either.
-    func testHeaderUsageReadsEachProvidersWindows() throws {
+    // Contract: usage windows are named by their reported length, never by
+    // slot. A Codex Pro plan reports only a weekly primary window (measured on
+    // Codex 0.162.0-alpha.17.2), which must not read as "5 hours". Claude shows
+    // its 5-hour and weekly windows; nothing shows without a window.
+    func testHeaderUsageNamesWindowsByTheirDuration() throws {
         func usage(_ windows: String) throws -> HeaderUsage? {
             HeaderUsage(try JSONDecoder().decode(CodexUsageResponse.self, from: Data(#"{"checkedAtMs":1,"windows":[\#(windows)]}"#.utf8)))
         }
-        let codex = try XCTUnwrap(usage(#"{"id":"secondary","label":"Usage","usedPercent":18.4,"remainingPercent":81.6},{"id":"primary","label":"Usage","usedPercent":41.6,"remainingPercent":58.4}"#))
-        XCTAssertEqual([codex.fiveHourUsed, codex.weeklyUsed], [42, 18])
-        XCTAssertEqual(codex.accessibilityLabel, "5-hour limit 42% used, weekly 18% used")
-        let claude = try XCTUnwrap(usage(#"{"id":"seven_day_opus","label":"Weekly · Opus","usedPercent":90,"remainingPercent":10},{"id":"seven_day","label":"Weekly","usedPercent":8,"remainingPercent":92}"#))
-        XCTAssertEqual([claude.fiveHourUsed, claude.weeklyUsed], [nil, 8])
-        XCTAssertEqual(claude.accessibilityLabel, "Weekly limit 8% used")
+        let pro = try XCTUnwrap(usage(#"{"id":"primary","label":"Weekly","usedPercent":34,"remainingPercent":66,"windowDurationMins":10080}"#))
+        XCTAssertEqual(pro.windows.map(\.title), ["Weekly · 34% used"])
+        let plus = try XCTUnwrap(usage(#"{"id":"secondary","label":"Weekly","usedPercent":18.4,"remainingPercent":81.6,"windowDurationMins":10080},{"id":"primary","label":"5 hours","usedPercent":41.6,"remainingPercent":58.4,"windowDurationMins":300}"#))
+        XCTAssertEqual(plus.windows.map(\.title), ["5 hours · 42% used", "Weekly · 18% used"])
+        XCTAssertEqual(HeaderUsage.name(minutes: 43_200, fallback: ""), "30 days")
+        let claude = try XCTUnwrap(usage(#"{"id":"seven_day_opus","label":"Weekly · Opus","usedPercent":90,"remainingPercent":10},{"id":"seven_day","label":"Weekly","usedPercent":8,"remainingPercent":92},{"id":"five_hour","label":"5 hours","usedPercent":14,"remainingPercent":86}"#))
+        XCTAssertEqual(claude.windows.map(\.title), ["5 hours · 14% used", "Weekly · 8% used"])
         XCTAssertNil(try usage(""))
     }
 
@@ -1914,9 +1917,11 @@ final class WonderDiagnosticsTests: XCTestCase {
         XCTAssertEqual(model.projects.threads["project"]?.threads.compactMap(\.conversationId),
                        ["second-chat", "draft-chat", "started-chat"], "Locally created rows must keep their sidebar order")
         let library = ConnectionLibrary(diagnosticModel: model)
-        let (hostID, _, projects) = ProjectWidgetSnapshotPublisher.lastMacRows(from: library)
+        let (hostID, _, projects, threads) = ProjectWidgetSnapshotPublisher.lastMacRows(from: library)
         XCTAssertEqual(hostID, model.connection?.credential.hostInstallationId, "The widget follows the paired Mac")
         XCTAssertEqual(projects.map(\.id), ["project"])
+        XCTAssertEqual(Set(threads.compactMap(\.conversationID)), ["second-chat", "draft-chat", "started-chat"],
+                       "The widget offers the loaded threads, each opening its conversation")
     }
 
     @MainActor private func prepareProject(_ model: ConnectionModel) async throws {

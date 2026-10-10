@@ -2,8 +2,9 @@
 
 Unmodified font files from [google/fonts](https://github.com/google/fonts) at commit
 `2eb0b48d5f760f62e286216f0859a8c540dbc1bd`, each under the SIL Open Font License 1.1.
-The license texts ship next to them and appear in Settings → Appearance → Font →
-Font licenses. Fonts with a Reserved Font Name (IBM Plex: "Plex") must stay unmodified
+The license texts ship next to them and appear in Settings → Acknowledgements and in
+each font's long-press menu in Settings → Appearance → Font. Every file matches its
+upstream git blob byte for byte (checked 2026-10-09 with `git hash-object`). Fonts with a Reserved Font Name (IBM Plex: "Plex") must stay unmodified
 to keep their names, so do not subset or rename these files.
 
 | Family | Files (source path under `ofl/`) | Bytes |

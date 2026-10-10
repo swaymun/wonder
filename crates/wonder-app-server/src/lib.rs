@@ -16,12 +16,13 @@ pub use process::{
 pub const CODEX_VERSION: &str = "codex-cli 0.155.0-alpha.9";
 // Known versions retain a fast exact-hash path. Later versions are checked
 // against the embedded protocol contract instead of requiring a Wonder update.
-pub const COMPATIBLE_CODEX_VERSIONS: [&str; 5] = [
+pub const COMPATIBLE_CODEX_VERSIONS: [&str; 6] = [
     CODEX_VERSION,
     "codex-cli 0.155.0-alpha.9.2",
     "codex-cli 0.155.0-alpha.16.3",
     "codex-cli 0.155.0-alpha.16.4",
     "codex-cli 0.162.0-alpha.2",
+    "codex-cli 0.162.0-alpha.17.2",
 ];
 pub const STABLE_SCHEMA_SHA256: &str =
     "5a4d50ed04afa9cd1b383d011f67ec055960a35ca7fdeab222ed65e70fca8f0b";
@@ -36,6 +37,10 @@ pub const V162_STABLE_SCHEMA_SHA256: &str =
     "0c34fd753d5e4498c32db50dbb20e9c142f81cb3f4b186c581d756d6b7e10bac";
 pub const V162_EXPERIMENTAL_SCHEMA_SHA256: &str =
     "9be20dabc0516c68cbe7ad4480affd2953c43ad0e7770a3949663967c00f5ca5";
+pub const V162_17_STABLE_SCHEMA_SHA256: &str =
+    "6f622f94329e648ffcee48be34b78a35da19e55598fd71241dbb08508195c46d";
+pub const V162_17_EXPERIMENTAL_SCHEMA_SHA256: &str =
+    "bff504aada804072a51f42c94478375c46273cf30195069ec4514f56a913663c";
 
 pub fn expected_schema_hashes(version: &str) -> Option<(&'static str, &'static str)> {
     match version {
@@ -49,6 +54,10 @@ pub fn expected_schema_hashes(version: &str) -> Option<(&'static str, &'static s
         "codex-cli 0.162.0-alpha.2" => {
             Some((V162_STABLE_SCHEMA_SHA256, V162_EXPERIMENTAL_SCHEMA_SHA256))
         }
+        "codex-cli 0.162.0-alpha.17.2" => Some((
+            V162_17_STABLE_SCHEMA_SHA256,
+            V162_17_EXPERIMENTAL_SCHEMA_SHA256,
+        )),
         _ => None,
     }
 }
@@ -62,15 +71,57 @@ pub const ALLOWED_SERVER_REQUESTS: [&str; 6] = [
     "item/tool/call",
 ];
 
+/// Optional native-MCP lifecycle cleanup; not a required runtime feature.
+pub const OPTIONAL_METHODS: [&str; 3] = [
+    "mcpServer/tool/call",
+    "thread/loaded/list",
+    "thread/backgroundTerminals/list",
+];
+
 pub fn is_allowed_method(method: &str) -> bool {
-    // Optional native-MCP lifecycle cleanup; not a required runtime feature.
-    matches!(
-        method,
-        "mcpServer/tool/call" | "thread/loaded/list" | "thread/backgroundTerminals/list"
-    ) || RequiredMethod::ALL
-        .iter()
-        .any(|candidate| candidate.as_str() == method)
+    OPTIONAL_METHODS.contains(&method)
+        || RequiredMethod::ALL
+            .iter()
+            .any(|candidate| candidate.as_str() == method)
 }
+
+/// Every Codex method Wonder can send, with whether the runtime must offer it.
+/// `RpcClient::request` refuses anything else, so this is the complete set of
+/// request contracts startup verification has to protect.
+pub fn sent_methods() -> impl Iterator<Item = (&'static str, bool)> {
+    RequiredMethod::ALL
+        .iter()
+        .map(|method| (method.as_str(), true))
+        .chain(OPTIONAL_METHODS.iter().map(|method| (*method, false)))
+        .chain(PROJECT_METHODS.iter().map(|method| (*method, false)))
+}
+
+/// Codex notifications wonderd reads, with whether Wonder stops working
+/// without them. wonderd's `codex_notification_inventory_is_complete` test
+/// fails when its source starts reading a notification missing here.
+pub const CONSUMED_NOTIFICATIONS: [(&str, bool); 21] = [
+    ("turn/started", true),
+    ("turn/completed", true),
+    ("item/started", true),
+    ("item/completed", true),
+    ("item/agentMessage/delta", true),
+    ("serverRequest/resolved", true),
+    ("item/commandExecution/outputDelta", false),
+    ("item/fileChange/outputDelta", false),
+    ("item/fileChange/patchUpdated", false),
+    ("item/mcpToolCall/progress", false),
+    ("item/plan/delta", false),
+    ("item/reasoning/summaryPartAdded", false),
+    ("item/reasoning/summaryTextDelta", false),
+    ("item/reasoning/textDelta", false),
+    ("model/rerouted", false),
+    ("thread/compacted", false),
+    ("thread/goal/cleared", false),
+    ("thread/goal/updated", false),
+    ("thread/status/changed", false),
+    ("turn/diff/updated", false),
+    ("turn/plan/updated", false),
+];
 
 /// Native project metadata, allowed only on the normal-home Projects client.
 /// Older runtimes without these methods remain compatible; callers treat an
@@ -382,7 +433,7 @@ mod tests {
         assert_eq!(manifest["policy"]["allowUnknownVersions"], true);
         assert_eq!(
             manifest["policy"]["unknownVersionPolicy"],
-            "local-additive-schema-check-against-0.155.0-alpha.16.3"
+            "local-used-contract-check-against-0.155.0-alpha.16.3"
         );
         assert_eq!(
             manifest["codex"]["v162SchemaSha256"]["stable"],
@@ -395,6 +446,21 @@ mod tests {
         assert_eq!(
             expected_schema_hashes("codex-cli 0.162.0-alpha.2"),
             Some((V162_STABLE_SCHEMA_SHA256, V162_EXPERIMENTAL_SCHEMA_SHA256))
+        );
+        assert_eq!(
+            manifest["codex"]["v162_17SchemaSha256"]["stable"],
+            V162_17_STABLE_SCHEMA_SHA256
+        );
+        assert_eq!(
+            manifest["codex"]["v162_17SchemaSha256"]["experimental"],
+            V162_17_EXPERIMENTAL_SCHEMA_SHA256
+        );
+        assert_eq!(
+            expected_schema_hashes("codex-cli 0.162.0-alpha.17.2"),
+            Some((
+                V162_17_STABLE_SCHEMA_SHA256,
+                V162_17_EXPERIMENTAL_SCHEMA_SHA256
+            ))
         );
         assert_eq!(
             expected_schema_hashes("codex-cli 0.155.0-alpha.16.4"),
@@ -410,6 +476,8 @@ mod tests {
             (include_bytes!("../../../research/codex-app-server/0.155.0-alpha.16.3/experimental/codex_app_server_protocol.v2.schemas.json").as_slice(), ALPHA16_EXPERIMENTAL_SCHEMA_SHA256),
             (include_bytes!("../../../research/codex-app-server/0.162.0-alpha.2/stable/codex_app_server_protocol.v2.schemas.json").as_slice(), V162_STABLE_SCHEMA_SHA256),
             (include_bytes!("../../../research/codex-app-server/0.162.0-alpha.2/experimental/codex_app_server_protocol.v2.schemas.json").as_slice(), V162_EXPERIMENTAL_SCHEMA_SHA256),
+            (include_bytes!("../../../research/codex-app-server/0.162.0-alpha.17.2/stable/codex_app_server_protocol.v2.schemas.json").as_slice(), V162_17_STABLE_SCHEMA_SHA256),
+            (include_bytes!("../../../research/codex-app-server/0.162.0-alpha.17.2/experimental/codex_app_server_protocol.v2.schemas.json").as_slice(), V162_17_EXPERIMENTAL_SCHEMA_SHA256),
         ] {
             assert_eq!(hex::encode(Sha256::digest(schema)), expected);
         }
@@ -421,6 +489,7 @@ mod tests {
             (include_str!("../../../research/codex-app-server/0.155.0-alpha.9/experimental/codex_app_server_protocol.v2.schemas.json"), include_str!("../../../research/codex-app-server/0.155.0-alpha.9/experimental/ServerRequest.ts")),
             (include_str!("../../../research/codex-app-server/0.155.0-alpha.16.3/experimental/codex_app_server_protocol.v2.schemas.json"), include_str!("../../../research/codex-app-server/0.155.0-alpha.16.3/experimental/ServerRequest.ts")),
             (include_str!("../../../research/codex-app-server/0.162.0-alpha.2/experimental/codex_app_server_protocol.v2.schemas.json"), include_str!("../../../research/codex-app-server/0.162.0-alpha.2/experimental/ServerRequest.ts")),
+            (include_str!("../../../research/codex-app-server/0.162.0-alpha.17.2/experimental/codex_app_server_protocol.v2.schemas.json"), include_str!("../../../research/codex-app-server/0.162.0-alpha.17.2/experimental/ServerRequest.ts")),
         ] {
         let schema: Value = serde_json::from_str(schema).unwrap();
         let definitions = &schema["definitions"];

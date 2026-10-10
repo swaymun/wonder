@@ -172,13 +172,20 @@ public struct ResponseEditedFiles: Sendable {
     /// it was first edited. Each file keeps its responses' patches in order; line
     /// counts add up the edits rather than diffing the file's first and last state.
     public static func conversation(entries: [ChatFeedEntry], activeTurnIDs: Set<String>, turns: [String: ReadTurn] = [:]) -> Self? {
+        conversationAndLatest(entries: entries, activeTurnIDs: activeTurnIDs, turns: turns).conversation
+    }
+
+    /// Every saved edit in the conversation, and the edits of the latest
+    /// finished response alone (what Changes calls "Last response").
+    public static func conversationAndLatest(entries: [ChatFeedEntry], activeTurnIDs: Set<String>,
+                                             turns: [String: ReadTurn] = [:]) -> (conversation: Self?, latest: Self?) {
         let footers = footers(entries: entries, activeTurnIDs: activeTurnIDs, turns: turns)
         let responses = entries.compactMap { footers[$0.id] }
-        guard let last = responses.last else { return nil }
+        guard let last = responses.last else { return (nil, nil) }
         var files: [ResponseEditedFile] = []
         var indices: [String: Int] = [:]
         for file in responses.flatMap(\.files) { merge(file, into: &files, indices: &indices) }
-        return Self(turnID: last.turnID, files: files)
+        return (Self(turnID: last.turnID, files: files), last)
     }
 }
 

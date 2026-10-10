@@ -721,171 +721,6 @@ export interface ComputerControlActionResponse {
   clipboardText?: string;
 }
 
-export interface TeachingCapability {
-  available: boolean;
-  action: "update-host" | "retry" | "none";
-  reason: string;
-  provider: string;
-  maxDurationSeconds: number;
-  maxEvents: number;
-  maxEvidenceBytes: number;
-}
-
-export type TeachingSessionState =
-  | "draft"
-  | "awaitingCaptureConsent"
-  | "starting"
-  | "recording"
-  | "reviewing"
-  | "skillDraft"
-  | "approvedVersion"
-  | "testing"
-  | "replayVerified"
-  | "testFailed"
-  | "cancelled"
-  | "interrupted"
-  | "expired"
-  | "unavailable";
-
-export interface StartTeachingSessionRequest {
-  clientRequestId: string;
-  conversationId: string;
-  computerSessionId: string;
-  controlLeaseId: string;
-  captureScope: "authenticated-remote-control";
-  outcome: string;
-}
-
-export type TeachingEventKind = "pointer" | "scroll" | "key" | "text" | "clipboard";
-
-export interface TeachingEvent {
-  sequence: number;
-  actionIndex: number;
-  kind: TeachingEventKind;
-  payload: Record<string, unknown>;
-  createdAt: string;
-}
-
-export interface TeachingSession {
-  id: string;
-  clientRequestId: string;
-  ownerDeviceId: string;
-  hostInstallationId: string;
-  botId: string;
-  conversationId: string;
-  computerSessionId: string | null;
-  controlLeaseId: string | null;
-  state: TeachingSessionState;
-  captureScope: string;
-  captureProvider: string;
-  outcome: string;
-  name: string | null;
-  description: string | null;
-  goal: string | null;
-  inputSchema: Record<string, unknown> | null;
-  prerequisites: string | null;
-  steps: string | null;
-  resultChecks: string | null;
-  failureReason: string | null;
-  revision: number;
-  eventCount: number;
-  evidenceBytes: number;
-  contentHash: string | null;
-  createdAt: string;
-  updatedAt: string;
-  startedAt: string | null;
-  endedAt: string | null;
-  expiresAt: string | null;
-  events: TeachingEvent[];
-  capability: TeachingCapability;
-}
-
-export interface TeachingRevisionRequest { expectedRevision: number }
-export interface OptionalTeachingRevisionRequest { expectedRevision?: number | null }
-
-export interface ReviewTeachingSessionRequest {
-  expectedRevision: number;
-  name: string;
-  description: string;
-  goal: string;
-  inputSchema: Record<string, unknown>;
-  prerequisites: string;
-  steps: string;
-  resultChecks: string;
-}
-
-export interface SaveBotSkillVersionRequest {
-  clientRequestId: string;
-  expectedRevision: number;
-  slug?: string | null;
-}
-
-export interface BotSkillVersion {
-  id: string;
-  version: number;
-  sourceSessionId: string;
-  contentHash: string;
-  inputSchema: Record<string, unknown>;
-  verificationState: "unverified" | "structurallyVerified" | "fixtureVerified" | "replayVerified" | "testFailed";
-  createdAt: string;
-}
-
-export interface BotSkill {
-  id: string;
-  botId: string;
-  slug: string;
-  name: string;
-  description: string;
-  state: "draft" | "active" | "archived";
-  activeVersion: number | null;
-  discoverability: "bot-private";
-  versions: BotSkillVersion[] | null;
-}
-
-export interface BotSkillListResponse {
-  capability: TeachingCapability;
-  skills: BotSkill[];
-}
-
-export interface SaveBotSkillVersionResponse {
-  skill: BotSkill;
-  version: BotSkillVersion;
-  teachingSession: TeachingSession;
-}
-
-export interface RunBotSkillFixtureTestRequest {
-  clientRequestId: string;
-  contentHash: string;
-  inputSchema: Record<string, unknown>;
-  inputs: Record<string, unknown>;
-  workingDirectory?: string | null;
-}
-
-export interface BotSkillFixtureTestReceipt {
-  id: string;
-  clientRequestId: string;
-  ownerDeviceId: string;
-  botId: string;
-  skillId: string;
-  version: number;
-  contentHash: string;
-  inputSchemaHash: string;
-  inputSchema: Record<string, unknown>;
-  inputs: Record<string, unknown>;
-  workingDirectory: string;
-  provider: "deterministic-local";
-  executionKind: "deterministicFixture";
-  status: "succeeded" | "failed";
-  verificationState: "fixtureVerified" | "testFailed";
-  artifactPath: string | null;
-  artifactHash: string | null;
-  artifactBytes: number;
-  evidence: Record<string, unknown>;
-  failureReason: string | null;
-  createdAt: string;
-  completedAt: string;
-}
-
 /** The loss-minimized event carried in the legacy activity envelope while
  * older clients still consume WonderEvent. */
 export interface ConversationThreadItemUpsertEvent {
@@ -1018,8 +853,9 @@ export interface ProjectsResponse {
   families: Array<{ family: AgentFamily; available: boolean }>;
   /** 1: the host accepts `claudeApproval` and `planMode` and reports `pinned`. */
   modesVersion: 1;
-  /** 1: Codex archive/restore changes the provider session and reconciles desktop archives. */
-  archiveVersion?: 1;
+  /** 1: Codex archive/restore changes the provider session and reconciles desktop archives.
+   *  2: also archives Claude Code threads in Wonder only, and lists archived threads. */
+  archiveVersion?: 1 | 2;
   /** Attached, pinned threads of included projects, most recent activity first, at most 50. */
   pinned: PinnedProjectThread[];
 }
@@ -1051,6 +887,8 @@ export interface ProjectThreadSummary {
   hasUnread: boolean;
   isWorking: boolean;
 }
+/** GET /api/v1/projects/{projectId}/threads/archived: Codex-archived and Wonder-archived (Claude Code) threads, newest first. */
+export interface ArchivedProjectThreadsPage { threads: ProjectThreadSummary[]; partial: ProjectPartialFailure[] }
 export interface ProjectThreadsPage { threads: ProjectThreadSummary[]; nextCursor: string | null; partial: ProjectPartialFailure[] }
 export interface AttachProjectThreadRequest { reference: string }
 /** Copies a started thread, through `lastTurnId` when given, into a new thread. */

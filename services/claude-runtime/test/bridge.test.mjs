@@ -98,14 +98,13 @@ test("resumed sessions cannot expose or invoke the retired computer tool", async
 
 // Catalog labels must describe actual execution without changing saved model or
 // MCP identities. Older SDKs and unfamiliar future IDs keep their runtime label.
-test("model labels use resolved versions while preserving selections and pinned Haiku", async t => {
+test("model labels use resolved versions while preserving selections", async t => {
   const f = await fixture(t);
   const cases = [
     ["opus", "claude-opus-5-5", "Opus", "Opus 5.5"],
     ["sonnet", "claude-sonnet-5", "Sonnet", "Sonnet 5"],
-    ["haiku", "claude-haiku-9", "Haiku", "Haiku 4.5"],
+    ["haiku", "claude-haiku-9", "Haiku", "Haiku 9"],
     ["claude-fable-5-1[1m]", "claude-fable-5-1", "Fable", "Fable 5.1"],
-    ["claude-opus-4-1-20250805", undefined, "Opus", "Opus 4.1"],
     ["claude-sonnet-5-20260901", undefined, "Sonnet", "Sonnet 5"],
     ["legacy-alias", undefined, "Legacy model", "Legacy model"],
     ["future-alias", "claude-next-special", "Next special", "Next special"],
@@ -115,8 +114,7 @@ test("model labels use resolved versions while preserving selections and pinned 
     ...cases.map(([id, resolvedModel, name]) => ({ id, resolvedModel, name, efforts: ["low", "high"] })),
   ] });
   const { data } = await f.bridge.request("model/list", {});
-  assert.equal(data.length, cases.length);
-  assert.equal(data[0].id, "claude:haiku");
+  assert.deepEqual(data.map(m => m.id), cases.map(([id]) => `claude:${id}`));
   for (const [id, , , expected] of cases) {
     const model = data.find(m => m.id === `claude:${id}`);
     assert.equal(model.model, `claude:${id}`);
@@ -124,6 +122,24 @@ test("model labels use resolved versions while preserving selections and pinned 
     assert.deepEqual(model.supportedReasoningEfforts.map(e => e.reasoningEffort), ["low", "high"]);
   }
   assert.equal(f.inputs.length, 0);
+});
+
+// Contract: the picker follows Claude Code's catalog order and offers only the
+// newest version of each family. The catalog is the one Claude Agent SDK
+// 0.3.295 reported on 2026-10-09 (measured, no prompt sent).
+test("model list is Opus, Fable, Sonnet, Haiku with no superseded Haiku 4.5", async t => {
+  const f = await fixture(t);
+  f.bridge.inspect = async () => ({ models: [
+    { id: "default", resolvedModel: "claude-opus-5-5", name: "Default (recommended)", efforts: ["high"] },
+    { id: "opus", resolvedModel: "claude-opus-5-5", name: "Opus", efforts: ["high"] },
+    { id: "claude-fable-5-1[1m]", resolvedModel: "claude-fable-5-1", name: "Fable", efforts: ["high"] },
+    { id: "sonnet", resolvedModel: "claude-sonnet-5-5", name: "Sonnet", efforts: ["high"] },
+    { id: "haiku", resolvedModel: "claude-haiku-5-5", name: "Haiku", efforts: ["high"] },
+    { id: "claude-haiku-4-5-20251001", resolvedModel: "claude-haiku-4-5-20251001", name: "Haiku 4.5", efforts: [] },
+  ] });
+  const { data } = await f.bridge.request("model/list", {});
+  assert.deepEqual(data.map(m => m.displayName), ["Opus 5.5", "Fable 5.1", "Sonnet 5.5", "Haiku 5.5"]);
+  assert.deepEqual(data.map(m => m.id), ["claude:opus", "claude:claude-fable-5-1[1m]", "claude:sonnet", "claude:haiku"]);
 });
 
 test("connector labels strip the Claude account prefix without changing MCP identity", async t => {
@@ -166,7 +182,8 @@ test("duplicate delivery executes once and commits the terminal receipt before p
   assert.equal(f.frames.filter(e => e.method === "turn/completed").length, 1);
   const restarted = await new Sessions(join(f.root, "sessions")).initialize();
   assert.equal(restarted.get(f.thread.id).turns[0].status, "completed");
-  assert.equal(f.capturedOptions[0].model, "claude-haiku-4-5-20251001");
+  // The "haiku" alias follows Claude Code to its current Haiku.
+  assert.equal(f.capturedOptions[0].model, "haiku");
   // Bots have no per-task Stop, so an interrupt keeps its default (stop everything).
   assert.ok(!("perTaskStopAffordance" in f.capturedOptions[0]));
 });

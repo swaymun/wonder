@@ -348,6 +348,15 @@ final class ActivityPresentationTests: XCTestCase {
         XCTAssertTrue(entries[0].isActivity)
     }
 
+    func testPartialAnswerStaysAnswerTextBetweenWork() {
+        // Codex 0.162.0-alpha.17 labels answer text that more tools may follow.
+        let partial = row("partial", type: "agentMessage", payload: ["phase": .string("partial_answer")])
+        XCTAssertFalse(partial.isCommentary)
+        let entries = ChatFeedEntry.grouping([row("a", type: "commandExecution"), partial, row("b", type: "webSearch")])
+        XCTAssertEqual(entries.count, 3)
+        XCTAssertFalse(entries[1].isActivity)
+    }
+
     func testThinkingOnlyExistsWhileItsTurnAndItemAreActive() {
         let thinking = row("thinking", type: "reasoning", state: "streaming")
         XCTAssertTrue(ChatFeedEntry.grouping([thinking]).isEmpty)

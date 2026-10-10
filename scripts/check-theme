@@ -13,6 +13,8 @@ the theme. Elsewhere in the app:
 2. A type whose body builds a `List` or `Form` applies `.wonderGroupedStyle()`.
 3. A type that opens a `NavigationStack` (a sheet or cover) applies `.wonderPage()` or
    `.wonderGroupedStyle()`, so the sheet takes the theme's page and photo.
+4. No `.borderedProminent`: it labels in white over the theme's tint, which is
+   the near-white text colour on dark themes. Use `.buttonStyle(.wonderProminent)`.
 
 A line that must keep a system colour or needs no theming says why with a
 `// theme-exempt: <reason>` comment on that line (for 2 and 3, on the List, Form or
@@ -38,6 +40,7 @@ COLOUR = re.compile(
 )
 TYPE = re.compile(r"^(?:@MainActor )?(?:private |fileprivate )?(?:final )?(?:struct|class|enum|extension) (\w+)")
 GROUPED = re.compile(r"\b(?:List|Form)\s*(?:\{|\()")
+PROMINENT = re.compile(r"\.borderedProminent\b")
 NAV = re.compile(r"\bNavigationStack\s*(?:\{|\()")
 EXEMPT = "theme-exempt:"
 
@@ -66,6 +69,9 @@ def check(path):
         if COLOUR.search(code) and EXEMPT not in line:
             problems.append(f"{rel}:{number}: hard-coded system colour; use a WonderTheme token "
                             f"(theme.page, theme.surface, theme.chip, theme.text, theme.textUIColor, theme.rule)")
+        if PROMINENT.search(code) and EXEMPT not in line:
+            problems.append(f"{rel}:{number}: .borderedProminent hides its label on dark themes; "
+                            f"use .buttonStyle(.wonderProminent)")
     for name, start, body in blocks(lines):
         text = "\n".join(line for _, line in body)
         for pattern, needs, fix in (

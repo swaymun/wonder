@@ -1,9 +1,11 @@
 // Theme palette data. Classic palettes use the published colours of widely used
 // editor themes (VS Code's Dark/Light Modern, One Dark Pro, Dracula, Monokai,
 // Solarized, Nord, Gruvbox, Tokyo Night, Catppuccin, GitHub, Night Owl, Rosé
-// Pine); a few secondary-text and comment colours are lightened so every theme
-// keeps WCAG AA. The photo themes are Wonder's own. Keep WonderThemeTests green
-// when editing a palette.
+// Pine) and the MIT-licensed Apothecary Diary VS Code theme by Matheus
+// Montemurro (Jinshi palette as "Apothecary", Maomao palette as "Herbalist";
+// notice in ThemeCredits); a few secondary-text and comment colours are adjusted
+// so every theme keeps WCAG AA. The photo themes are Wonder's own. Keep
+// WonderThemeTests green when editing a palette.
 import Foundation
 
 extension WonderThemeCatalog {
@@ -148,6 +150,38 @@ extension WonderThemeCatalog {
                 codeBackground: 0x16141F, keyword: 0x3E8FB0, string: 0xF6C177, number: 0xEBBCBA,
                 comment: 0x6E6A86, type: 0x9CCFD8, function: 0xEBBCBA, punctuation: 0x908CAA),
             background: nil),
+        WonderThemeSpec(id: "apothecary-dark", name: "Apothecary Dark", scheme: .dark,
+            light: nil,
+            dark: ThemePalette(
+                background: 0x2A1B3D, sidebar: 0x1F1129, agentBubble: 0x36254C, userBubble: 0x4A3266,
+                primaryText: 0xF4F1F8, secondaryText: 0xC4B8D6, separator: 0x5A4A6B, accent: 0xB794D1,
+                codeBackground: 0x1F1129, keyword: 0xB794D1, string: 0xF4D03F, number: 0xD19A66,
+                comment: 0x8B5FBF, type: 0x98C379, function: 0x56B6C2, punctuation: 0xC678DD),
+            background: nil),
+        WonderThemeSpec(id: "apothecary-light", name: "Apothecary Light", scheme: .light,
+            light: ThemePalette(
+                background: 0xFDFCFF, sidebar: 0xEFE9F8, agentBubble: 0xF5F1FB, userBubble: 0xE6DAF5,
+                primaryText: 0x2A1B3D, secondaryText: 0x5E4E72, separator: 0xE8DCF0, accent: 0x6A4C93,
+                codeBackground: 0xF8F4FF, keyword: 0x6A4C93, string: 0x8C7820, number: 0xB8652A,
+                comment: 0x8B5FBF, type: 0x5A8B3A, function: 0x4A7B7C, punctuation: 0x4A7B7C),
+            dark: nil,
+            background: nil),
+        WonderThemeSpec(id: "herbalist-dark", name: "Herbalist Dark", scheme: .dark,
+            light: nil,
+            dark: ThemePalette(
+                background: 0x22322E, sidebar: 0x18201F, agentBubble: 0x2C3F3A, userBubble: 0x34524A,
+                primaryText: 0xF8F7F3, secondaryText: 0xB8C6BF, separator: 0x454E4E, accent: 0x7AAE8F,
+                codeBackground: 0x1A2323, keyword: 0x8CBCCF, string: 0xF4E5B0, number: 0xF2856B,
+                comment: 0x7AAE8F, type: 0xACDFB2, function: 0xAEE4CE, punctuation: 0x89DDFF),
+            background: nil),
+        WonderThemeSpec(id: "herbalist-light", name: "Herbalist Light", scheme: .light,
+            light: ThemePalette(
+                background: 0xF8F7F3, sidebar: 0xE8E6DF, agentBubble: 0xFFFFFF, userBubble: 0xDCEBE1,
+                primaryText: 0x22322E, secondaryText: 0x4F5F59, separator: 0xDDD9D0, accent: 0x1A5D4A,
+                codeBackground: 0xF0EFEB, keyword: 0x4A7A9B, string: 0xA67A2B, number: 0xB85C32,
+                comment: 0x5E8A70, type: 0x1A5D4A, function: 0x1A5D4A, punctuation: 0x22322E),
+            dark: nil,
+            background: nil),
         WonderThemeSpec(id: "misty-forest", name: "Misty Forest", scheme: .light,
             light: ThemePalette(
                 background: 0xE9EEEA, sidebar: 0xDBE3DD, agentBubble: 0xF6F8F6, userBubble: 0xDCE8DF,
@@ -172,6 +206,14 @@ extension WonderThemeCatalog {
                 comment: 0x7A6454, type: 0x2E6E73, function: 0x4A5BA0, punctuation: 0x3A2418),
             dark: nil,
             background: ThemeBackground(asset: "ThemeBackgroundDunes", scrim: 0.74, pixelRange: 99...245)),
+        WonderThemeSpec(id: "desert-dunes-night", name: "Desert Dunes Night", scheme: .dark,
+            light: nil,
+            dark: ThemePalette(
+                background: 0x1B1622, sidebar: 0x0B080F, agentBubble: 0x272031, userBubble: 0x3B2E2B,
+                primaryText: 0xF3E9DC, secondaryText: 0xC4B5A5, separator: 0x35293B, accent: 0xF0A35E,
+                codeBackground: 0x15111B, keyword: 0xF28FB8, string: 0xF2B880, number: 0xE6C07B,
+                comment: 0x9F918A, type: 0x7FC8C8, function: 0x9AB0F0, punctuation: 0xF3E9DC),
+            background: ThemeBackground(asset: "ThemeBackgroundDunesNight", scrim: 0.8, pixelRange: 4...238)),
         WonderThemeSpec(id: "geometric", name: "Geometric", scheme: .dark,
             light: nil,
             dark: ThemePalette(
@@ -180,5 +222,46 @@ extension WonderThemeCatalog {
                 codeBackground: 0x0F1022, keyword: 0xC4A1FF, string: 0x9EE6B8, number: 0xF5B98A,
                 comment: 0x8F93BD, type: 0x7ED6F0, function: 0x9AB4FF, punctuation: 0xE8E9F8),
             background: ThemeBackground(asset: "ThemeBackgroundGeometric", scrim: 0.74, pixelRange: 61...139)),
+    ]
+}
+
+/// Notices for palettes derived from others' work, shown in Settings →
+/// Acknowledgements. A derived palette keeps its source's notice here.
+public enum ThemeCredits {
+    public struct Credit: Sendable {
+        public let title: String
+        public let detail: String
+        public let themeIDs: [String]
+        public let license: String
+    }
+    public static let all: [Credit] = [
+        Credit(title: "Apothecary Diary theme", detail: "Colors of Apothecary and Herbalist · MIT",
+               themeIDs: ["apothecary-dark", "apothecary-light", "herbalist-dark", "herbalist-light"],
+               license: """
+            The Apothecary and Herbalist themes adapt colours from the Apothecary Diary \
+            theme for Visual Studio Code (github.com/montemurro19/apothecary-diary-theme).
+
+            MIT License
+
+            Copyright (c) 2025 Matheus Montemurro
+
+            Permission is hereby granted, free of charge, to any person obtaining a copy
+            of this software and associated documentation files (the "Software"), to deal
+            in the Software without restriction, including without limitation the rights
+            to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+            copies of the Software, and to permit persons to whom the Software is
+            furnished to do so, subject to the following conditions:
+
+            The above copyright notice and this permission notice shall be included in all
+            copies or substantial portions of the Software.
+
+            THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+            IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+            FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+            AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+            LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+            OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+            SOFTWARE.
+            """),
     ]
 }

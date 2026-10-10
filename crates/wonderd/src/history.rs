@@ -1638,23 +1638,71 @@ pub(super) async fn history_activity(
         }
     }
     // A Claude session open in Claude Code in a terminal keeps Wonder's
-    // messages waiting; the desktop app's chats are taken over on send.
-    let open_elsewhere = match state.store.project_conversation(&conversation).await {
+    // messages waiting. The desktop app's chats are taken over on send, which
+    // ends background work still running in the app's process: the phone says
+    // so before sending (`tasksOnMac`).
+    let (open_elsewhere, tasks_on_mac) = match state.store.project_conversation(&conversation).await
+    {
         Ok(Some(stored)) if AgentFamily::issuing_thread(&thread) == AgentFamily::Claude => {
             match stored.native_session_id {
-                Some(native) => crate::desktop_activity::claude_open_in_terminal(&native).await,
-                None => false,
+                Some(native) => {
+                    let terminal = crate::desktop_activity::claude_open_in_terminal(&native).await;
+                    let tasks = !terminal
+                        && !status.running_elsewhere
+                        && crate::desktop_activity::claude_live_sessions()
+                            .await
+                            .contains_key(&native)
+                        && tasks_running_on_mac(&runtime, &thread).await;
+                    (terminal, tasks)
+                }
+                None => (false, false),
             }
         }
-        _ => false,
+        _ => (false, false),
     };
+    // Claude can add to a turn after it ended (its own reply when a background
+    // task finishes); the item count lets an open screen notice that.
+    let items = latest
+        .and_then(|turn| turn.get("itemCount"))
+        .and_then(serde_json::Value::as_u64);
     Json(serde_json::json!({
         "latestTurnId": id,
         "latestTurnStatus": status.status,
+        "latestTurnItems": items,
         "runningElsewhere": status.running_elsewhere,
         "openElsewhere": open_elsewhere,
+        "tasksOnMac": tasks_on_mac,
     }))
     .into_response()
+}
+
+/// Whether the desktop app's process for this chat still runs agent tasks,
+/// commands or monitors. Its session record cannot tell (Claude Code 2.1.295
+/// reports "idle" while a background command runs); the bridge reads them
+/// from the transcript.
+async fn tasks_running_on_mac(runtime: &wonder_app_server::RpcClient, thread: &str) -> bool {
+    let Ok(response) = runtime
+        .request(
+            "thread/backgroundTasks/list",
+            serde_json::json!({"threadId": thread}),
+        )
+        .await
+    else {
+        return false;
+    };
+    response
+        .result
+        .as_ref()
+        .and_then(|result| result.get("data"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tasks| {
+            tasks.iter().any(|task| {
+                task.get("runningElsewhere")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                    && task.get("kind").and_then(serde_json::Value::as_str) != Some("session")
+            })
+        })
 }
 
 /// The receipt acknowledges a refresh job, never completed hydration. Readers

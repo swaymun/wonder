@@ -114,6 +114,7 @@ apps/ios/Wonder/ManagementViews.swift
 apps/ios/Wonder/NativeChats.swift
 apps/ios/Wonder/NewChatView.swift
 apps/ios/Wonder/PhoneIdentity.swift
+apps/ios/Wonder/PrivacyInfo.xcprivacy
 apps/ios/Wonder/ProjectViews.swift
 apps/ios/Wonder/ProjectWidgetSnapshotPublisher.swift
 apps/ios/Wonder/ProjectsModel.swift
@@ -135,8 +136,10 @@ apps/ios/WonderDiagnosticsTests/WonderDiagnosticsTests.swift
 apps/ios/WonderDiagnosticsTests/WorkspacePreviewPolicyTests.swift
 apps/ios/WonderNotificationService/Info.plist
 apps/ios/WonderNotificationService/NotificationService.swift
+apps/ios/WonderNotificationService/PrivacyInfo.xcprivacy
 apps/ios/WonderNotificationService/WonderNotificationService.entitlements
 apps/ios/WonderShare/Info.plist
+apps/ios/WonderShare/PrivacyInfo.xcprivacy
 apps/ios/WonderShare/ShareViewController.swift
 apps/ios/WonderShare/WonderShare.entitlements
 apps/ios/WonderUITests/AutomationUITests.swift
@@ -144,6 +147,7 @@ apps/ios/WonderUITests/DeepLinkUITests.swift
 apps/ios/WonderUITests/WonderUITests.swift
 apps/ios/WonderUITests/WorkspacePreviewUITests.swift
 apps/ios/WonderWidget/Info.plist
+apps/ios/WonderWidget/PrivacyInfo.xcprivacy
 apps/ios/WonderWidget/ProjectWidgetSnapshot.swift
 apps/ios/WonderWidget/WonderProjectWidget.swift
 apps/ios/WonderWidget/WonderWidget.entitlements
@@ -157,7 +161,6 @@ apps/ios/control/scenarios/claude-command-blocks.wctl
 apps/ios/control/scenarios/codex-header-usage-unavailable.wctl
 apps/ios/control/scenarios/codex-header-usage.wctl
 apps/ios/control/scenarios/composer-draft.wctl
-apps/ios/control/scenarios/copy-folder-path.wctl
 apps/ios/control/scenarios/copy-markdown.wctl
 apps/ios/control/scenarios/copy-message.wctl
 apps/ios/control/scenarios/default-models.wctl
@@ -185,12 +188,13 @@ apps/menubar/README.md
 apps/menubar/Resources/Info.plist
 apps/menubar/Resources/WonderMenuIcon.pdf
 apps/menubar/Sources/WonderMenu/AppUpdates.swift
-apps/menubar/Sources/WonderMenu/FileAccess.swift
+apps/menubar/Sources/WonderMenu/ControlSession.swift
 apps/menubar/Sources/WonderMenu/HostStatus.swift
 apps/menubar/Sources/WonderMenu/NativeBridge.swift
 apps/menubar/Sources/WonderMenu/Pairing.swift
 apps/menubar/Sources/WonderMenu/Permissions.swift
 apps/menubar/Sources/WonderMenu/PrivacySettings.swift
+apps/menubar/Sources/WonderMenu/Providers.swift
 apps/menubar/Sources/WonderMenu/ServiceControls.swift
 apps/menubar/Sources/WonderMenu/Setup.swift
 apps/menubar/Tests/WonderMenuTests/MenuReadinessStateTests.swift
@@ -518,6 +522,7 @@ crates/wonderd/src/pm_tools.rs
 crates/wonderd/src/project_assignments.rs
 crates/wonderd/src/project_subagents.rs
 crates/wonderd/src/projects.rs
+crates/wonderd/src/provider_runtime.rs
 crates/wonderd/src/provider_switch.rs
 crates/wonderd/src/provider_switch_tests.rs
 crates/wonderd/src/providers.rs
@@ -626,6 +631,9 @@ research/codex-app-server/0.155.0-alpha.9/stable/ClientRequest.ts
 research/codex-app-server/0.155.0-alpha.9/stable/ServerNotification.ts
 research/codex-app-server/0.155.0-alpha.9/stable/ServerRequest.ts
 research/codex-app-server/0.155.0-alpha.9/stable/codex_app_server_protocol.v2.schemas.json
+research/codex-app-server/0.162.0-alpha.17.2/experimental/ServerRequest.ts
+research/codex-app-server/0.162.0-alpha.17.2/experimental/codex_app_server_protocol.v2.schemas.json
+research/codex-app-server/0.162.0-alpha.17.2/stable/codex_app_server_protocol.v2.schemas.json
 research/codex-app-server/0.162.0-alpha.2/experimental/ServerRequest.ts
 research/codex-app-server/0.162.0-alpha.2/experimental/codex_app_server_protocol.v2.schemas.json
 research/codex-app-server/0.162.0-alpha.2/stable/codex_app_server_protocol.v2.schemas.json
@@ -635,6 +643,7 @@ scripts/build-ios-performance.sh
 scripts/build-menu-icon.py
 scripts/build-tunnel.sh
 scripts/check-ios-profiles.py
+scripts/check-privacy-manifests
 scripts/check-theme
 scripts/ci-changes
 scripts/clean-build-artifacts.py

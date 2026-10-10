@@ -46,6 +46,14 @@ enum MessageFont: String, CaseIterable, Identifiable, Sendable {
         default: nil
         }
     }
+    /// The license shipped beside a bundled family, in `Fonts/`.
+    var licenseFile: String? {
+        switch self {
+        case .inter: "Inter-OFL"
+        case .atkinson: "AtkinsonHyperlegible-OFL"
+        default: nil
+        }
+    }
 }
 
 /// The typeface for code blocks, file sources and diffs.
@@ -65,6 +73,13 @@ enum CodeFont: String, CaseIterable, Identifiable, Sendable {
         case .system: nil
         case .jetBrains: "JetBrainsMono-Regular"
         case .plex: "IBMPlexMono-Regular"
+        }
+    }
+    var licenseFile: String? {
+        switch self {
+        case .system: nil
+        case .jetBrains: "JetBrainsMono-OFL"
+        case .plex: "IBMPlexMono-OFL"
         }
     }
 }
@@ -177,17 +192,22 @@ enum BundledFonts {
         for face in faces where UIFont(name: face, size: 12) == nil {
             preconditionFailure("Bundled font \(face) did not register")
         }
+        // Every bundled family ships its license (OFL requires it) and shows it in the app.
+        let bundled = MessageFont.allCases.filter { $0.face != nil }.map { ($0.name, $0.licenseFile) }
+            + CodeFont.allCases.filter { $0.face != nil }.map { ($0.name, $0.licenseFile) }
+        for (family, file) in bundled where file.flatMap(licenseText) == nil {
+            preconditionFailure("Bundled font \(family) has no license text; add its license file to Fonts/ and licenseFile")
+        }
         #endif
     }()
     static func registerIfNeeded() { _ = registered }
 
-    /// Each bundled family and its license, for Settings → Font → Font licenses.
-    static let licenses: [(family: String, file: String)] = [
-        ("Inter", "Inter-OFL"),
-        ("Atkinson Hyperlegible", "AtkinsonHyperlegible-OFL"),
-        ("JetBrains Mono", "JetBrainsMono-OFL"),
-        ("IBM Plex Mono", "IBMPlexMono-OFL"),
-    ]
+    /// Each bundled family and its license, for Settings → Acknowledgements and
+    /// a font's long-press menu. Derived from the fonts, so none is left out.
+    static var licenses: [(family: String, file: String)] {
+        MessageFont.allCases.compactMap { font in font.licenseFile.map { (font.name, $0) } }
+            + CodeFont.allCases.compactMap { font in font.licenseFile.map { (font.name, $0) } }
+    }
     static func licenseText(_ file: String) -> String? {
         Bundle.main.url(forResource: file, withExtension: "txt", subdirectory: "Fonts")
             .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
@@ -217,7 +237,7 @@ struct FontPickerView: View {
             Section {
                 ForEach(MessageFont.allCases) { option in
                     row(id: "message-font:\(option.rawValue)", title: option.name, detail: option.detail,
-                        sample: WonderTypography(message: option).font(.body),
+                        sample: WonderTypography(message: option).font(.body), licenseFile: option.licenseFile,
                         selected: (MessageFont(rawValue: messageID) ?? .system) == option) { messageID = option.rawValue }
                 }
             } header: {
@@ -225,27 +245,41 @@ struct FontPickerView: View {
             } footer: {
                 Text("Used for messages, the composer and Markdown files. Every font follows your text size setting.")
             }
-            Section("Code") {
+            Section {
                 ForEach(CodeFont.allCases) { option in
                     row(id: "code-font:\(option.rawValue)", title: option.name, detail: nil,
-                        sample: WonderTypography(code: option).codeFont(.body),
+                        sample: WonderTypography(code: option).codeFont(.body), licenseFile: option.licenseFile,
                         selected: (CodeFont(rawValue: codeID) ?? .system) == option) { codeID = option.rawValue }
                 }
-            }
-            Section {
-                NavigationLink("Font licenses") { FontLicensesView() }
-                    .accessibilityIdentifier("font-licenses")
+            } header: {
+                Text("Code")
+            } footer: {
+                Text("Touch and hold a font to read its license.")
             }
         }
         .wonderGroupedStyle()
         .navigationTitle("Font")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("font-picker")
+        .sheet(item: $license) { license in
+            NavigationStack {
+                LicenseTextView(title: license.family, text: BundledFonts.licenseText(license.file))
+                    .toolbar { Button("Done") { self.license = nil }.accessibilityIdentifier("font-license-done") }
+            }
+        }
     }
 
-    private func row(id: String, title: String, detail: String?, sample: Font, selected: Bool,
+    private struct LicenseTarget: Identifiable {
+        let family: String
+        let file: String
+        var id: String { file }
+    }
+    @State private var license: LicenseTarget?
+
+    private func row(id: String, title: String, detail: String?, sample: Font, licenseFile: String?, selected: Bool,
                      choose: @escaping () -> Void) -> some View {
-        Button(action: choose) {
+        let show = { if let licenseFile { license = LicenseTarget(family: title, file: licenseFile) } }
+        return Button(action: choose) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(sample).foregroundStyle(.primary)
@@ -261,24 +295,32 @@ struct FontPickerView: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
         .accessibilityIdentifier(id)
+        .contextMenu {
+            if licenseFile != nil {
+                Button("License", systemImage: "doc.text", action: show).accessibilityIdentifier("font-license")
+            } else {
+                Text("Built into iOS")
+            }
+        }
+        .accessibilityActions { if licenseFile != nil { Button("License", action: show) } }
     }
 }
 
-/// The SIL Open Font License of each bundled font, as shipped in the app.
-struct FontLicensesView: View {
+/// One license as shipped in the app, selectable for copying.
+struct LicenseTextView: View {
+    let title: String
+    let text: String?
     var body: some View {
-        List {
-            ForEach(BundledFonts.licenses, id: \.family) { entry in
-                Section(entry.family) {
-                    Text(BundledFonts.licenseText(entry.file) ?? "License text unavailable.")
-                        .font(.footnote)
-                        .textSelection(.enabled)
-                }
-            }
+        ScrollView {
+            Text(text ?? "License text unavailable.")
+                .font(.footnote.monospaced())
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
         }
-        .wonderGroupedStyle()
-        .navigationTitle("Font licenses")
+        .wonderPage()
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
-        .accessibilityIdentifier("font-licenses-list")
+        .accessibilityIdentifier("license-text")
     }
 }

@@ -504,6 +504,9 @@ pub(crate) async fn observe(
         else {
             return Ok(None);
         };
+        if crate::projects::is_project(state, &parent_conversation_id).await {
+            return Ok(None);
+        }
         if !route_matches_parent(state, &route, &parent_conversation_id, thread_id).await? {
             return Err("Parent activity runtime is not attached to its conversation".into());
         }
@@ -555,6 +558,13 @@ pub(crate) async fn observe(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Unregistered child parent is not a Wonder conversation".to_owned())?;
+    // Claude serves Bots and Projects from one runtime, so the route alone
+    // does not say which. A Project's agent tasks stay in its provider history
+    // and the parent's activity items; registering them as Bot children fails
+    // and would hold every later notification behind this one.
+    if crate::projects::is_project(state, &parent_conversation_id).await {
+        return Ok(None);
+    }
     if !route_matches_parent(state, &route, &parent_conversation_id, &parent_thread_id).await? {
         return Err("Unregistered child runtime is not attached to its parent conversation".into());
     }

@@ -1996,6 +1996,42 @@ mod tests {
             .is_some());
     }
 
+    // The phone's Guide button posts to the steer route; a Project Codex
+    // thread's running turn takes it, a Project Claude thread's refuses it.
+    #[tokio::test]
+    async fn phone_guide_steers_a_project_codex_turn_and_refuses_claude() {
+        let fx = fx().await;
+        for (id, family) in [
+            ("codex", AgentFamily::Codex),
+            ("claude", AgentFamily::Claude),
+        ] {
+            add_thread(&fx, id, id, family, "workspace", "2026-01-01T00:00:00Z").await;
+            let running = queue(&fx, id, "busy").await;
+            let (thread, turn) = (format!("{id}-thread"), format!("{id}-turn"));
+            fx.state
+                .store
+                .update_message_delivery(&running.id, "streaming", Some(&thread), Some(&turn))
+                .await
+                .unwrap();
+            let (status, body) = crate::permission_modes::tests::call(
+                &fx.state,
+                "POST",
+                &format!("/api/v1/conversations/{id}/turns/{turn}/steer"),
+                json!({"deviceId":"owner","clientMessageId":fresh(),"body":"use the new API","expectedTurnId":turn}),
+            )
+            .await;
+            if family == AgentFamily::Codex {
+                assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+                let guides = fx.state.store.pending_guides().await.unwrap();
+                assert!(guides
+                    .iter()
+                    .any(|(m, t)| m.conversation_id == id && t == &turn));
+            } else {
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            }
+        }
+    }
+
     // The Guide path used to serve Bot chats only; a Project thread's running
     // turn must take the steer through its own provider runtime.
     #[tokio::test]

@@ -1288,7 +1288,7 @@ private struct ComputerConnectionSessionView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     FailureDetails("Computer view unavailable", message: failure)
                     Button("Try again") { Task { await sessionModel.retry() } }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.wonderProminent)
                         .disabled(sessionModel.isLoading)
                 }
                 .frame(maxWidth: 980, alignment: .leading)
@@ -1618,7 +1618,7 @@ struct ComputerSessionControls: View {
                             .frame(minWidth: sidePlacement ? 48 : nil, minHeight: 44)
                             .padding(.horizontal, sidePlacement ? 0 : 14)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.wonderProminent)
                         .buttonBorderShape(.capsule)
                         .disabled(!model.canTakeControl)
                         .accessibilityLabel("Take control")

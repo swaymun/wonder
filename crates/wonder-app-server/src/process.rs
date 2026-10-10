@@ -1091,6 +1091,25 @@ fn toml_string(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Opt-in check of the Codex ChatGPT actually ships on this Mac, without
+    /// the known-version hash shortcut: `cargo
+    /// test -p wonder-app-server installed_chatgpt_codex -- --ignored`.
+    /// `WONDER_CODEX_BIN` selects another binary.
+    #[tokio::test]
+    #[ignore = "needs the ChatGPT app's bundled Codex"]
+    async fn installed_chatgpt_codex_passes_the_contract_check() {
+        let binary = std::env::var("WONDER_CODEX_BIN").unwrap_or_else(|_| {
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex".into()
+        });
+        let binary = std::path::Path::new(&binary);
+        verify_generated_schemas(binary, None)
+            .await
+            .expect("installed Codex must pass the contract check without its hash");
+        verify_runtime(binary)
+            .await
+            .expect("installed Codex must pass full runtime verification");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn newer_runtime_uses_local_schema_contract_and_rejects_breakage() {

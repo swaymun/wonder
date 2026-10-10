@@ -52,7 +52,7 @@ def report(device, results, images):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--device", default="iphone", choices=["iphone", "duo"])
+    parser.add_argument("--device", default="iphone", choices=["iphone", "iphone-27", "duo"])
     parser.add_argument("--pr", type=int)
     args = parser.parse_args()
 

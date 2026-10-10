@@ -179,11 +179,12 @@ export class ToolPolicy {
       // Child work inherits the parent's selected model. In particular, Haiku
       // validation must not silently start a more expensive helper model.
       const { model, ...input } = event.tool_input;
-      // A child stays within the parent turn's owned lifetime. The SDK now
-      // defaults to background agents; that can leave the parent saying it is
-      // waiting after its result frame. Foreground agents still stream their
-      // own rows and can run alongside sibling tool calls.
-      result.updatedInput = { ...input, run_in_background: false };
+      // A Bot's child stays within the parent turn's owned lifetime: a
+      // background agent could leave the Bot saying it is waiting after its
+      // result frame. A Project follows Claude Code, whose agents may run in
+      // the background while the conversation takes new messages; the bridge
+      // keeps the process up for them (see ClaudeBridge.linger).
+      result.updatedInput = this.project && !this.internal ? input : { ...input, run_in_background: false };
     }
     return { hookSpecificOutput: result };
   }

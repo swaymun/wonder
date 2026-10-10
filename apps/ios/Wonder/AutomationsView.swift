@@ -75,8 +75,25 @@ private struct AutomationEditorContext: Identifiable {
     let item: AutomationItem?
 }
 
+/// Automations for one Mac, opened from its section of the sidebar.
+struct AutomationsSheet: View {
+    @ObservedObject var model: ConnectionModel
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack { // theme-exempt: AutomationsView applies wonderGroupedStyle
+            AutomationsView(model: model, title: "Automations on \(model.macName)")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }.accessibilityIdentifier("automations-done")
+                    }
+                }
+        }
+    }
+}
+
 struct AutomationsView: View {
     @ObservedObject var model: ConnectionModel
+    var title = "Automations"
     @State private var items: [AutomationItem] = []
     @State private var targetNames: [String: String] = [:]
     @State private var loadToken: UUID?
@@ -136,7 +153,7 @@ struct AutomationsView: View {
             }
         }
         .wonderGroupedStyle()
-        .navigationTitle("Automations")
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {

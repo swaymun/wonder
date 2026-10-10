@@ -44,7 +44,8 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
     }
     let permissions = PermissionModel()
     let pairing = PhonePairing()
-    let files = FileAccessModel()
+    let providers = ProviderControls()
+    let controlSession = ControlSessionObserver()
     private var lastState = Data()
     private var timer: Timer?
     private var commandBusy = false
@@ -66,6 +67,9 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
         if !setup.completed && setup.step == .finish { service.applyInitialLoginDefault() }
         if setup.completed { updates.start() }
         pairing.start()
+        providers.restartServices = { [weak self] in self?.service.restart() }
+        providers.refresh()
+        controlSession.start()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.publish() }
@@ -73,12 +77,11 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             while !Task.isCancelled {
                 refresh()
-                await files.load()
                 try? await Task.sleep(for: .seconds(3))
             }
         }
-        // A slow file-access scan must not delay permission recovery after an
-        // app update or a grant change in System Settings.
+        // Permission recovery after an app update or a grant change in System
+        // Settings keeps its own timer.
         Task { @MainActor in
             while !Task.isCancelled {
                 permissions.refresh()
@@ -133,8 +136,21 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
         case "download-update": NSWorkspace.shared.open(URL(string: "https://github.com/swaymun/wonder/releases")!)
         case "refresh": refresh(); await pairing.refresh()
         case "repair": service.repair()
-        case "sign-in": service.repair(signIn: true)
-        case "claude-sign-in": service.repair(signIn: true, claude: true)
+        case "provider-refresh": providers.refresh(maximumAge: command.enabled == true ? 0 : 30)
+        case "provider-sign-in", "provider-sign-out", "provider-set-up", "provider-cancel", "provider-reconnect":
+            guard let provider = command.key.flatMap(ProviderKind.init(rawValue:)) else { return }
+            switch command.action {
+            case "provider-sign-in": providers.signIn(provider)
+            case "provider-sign-out": providers.signOut(provider)
+            case "provider-set-up": providers.setUp(provider)
+            case "provider-reconnect": providers.reconnect(provider)
+            default: providers.cancel(provider)
+            }
+        case "stop-control":
+            // Revokes only the helper's current lease; it never changes the saved
+            // paired-device permission or starts another control session.
+            DistributedNotificationCenter.default().postNotificationName(
+                ControlSessionSignal.stop, object: nil, userInfo: nil, deliverImmediately: true)
         case "login":
             guard let enabled = command.enabled else { return }
             service.setLaunchAtLogin(enabled)
@@ -195,10 +211,6 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             if !opened {
                 commandError = "Open System Settings → Privacy & Security to manage Wonder’s access."
             }
-        case "review-folder", "decline-folder":
-            guard let item = files.requests.first(where: { $0.id == command.key }) else { return }
-            if command.action == "review-folder" { NSApp.activate(ignoringOtherApps: true); files.review(item) }
-            else { await files.decide(item, accepted: false) }
         default: commandError = "This settings action is unavailable. Reopen Wonder."
         }
     }
@@ -225,7 +237,8 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             "needsRepair": model.needsRepair, "remoteStatus": service.remoteState.presentation.title,
             "remoteDetail": service.remoteDetail, "canConnect": service.authURL != nil,
             "serviceBusy": service.busy, "serviceMessage": service.message ?? "",
-            "claudeAuthRequired": service.claudeAuthRequired,
+            "providers": providers.snapshot,
+            "controlActive": controlSession.active,
             "login": service.launchAtLogin, "loginMessage": service.loginMessage ?? "", "loginApproval": service.loginNeedsApproval,
             "allowControlFromPairedDevices": service.allowControlFromPairedDevices,
             "controlPreferencesMessage": service.controlPreferencesMessage ?? "",
@@ -243,9 +256,7 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
             "pairingFresh": pairing.refreshError == nil, "pairingMessage": pairing.message ?? "",
             "pending": pairing.pending.filter { $0.isValid(at: Date()) }.map { ["id": $0.id, "label": $0.label, "verification": $0.challenge.verification, "expiresAtMs": $0.challenge.expiresAtMs] as [String: Any] },
             "devices": pairing.devices.map { ["id": $0.id, "label": $0.label, "revoked": $0.revokedAt != nil, "lastSeen": $0.lastSeenAt ?? "", "pairedAt": $0.createdAt ?? ""] as [String: Any] },
-            "permissionDrag": PrivacySettings.dragRequest,
-            "filesBusy": files.busy, "filesMessage": files.message ?? "",
-            "fileRequests": files.requests.map { ["id": $0.id, "path": $0.path, "access": $0.access, "project": $0.useAsWorkingDirectory, "botName": files.snapshot?.botName ?? "Bot"] as [String: Any] }
+            "permissionDrag": PrivacySettings.dragRequest
         ]
         if let offer = pairing.offer {
             value["offer"] = ["id": offer.offerId, "url": offer.url, "origin": offer.origin, "code": offer.humanCode.uppercased(), "expired": pairing.expired, "expiresAtMs": offer.expiresAtMs, "qr": qrBytes] as [String: Any]
@@ -279,7 +290,7 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard updates.preparingInstall else {
-            service.cancelSetup(); pairing.stop()
+            service.cancelSetup(); pairing.stop(); providers.stop()
             return .terminateNow
         }
         guard let directory = service.serviceDirectory else {
@@ -294,7 +305,7 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
                 sender.reply(toApplicationShouldTerminate: false)
                 return
             }
-            service.cancelSetup(); pairing.stop()
+            service.cancelSetup(); pairing.stop(); providers.stop()
             // Prepare the host's exit marker before stopping its services. The
             // host acts on it only after the supervisor acknowledges shutdown.
             let ready = directory.appendingPathComponent("update-ready")

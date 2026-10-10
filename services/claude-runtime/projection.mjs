@@ -153,8 +153,11 @@ export function usageWindow(type, source, timestamp = Date.now()) {
 }
 
 export class TurnProjection {
-  constructor({ threadId, turnId, emit, onSession = () => {}, onUsage = () => {}, onChild = () => {}, internal = false, promptUuid = null }) {
-    Object.assign(this, { threadId, turnId, emit, onSession, onUsage, onChild, internal, promptUuid });
+  // A continuation adds to a turn that already ended, such as the reply Claude
+  // writes on its own when a background task finishes: its items join that
+  // turn under the same IDs history gives them, and it reports no turn end.
+  constructor({ threadId, turnId, emit, onSession = () => {}, onUsage = () => {}, onChild = () => {}, internal = false, promptUuid = null, continuation = false }) {
+    Object.assign(this, { threadId, turnId, emit, onSession, onUsage, onChild, internal, promptUuid, continuation });
     this.items = new Map(); this.textByMessage = new Map(); this.blocks = new Map(); this.agentTools = new Map();
     this.messageId = null; this.terminal = false; this.completedTexts = new Set();
   }
@@ -284,6 +287,7 @@ export class TurnProjection {
       if (item.type === "agentMessage") this.finishItem(item);
       else if (item.status === "inProgress") { item.success = false; item.error = { message: "Action did not return a confirmed result." }; this.finishItem(item); }
     }
+    if (this.continuation) return;
     this.result = { id: this.turnId, status, ...(this.structuredOutput === undefined ? {} : { structuredOutput: this.structuredOutput }), items: [...this.items.values()], error: error ? { message: String(error).slice(0, 2000) } : null };
     this.notify("turn/completed", { turn: this.result });
   }

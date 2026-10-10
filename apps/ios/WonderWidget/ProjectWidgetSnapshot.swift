@@ -1,18 +1,31 @@
 import Foundation
 
-/// The only data shared with WidgetKit: the last-used Mac and its recent
-/// Projects as navigation labels and opaque IDs, never message text, folder
-/// paths, credentials, or agent state.
+/// The only data shared with WidgetKit: the last-used Mac, its most recently
+/// active threads and its recent Projects as navigation labels and opaque IDs,
+/// never message text, folder paths, credentials, or agent state.
 struct ProjectWidgetSnapshot: Codable, Equatable, Sendable {
-    static let version = 2
+    static let version = 3
     static let widgetKind = "WonderProjectWidget"
     static let staleAfter: TimeInterval = 60 * 60
     static let maxBytes = 32 * 1024
     static let maxProjects = 8
+    static let maxThreads = 8
 
     struct Project: Codable, Equatable, Sendable, Identifiable {
         let id: String
         let name: String
+    }
+
+    /// A Project thread: opened by its Wonder conversation when it has one,
+    /// otherwise by its provider thread, which the app attaches on open.
+    struct Thread: Codable, Equatable, Sendable, Identifiable {
+        let projectID: String
+        let family: String
+        let nativeID: String?
+        let conversationID: String?
+        let title: String
+        let projectName: String
+        var id: String { conversationID ?? family + "-" + (nativeID ?? "") }
     }
 
     let schemaVersion: Int
@@ -22,14 +35,17 @@ struct ProjectWidgetSnapshot: Codable, Equatable, Sendable {
     let hostName: String
     /// That Mac's Projects, most recently used first.
     let projects: [Project]
+    /// That Mac's Project threads, most recently active first.
+    let threads: [Thread]
 
     init(savedAt: Date = Date(), hostID: String?, hostName: String,
-         projects: [Project]) {
+         projects: [Project], threads: [Thread] = []) {
         self.schemaVersion = Self.version
         self.savedAt = savedAt
         self.hostID = hostID
         self.hostName = hostName
         self.projects = projects
+        self.threads = threads
     }
 
     /// Validate after decoding as well as before writing: the shared container
@@ -37,7 +53,7 @@ struct ProjectWidgetSnapshot: Codable, Equatable, Sendable {
     func validated() -> Self? {
         guard schemaVersion == Self.version, savedAt.timeIntervalSince1970.isFinite else { return nil }
         guard let hostID, ProjectWidgetLink.validID(hostID) else {
-            return Self(savedAt: savedAt, hostID: nil, hostName: "Mac", projects: [])
+            return Self(savedAt: savedAt, hostID: nil, hostName: "Mac", projects: [], threads: [])
         }
         var seen = Set<String>()
         var safe: [Project] = []
@@ -46,7 +62,22 @@ struct ProjectWidgetSnapshot: Codable, Equatable, Sendable {
             guard ProjectWidgetLink.validID(project.id), seen.insert(project.id).inserted else { continue }
             safe.append(Project(id: project.id, name: Self.safeLabel(project.name, fallback: "Project")))
         }
-        return Self(savedAt: savedAt, hostID: hostID, hostName: Self.safeLabel(hostName, fallback: "Mac"), projects: safe)
+        var safeThreads: [Thread] = []
+        var seenThreads = Set<String>()
+        for thread in threads {
+            if safeThreads.count == Self.maxThreads { break }
+            guard ProjectWidgetLink.validID(thread.projectID), ["codex", "claude"].contains(thread.family),
+                  thread.conversationID.map(ProjectWidgetLink.validID) ?? true,
+                  thread.nativeID.map(ProjectWidgetLink.validID) ?? true,
+                  thread.conversationID != nil || thread.nativeID != nil,
+                  seenThreads.insert(thread.id).inserted else { continue }
+            safeThreads.append(Thread(projectID: thread.projectID, family: thread.family, nativeID: thread.nativeID,
+                                      conversationID: thread.conversationID,
+                                      title: Self.safeLabel(thread.title, fallback: "Thread"),
+                                      projectName: Self.safeLabel(thread.projectName, fallback: "Project")))
+        }
+        return Self(savedAt: savedAt, hostID: hostID, hostName: Self.safeLabel(hostName, fallback: "Mac"),
+                    projects: safe, threads: safeThreads)
     }
 
     func isStale(at date: Date) -> Bool {
@@ -96,6 +127,14 @@ enum ProjectWidgetLink {
         return url(path: "/hosts/\(hostID)/chats/\(chatID)", identity: identity)
     }
 
+    /// Opens a thread directly: its conversation, or its provider thread.
+    static func thread(hostID: String, thread: ProjectWidgetSnapshot.Thread, identity: ProjectWidgetIdentity) -> URL? {
+        if let conversation = thread.conversationID { return chat(hostID: hostID, chatID: conversation, identity: identity) }
+        guard validID(hostID), validID(thread.projectID), ["codex", "claude"].contains(thread.family),
+              let native = thread.nativeID, validID(native) else { return nil }
+        return url(path: "/hosts/\(hostID)/projects/\(thread.projectID)/threads/\(thread.family)/\(native)", identity: identity)
+    }
+
     static func validID(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.count <= 128 && value.utf8.allSatisfy {
             (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
@@ -113,7 +152,7 @@ enum ProjectWidgetLink {
 }
 
 enum ProjectWidgetSnapshotStore {
-    private static let fileName = "project-widget-snapshot-v2.json"
+    private static let fileName = "project-widget-snapshot-v3.json"
 
     static func containerURL(bundleIdentifier: String?) -> URL? {
         guard let identity = ProjectWidgetIdentity(bundleIdentifier: bundleIdentifier),

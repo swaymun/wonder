@@ -5,6 +5,10 @@ pub const REPLAY_MAX_EVENTS: i64 = 100_000;
 pub const REPLAY_MAX_BYTES: i64 = 128 * 1024 * 1024;
 const REPLAY_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const PRUNE_BATCH: i64 = 256;
+/// A notification waits here only until dispatch maps its turn (seconds) or a
+/// Group plan reads its completion (at most minutes). One a week old whose
+/// thread no conversation, message or goal knows will never be delivered.
+pub const ORPHANED_NOTIFICATION_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug)]
 pub struct ReplayStorageUsage {
@@ -51,6 +55,41 @@ impl Store {
         }
         tx.commit().await?;
         Ok(age_removed == PRUNE_BATCH as u64 || overflow)
+    }
+
+    /// Drops held App Server notifications older than the bound whose thread
+    /// was never bound to, or no longer belongs to, a conversation. Rows with a
+    /// non-numeric receipt time (not written by wonderd) are left alone.
+    pub async fn prune_orphaned_pending_notifications(
+        &self,
+        now_ms: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let cutoff = now_ms - ORPHANED_NOTIFICATION_MAX_AGE_MS;
+        let mut removed = 0;
+        loop {
+            let result = sqlx::query(
+                "DELETE FROM pending_app_server_notifications WHERE id IN (
+                   SELECT p.id FROM pending_app_server_notifications p
+                   WHERE p.received_at NOT GLOB '*[^0-9]*' AND p.received_at != ''
+                     AND CAST(p.received_at AS INTEGER) < ?
+                     AND (p.thread_id IS NULL OR p.thread_id NOT IN (
+                       SELECT codex_thread_id FROM conversations WHERE codex_thread_id IS NOT NULL
+                       UNION SELECT runtime_thread_id FROM runtime_bindings
+                       UNION SELECT codex_thread_id FROM messages WHERE codex_thread_id IS NOT NULL
+                       UNION SELECT thread_id FROM goal_threads
+                       UNION SELECT thread_id FROM subagent_ownership))
+                   LIMIT ?)",
+            )
+            .bind(cutoff)
+            .bind(PRUNE_BATCH)
+            .execute(&self.pool)
+            .await?;
+            removed += result.rows_affected();
+            if result.rows_affected() < PRUNE_BATCH as u64 {
+                return Ok(removed);
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     pub async fn replay_storage_usage(&self) -> Result<ReplayStorageUsage, sqlx::Error> {
@@ -141,5 +180,65 @@ mod tests {
             1
         );
         eprintln!("RETENTION_COUNT_CAP={usage:?}; RETENTION_AFTER_BYTES={bounded:?}; RETENTION_AFTER_AGE={final_usage:?}; WAL_BYTES={}",std::fs::metadata(dir.path().join("retention.db-wal")).map(|m|m.len()).unwrap_or(0));
+    }
+
+    #[tokio::test]
+    async fn orphaned_pending_notifications_are_dropped_once_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("pending.db").display()
+        );
+        let store = Store::connect(&url).await.unwrap();
+        let now: i64 = 1_800_000_000_000;
+        let old = (now - ORPHANED_NOTIFICATION_MAX_AGE_MS - 1).to_string();
+        let fresh = (now - 60_000).to_string();
+        sqlx::query("INSERT INTO conversations (id, codex_thread_id, created_at) VALUES ('chat', 'bound-thread', 'now')")
+            .execute(&store.pool).await.unwrap();
+        let mut rows = vec![
+            ("bound".to_owned(), Some("bound-thread"), old.clone()),
+            ("fresh".to_owned(), Some("gone-thread"), fresh),
+            ("not-ms".to_owned(), Some("gone-thread"), "now".to_owned()),
+            ("no-thread".to_owned(), None, old.clone()),
+        ];
+        // More than one delete batch of orphans from a removed Bot conversation.
+        rows.extend((0..300).map(|i| (format!("orphan-{i}"), Some("gone-thread"), old.clone())));
+        for (id, thread, received) in &rows {
+            store
+                .enqueue_pending_app_server_notification(
+                    id,
+                    None,
+                    "item/completed",
+                    *thread,
+                    Some("turn"),
+                    None,
+                    "{}",
+                    "{}",
+                    received,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .prune_orphaned_pending_notifications(now)
+                .await
+                .unwrap(),
+            301
+        );
+        let mut left: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM pending_app_server_notifications")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        left.sort();
+        assert_eq!(left, ["bound", "fresh", "not-ms"]);
+        assert_eq!(
+            store
+                .prune_orphaned_pending_notifications(now)
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

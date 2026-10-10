@@ -362,6 +362,8 @@ enum SharedItem: Sendable {
             return "Files must be 8 MB or smaller."
         case FileFailure.integrity, SendFailure.receiptMismatch:
             return "\(mac) didn't confirm this message. Try again."
+        case let error as URLError where error.code == .timedOut:
+            return "\(mac) took too long to answer. Try again on a stronger connection."
         case is URLError:
             return "Couldn't reach \(mac). Check that Tailscale is connected, then try again."
         default:

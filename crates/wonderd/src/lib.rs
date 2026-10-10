@@ -45,6 +45,7 @@ mod pm_tools;
 mod project_assignments;
 mod project_subagents;
 pub mod projects;
+pub mod provider_runtime;
 mod provider_switch;
 #[cfg(test)]
 mod provider_switch_tests;
@@ -99,7 +100,6 @@ use wonder_store::{
     ComputerSessionCreate, ComputerSessionState, DefaultSpeed, MessageInsert, NewChannelMessage,
     Store, StoredBot, StoredChannel, StoredChannelMember, StoredComputerControlLease,
     StoredComputerSession, StoredConversationFile, StoredConversationSummary,
-    TeachingCaptureAppendResult, TeachingEventCreate,
 };
 
 const COMPUTER_USE_DYNAMIC_TOOLS_VERSION: &str = "wonder-computer-use-v2";
@@ -124,11 +124,16 @@ pub struct AppState {
     /// Owner-selected folder projects in the normal provider homes.
     pub projects: Arc<projects::ProjectRuntime>,
     pub denied_roots: Vec<String>,
+    /// Held while a provider reconnect runs; one at a time from any device.
+    pub provider_reconnect: Arc<tokio::sync::Mutex<()>>,
     /// Host folders whose files may be copied into a conversation after the
     /// owner explicitly clicks a local link. Bot workspaces are always
     /// readable and do not need to be listed here.
     pub linked_file_roots: Vec<PathBuf>,
     pub dispatch_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Wakes the dispatch loop as soon as a send is accepted; its one-second
+    /// sleep remains the backstop for everything else.
+    pub dispatch_wake: Arc<tokio::sync::Notify>,
     pub update_admission: Arc<update_admission::UpdateAdmission>,
     pub channel_worker_slots: Arc<tokio::sync::Semaphore>,
     pub approval_lock: Arc<tokio::sync::Mutex<()>>,
@@ -861,6 +866,16 @@ pub fn router(state: AppState) -> Router {
             post(update_admission::prepare),
         )
         .route("/api/v1/host/update/cancel", post(update_admission::cancel))
+        .route("/api/v1/host/providers", get(provider_runtime::status))
+        .route(
+            "/api/v1/host/providers/{id}/reconnect",
+            post(provider_runtime::reconnect),
+        )
+        .route("/api/v1/providers", get(provider_runtime::owner_status))
+        .route(
+            "/api/v1/providers/{id}/reconnect",
+            post(provider_runtime::owner_reconnect),
+        )
         .route("/api/v1/push/config", get(push::config))
         .route("/api/v1/push/registration", post(push::register))
         .route("/api/v1/push/revoke", post(push::revoke))
@@ -903,48 +918,6 @@ pub fn router(state: AppState) -> Router {
             post(computer_sessions::resume_control),
         )
         .route("/api/v1/connected-apps", get(connected_apps::list))
-        .route("/api/v1/teaching/capability", get(teaching::capability))
-        .route(
-            "/api/v1/bots/{bot_id}/teaching/sessions",
-            post(teaching::start),
-        )
-        .route(
-            "/api/v1/bots/{bot_id}/teaching/sessions/{session_id}",
-            get(teaching::read),
-        )
-        .route(
-            "/api/v1/bots/{bot_id}/teaching/sessions/{session_id}/stop",
-            post(teaching::stop),
-        )
-        .route(
-            "/api/v1/bots/{bot_id}/teaching/sessions/{session_id}/cancel",
-            post(teaching::cancel),
-        )
-        .route(
-            "/api/v1/bots/{bot_id}/teaching/sessions/{session_id}/review",
-            post(teaching::review),
-        )
-        .route(
-            "/api/v1/bots/{bot_id}/teaching/sessions/{session_id}/save-version",
-            post(teaching::save_version),
-        )
-        .route("/api/v1/bots/{bot_id}/skills", get(teaching::list_skills))
-        .route(
-            "/api/v1/bots/{bot_id}/skills/{skill_id}/versions/{version}/fixture-tests",
-            post(teaching::run_fixture),
-        )
-        .route(
-            "/api/v1/bots/{bot_id}/skills/{skill_id}/fixture-tests/{request_id}",
-            get(teaching::read_fixture),
-        )
-        .route(
-            "/api/v1/bots/{bot_id}/skills/{skill_id}",
-            get(teaching::get_skill).delete(teaching::archive_skill),
-        )
-        .route(
-            "/api/v1/bots/{bot_id}/skills/{skill_id}/activate",
-            post(teaching::activate_skill_version),
-        )
         .route(
             "/api/v1/bots",
             get(list_bots).post(bot_management::create_with_avatar),
@@ -962,6 +935,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/projects/{project_id}/threads/attach",
             post(projects::attach),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/threads/archived",
+            get(projects::archived_threads),
         )
         .route("/api/v1/settings/default-models", get(default_models::list))
         .route(
@@ -1037,6 +1014,14 @@ pub fn router(state: AppState) -> Router {
             get(filesystem::workspace_git_status),
         )
         .route(
+            "/api/v1/conversations/{conversation_id}/workspace/git/summary",
+            get(filesystem::workspace_git_summary),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/workspace/git/changes",
+            get(filesystem::workspace_git_changes),
+        )
+        .route(
             "/api/v1/conversations/{conversation_id}/workspace/git/diff",
             get(filesystem::workspace_git_diff),
         )
@@ -1100,16 +1085,9 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/assignments/{id}/cancel",
             post(project_assignments::cancel),
         )
-        .route("/api/v1/channels", get(list_channels).post(create_channel))
         .route(
             "/api/v1/group-chats",
             get(list_channels).post(create_channel),
-        )
-        .route(
-            "/api/v1/channels/{channel_id}",
-            get(get_channel)
-                .patch(update_channel)
-                .delete(delete_channel),
         )
         .route(
             "/api/v1/group-chats/{channel_id}/read",
@@ -1122,24 +1100,12 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_channel),
         )
         .route(
-            "/api/v1/channels/{channel_id}/members",
-            get(list_channel_members).post(add_channel_member),
-        )
-        .route(
             "/api/v1/group-chats/{channel_id}/members",
             get(list_channel_members).post(add_channel_member),
         )
         .route(
-            "/api/v1/channels/{channel_id}/members/{bot_id}",
-            delete(remove_channel_member),
-        )
-        .route(
             "/api/v1/group-chats/{channel_id}/members/{bot_id}",
             delete(remove_channel_member),
-        )
-        .route(
-            "/api/v1/channels/{channel_id}/messages",
-            post(send_channel_message),
         )
         .route(
             "/api/v1/group-chats/{channel_id}/messages",
@@ -7497,6 +7463,7 @@ fn message_receipt(message: wonder_store::StoredMessage) -> Option<ClientMessage
         delivery_state: delivery_state_from_name(&message.state)?,
         codex_thread_id: message.codex_thread_id,
         codex_turn_id: message.codex_turn_id,
+        queued: None,
     })
 }
 
@@ -9559,13 +9526,14 @@ async fn send_message_inner(
                 .into_response();
         }
     }
-    let Some(receipt) = message_receipt(stored.clone()) else {
+    let Some(receipt) = queue::receipt(&state, stored.clone()).await else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "stored message has an unknown delivery state",
         )
             .into_response();
     };
+    state.dispatch_wake.notify_one();
     (
         StatusCode::ACCEPTED,
         [(header::CACHE_CONTROL, "no-store")],
@@ -9824,6 +9792,7 @@ async fn dispatch_guide(
                             delivery_state: DeliveryState::AcceptedByCodex,
                             codex_thread_id: Some(thread_id),
                             codex_turn_id: Some(turn_id),
+                            queued: None,
                         }),
                     )
                         .into_response();
@@ -9878,6 +9847,7 @@ async fn dispatch_guide(
             delivery_state: DeliveryState::AcceptedByCodex,
             codex_thread_id: thread_id,
             codex_turn_id: Some(next_turn_id),
+            queued: None,
         }),
     )
         .into_response()
@@ -10088,6 +10058,7 @@ async fn retry_message(
     }
     match state.store.requeue_message_for_retry(&message.id).await {
         Ok(true) => {
+            state.dispatch_wake.notify_one();
             publish_message_state(
                 &state,
                 &message,
@@ -10107,6 +10078,7 @@ async fn retry_message(
                     delivery_state: DeliveryState::AcceptedByWonder,
                     codex_thread_id: message.codex_thread_id,
                     codex_turn_id: message.codex_turn_id,
+                    queued: None,
                 }),
             )
                 .into_response()
@@ -13795,6 +13767,11 @@ mod tests {
                 turn_id: "turn".into(),
                 item: serde_json::json!({"type":"agentMessage","id":"z-commentary","phase":"commentary","text":"Checking the files."}),
             },
+            // Codex 0.162.0-alpha.17 labels answer text that tools may follow.
+            AppServerThreadItem {
+                turn_id: "turn".into(),
+                item: serde_json::json!({"type":"agentMessage","id":"p-partial","phase":"partial_answer","text":"The first file is fine."}),
+            },
             AppServerThreadItem {
                 turn_id: "turn".into(),
                 item: serde_json::json!({"type":"dynamicToolCall","id":"m-tool","tool":"inspect","status":"completed","success":true,"arguments":{},"contentItems":[{"type":"inputText","text":"Found a chart."},{"type":"inputImage","imageUrl":"data:image/png;base64,synthetic"}]}),
@@ -13815,15 +13792,115 @@ mod tests {
         let items = &projection.turns[0].items;
         assert_eq!(
             items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
-            vec!["z-commentary", "m-tool", "a-final"]
+            vec!["z-commentary", "p-partial", "m-tool", "a-final"]
         );
         assert_eq!(items[0].payload["phase"], "commentary");
         assert_eq!(items[0].text.as_deref(), Some("Checking the files."));
+        assert_eq!(items[1].payload["phase"], "partial_answer");
+        assert_eq!(items[1].text.as_deref(), Some("The first file is fine."));
         assert_eq!(
-            items[1].payload["contentItems"][0]["text"],
+            items[2].payload["contentItems"][0]["text"],
             "Found a chart."
         );
-        assert_eq!(items[2].payload["phase"], "final_answer");
+        assert_eq!(items[3].payload["phase"], "final_answer");
+    }
+
+    /// A newer Codex passes startup verification with labels Wonder has not
+    /// seen (schema_compat accepts additive response changes), so ingestion
+    /// must keep them as opaque values instead of dropping the turn.
+    #[test]
+    fn labels_from_a_newer_codex_degrade_to_opaque_items() {
+        let typed = vec![
+            AppServerThreadItem {
+                turn_id: "turn".into(),
+                item: serde_json::json!({"type":"agentMessage","id":"a-draft","phase":"future_phase","text":"Drafting."}),
+            },
+            AppServerThreadItem {
+                turn_id: "turn".into(),
+                item: serde_json::json!({"type":"futureItem","id":"b-future","status":"futureStatus","text":"New kind of work"}),
+            },
+            AppServerThreadItem {
+                turn_id: "turn".into(),
+                item: serde_json::json!({"type":"commandExecution","id":"c-command","command":"ls","status":{"type":"futureStatus"}}),
+            },
+        ];
+        let projection = conversation_thread_projection_with_items(
+            Some("thread".into()),
+            &[],
+            &[],
+            &[],
+            &typed,
+            None,
+        );
+        let items = &projection.turns[0].items;
+        assert_eq!(
+            items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["a-draft", "b-future", "c-command"]
+        );
+        assert_eq!(items[0].item_type, "agentMessage");
+        assert_eq!(items[0].payload["phase"], "future_phase");
+        assert_eq!(items[0].text.as_deref(), Some("Drafting."));
+        assert_eq!(items[1].item_type, "unknown");
+        assert_eq!(items[1].payload["originalType"], "futureItem");
+        assert_eq!(items[1].state, "unknown");
+        assert_eq!(items[2].item_type, "commandExecution");
+        assert_eq!(items[2].state, "unknown");
+        assert!(project_app_server_notification(
+            "item/completed",
+            &serde_json::json!({"item":{"type":"futureItem","id":"b-future"}}),
+            None
+        )
+        .is_none());
+        assert_eq!(
+            super::turn_completion_delivery_state(
+                &serde_json::json!({"turn":{"id":"turn","status":"futureStatus"}})
+            ),
+            super::DeliveryState::Completed
+        );
+    }
+
+    /// Startup verification protects only the notifications listed in
+    /// `wonder_app_server::CONSUMED_NOTIFICATIONS`. Reading another Codex
+    /// notification here without listing it would leave its contract unchecked.
+    #[test]
+    fn codex_notification_inventory_is_complete() {
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../research/codex-app-server/0.162.0-alpha.17.2/experimental/codex_app_server_protocol.v2.schemas.json"
+        ))
+        .unwrap();
+        let notifications: Vec<&str> = schema["definitions"]["ServerNotification"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|variant| variant["properties"]["method"]["enum"][0].as_str())
+            .filter(|method| method.contains('/'))
+            .collect();
+        let mut missing = std::collections::BTreeSet::new();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut directories = vec![source];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for method in &notifications {
+                        if text.contains(&format!("\"{method}\""))
+                            && !wonder_app_server::CONSUMED_NOTIFICATIONS
+                                .iter()
+                                .any(|(consumed, _)| consumed == method)
+                        {
+                            missing.insert(*method);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "wonderd reads {missing:?}; add them to wonder_app_server::CONSUMED_NOTIFICATIONS"
+        );
     }
 
     #[test]
@@ -13968,9 +14045,9 @@ mod tests {
             route_auth("/api/v1/search?q=launch"),
             RouteAuth::ProtectedApi
         );
-        assert_eq!(route_auth("/api/v1/channels"), RouteAuth::ProtectedApi);
+        assert_eq!(route_auth("/api/v1/group-chats"), RouteAuth::ProtectedApi);
         assert_eq!(
-            route_auth("/api/v1/channels/channel-1/messages"),
+            route_auth("/api/v1/group-chats/channel-1/messages"),
             RouteAuth::ProtectedApi
         );
         assert_eq!(route_auth("/api/v1/devices"), RouteAuth::ProtectedApi);
@@ -14951,8 +15028,10 @@ for line in sys.stdin:
                 permission_overrides: vec![],
             })),
             denied_roots: vec![],
+            provider_reconnect: Default::default(),
             linked_file_roots: vec![directory.path().join("previewable")],
             dispatch_lock: Arc::new(tokio::sync::Mutex::new(())),
+            dispatch_wake: Arc::default(),
             update_admission: Arc::new(Default::default()),
             channel_worker_slots: Arc::new(tokio::sync::Semaphore::new(CHANNEL_WORKER_CONCURRENCY)),
             approval_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -15429,9 +15508,26 @@ for line in sys.stdin:
                 .expect("error body");
             panic!("send failed: {status}: {}", String::from_utf8_lossy(&body));
         }
+        // A direct send is decided up front: the receipt says it is not
+        // queued, and the queue never lists it, claimed by dispatch or not.
+        let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(receipt["queued"], false);
+        let queue = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/conversations/default/queue")
+                    .header("x-wonder-loopback-capability", "contract-capability")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let queue: serde_json::Value =
+            serde_json::from_slice(&to_bytes(queue.into_body(), 1_000_000).await.unwrap()).unwrap();
+        assert_eq!(queue, serde_json::json!([]));
         // Native response-loss recovery and double taps reuse the exact request.
         // Discard the first receipt, then race two duplicates with dispatch.
-        drop(response);
         for _ in 0..2 {
             let duplicate = router(state.clone())
                 .oneshot(

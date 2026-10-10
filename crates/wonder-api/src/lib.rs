@@ -33,6 +33,11 @@ pub struct ClientMessageReceipt {
     pub delivery_state: DeliveryState,
     pub codex_thread_id: Option<String>,
     pub codex_turn_id: Option<String>,
+    /// Whether the message waits in its conversation's queue (behind a
+    /// running turn or earlier messages, or while the Mac holds the chat)
+    /// rather than being sent now. Absent where it does not apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

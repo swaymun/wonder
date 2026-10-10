@@ -18,8 +18,7 @@ returns a conflict. Retrying an upload verifies the saved bytes before returning
 success. MIME, size, image validation, and download integrity checks are shared
 with direct conversations.
 
-Send to `POST /api/v1/group-chats/{groupId}/messages` (the existing
-`/api/v1/channels/{groupId}/messages` alias uses the same handler):
+Send to `POST /api/v1/group-chats/{groupId}/messages`:
 
 ```json
 {

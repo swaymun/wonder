@@ -12,27 +12,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 static ACTIONS: AtomicU8 = AtomicU8::new(0);
 pub const SETTINGS: u8 = 2;
 pub const QUIT: u8 = 4;
-const STOP_CONTROL: u8 = 8;
 pub fn pending() -> u8 {
     ACTIONS.swap(0, Ordering::Relaxed)
 }
+// Stop for remote control lives in Settings → Access → Remote control.
 extern "C" fn selected(_: &Object, _: Sel, sender: *mut Object) {
     let tag: isize = unsafe { msg_send![sender, tag] };
-    if tag as u8 == STOP_CONTROL {
-        // Only revokes the helper's current lease; it never changes the saved
-        // paired-device permission or starts another control session.
-        unsafe {
-            let center: *mut Object =
-                msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
-            let _: () = msg_send![center,
-                postNotificationName:*string("com.wonder.stop-control")
-                object:std::ptr::null_mut::<Object>()
-                userInfo:std::ptr::null_mut::<Object>()
-                deliverImmediately:true];
-        }
-    } else {
-        ACTIONS.fetch_or(tag as u8, Ordering::Relaxed);
-    }
+    ACTIONS.fetch_or(tag as u8, Ordering::Relaxed);
 }
 unsafe fn string(value: &str) -> StrongPtr {
     let raw: *mut Object = msg_send![class!(NSString), alloc];
@@ -117,11 +103,7 @@ impl MenuBar {
             let _: () = msg_send![*item, setVisible:true];
             let menu = StrongPtr::new(msg_send![class!(NSMenu), new]);
             let _: () = msg_send![*menu, setAutoenablesItems:false];
-            let entries = [
-                ("Settings…", SETTINGS),
-                ("Stop Control", STOP_CONTROL),
-                ("Quit Wonder", QUIT),
-            ];
+            let entries = [("Settings…", SETTINGS), ("Quit Wonder", QUIT)];
             for (label, tag) in entries {
                 if tag == QUIT {
                     let separator: *mut Object = msg_send![class!(NSMenuItem), separatorItem];

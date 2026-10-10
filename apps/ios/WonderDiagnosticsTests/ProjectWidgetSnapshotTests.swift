@@ -1,5 +1,6 @@
 import XCTest
 @testable import Wonder
+import WonderPairing
 
 final class ProjectWidgetSnapshotTests: XCTestCase {
     // Widget links must enter the exact paired host and channel. A scheme or ID
@@ -52,7 +53,7 @@ final class ProjectWidgetSnapshotTests: XCTestCase {
             .appendingPathComponent("wonder-widget-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appendingPathComponent("project-widget-snapshot-v2.json")
+        let file = directory.appendingPathComponent("project-widget-snapshot-v3.json")
         let project = ProjectWidgetSnapshot.Project(id: "project", name: "Roadmap")
         let snapshot = ProjectWidgetSnapshot(savedAt: Date(timeIntervalSince1970: 1_000_000), hostID: "mac",
                                              hostName: "Studio", projects: [project])
@@ -65,5 +66,34 @@ final class ProjectWidgetSnapshotTests: XCTestCase {
         XCTAssertNil(ProjectWidgetSnapshotStore.load(from: directory))
         XCTAssertTrue(ProjectWidgetSnapshotStore.save(snapshot, in: directory))
         XCTAssertEqual(ProjectWidgetSnapshotStore.load(from: directory)?.projects.first?.name, "Roadmap")
+    }
+
+    // The widget opens the threads most recently worked on, newest first, by
+    // their conversation when Wonder has one and otherwise by the provider
+    // thread, which the app attaches. Hidden Projects and drafts never leak.
+    @MainActor func testRecentThreadsOpenDirectlyNewestFirst() throws {
+        func project(_ id: String, included: Bool = true) throws -> ProjectSummary {
+            try JSONDecoder().decode(ProjectSummary.self, from: Data(#"{"id":"\#(id)","name":"P \#(id)","isIncluded":\#(included),"isPinned":false,"rootsRevision":1,"folders":[],"createdAt":"x"}"#.utf8))
+        }
+        var state = ProjectThreadsState()
+        state.threads = [
+            ProjectThreadSummary(reference: "codex:aa-1", conversationId: "conv-1", title: "Older", family: .codex, updatedAt: 10),
+            ProjectThreadSummary(reference: "claude:bb-2", conversationId: nil, title: "Newest", family: .claude, updatedAt: 30),
+            ProjectThreadSummary(reference: "wonder:conv-9", conversationId: "conv-9", title: "Draft", family: .codex, updatedAt: 20),
+        ]
+        var hidden = ProjectThreadsState()
+        hidden.threads = [ProjectThreadSummary(reference: "codex:cc-3", conversationId: nil, title: "Hidden", family: .codex, updatedAt: 99)]
+        let rows = ProjectWidgetSnapshotPublisher.recentThreads(
+            projects: [try project("p1"), try project("p2", included: false)].filter(\.isIncluded),
+            threads: ["p1": state, "p2": hidden], pinned: [])
+        XCTAssertEqual(rows.map(\.title), ["Newest", "Draft", "Older"])
+        let testing = try XCTUnwrap(ProjectWidgetIdentity(bundleIdentifier: "com.swaymun.wonder.testing"))
+        let newest = try XCTUnwrap(ProjectWidgetLink.thread(hostID: "mac", thread: rows[0], identity: testing))
+        XCTAssertEqual(newest.absoluteString, "wonder-testing://v1/hosts/mac/projects/p1/threads/claude/bb-2")
+        XCTAssertEqual(WonderDeepLink.parse(newest, scheme: "wonder-testing"),
+                       .projectThread(host: "mac", project: "p1", family: .claude, thread: "bb-2"))
+        XCTAssertEqual(ProjectWidgetLink.thread(hostID: "mac", thread: rows[1], identity: testing)?.absoluteString,
+                       "wonder-testing://v1/hosts/mac/chats/conv-9")
+        XCTAssertNil(WonderDeepLink.parse(URL(string: "wonder-testing://v1/hosts/mac/projects/p1/threads/other/bb-2")!, scheme: "wonder-testing"))
     }
 }

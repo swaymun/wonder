@@ -1,5 +1,6 @@
-# Settings > Appearance > Font: choose a message font and a code font, read the bundled
-# font licenses, and find both choices kept after a relaunch. Ends back on the defaults.
+# Settings > Appearance > Font: choose a message font and a code font, read a bundled
+# font's license from its long-press menu, find every license under Settings >
+# Acknowledgements, and find both choices kept after a relaunch. Ends back on the defaults.
 launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-actions
 wait --id open-sidebar --timeout 30
 tap --id open-sidebar --type Button
@@ -10,19 +11,32 @@ tap --id settings-font
 wait --id message-font:atkinson --timeout 10
 tap --id message-font:atkinson
 shot font-picker
-# Code fonts and the licenses link sit below the fold on a phone.
+# Code fonts sit below the fold on a phone.
 swipe up --in font-picker
 wait --id code-font:plex --timeout 5
 tap --id code-font:plex
-swipe up --in font-picker
-wait --id font-licenses --timeout 5
-tap --id font-licenses
+hold --id code-font:plex
+wait --id font-license --timeout 10
+shot font-license-menu
+tap --id font-license
+wait --id license-text --timeout 10
 wait --contains "SIL OPEN FONT LICENSE" --timeout 10
-shot font-licenses
-back
+wait --contains "Plex" --timeout 5
+shot font-license
+tap --id font-license-done
 wait --id font-picker --timeout 10
 back
 wait --id settings-font --contains "Atkinson Hyperlegible, IBM Plex Mono" --timeout 10
+swipe up
+wait --id settings-acknowledgements --timeout 10
+tap --id settings-acknowledgements
+wait --id acknowledgement:Inter --timeout 10
+wait --id acknowledgement:WebRTC --timeout 5
+shot acknowledgements
+tap --id acknowledgement:Inter
+wait --contains "SIL OPEN FONT LICENSE" --timeout 10
+back
+wait --id acknowledgements --timeout 10
 launch --fixture subagent-fixture --fixture chat-layout --fixture chat-layout-unsaved --fixture project-actions
 wait --id open-sidebar --timeout 30
 tap --id open-sidebar --type Button

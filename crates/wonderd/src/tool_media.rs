@@ -18,6 +18,9 @@ pub(super) async fn normalize(
     if item_id.is_empty() {
         return Ok(item);
     }
+    if item.get("type").and_then(Value::as_str) == Some("userMessage") {
+        return user_images(state, conversation, turn, &item_id, item).await;
+    }
     // Generated images carry bare base64 rather than a tool content block.
     // Normalize before projection truncates strings, including history refresh.
     // Paired clients use the retained bytes; never resolve the runtime savedPath.
@@ -117,60 +120,194 @@ pub(super) async fn normalize(
                 continue;
             }
         };
-        let digest = hex::encode(Sha256::digest(&bytes));
-        let id = deterministic_uuid(&format!(
-            "tool-media:{conversation}:{turn}:{item_id}:{index}:{mime}:{digest}"
-        ));
-        let target = attachment_path(&storage, &id, true)
-            .await
-            .ok_or("Preview storage unavailable")?;
-        if target.exists() {
-            if tokio::fs::read(&target).await.map_err(|e| e.to_string())? != bytes {
-                return Err("Stored preview failed integrity verification".into());
-            }
-        } else {
-            // Publish only complete bytes. A crash cannot poison the stable ID
-            // with a partial file and permanently prevent inbox replay.
-            let temporary = target.with_extension(uuid::Uuid::new_v4().to_string());
-            let written = async {
-                let mut file = tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&temporary)
-                    .await?;
-                file.write_all(&bytes).await?;
-                file.sync_all().await?;
-                tokio::fs::rename(&temporary, &target).await
-            }
-            .await;
-            if let Err(error) = written {
-                let _ = tokio::fs::remove_file(&temporary).await;
-                return Err(error.to_string());
-            }
-        }
-        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        state
-            .store
-            .upsert_conversation_file(
-                &id,
-                conversation,
-                "attachment",
-                &name,
-                Some(&mime),
-                Some(bytes.len() as i64),
-                Some(&digest),
-                Some(&attachment_relative_path(&id)),
-                "available",
-                None,
-                None,
-                Some(&format!("tool-media:{turn}:{item_id}:{index}")),
-                &now,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        *value = json!({"type":"wonderArtifact","file":{"id":id,"name":name,"mimeType":mime,
-            "byteSize":bytes.len(),"sha256":digest,"state":"available","updatedAt":now}});
+        let source_id = format!("tool-media:{turn}:{item_id}:{index}");
+        let id_seed = format!("tool-media:{conversation}:{turn}:{item_id}:{index}");
+        *value = store(
+            state,
+            conversation,
+            &storage,
+            &id_seed,
+            &source_id,
+            &name,
+            &mime,
+            &bytes,
+        )
+        .await?;
     }
+    Ok(item)
+}
+
+/// Persist verified bytes under a stable ID derived from `id_seed` and the
+/// content, record the conversation file, and return its artifact reference.
+#[allow(clippy::too_many_arguments)]
+async fn store(
+    state: &AppState,
+    conversation: &str,
+    storage: &str,
+    id_seed: &str,
+    source_id: &str,
+    name: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<Value, String> {
+    let digest = hex::encode(Sha256::digest(bytes));
+    let id = deterministic_uuid(&format!("{id_seed}:{mime}:{digest}"));
+    let target = attachment_path(storage, &id, true)
+        .await
+        .ok_or("Preview storage unavailable")?;
+    if target.exists() {
+        if tokio::fs::read(&target).await.map_err(|e| e.to_string())? != bytes {
+            return Err("Stored preview failed integrity verification".into());
+        }
+    } else {
+        // Publish only complete bytes. A crash cannot poison the stable ID
+        // with a partial file and permanently prevent inbox replay.
+        let temporary = target.with_extension(uuid::Uuid::new_v4().to_string());
+        let written = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await?;
+            file.write_all(bytes).await?;
+            file.sync_all().await?;
+            tokio::fs::rename(&temporary, &target).await
+        }
+        .await;
+        if let Err(error) = written {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(error.to_string());
+        }
+    }
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    state
+        .store
+        .upsert_conversation_file(
+            &id,
+            conversation,
+            "attachment",
+            name,
+            Some(mime),
+            Some(bytes.len() as i64),
+            Some(&digest),
+            Some(&attachment_relative_path(&id)),
+            "available",
+            None,
+            None,
+            Some(source_id),
+            &now,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(
+        json!({"type":"wonderArtifact","file":{"id":id,"name":name,"mimeType":mime,
+        "byteSize":bytes.len(),"sha256":digest,"state":"available","updatedAt":now}}),
+    )
+}
+
+/// Images the owner attached to a prompt in Claude Code or the Claude desktop
+/// app arrive as base64 blocks in the user item. Store each one as a verified
+/// conversation file (same MIME, size and integrity checks as tool media) and
+/// list them as the bubble's `attachmentIds`. A history refresh reuses the
+/// stored file instead of decoding the image again.
+async fn user_images(
+    state: &AppState,
+    conversation: &str,
+    turn: &str,
+    item_id: &str,
+    mut item: Value,
+) -> Result<Value, String> {
+    let positions: Vec<usize> = item["content"]
+        .as_array()
+        .map(|content| {
+            content
+                .iter()
+                .enumerate()
+                .filter(|(_, block)| {
+                    block["type"] == "image"
+                        && (block["data"].is_string() || block["unavailable"].is_string())
+                })
+                .map(|(position, _)| position)
+                .collect()
+        })
+        .unwrap_or_default();
+    if positions.is_empty() {
+        return Ok(item);
+    }
+    let Some((storage, _, _)) = media_scope(state, conversation).await? else {
+        return Ok(item);
+    };
+    let existing = state
+        .store
+        .list_conversation_files(conversation)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut ids = Vec::new();
+    let mut total = 0;
+    for (index, position) in positions.iter().enumerate() {
+        let source_id = format!("user-media:{turn}:{item_id}:{index}");
+        let block = &mut item["content"][*position];
+        if let Some(file) = existing
+            .iter()
+            .find(|file| file.source_id.as_deref() == Some(&source_id) && file.state == "available")
+        {
+            ids.push(json!(file.id));
+            *block = json!({"type":"wonderArtifact","file":{"id":file.id,"name":file.name,
+                "mimeType":file.mime_type,"byteSize":file.byte_size,"sha256":file.sha256,
+                "state":file.state,"updatedAt":file.updated_at}});
+            continue;
+        }
+        // An image the owner attached is never replaced by words in their
+        // message; an unusable one keeps only the reason, without bytes.
+        let decoded = match block["unavailable"].as_str() {
+            Some(reason) => Err(reason.to_owned()),
+            None => decode(block).map_err(str::to_owned),
+        };
+        let checked = match decoded {
+            Ok((bytes, _, _)) if total + bytes.len() > 16 * 1024 * 1024 => {
+                Err("These images exceed the preview size limit".to_owned())
+            }
+            Ok((bytes, mime, _)) => {
+                total += bytes.len();
+                tokio::task::spawn_blocking(move || {
+                    validate(&bytes, &mime)
+                        .map(|_| (bytes, mime))
+                        .map_err(str::to_owned)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            }
+            Err(reason) => Err(reason),
+        };
+        let (bytes, mime) = match checked {
+            Ok(file) => file,
+            Err(reason) => {
+                *block = json!({"type":"imageUnavailable","reason":reason});
+                continue;
+            }
+        };
+        let extension = mime.trim_start_matches("image/").replace("jpeg", "jpg");
+        let name = if positions.len() == 1 {
+            format!("Image.{extension}")
+        } else {
+            format!("Image {}.{extension}", index + 1)
+        };
+        let id_seed = format!("user-media:{conversation}:{turn}:{item_id}:{index}");
+        let file = store(
+            state,
+            conversation,
+            &storage,
+            &id_seed,
+            &source_id,
+            &name,
+            &mime,
+            &bytes,
+        )
+        .await?;
+        ids.push(file["file"]["id"].clone());
+        item["content"][*position] = file;
+    }
+    item["attachmentIds"] = Value::Array(ids);
     Ok(item)
 }
 /// Where verified previews are stored and which folders a tool image may be
@@ -424,6 +561,61 @@ fn validate(bytes: &[u8], mime: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn images_the_owner_attached_on_the_mac_become_verified_bubble_attachments() {
+        let (_dir, state) = crate::ingestion::tests::fixture().await;
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(32, 32)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = encoded.into_inner();
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        // The bridge's projection of a Claude Code prompt with two images, one
+        // too large to forward, plus a block that claims to be a PNG.
+        let raw = json!({"type":"userMessage","id":"prompt","content":[
+            {"type":"text","text":"What changed in [Image #1]?"},
+            {"type":"image","mimeType":"image/png","data":data},
+            {"type":"image","mimeType":"image/png","unavailable":"This image is larger than 8 MB"},
+            {"type":"image","mimeType":"image/png","data":"bm90IGFuIGltYWdl"},
+        ]});
+        let first = normalize(&state, "bot", "turn", &raw).await.unwrap();
+        let ids = first["attachmentIds"].as_array().unwrap().clone();
+        assert_eq!(ids.len(), 1, "{first}");
+        let file = &first["content"][1]["file"];
+        assert_eq!(file["id"], ids[0]);
+        assert_eq!(file["mimeType"], "image/png");
+        assert_eq!(file["sha256"], hex::encode(Sha256::digest(&bytes)));
+        assert_eq!(first["content"][2]["type"], "imageUnavailable");
+        assert_eq!(first["content"][3]["type"], "imageUnavailable");
+        assert!(
+            first.to_string().len() < 2048,
+            "No base64 reaches projection"
+        );
+        // Words stay the owner's; nothing is appended to them.
+        assert_eq!(
+            crate::extract_text(&first).as_deref(),
+            Some("What changed in [Image #1]?")
+        );
+        let stored = state
+            .store
+            .list_conversation_files("bot")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|f| Some(f.id.as_str()) == ids[0].as_str())
+            .unwrap();
+        assert_eq!(stored.name, "Image 1.png");
+        assert_eq!(stored.byte_size, Some(bytes.len() as i64));
+        // A history refresh resolves to the same file.
+        let again = normalize(&state, "bot", "turn", &raw).await.unwrap();
+        assert_eq!(again["attachmentIds"], first["attachmentIds"]);
+        // A prompt Wonder sent keeps its own attachment records.
+        let sent = json!({"type":"userMessage","id":"sent","content":[
+            {"type":"text","text":"hi"},{"type":"localImage","path":"/tmp/a.png"}]});
+        assert_eq!(normalize(&state, "bot", "turn", &sent).await.unwrap(), sent);
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn generated_images_survive_projection_replay_and_authenticated_download() {

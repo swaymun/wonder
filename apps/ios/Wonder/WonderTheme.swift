@@ -104,6 +104,25 @@ struct WonderThemeHost: ViewModifier {
     }
 }
 
+/// The filled primary button. Themes tint controls with their text colour, and
+/// `.borderedProminent` fills with the tint and labels in white, so on a dark
+/// theme the label vanished into its fill. The label takes the theme's
+/// background instead; the Wonder theme keeps the system style.
+struct WonderProminentButtonStyle: PrimitiveButtonStyle {
+    @Environment(\.wonderTheme) private var theme
+    func makeBody(configuration: Configuration) -> some View {
+        Button(role: configuration.role, action: configuration.trigger) {
+            if theme.isDefault { configuration.label }
+            else { configuration.label.foregroundStyle(theme.background) }
+        }
+        .buttonStyle(.borderedProminent) // theme-exempt: the one owner of the prominent style
+    }
+}
+
+extension PrimitiveButtonStyle where Self == WonderProminentButtonStyle {
+    static var wonderProminent: WonderProminentButtonStyle { WonderProminentButtonStyle() }
+}
+
 /// Settings-style Lists and Forms: on a non-default theme the page takes the theme's
 /// background and rows sit on its surface colour. The Wonder theme keeps the system
 /// grouped look. One owner, applied once per screen, never per row. `overBackdrop`

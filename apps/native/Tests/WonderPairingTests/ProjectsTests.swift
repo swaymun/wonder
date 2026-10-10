@@ -245,7 +245,7 @@ final class ProjectsTests: XCTestCase {
                                        projects: [project("b"), project("a", pinned: true), project("hidden", included: false)], threads: ["a": state])
         let key = SidebarProjection.expansionKey(host: "mac", project: "a")
         let first = SidebarProjection.projectRows(hosts: [host], expanded: [key], selectedConversation: "c1", selectedProject: nil)
-        XCTAssertEqual(first.map(\.id), ["host:mac", "project:mac:a", "thread:mac:a:codex:1", "more:mac:a", "project:mac:b", "new-project:mac"])
+        XCTAssertEqual(first.map(\.id), ["host:mac", "project:mac:a", "thread:mac:a:codex:1", "more:mac:a", "project:mac:b", "new-project:mac", "automations:mac"])
         if case .thread(_, _, _, let selected) = first[2] { XCTAssertTrue(selected) } else { XCTFail() }
         state.apply(ProjectThreadsPage(threads: [thread("codex:1", conversation: "c1"), thread("codex:3")], nextCursor: nil, partial: []), replacing: false)
         let paged = SidebarProjection.projectRows(hosts: [SidebarHostProjects(hostID: "mac", name: "MacBook Pro", isOnline: true, supportsProjects: true, projects: host.projects, threads: ["a": state])], expanded: [key], selectedConversation: nil, selectedProject: nil)
@@ -302,13 +302,13 @@ final class ProjectsTests: XCTestCase {
         let key = SidebarProjection.expansionKey(host: "mac", project: "a")
         let rows = SidebarProjection.rows(hosts: [mac, laptop], expanded: [key], collapsedHosts: ["laptop"], selectedHost: "mac", selectedConversation: "c2")
         XCTAssertEqual(rows.map(\.id), ["pinned-header", "pinned:mac:codex:9", "pinned:mac:claude:2",
-                                        "host:mac", "host-notice:mac", "project:mac:a", "thread:mac:a:codex:1", "project:mac:b", "new-project:mac",
+                                        "host:mac", "host-notice:mac", "project:mac:a", "thread:mac:a:codex:1", "project:mac:b", "new-project:mac", "automations:mac",
                                         "host:laptop"])
         if case .pinned(_, let project, let projectName, let hostName, _, let selected) = rows[2] {
             XCTAssertEqual([project, projectName, hostName], ["a", "A", "Studio"])
             XCTAssertTrue(selected)
         } else { XCTFail() }
-        if case .host(_, _, _, let collapsed) = rows[9] { XCTAssertTrue(collapsed) } else { XCTFail() }
+        if case .host(_, _, _, let collapsed) = rows[10] { XCTAssertTrue(collapsed) } else { XCTFail() }
         let elsewhere = SidebarProjection.pinnedRows(hosts: [mac, laptop], selectedHost: "laptop", selectedConversation: "c2")
         XCTAssertFalse(elsewhere.contains { if case .pinned(_, _, _, _, _, let selected) = $0 { return selected }; return false })
         if case .pinned(_, _, _, let hostName, _, _) = SidebarProjection.pinnedRows(hosts: [mac], selectedConversation: nil)[1] { XCTAssertNil(hostName) } else { XCTFail() }
@@ -592,5 +592,18 @@ final class ProjectComposerContractTests: XCTestCase {
         XCTAssertTrue(codex.usesAvatar)
         XCTAssertNil(codex.kindLabel)
         XCTAssertFalse(codex.isStoppable)
+    }
+
+    // Copy thread/session ID copies the provider's own ID, never Wonder's
+    // reference prefix, and a draft without a provider thread has none.
+    func testNativeIDIsTheProvidersThreadID() {
+        func thread(_ reference: String, _ family: AgentFamily) -> ProjectThreadSummary {
+            ProjectThreadSummary(reference: reference, conversationId: "c", title: "t", family: family, updatedAt: 0)
+        }
+        XCTAssertEqual(thread("codex:019a-77", .codex).nativeID, "019a-77")
+        XCTAssertEqual(thread("claude:5e55-10a1", .claude).nativeID, "5e55-10a1")
+        XCTAssertNil(thread("wonder:c", .codex).nativeID)
+        XCTAssertNil(thread("codex:", .codex).nativeID)
+        XCTAssertNil(thread("codex:019a", .claude).nativeID)
     }
 }

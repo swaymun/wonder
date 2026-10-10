@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B700000000000000000000B1 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B700000000000000000000F1 /* PrivacyInfo.xcprivacy */; };
+		B700000000000000000000B2 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B700000000000000000000F2 /* PrivacyInfo.xcprivacy */; };
+		B700000000000000000000B3 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B700000000000000000000F3 /* PrivacyInfo.xcprivacy */; };
+		B700000000000000000000B4 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B700000000000000000000F4 /* PrivacyInfo.xcprivacy */; };
 		000000000000000000000014 /* WonderApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000A /* WonderApp.swift */; };
 		000000000000000000000015 /* Identity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000B /* Identity.swift */; };
 		000000000000000000000016 /* ConnectionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000C /* ConnectionModel.swift */; };
@@ -46,6 +50,7 @@
 		B20000000000000000000006 /* ProjectViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000005 /* ProjectViews.swift */; };
 		B20000000000000000000008 /* ProjectsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000007 /* ProjectsModel.swift */; };
 		BA9F00000000000000000001 /* SubagentDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA9F00000000000000000002 /* SubagentDock.swift */; };
+		BA9F00000000000000000101 /* BranchChanges.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA9F00000000000000000102 /* BranchChanges.swift */; };
 		BA9F00000000000000000003 /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA9F00000000000000000004 /* PushNotifications.swift */; };
 		BA9F00000000000000000005 /* ComposerApprovalSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA9F00000000000000000006 /* ComposerApprovalSettings.swift */; };
 		C30000000000000000000001 /* AutomationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30000000000000000000002 /* AutomationsView.swift */; };
@@ -128,6 +133,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B700000000000000000000F1 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		B700000000000000000000F2 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		B700000000000000000000F3 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		B700000000000000000000F4 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		000000000000000000000005 /* Wonder.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = Wonder.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		00000000000000000000000A /* WonderApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WonderApp.swift; sourceTree = "<group>"; };
 		00000000000000000000000B /* Identity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identity.swift; sourceTree = "<group>"; };
@@ -168,6 +177,7 @@
 		B20000000000000000000005 /* ProjectViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectViews.swift; sourceTree = "<group>"; };
 		B20000000000000000000007 /* ProjectsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectsModel.swift; sourceTree = "<group>"; };
 		BA9F00000000000000000002 /* SubagentDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubagentDock.swift; sourceTree = "<group>"; };
+		BA9F00000000000000000102 /* BranchChanges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BranchChanges.swift; sourceTree = "<group>"; };
 		BA9F00000000000000000004 /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotifications.swift; sourceTree = "<group>"; };
 		BA9F00000000000000000006 /* ComposerApprovalSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerApprovalSettings.swift; sourceTree = "<group>"; };
 		C30000000000000000000002 /* AutomationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsView.swift; sourceTree = "<group>"; };
@@ -273,6 +283,7 @@
 				F30000000000000000000013 /* WorkspacePublicationPreview.swift */,
 				F30000000000000000000014 /* EPUB-LICENSES.md */,
 				BA9F00000000000000000002 /* SubagentDock.swift */,
+				BA9F00000000000000000102 /* BranchChanges.swift */,
 				BA9F00000000000000000004 /* PushNotifications.swift */,
 				BA9F00000000000000000006 /* ComposerApprovalSettings.swift */,
 				C30000000000000000000002 /* AutomationsView.swift */,
@@ -281,6 +292,7 @@
 				A10000000000000000000094 /* ComputerInput.swift */,
 				A10000000000000000000019 /* WebRTC-LICENSE.md */,
 				00000000000000000000000E /* Assets.xcassets */,
+				B700000000000000000000F1 /* PrivacyInfo.xcprivacy */,
 				A10000000000000000000001 /* ManagementViews.swift */,
 				A10000000000000000000003 /* MacFileAccess.swift */,
 				A10000000000000000000007 /* DictationViews.swift */,
@@ -370,6 +382,7 @@
 			children = (
 				35514834A232D7BF80D47544 /* NotificationService.swift */,
 				65E3D1A1343ACC28CEB0C089 /* Info.plist */,
+				B700000000000000000000F4 /* PrivacyInfo.xcprivacy */,
 				26AE55576767892982C94B4E /* WonderNotificationService.entitlements */,
 			);
 			name = WonderNotificationService;
@@ -381,6 +394,7 @@
 			children = (
 				49B30AA7F72EB16CF2018A69 /* ShareViewController.swift */,
 				A0A97AAF060C3698CD66A9EF /* Info.plist */,
+				B700000000000000000000F2 /* PrivacyInfo.xcprivacy */,
 				AC2C84E21DC79219A2F40F8C /* WonderShare.entitlements */,
 			);
 			name = WonderShare;
@@ -393,6 +407,7 @@
 				E10000000000000000000008 /* ProjectWidgetSnapshot.swift */,
 				E10000000000000000000009 /* WonderProjectWidget.swift */,
 				E1000000000000000000000E /* Info.plist */,
+				B700000000000000000000F3 /* PrivacyInfo.xcprivacy */,
 				E1000000000000000000000F /* WonderWidget.entitlements */,
 			);
 			name = WonderWidget;
@@ -560,6 +575,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B700000000000000000000B1 /* PrivacyInfo.xcprivacy in Resources */,
 				F30000000000000000000008 /* EPUB-LICENSES.md in Resources */,
 				000000000000000000000018 /* Assets.xcassets in Resources */,
 				A1000000000000000F0A0003 /* Fonts in Resources */,
@@ -585,6 +601,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B700000000000000000000B2 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -592,13 +609,16 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B700000000000000000000B4 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		E10000000000000000000016 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = ();
+			files = (
+				B700000000000000000000B3 /* PrivacyInfo.xcprivacy in Resources */,
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
@@ -618,6 +638,7 @@
 				F30000000000000000000002 /* WorkspaceModelPreview.swift in Sources */,
 				F30000000000000000000003 /* WorkspacePublicationPreview.swift in Sources */,
 				BA9F00000000000000000001 /* SubagentDock.swift in Sources */,
+				BA9F00000000000000000101 /* BranchChanges.swift in Sources */,
 				BA9F00000000000000000003 /* PushNotifications.swift in Sources */,
 				BA9F00000000000000000005 /* ComposerApprovalSettings.swift in Sources */,
 				C30000000000000000000001 /* AutomationsView.swift in Sources */,
@@ -742,7 +763,8 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Wonder uses the camera to take photos to attach to messages and scan a pairing code shown on your Mac.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wonder connects directly to your paired Mac on your local network to show its screen securely.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech or your paired Mac.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech recognition.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Wonder turns your voice into text on this device to add words to your draft.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -785,7 +807,8 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Wonder uses the camera to take photos to attach to messages and scan a pairing code shown on your Mac.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wonder connects directly to your paired Mac on your local network to show its screen securely.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech or your paired Mac.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech recognition.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Wonder turns your voice into text on this device to add words to your draft.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -875,7 +898,8 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Wonder uses the camera to take photos to attach to messages and scan a pairing code shown on your Mac.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wonder connects directly to your paired Mac on your local network to show its screen securely.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech or your paired Mac.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech recognition.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Wonder turns your voice into text on this device to add words to your draft.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -1197,7 +1221,8 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Wonder uses the camera to take photos to attach to messages and scan a pairing code shown on your Mac.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wonder connects directly to your paired Mac on your local network to show its screen securely.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech or your paired Mac.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech recognition.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Wonder turns your voice into text on this device to add words to your draft.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -1421,7 +1446,8 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Wonder uses the camera to take photos to attach to messages and scan a pairing code shown on your Mac.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Wonder connects directly to your paired Mac on your local network to show its screen securely.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech or your paired Mac.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record your voice to add words to your draft using on-device speech recognition.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Wonder turns your voice into text on this device to add words to your draft.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";

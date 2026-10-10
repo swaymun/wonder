@@ -23,7 +23,14 @@ struct Status {
     runtimes: HashMap<String, RuntimeRegistration>,
     planning_threads: HashSet<(String, String)>,
     retired_planning_threads: VecDeque<((String, String), Instant)>,
+    /// The inbox row projection keeps failing on, and since when.
+    failing: Option<(i64, Instant)>,
 }
+
+/// How long one notification may fail projection before it is set aside so
+/// later chat updates are not held behind it. Native history recovery still
+/// reconciles the turn it belonged to.
+const FAILING_NOTIFICATION_LIMIT: Duration = Duration::from_secs(5 * 60);
 
 /// Internal planners have no readable transcript or child ownership to discover.
 /// Keep their runtime provenance separate from ordinary conversation routing.
@@ -57,6 +64,18 @@ struct ProviderStatus {
     reconcile_requested: bool,
     /// The installed runtime was rejected as unsupported at its last start.
     incompatible: bool,
+    /// The installed runtime changed since the running one started; it is
+    /// replaced once the provider is idle.
+    update_pending: bool,
+}
+
+/// What Settings → Providers shows about a provider's runtime in wonderd.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ProviderRuntimeState {
+    pub alive: bool,
+    pub recovering: bool,
+    pub incompatible: bool,
+    pub update_pending: bool,
 }
 
 /// Shown for a provider whose installed runtime Wonder refuses to start.
@@ -352,6 +371,44 @@ impl Ingestion {
             .entry(family)
             .or_default()
             .incompatible = incompatible;
+    }
+
+    pub(crate) fn set_update_pending(&self, family: AgentFamily, pending: bool) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .providers
+            .entry(family)
+            .or_default()
+            .update_pending = pending;
+    }
+
+    /// Ask the provider's recovery loop to restart its runtime now.
+    pub(crate) fn request_reconcile(&self, family: AgentFamily) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .providers
+            .entry(family)
+            .or_default()
+            .reconcile_requested = true;
+    }
+
+    pub(crate) fn provider_runtime_state(&self, family: AgentFamily) -> ProviderRuntimeState {
+        let status = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let provider = status.providers.get(&family);
+        ProviderRuntimeState {
+            alive: provider
+                .and_then(|p| p.health.as_ref())
+                .is_some_and(RuntimeHealth::is_alive)
+                || status
+                    .runtimes
+                    .values()
+                    .any(|r| r.family == family && r.project && r.health.is_alive()),
+            recovering: provider.is_some_and(|p| p.recovering),
+            incompatible: provider.is_some_and(|p| p.incompatible),
+            update_pending: provider.is_some_and(|p| p.update_pending),
+        }
     }
 
     fn provider_incompatible(&self, family: Option<AgentFamily>) -> bool {
@@ -757,9 +814,39 @@ async fn project_next(state: &AppState) -> Result<bool, String> {
             .map_err(|e| e.to_string())?;
         return Ok(true);
     }
+    let method = method.to_owned();
     if !crate::process_app_server_notification(state, notification, false).await {
-        return Err(format!("notification {id} could not be projected"));
+        let expired = {
+            let mut status = state
+                .ingestion
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match status.failing {
+                Some((failing, since)) if failing == id => {
+                    since.elapsed() >= FAILING_NOTIFICATION_LIMIT
+                }
+                _ => {
+                    status.failing = Some((id, Instant::now()));
+                    false
+                }
+            }
+        };
+        if !expired {
+            return Err(format!("notification {id} could not be projected"));
+        }
+        let _ = state.logger.record(
+            "error",
+            "notification_set_aside",
+            json!({"inboxId": id, "method": method}),
+        );
     }
+    state
+        .ingestion
+        .inner
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .failing = None;
     state
         .store
         .acknowledge_notification(id)
@@ -1137,6 +1224,81 @@ pub(crate) mod tests {
         state.app_server.lock().await.shutdown().await.unwrap();
     }
 
+    // Regression: Claude serves Bots and Projects from one runtime, so its
+    // route is not marked as a Project route. A Project agent task's first
+    // turn/started was then treated as an unregistered Bot child, failed
+    // verification against its Project parent, and held every later
+    // notification in the inbox ("Wonder is recovering chat updates").
+    #[tokio::test]
+    async fn project_agent_tasks_on_a_shared_runtime_do_not_block_the_inbox() {
+        let (_dir, state, message) = crate::projects::tests::handoff_fixture().await;
+        let shared = state.app_server.lock().await.health();
+        state.ingestion.register_provider(
+            AgentFamily::Codex,
+            &state.app_server,
+            shared.clone(),
+            None,
+        );
+        let runtime = shared.id().to_owned();
+        state.store.enqueue_notification(&json!({"_wonderRuntimeId":runtime,
+            "method":"turn/started", "params":{"threadId":"child-thread", "turn":{"id":"child-turn","items":[],"status":"inProgress"}}})).await.unwrap();
+        state.store.enqueue_notification(&json!({"_wonderRuntimeId":runtime,
+            "method":"item/started", "params":{"threadId":"thread", "turnId":"turn", "item":{"type":"subAgentActivity","id":"task","agentThreadId":"child-thread","kind":"started","status":"running"}}})).await.unwrap();
+        state.store.enqueue_notification(&json!({"_wonderRuntimeId":runtime,
+            "method":"turn/completed", "params":{"threadId":"thread", "turn":{"id":"turn", "status":"completed"}}})).await.unwrap();
+        while project_next(&state).await.unwrap() {}
+        assert_eq!(state.store.notification_backlog().await.unwrap(), 0);
+        assert_eq!(
+            state
+                .store
+                .message_by_id(&message.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "completed"
+        );
+        assert!(state
+            .store
+            .subagent_ownership_for_thread("child-thread")
+            .await
+            .unwrap()
+            .is_none());
+        state.projects.shutdown().await;
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_notification_that_keeps_failing_is_set_aside_after_the_limit() {
+        let (_dir, state) = fixture().await;
+        // A goal update without a thread can never be projected.
+        state
+            .store
+            .enqueue_notification(&json!({"method":"thread/goal/updated","params":{}}))
+            .await
+            .unwrap();
+        state
+            .store
+            .enqueue_notification(&json!({"method":"turn/diff/updated","params":{}}))
+            .await
+            .unwrap();
+        assert!(project_next(&state).await.is_err());
+        assert!(
+            project_next(&state).await.is_err(),
+            "Still within the limit"
+        );
+        assert_eq!(state.store.notification_backlog().await.unwrap(), 2);
+        {
+            let mut status = state.ingestion.inner.lock().unwrap();
+            let (id, _) = status.failing.unwrap();
+            status.failing = Some((id, Instant::now() - FAILING_NOTIFICATION_LIMIT));
+        }
+        while project_next(&state).await.unwrap() {}
+        assert_eq!(state.store.notification_backlog().await.unwrap(), 0);
+        assert!(state.ingestion.inner.lock().unwrap().failing.is_none());
+        state.app_server.lock().await.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn cancelled_planner_retires_only_its_runtime_thread_and_bounds_late_events() {
         let ingestion = Ingestion::default();
@@ -1467,8 +1629,10 @@ for line in sys.stdin:
             app_server: Arc::new(tokio::sync::Mutex::new(runtime)),
             launch_config: Arc::new(tokio::sync::Mutex::new(config)),
             denied_roots: vec![],
+            provider_reconnect: Default::default(),
             linked_file_roots: vec![],
             dispatch_lock: Arc::new(tokio::sync::Mutex::new(())),
+            dispatch_wake: Arc::default(),
             update_admission: Arc::new(Default::default()),
             channel_worker_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             approval_lock: Arc::new(tokio::sync::Mutex::new(())),

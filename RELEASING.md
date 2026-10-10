@@ -125,9 +125,9 @@ prerelease; retain their unverified status rather than making them release block
 - Direct/Group messages, approvals, queues, attachments, scheduler recovery,
   Mac sleep/restart and phone network changes.
 
-Teaching capture and taught-task replay are excluded from this beta. Before
-re-enabling them, qualify genuine changed-input teaching replay; capture/save
-alone is insufficient. Existing stored teaching data must remain intact.
+Teaching capture and taught-task replay are retired; their routes were removed.
+The host still keeps skills taught by earlier versions disabled in Bot sessions
+and leaves existing stored teaching data intact.
 
 Before making source public, inspect every selected file and every commit that
 will be published for credentials, private evidence, account identifiers,

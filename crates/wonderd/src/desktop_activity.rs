@@ -51,16 +51,98 @@ pub(crate) fn claude_sessions_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("HOME")?).join(".claude/sessions"))
 }
 
+/// Sessions whose reply Claude Code on the Mac is writing right now. Its
+/// record says "busy" also while only background agents run after the reply
+/// ended; the transcript's last entry tells the two apart, so background work
+/// alone does not show the chat as working.
 pub(crate) async fn claude_busy_sessions() -> HashSet<String> {
-    claude_live_sessions()
+    let Some(dir) = claude_sessions_dir() else {
+        return HashSet::new();
+    };
+    let projects = claude_projects_dir();
+    tokio::task::spawn_blocking(move || busy_sessions_with_transcripts(&dir, projects.as_deref()))
         .await
+        .unwrap_or_default()
+}
+
+fn busy_sessions_with_transcripts(dir: &Path, projects: Option<&Path>) -> HashSet<String> {
+    live_records_in(dir)
         .into_iter()
-        .filter_map(|(session, busy)| busy.then_some(session))
+        .filter(|record| record.writing(projects))
+        .map(|record| record.session)
         .collect()
 }
 
+fn claude_projects_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Some(PathBuf::from(path).join("projects"));
+    }
+    Some(PathBuf::from(std::env::var_os("HOME")?).join(".claude/projects"))
+}
+
+/// Claude Code names a project's transcript folder after its working folder.
+fn project_folder_name(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+const TRANSCRIPT_TAIL_BYTES: u64 = 512 * 1024;
+
+/// Whether the session's main turn is unfinished, from the end of its
+/// transcript: the newest top-level message is a prompt, a tool result, or a
+/// reply that stopped to call a tool. Mirrors `mainTurnRunning` in the Claude
+/// runtime. `None` when the transcript cannot be read.
+pub(crate) fn main_turn_running(path: &Path) -> Option<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let start = length.saturating_sub(TRANSCRIPT_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = Vec::new();
+    file.take(TRANSCRIPT_TAIL_BYTES)
+        .read_to_end(&mut tail)
+        .ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    for line in text.lines().rev() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let flag = |name: &str| entry.get(name).and_then(serde_json::Value::as_bool) == Some(true);
+        if flag("isSidechain") || flag("isMeta") {
+            continue;
+        }
+        match entry.get("type").and_then(serde_json::Value::as_str) {
+            Some("assistant") => {
+                let reason = entry
+                    .pointer("/message/stop_reason")
+                    .and_then(serde_json::Value::as_str);
+                return Some(matches!(reason, None | Some("tool_use" | "pause_turn")));
+            }
+            Some("user") => {
+                let content = entry.pointer("/message/content");
+                let first = content.and_then(|c| match c {
+                    serde_json::Value::String(text) => Some(text.as_str()),
+                    serde_json::Value::Array(blocks) => blocks
+                        .iter()
+                        .find_map(|b| b.get("text").and_then(serde_json::Value::as_str)),
+                    _ => None,
+                });
+                return Some(
+                    !first.is_some_and(|t| {
+                        t.trim_start().starts_with("[Request interrupted by user")
+                    }),
+                );
+            }
+            _ => {}
+        }
+    }
+    Some(false)
+}
+
 /// Sessions a live Claude Code process (desktop or terminal) has open, and
-/// whether each is busy.
+/// whether each has work running: a reply, a dialog, or background agents,
+/// commands or monitors.
 pub(crate) async fn claude_live_sessions() -> HashMap<String, bool> {
     let Some(dir) = claude_sessions_dir() else {
         return HashMap::new();
@@ -83,24 +165,22 @@ pub(crate) async fn claude_open_in_terminal(session: &str) -> bool {
 }
 
 fn open_in_terminal_in(dir: &Path, session: &str) -> bool {
-    live_records_in(dir).into_iter().any(|record| {
-        record.session == session && (!record.desktop || !desktop_claude_process(record.pid))
-    })
+    live_records_in(dir)
+        .into_iter()
+        .any(|record| record.session == session && record.outside_desktop_app())
 }
 
 /// Session IDs whose live Claude Code process reports itself busy.
 #[cfg(test)]
 pub(crate) fn busy_sessions_in(dir: &Path) -> HashSet<String> {
-    live_sessions_in(dir)
-        .into_iter()
-        .filter_map(|(session, busy)| busy.then_some(session))
-        .collect()
+    busy_sessions_with_transcripts(dir, None)
 }
 
 fn live_sessions_in(dir: &Path) -> HashMap<String, bool> {
     let mut live = HashMap::new();
     for record in live_records_in(dir) {
-        *live.entry(record.session).or_insert(false) |= record.busy;
+        let working = record.background();
+        *live.entry(record.session).or_insert(false) |= working;
         if live.len() >= MAX_SESSION_RECORDS {
             break;
         }
@@ -112,50 +192,134 @@ fn live_sessions_in(dir: &Path) -> HashMap<String, bool> {
 struct LiveRecord {
     pid: i32,
     session: String,
-    busy: bool,
+    /// "busy" (a reply or background agents), "shell" (only background
+    /// commands or monitors), "waiting" (a dialog) or "idle".
+    status: String,
+    cwd: Option<String>,
     desktop: bool,
 }
 
-/// Why a desktop chat could not be stopped for Wonder to continue it.
+impl LiveRecord {
+    fn busy(&self) -> bool {
+        matches!(self.status.as_str(), "busy" | "waiting")
+    }
+    /// Whether this process is writing the chat's reply (or waits on a dialog
+    /// in it), rather than only keeping background work after its reply.
+    fn writing(&self, projects: Option<&Path>) -> bool {
+        if !self.busy() {
+            return false;
+        }
+        let transcript = projects.zip(self.cwd.as_deref()).map(|(projects, cwd)| {
+            projects
+                .join(project_folder_name(cwd))
+                .join(format!("{}.jsonl", self.session))
+        });
+        // Without a readable transcript, trust the record.
+        transcript
+            .and_then(|path| main_turn_running(&path))
+            .unwrap_or(true)
+    }
+    fn outside_desktop_app(&self) -> bool {
+        !self.desktop || !desktop_claude_process(self.pid)
+    }
+    /// Work that reports back into this process's copy of the conversation.
+    fn background(&self) -> bool {
+        matches!(self.status.as_str(), "busy" | "shell" | "waiting")
+    }
+}
+
+/// Why Wonder cannot continue a Claude chat right now.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StopRefusal {
+    /// Claude on the Mac is writing a reply in it (or waits on a dialog).
     Busy,
+    /// It is open in Claude Code outside the desktop app, such as a terminal.
     Terminal,
+    /// The desktop app's process for it did not exit.
     StillRunning,
 }
 
-/// Stops the idle process the Claude desktop app keeps for this chat, so a
-/// turn from Wonder becomes part of the conversation: the app starts the chat
-/// again from its transcript when it is next used. A busy chat, or one open in
-/// Claude Code in a terminal, is never stopped. `Ok` when nothing holds it.
-pub(crate) async fn stop_idle_desktop_session(session: &str) -> Result<(), StopRefusal> {
-    let Some(dir) = claude_sessions_dir() else {
-        return Ok(());
-    };
+/// Whether Claude on the Mac holds this chat, so a Wonder message waits: a
+/// reply it is writing, or the chat open in Claude Code in a terminal. Only
+/// reads; background work left running after a reply does not hold it.
+pub(crate) async fn claude_holds_session(session: &str) -> Option<StopRefusal> {
+    let dir = claude_sessions_dir()?;
+    let projects = claude_projects_dir();
     let session = session.to_owned();
-    tokio::task::spawn_blocking(move || stop_idle_desktop_session_in(&dir, &session))
+    tokio::task::spawn_blocking(move || holds_in(&dir, projects.as_deref(), &session))
         .await
-        .unwrap_or(Err(StopRefusal::StillRunning))
+        .unwrap_or(Some(StopRefusal::StillRunning))
 }
 
-fn stop_idle_desktop_session_in(dir: &Path, session: &str) -> Result<(), StopRefusal> {
+fn holds_in(dir: &Path, projects: Option<&Path>, session: &str) -> Option<StopRefusal> {
     let records: Vec<LiveRecord> = live_records_in(dir)
         .into_iter()
         .filter(|record| record.session == session)
         .collect();
-    if records.iter().any(|record| record.busy) {
+    if records.iter().any(|record| record.writing(projects)) {
+        return Some(StopRefusal::Busy);
+    }
+    if records.iter().any(LiveRecord::outside_desktop_app) {
+        return Some(StopRefusal::Terminal);
+    }
+    None
+}
+
+/// Ends the process the Claude desktop app keeps for this chat, so a turn from
+/// Wonder becomes part of the conversation: the app starts the chat again from
+/// its transcript when it is next used. Background agents, commands or
+/// monitors still running in that process end with it; Wonder says so before
+/// the message is sent. A reply being written, or a chat open in Claude Code
+/// in a terminal, is never ended. `Ok` when nothing holds the chat.
+pub(crate) async fn end_desktop_session(session: &str) -> Result<(), StopRefusal> {
+    let Some(dir) = claude_sessions_dir() else {
+        return Ok(());
+    };
+    let projects = claude_projects_dir();
+    let session = session.to_owned();
+    tokio::task::spawn_blocking(move || {
+        end_desktop_session_in(&dir, projects.as_deref(), &session, false)
+    })
+    .await
+    .unwrap_or(Err(StopRefusal::StillRunning))
+}
+
+/// After Wonder's turn, closes a desktop process opened for the chat during
+/// it, which holds the conversation from before, but only while it is idle:
+/// nothing the app runs there is ended for this.
+pub(crate) async fn close_idle_desktop_session(session: &str) {
+    let Some(dir) = claude_sessions_dir() else {
+        return;
+    };
+    let projects = claude_projects_dir();
+    let session = session.to_owned();
+    let _ = tokio::task::spawn_blocking(move || {
+        end_desktop_session_in(&dir, projects.as_deref(), &session, true)
+    })
+    .await;
+}
+
+fn end_desktop_session_in(
+    dir: &Path,
+    projects: Option<&Path>,
+    session: &str,
+    only_idle: bool,
+) -> Result<(), StopRefusal> {
+    if let Some(refusal) = holds_in(dir, projects, session) {
+        return Err(refusal);
+    }
+    let records: Vec<LiveRecord> = live_records_in(dir)
+        .into_iter()
+        .filter(|record| record.session == session)
+        .collect();
+    if only_idle && records.iter().any(LiveRecord::background) {
         return Err(StopRefusal::Busy);
     }
-    if records
-        .iter()
-        .any(|record| !record.desktop || !desktop_claude_process(record.pid))
-    {
-        return Err(StopRefusal::Terminal);
-    }
     for record in &records {
+        // SIGTERM lets Claude Code save the chat and end its shells and agents.
         unsafe { libc::kill(record.pid, libc::SIGTERM) };
     }
-    for _ in 0..50 {
+    for _ in 0..80 {
         if records.iter().all(|record| !process_alive(record.pid)) {
             return Ok(());
         }
@@ -207,7 +371,7 @@ pub(crate) fn schedule_desktop_import(
             for _ in 0..20 {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if claude_live_sessions().await.get(&session) == Some(&false) {
-                    let _ = stop_idle_desktop_session(&session).await;
+                    close_idle_desktop_session(&session).await;
                     break;
                 }
             }
@@ -251,6 +415,10 @@ async fn desktop_app_frontmost() -> bool {
 /// by executable path so a reused process ID is never signalled.
 #[cfg(target_os = "macos")]
 fn desktop_claude_process(pid: i32) -> bool {
+    #[cfg(test)]
+    if tests::DESKTOP_PIDS.lock().unwrap().contains(&pid) {
+        return true;
+    }
     let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let length =
         unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
@@ -312,7 +480,18 @@ fn live_records_in(dir: &Path) -> Vec<LiveRecord> {
             live.push(LiveRecord {
                 pid,
                 session: session.to_owned(),
-                busy: record.get("status").and_then(serde_json::Value::as_str) == Some("busy"),
+                status: record
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("idle")
+                    .chars()
+                    .take(32)
+                    .collect(),
+                cwd: record
+                    .get("cwd")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|cwd| cwd.starts_with('/') && cwd.len() <= 4096)
+                    .map(str::to_owned),
                 desktop: record.get("entrypoint").and_then(serde_json::Value::as_str)
                     == Some("claude-desktop"),
             });
@@ -383,7 +562,7 @@ mod tests {
         // The test process is not the desktop app's Claude Code, so it is never stopped.
         let me_session = "busy";
         assert_eq!(
-            stop_idle_desktop_session_in(dir.path(), me_session),
+            end_desktop_session_in(dir.path(), None, me_session, false),
             Err(StopRefusal::Busy)
         );
         std::fs::write(
@@ -392,10 +571,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            stop_idle_desktop_session_in(&idle, "idle"),
+            end_desktop_session_in(&idle, None, "idle", false),
             Err(StopRefusal::Terminal)
         );
-        assert_eq!(stop_idle_desktop_session_in(&idle, "absent"), Ok(()));
+        assert_eq!(holds_in(&idle, None, "idle"), Some(StopRefusal::Terminal));
+        assert_eq!(end_desktop_session_in(&idle, None, "absent", false), Ok(()));
         // Only a chat Wonder cannot take over is reported as held on the Mac.
         assert!(open_in_terminal_in(&idle, "idle"));
         assert!(!open_in_terminal_in(&idle, "absent"));
@@ -404,5 +584,113 @@ mod tests {
             live_sessions_in(&idle),
             HashMap::from([("idle".to_owned(), false)])
         );
+    }
+
+    pub(super) static DESKTOP_PIDS: std::sync::LazyLock<std::sync::Mutex<HashSet<i32>>> =
+        std::sync::LazyLock::new(Default::default);
+
+    /// A stand-in for the desktop app's Claude Code: a child process that is
+    /// reaped when it exits, so its pid stops existing.
+    fn desktop_process() -> i32 {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        DESKTOP_PIDS.lock().unwrap().insert(pid);
+        std::thread::spawn(move || child.wait());
+        pid
+    }
+
+    // Background agents keep the record "busy" after the reply ends, and
+    // background commands may leave it "idle" or "shell": none shows the chat
+    // as working or holds a Wonder message. Wonder ends the app's process (and
+    // that work) to continue the chat; only a reply being written holds it,
+    // and the idle-only close after Wonder's own turn never ends that work.
+    #[test]
+    fn background_work_is_not_a_running_reply_and_ends_on_takeover() {
+        let sessions = tempfile::tempdir().unwrap();
+        let projects = tempfile::tempdir().unwrap();
+        let cwd = "/work/My App";
+        let folder = projects.path().join(project_folder_name(cwd));
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(project_folder_name(cwd), "-work-My-App");
+        let mut pid = desktop_process();
+        let record = |pid: i32, status: &str| {
+            for entry in std::fs::read_dir(sessions.path()).unwrap() {
+                std::fs::remove_file(entry.unwrap().path()).unwrap();
+            }
+            std::fs::write(
+                sessions.path().join(format!("{pid}.json")),
+                serde_json::json!({"pid": pid, "sessionId": "s1", "status": status, "cwd": cwd, "entrypoint": "claude-desktop"})
+                    .to_string(),
+            )
+            .unwrap()
+        };
+        let transcript = |lines: &[serde_json::Value]| {
+            let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+            std::fs::write(folder.join("s1.jsonl"), text.join("\n") + "\n").unwrap();
+        };
+        let prompt = serde_json::json!({"type": "user", "message": {"content": "Go"}});
+        let tool = serde_json::json!({"type": "assistant", "message": {"stop_reason": "tool_use", "content": []}});
+        let reply = serde_json::json!({"type": "assistant", "message": {"stop_reason": "end_turn", "content": []}});
+        let child = serde_json::json!({"type": "assistant", "isSidechain": true, "message": {"stop_reason": null}});
+        let busy = || busy_sessions_with_transcripts(sessions.path(), Some(projects.path()));
+        let end = |only_idle| {
+            end_desktop_session_in(sessions.path(), Some(projects.path()), "s1", only_idle)
+        };
+
+        record(pid, "busy");
+        transcript(&[prompt.clone(), tool.clone()]);
+        assert_eq!(
+            busy(),
+            HashSet::from(["s1".to_owned()]),
+            "the reply is still running"
+        );
+        assert_eq!(
+            end(false),
+            Err(StopRefusal::Busy),
+            "a reply being written is never ended"
+        );
+        transcript(&[prompt.clone(), tool, reply.clone(), child]);
+        assert!(busy().is_empty(), "the reply ended; only agents run");
+        assert_eq!(holds_in(sessions.path(), Some(projects.path()), "s1"), None);
+        assert_eq!(
+            end(true),
+            Err(StopRefusal::Busy),
+            "the idle-only close keeps the agents"
+        );
+        assert!(process_alive(pid));
+        assert_eq!(end(false), Ok(()), "a Wonder message takes the chat over");
+        assert!(!process_alive(pid));
+
+        for status in ["shell", "idle"] {
+            pid = desktop_process();
+            record(pid, status);
+            assert!(busy().is_empty());
+            assert_eq!(
+                live_sessions_in(sessions.path()),
+                HashMap::from([("s1".to_owned(), status == "shell")])
+            );
+            assert_eq!(end(false), Ok(()));
+            assert!(!process_alive(pid));
+        }
+
+        let me = std::process::id() as i32;
+        let record = |status: &str| {
+            std::fs::write(
+                sessions.path().join(format!("{me}.json")),
+                serde_json::json!({"pid": me, "sessionId": "s1", "status": status, "cwd": cwd})
+                    .to_string(),
+            )
+            .unwrap()
+        };
+        // An unreadable transcript keeps trusting the record.
+        std::fs::remove_file(folder.join("s1.jsonl")).unwrap();
+        record("busy");
+        assert_eq!(busy(), HashSet::from(["s1".to_owned()]));
+        let interrupted = serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": "[Request interrupted by user]"}]}});
+        transcript(&[prompt, reply, interrupted]);
+        assert!(busy().is_empty());
     }
 }

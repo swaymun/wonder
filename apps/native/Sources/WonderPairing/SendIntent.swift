@@ -19,6 +19,9 @@ public struct SendReceipt: Codable, Sendable {
     public let bodySha256: String
     public let conversationId: String
     public let deliveryState: String
+    /// Whether the message waits in the conversation's queue rather than being
+    /// sent now; absent from Macs that do not decide it.
+    public var queued: Bool? = nil
 }
 
 public enum SendFailure: Error { case empty, tooLarge, pending, receiptMismatch }

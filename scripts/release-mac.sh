@@ -8,6 +8,8 @@ cd "$(dirname "$0")/.."
 V=${1:?usage: scripts/release-mac.sh VERSION}
 [[ "$V" =~ ^[0-9]+([.][0-9]+)*$ ]] || { echo "Version must be numeric" >&2; exit 1; }
 R=.local/release/mac-$V
+# python.org Python ships without CA roots; the runtime download needs them.
+export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/cert.pem}"
 mkdir -p "$R"
 
 CFG="${WONDER_ASC_CONFIG:-$HOME/.config/wonder/app-store-connect/upload.json}"

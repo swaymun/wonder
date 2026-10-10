@@ -80,6 +80,8 @@ pub struct StoredProjectConversation {
     pub native_settings_turn: Option<String>,
     pub is_pinned: bool,
     pub has_unread: bool,
+    /// Archived in Wonder only (Claude Code threads); see migration 0096.
+    pub wonder_archived: bool,
     pub creation_request_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -201,6 +203,12 @@ pub(crate) fn project_conversation(
         native_settings_turn: row.try_get("native_settings_turn").unwrap_or(None),
         is_pinned: row.get::<i64, _>("is_pinned") != 0,
         has_unread: row.get::<i64, _>("has_unread") != 0,
+        // Absent before migration 0096, which upgrade tests read through.
+        wonder_archived: row
+            .try_get::<Option<String>, _>("wonder_archived_at")
+            .ok()
+            .flatten()
+            .is_some(),
         creation_request_id: row.get("creation_request_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -679,6 +687,26 @@ impl Store {
             .transpose()
     }
 
+    /// Hides or restores a thread in Wonder only. Returns false when the
+    /// conversation does not exist.
+    pub async fn set_project_conversation_wonder_archived(
+        &self,
+        conversation: &str,
+        archived: bool,
+        now: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let updated = sqlx::query(
+            "UPDATE project_conversations SET wonder_archived_at=CASE WHEN ? THEN COALESCE(wonder_archived_at, ?) ELSE NULL END, updated_at=? WHERE conversation_id=?",
+        )
+        .bind(archived)
+        .bind(now)
+        .bind(now)
+        .bind(conversation)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     pub async fn project_conversation_by_native(
         &self,
         family: AgentFamily,
@@ -1086,6 +1114,10 @@ mod tests {
             .unwrap();
         }
         sqlx::migrate!().run(&old.pool).await.unwrap();
+        // Reopen as a relaunch does: the old connection caches `SELECT *`
+        // statements with the pre-upgrade column list.
+        old.pool.close().await;
+        let old = Store { pool: sqlx::SqlitePool::connect(&url).await.unwrap() };
         for (id, access, approval) in [
             ("sandboxed", "workspace", "auto"),
             ("opted-out", "full_access", "ask"),

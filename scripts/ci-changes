@@ -27,7 +27,7 @@ JOBS = {
     # The scenarios run Wonder Testing against built-in fixtures, so only iOS code,
     # the shared Swift package and the protocol fixtures can change their outcome.
     "ios": [r"^apps/ios/", r"^apps/native/", r"^packages/protocol/",
-            r"^scripts/(wonderctl|run-scenarios|pr-evidence|check-theme)$"],
+            r"^scripts/(wonderctl|run-scenarios|pr-evidence|check-theme|check-privacy-manifests)$"],
 }
 EVERYTHING = [r"^\.github/workflows/ci\.yml$", r"^scripts/ci-changes$"]
 # Areas no CI job builds or tests; changing them alone runs nothing.
